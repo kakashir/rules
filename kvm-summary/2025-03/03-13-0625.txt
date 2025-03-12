@@ -1,0 +1,376 @@
+From 921aa2e2 to d8f1927f
+KVM mailing list update from 921aa2e2 to d8f1927f
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     11 google.com
+      4 redhat.com
+      2 linux.ibm.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     11  Fuad Tabba <tabba@google.com>
+      3  Stefano Garzarella <sgarzare@redhat.com>
+      2  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      1  Bobby Eshleman <bobbyeshleman@gmail.com>
+      1  Alex Williamson <alex.williamson@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vsock: add network namespace support
+[PATCH v2 1/3] vsock: add network namespace support
+Author: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+
+This patch adds a check of the "net" assigned to a socket during
+the vsock_find_bound_socket() and vsock_find_connected_socket()
+to support network namespace, allowing to share the same address
+(cid, port) across different network namespaces.
+
+This patch preserves old behavior, and does not yet bring up namespace
+support fully.
+
+Signed-off-by: Stefano Garzarella <sgarzare@redhat.com>
+Signed-off-by: Bobby Eshleman <bobbyeshleman@gmail.com>
+---
+v1 -> v2:
+* remove 'netns' module param
+* remove vsock_net_eq()
+* use vsock_global_net() for "global" namespace
+* use fallback logic in socket lookup functions, giving precedence to
+  non-global vsock namespaces
+
+RFC -> v1
+* added 'netns' module param
+* added 'vsock_net_eq()' to check the "net" assigned to a socket
+  only when 'netns' support is enabled
+---
+ include/net/af_vsock.h                  |  7 +++--
+ net/vmw_vsock/af_vsock.c                | 55 ++++++++++++++++++++++++---------
+ net/vmw_vsock/hyperv_transport.c        |  2 +-
+ net/vmw_vsock/virtio_transport_common.c |  5 +--
+ net/vmw_vsock/vmci_transport.c          |  4 +--
+ 5 files changed, 51 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock: add namespace support to vhost-vsock
+[PATCH v2 0/3] vsock: add namespace support to vhost-vsock
+Author: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+Picking up Stefano's v1 [1], this series adds netns support to
+vhost-vsock. Unlike v1, this series does not address guest-to-host (g2h)
+namespaces, defering that for future implementation and discussion.
+
+Any vsock created with /dev/vhost-vsock is a global vsock, accessible
+from any namespace. Any vsock created with /dev/vhost-vsock-netns is a
+"scoped" vsock, accessible only to sockets in its namespace. If a global
+vsock or scoped vsock share the same CID, the scoped vsock takes
+precedence.
+
+If a socket in a namespace connects with a global vsock, the CID becomes
+unavailable to any VMM in that namespace when creating new vsocks. If
+disconnected, the CID becomes available again.
+
+Testing
+
+QEMU with /dev/vhost-vsock-netns support:
+	https://github.com/beshleman/qemu/tree/vsock-netns
+
+Test: Scoped vsocks isolated by namespace
+
+  host# ip netns add ns1
+  host# ip netns add ns2
+  host# ip netns exec ns1 \
+				  qemu-system-x86_64 \
+					  -m 8G -smp 4 -cpu host -enable-kvm \
+					  -serial mon:stdio \
+					  -drive if=virtio,file=${IMAGE1} \
+					  -device vhost-vsock-pci,netns=on,guest-cid=15
+  host# ip netns exec ns2 \
+				  qemu-system-x86_64 \
+					  -m 8G -smp 4 -cpu host -enable-kvm \
+					  -serial mon:stdio \
+					  -drive if=virtio,file=${IMAGE2} \
+					  -device vhost-vsock-pci,netns=on,guest-cid=15
+
+  host# socat - VSOCK-CONNECT:15:1234
+  2025/03/10 17:09:40 socat[255741] E connect(5, AF=40 cid:15 port:1234, 16): No such device
+
+  host# echo foobar1 | sudo ip netns exec ns1 socat - VSOCK-CONNECT:15:1234
+  host# echo foobar2 | sudo ip netns exec ns2 socat - VSOCK-CONNECT:15:1234
+
+  vm1# socat - VSOCK-LISTEN:1234
+  foobar1
+  vm2# socat - VSOCK-LISTEN:1234
+  foobar2
+
+Test: Global vsocks accessible to any namespace
+
+  host# qemu-system-x86_64 \
+	  -m 8G -smp 4 -cpu host -enable-kvm \
+	  -serial mon:stdio \
+	  -drive if=virtio,file=${IMAGE2} \
+	  -device vhost-vsock-pci,guest-cid=15,netns=off
+
+  host# echo foobar | sudo ip netns exec ns1 socat - VSOCK-CONNECT:15:1234
+
+  vm# socat - VSOCK-LISTEN:1234
+  foobar
+
+Test: Connecting to global vsock makes CID unavailble to namespace
+
+  host# qemu-system-x86_64 \
+	  -m 8G -smp 4 -cpu host -enable-kvm \
+	  -serial mon:stdio \
+	  -drive if=virtio,file=${IMAGE2} \
+	  -device vhost-vsock-pci,guest-cid=15,netns=off
+
+  vm# socat - VSOCK-LISTEN:1234
+
+  host# sudo ip netns exec ns1 socat - VSOCK-CONNECT:15:1234
+  host# ip netns exec ns1 \
+				  qemu-system-x86_64 \
+					  -m 8G -smp 4 -cpu host -enable-kvm \
+					  -serial mon:stdio \
+					  -drive if=virtio,file=${IMAGE1} \
+					  -device vhost-vsock-pci,netns=on,guest-cid=15
+
+  qemu-system-x86_64: -device vhost-vsock-pci,netns=on,guest-cid=15: vhost-vsock: unable to set guest cid: Address already in use
+
+Signed-off-by: Bobby Eshleman <bobbyeshleman@gmail.com>
+---
+Changes in v2:
+- only support vhost-vsock namespaces
+- all g2h namespaces retain old behavior, only common API changes
+  impacted by vhost-vsock changes
+- add /dev/vhost-vsock-netns for "opt-in"
+- leave /dev/vhost-vsock to old behavior
+- removed netns module param
+- Link to v1: https://lore.kernel.org/r/20200116172428.311437-1-sgarzare@redhat.com
+
+Changes in v1:
+- added 'netns' module param to vsock.ko to enable the
+  network namespace support (disabled by default)
+- added 'vsock_net_eq()' to check the "net" assigned to a socket
+  only when 'netns' support is enabled
+- Link to RFC: https://patchwork.ozlabs.org/cover/1202235/
+
+---
+Stefano Garzarella (3):
+      vsock: add network namespace support
+      vsock/virtio_transport_common: handle netns of received packets
+      vhost/vsock: use netns of process that opens the vhost-vsock-netns device
+
+ drivers/vhost/vsock.c                   | 96 +++++++++++++++++++++++++++------
+ include/linux/miscdevice.h              |  1 +
+ include/linux/virtio_vsock.h            |  2 +
+ include/net/af_vsock.h                  | 10 ++--
+ net/vmw_vsock/af_vsock.c                | 85 +++++++++++++++++++++++------
+ net/vmw_vsock/hyperv_transport.c        |  2 +-
+ net/vmw_vsock/virtio_transport.c        |  5 +-
+ net/vmw_vsock/virtio_transport_common.c | 14 ++++-
+ net/vmw_vsock/vmci_transport.c          |  4 +-
+ net/vmw_vsock/vsock_loopback.c          |  4 +-
+ 10 files changed, 180 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: fix a newly introduced bug
+[PATCH v5 0/1] KVM: s390: fix a newly introduced bug
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Fix race when making a page secure (hold pte lock again)
+
+This should fix the issues I have seen, which I think/hope are also the same
+issues that David found.
+
+v4->v5:
+* fixed kerneldoc for s390_wiggle_split_folio()
+* remove get_locked_valid_pte() and replace it with folio_walk_start()
+  [thanks David]
+
+v3->v4:
+* move and rename s390_wiggle_split_folio() to fix a compile issue when
+  KVM is not selected
+* removed obsolete reference to __() from comments
+
+v2->v3:
+* added check for pte_write() in make_hva_secure() [thanks David]
+
+v1->v2:
+* major refactoring
+* walk the page tables only once
+* when importing, manually fault in pages if needed
+
+Claudio Imbrenda (1):
+  KVM: s390: pv: fix race when making a page secure
+
+ arch/s390/include/asm/gmap.h |   1 -
+ arch/s390/include/asm/uv.h   |   2 +-
+ arch/s390/kernel/uv.c        | 136 +++++++++++++++++++++++++++++++++--
+ arch/s390/kvm/gmap.c         | 103 ++------------------------
+ arch/s390/kvm/kvm-s390.c     |  25 ++++---
+ arch/s390/mm/gmap.c          |  28 --------
+ 6 files changed, 151 insertions(+), 144 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: pv: fix race when making a page secure
+[PATCH v5 1/1] KVM: s390: pv: fix race when making a page secure
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Holding the pte lock for the page that is being converted to secure is
+needed to avoid races. A previous commit removed the locking, which
+caused issues. Fix by locking the pte again.
+
+Fixes: 5cbe24350b7d ("KVM: s390: move pv gmap functions into kvm")
+Reported-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Tested-by: David Hildenbrand <david@redhat.com>
+Reviewed-by: David Hildenbrand <david@redhat.com>
+[david@redhat.com: replace use of get_locked_pte() with folio_walk_start()]
+---
+ arch/s390/include/asm/gmap.h |   1 -
+ arch/s390/include/asm/uv.h   |   2 +-
+ arch/s390/kernel/uv.c        | 136 +++++++++++++++++++++++++++++++++--
+ arch/s390/kvm/gmap.c         | 103 ++------------------------
+ arch/s390/kvm/kvm-s390.c     |  25 ++++---
+ arch/s390/mm/gmap.c          |  28 --------
+ 6 files changed, 151 insertions(+), 144 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: Consolidate freeing of typed folios on final folio_put()
+[PATCH v6 01/10] mm: Consolidate freeing of typed folios on final folio_put()
+Author: Fuad Tabba <tabba@google.com>
+
+Some folio types, such as hugetlb, handle freeing their own
+folios. Moreover, guest_memfd will require being notified once a
+folio's reference count reaches 0 to facilitate shared to private
+folio conversion, without the folio actually being freed at that
+point.
+
+As a first step towards that, this patch consolidates freeing
+folios that have a type. The first user is hugetlb folios. Later
+in this patch series, guest_memfd will become the second user of
+this.
+
+Suggested-by: David Hildenbrand <david@redhat.com>
+Acked-by: Vlastimil Babka <vbabka@suse.cz>
+Acked-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ include/linux/page-flags.h | 15 +++++++++++++++
+ mm/swap.c                  | 23 ++++++++++++++++++-----
+ 2 files changed, 33 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Mapping guest_memfd backed memory at the host
+[PATCH v6 00/10] KVM: Mapping guest_memfd backed memory at the host
+Author: Fuad Tabba <tabba@google.com>
+
+Main changes since v5 [1]:
+- Added handling of folio_put() when KVM is configured as a module
+- KVM_GMEM_SHARED_MEM is orthogonal to KVM_GENERIC_MEMORY_ATTRIBUTES
+  (Ackerley)
+- kvm_gmem_offset_is_shared() takes folio as parameter to check locking
+  (Kirill)
+- Refactoring and fixes from comments on previous version
+- Rebased on Linux 6.14-rc6
+
+The purpose of this series is to serve as a base for _restricted_
+mmap() support for guest_memfd backed memory at the host [2]. It
+allows experimentation with what that support would be like in
+the safe environment of software and non-confidential VM types.
+
+For more background and for how to test this series, please refer
+to v2 [3]. Note that an updated version of kvmtool that works
+with this series is available here [4].
+
+I'm working on respinning the series that tracks folio sharing [5]. I'll
+post that one soon.
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20250303171013.3548775-1-tabba@google.com/
+[2] https://lore.kernel.org/all/20250117163001.2326672-1-tabba@google.com/
+[3] https://lore.kernel.org/all/20250129172320.950523-1-tabba@google.com/
+[4] https://android-kvm.googlesource.com/kvmtool/+/refs/heads/tabba/guestmem-6.14
+[5] https://lore.kernel.org/all/20250117163001.2326672-1-tabba@google.com/
+
+Fuad Tabba (10):
+  mm: Consolidate freeing of typed folios on final folio_put()
+  KVM: guest_memfd: Handle final folio_put() of guest_memfd pages
+  KVM: guest_memfd: Handle kvm_gmem_handle_folio_put() for KVM as a
+    module
+  KVM: guest_memfd: Allow host to map guest_memfd() pages
+  KVM: guest_memfd: Handle in-place shared memory as guest_memfd backed
+    memory
+  KVM: x86: Mark KVM_X86_SW_PROTECTED_VM as supporting guest_memfd
+    shared memory
+  KVM: arm64: Refactor user_mem_abort() calculation of force_pte
+  KVM: arm64: Handle guest_memfd()-backed guest page faults
+  KVM: arm64: Enable mapping guest_memfd in arm64
+  KVM: guest_memfd: selftests: guest_memfd mmap() test when mapping is
+    allowed
+
+ arch/arm64/include/asm/kvm_host.h             |  10 ++
+ arch/arm64/kvm/Kconfig                        |   1 +
+ arch/arm64/kvm/mmu.c                          |  76 +++++++-----
+ arch/x86/include/asm/kvm_host.h               |   5 +
+ arch/x86/kvm/Kconfig                          |   3 +-
+ include/linux/kvm_host.h                      |  23 +++-
+ include/linux/page-flags.h                    |  31 +++++
+ include/uapi/linux/kvm.h                      |   1 +
+ mm/debug.c                                    |   1 +
+ mm/swap.c                                     |  50 +++++++-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/guest_memfd_test.c  |  75 +++++++++++-
+ virt/kvm/Kconfig                              |   4 +
+ virt/kvm/guest_memfd.c                        | 110 ++++++++++++++++++
+ virt/kvm/kvm_main.c                           |   9 +-
+ 15 files changed, 354 insertions(+), 46 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Handle INTx IRQ_NOTCONNECTED
+[PATCH] vfio/pci: Handle INTx IRQ_NOTCONNECTED
+Author: Alex Williamson <alex.williamson@redhat.com>
+
+Some systems report INTx as not routed by setting pdev->irq to
+IRQ_NOTCONNECTED, resulting in a -ENOTCONN error when trying to
+setup eventfd signaling.  Include this in the set of conditions
+for which the PIN register is virtualized to zero.
+
+Additionally consolidate vfio_pci_get_irq_count() to use this
+virtualized value in reporting INTx support via ioctl and sanity
+checking ioctl paths since pdev->irq is re-used when the device
+is in MSI mode.
+
+The combination of these results in both the config space of the
+device and the ioctl interface behaving as if the device does not
+support INTx.
+
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+---
+
+Testing is welcome on systems that actually implement this form
+of reporting an unrouted INTx, I don't have access to such as
+system and have only tested mimicking the behavior with a quirk
+to write the LINE register to 0xff and hack to mask the GSI info
+for a device.
+
+ drivers/vfio/pci/vfio_pci_config.c |  3 ++-
+ drivers/vfio/pci/vfio_pci_core.c   | 10 +---------
+ drivers/vfio/pci/vfio_pci_intrs.c  |  2 +-
+ 3 files changed, 4 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
