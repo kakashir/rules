@@ -1,0 +1,957 @@
+From d8f1927f to b1b22b99
+KVM mailing list update from d8f1927f to b1b22b99
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 linaro.org
+     12 oracle.com
+     12 nutanix.com
+     12 intel.com
+     11 daynix.com
+      8 linux.dev
+      6 huawei.com
+      5 digikod.net
+      2 gmail.com
+      1 suse.com
+      1 kernel.org
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     18  Pierrick Bouvier <pierrick.bouvier@linaro.org>
+     12  Mike Christie <michael.christie@oracle.com>
+     12  Jon Kohler <jon@nutanix.com>
+     11  Akihiko Odaki <akihiko.odaki@daynix.com>
+      8  Yosry Ahmed <yosry.ahmed@linux.dev>
+      6  Yi Liu <yi.l.liu@intel.com>
+      6  Longfang Liu <liulongfang@huawei.com>
+      5  Vishal Verma <vishal.l.verma@intel.com>
+      5  Mickaël Salaün <mic@digikod.net>
+      2  Akshay Behl <akshaybehl231@gmail.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Nikolay Borisov <nik.borisov@suse.com>
+      1  Keith Busch <kbusch@kernel.org>
+      1  Adrian Hunter <adrian.hunter@intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: VMX: Generalize VPID allocation to be vendor-neutral
+[PATCH 1/7] KVM: VMX: Generalize VPID allocation to be vendor-neutral
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+Generalize the VMX VPID allocation code and make move it to common code
+in preparation for sharing with SVM. Create a generic struct
+kvm_tlb_tags, representing a factory for VPIDs (or ASIDs later), and use
+one for VPIDs.
+
+Most of the functionality remains the same, with the following
+differences:
+- The enable_vpid checks are moved to the callers for allocate_vpid()
+  and free_vpid(), as they are specific to VMX.
+- The bitmap allocation is now dynamic (which will be required for SVM),
+  so it is initialized and cleaned up in vmx_hardware_{setup/unsetup}().
+- The range of valid TLB tags is expressed in terms of min/max instead
+  of the number of tags to support SVM use cases.
+
+Signed-off-by: Yosry Ahmed <yosry.ahmed@linux.dev>
+---
+ arch/x86/kvm/vmx/nested.c |  4 +--
+ arch/x86/kvm/vmx/vmx.c    | 38 +++++--------------------
+ arch/x86/kvm/vmx/vmx.h    |  4 +--
+ arch/x86/kvm/x86.c        | 58 +++++++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.h        | 13 +++++++++
+ 5 files changed, 82 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Make ASIDs static for SVM
+[PATCH 0/7] Make ASIDs static for SVM
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+This series changes SVM to use a single ASID per-VM, instead of using
+dynamic generation-based ASIDs per-vCPU. Dynamic ASIDs were added for
+CPUs without FLUSHBYASID to avoid full TLB flushes, but as Sean said,
+FLUSHBYASID was added in 2010, and the case for this is no longer as
+strong [1].
+
+Furthermore, having different ASIDs for different vCPUs is not required.
+ASIDs are local to physical CPUs. The only requirement is to make sure
+the ASID is flushed before a differnet vCPU runs on the same physical
+CPU (see below). Furthermore, SEV VMs have been using with a single ASID
+per-VM anyway (required for different reasons).
+
+A new ASID is currently allocated in 3 cases:
+(a) Once when the vCPU is initialized.
+(b) When the vCPU moves to a new physical CPU.
+(c) On TLB flushes when FLUSHBYASID is not available.
+
+Case (a) is trivial, instead the ASID is allocated for VM creation.
+Case (b) is handled by flushing the ASID instead of assigning a new one.
+Case (c) is handled by doing a full TLB flush (i.e.
+TLB_CONTROL_FLUSH_ALL_ASID) instead of assinging a new ASID. This is
+a bit aggressive, but FLUSHBYASID is available in all modern CPUs.
+
+The series is organized as follows:
+- Patch 1 generalizes the VPID allocation code in VMX to be
+  vendor-neutral, to reuse for SVM.
+- Patches 2-3 do some refactoring and cleanups.
+- Patches 4-5 address cases (b) and (c) above.
+- Patch 6 moves to single ASID per-VM.
+- Patch 7 performs some minimal unification between SVM and SEV code.
+  More unification can be done. In particular, SEV can use the
+  generalized kvm_tlb_tags to allocate ASIDs, and can stop tracking the
+  ASID separately in struct kvm_sev_info. However, I didn't have enough
+  SEV knowledge (or testability) to do this.
+
+The performance impact does not seem to be that bad. To test this
+series, I ran 3 benchmarks in an SVM guest on a Milan machine:
+- netperf
+- cpuid_rate [2]
+- A simple program doing mmap() and munmap() of 100M for 100 iterations,
+  to trigger MMU syncs and TLB flushes when using the shadow MMU.
+
+The benchmarks were ran with and without the patches for 5 iterations
+each, and also with and without NPT and FLUSBYASID to emulate old
+hardware. In all cases, there was either no difference or a 1-2%
+performance hit for the old hardware case. The performance hit could be
+larger for specific workloads, but niche performance-sensitive workloads
+should not be running on very old hardware.
+
+[1] https://lore.kernel.org/lkml/Z8JOvMx6iLexT3pK@google.com/
+[2] https://lore.kernel.org/kvm/20231109180646.2963718-1-khorenko@virtuozzo.com/
+
+Yosry Ahmed (7):
+  KVM: VMX: Generalize VPID allocation to be vendor-neutral
+  KVM: SVM: Use cached local variable in init_vmcb()
+  KVM: SVM: Add helpers to set/clear ASID flush
+  KVM: SVM: Flush everything if FLUSHBYASID is not available
+  KVM: SVM: Flush the ASID when running on a new CPU
+  KVM: SVM: Use a single ASID per VM
+  KVM: SVM: Share more code between pre_sev_run() and pre_svm_run()
+
+ arch/x86/include/asm/svm.h |  5 ---
+ arch/x86/kvm/svm/nested.c  |  4 +-
+ arch/x86/kvm/svm/sev.c     | 26 +++++-------
+ arch/x86/kvm/svm/svm.c     | 87 ++++++++++++++++++++------------------
+ arch/x86/kvm/svm/svm.h     | 28 ++++++++----
+ arch/x86/kvm/vmx/nested.c  |  4 +-
+ arch/x86/kvm/vmx/vmx.c     | 38 +++--------------
+ arch/x86/kvm/vmx/vmx.h     |  4 +-
+ arch/x86/kvm/x86.c         | 58 +++++++++++++++++++++++++
+ arch/x86/kvm/x86.h         | 13 ++++++
+ 10 files changed, 161 insertions(+), 106 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Introduce Intel Mode-Based Execute Control (MBEC)
+[RFC PATCH 00/18] KVM: VMX: Introduce Intel Mode-Based Execute Control (MBEC)
+Author: Jon Kohler <jon@nutanix.com>
+
+## Summary
+This series introduces support for Intel Mode-Based Execute Control
+(MBEC) to KVM and nested VMX virtualization, aiming to significantly
+reduce VMexits and improve performance for Windows guests running with
+Hypervisor-Protected Code Integrity (HVCI).
+
+## What?
+Intel MBEC is a hardware feature, introduced in the Kabylake
+generation, that allows for more granular control over execution
+permissions. MBEC enables the separation and tracking of execution
+permissions for supervisor (kernel) and user-mode code. It is used as
+an accelerator for Microsoft's Memory Integrity [1] (also known as
+hypervisor-protected code integrity or HVCI).
+
+## Why?
+The primary reason for this feature is performance.
+
+Without hardware-level MBEC, enabling Windows HVCI runs a 'software
+MBEC' known as Restricted User Mode, which imposes a runtime overhead
+due to increased state transitions between the guest's L2 root
+partition and the L2 secure partition for running kernel mode code
+integrity operations.
+
+In practice, this results in a significant number of exits. For
+example, playing a YouTube video within the Edge Browser produces
+roughly 1.2 million VMexits/second across an 8 vCPU Windows 11 guest.
+
+Most of these exits are VMREAD/VMWRITE operations, which can be
+emulated with Enlightened VMCS (eVMCS). However, even with eVMCS, this
+configuration still produces around 200,000 VMexits/second.
+
+With MBEC exposed to the L1 Windows Hypervisor, the same scenario
+results in approximately 50,000 VMexits/second, a *24x* reduction from
+the baseline.
+
+Not a typo, 24x reduction in VMexits.
+
+## How?
+This series implements core KVM support for exposing the MBEC bit in
+secondary execution controls (bit 22) to L1 and L2, based on
+configuration from user space and a module parameter
+'enable_pt_guest_exec_control'. The inspiration for this series
+started with Mickaël's series for Heki [3], where we've extracted,
+refactored, and extended the MBEC-specific use case to be
+general-purpose.
+
+MBEC, which appears in Linux /proc/cpuinfo as ept_mode_based_exec,
+splits the EPT exec bit (bit 2 in PTE) into two bits. When secondary
+execution control bit 22 is set, PTE bit 2 reflects supervisor mode
+executable, and PTE bit 10 reflects user mode executable.
+
+The semantics for EPT violation qualifications also change when MBEC
+is enabled, with bit 5 reflecting supervisor/kernel mode execute
+permissions and bit 6 reflecting user mode execute permissions.
+This ultimately serves to expose this feature to the L1 hypervisor,
+which consumes MBEC and informs the L2 partitions not to use the
+software MBEC by removing bit 14 in 0x40000004 EAX [4].
+
+## Where?
+Enablement spans both VMX code and MMU code to teach the shadow MMU
+about the different execution modes, as well as user space VMM to pass
+secondary execution control bit 22. A patch for QEMU enablement is
+available [5].
+
+## Testing
+Initial testing has been on done on 6.12-based code with:
+  Guests
+    - Windows 11 24H2 26100.2894
+    - Windows Server 2025 24H2 26100.2894
+    - Windows Server 2022 W1H2 20348.825
+  Processors:
+    - Intel Skylake 6154
+    - Intel Sapphire Rapids 6444Y
+
+## Acknowledgements
+Special thanks to all contributors and reviewers who have provided
+valuable feedback and support for this patch series.
+
+[1] https://learn.microsoft.com/en-us/windows/security/hardware-security/enable-virtualization-based-protection-of-code-integrity
+[2] https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/nested-virtualization#enlightened-vmcs-intel
+[3] https://patchwork.kernel.org/project/kvm/patch/20231113022326.24388-6-mic@digikod.net/
+[4] https://learn.microsoft.com/en-us/virtualization/hyper-v-on-windows/tlfs/feature-discovery#implementation-recommendations---0x40000004
+[5] https://github.com/JonKohler/qemu/tree/mbec-rfc-v1
+
+Cc: Alexander Grest <Alexander.Grest@microsoft.com>
+Cc: Nicolas Saenz Julienne <nsaenz@amazon.es>
+Cc: Madhavan T. Venkataraman <madvenka@linux.microsoft.com>
+Cc: Mickaël Salaün <mic@digikod.net>
+Cc: Tao Su <tao1.su@linux.intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Zhao Liu <zhao1.liu@intel.com>
+
+Jon Kohler (11):
+  KVM: x86: Add module parameter for Intel MBEC
+  KVM: x86: Add pt_guest_exec_control to kvm_vcpu_arch
+  KVM: VMX: Wire up Intel MBEC enable/disable logic
+  KVM: x86/mmu: Remove SPTE_PERM_MASK
+  KVM: VMX: Extend EPT Violation protection bits
+  KVM: x86/mmu: Introduce shadow_ux_mask
+  KVM: x86/mmu: Adjust SPTE_MMIO_ALLOWED_MASK to understand MBEC
+  KVM: x86/mmu: Extend make_spte to understand MBEC
+  KVM: nVMX: Setup Intel MBEC in nested secondary controls
+  KVM: VMX: Allow MBEC with EVMCS
+  KVM: x86: Enable module parameter for MBEC
+
+Mickaël Salaün (5):
+  KVM: VMX: add cpu_has_vmx_mbec helper
+  KVM: VMX: Define VMX_EPT_USER_EXECUTABLE_MASK
+  KVM: x86/mmu: Extend access bitfield in kvm_mmu_page_role
+  KVM: VMX: Enhance EPT violation handler for PROT_USER_EXEC
+  KVM: x86/mmu: Extend is_executable_pte to understand MBEC
+
+Nikolay Borisov (1):
+  KVM: VMX: Remove EPT_VIOLATIONS_ACC_*_BIT defines
+
+Sean Christopherson (1):
+  KVM: nVMX: Decouple EPT RWX bits from EPT Violation protection bits
+
+ arch/x86/include/asm/kvm_host.h | 13 +++++----
+ arch/x86/include/asm/vmx.h      | 45 ++++++++++++++++++++---------
+ arch/x86/kvm/mmu.h              |  3 +-
+ arch/x86/kvm/mmu/mmu.c          | 13 +++++----
+ arch/x86/kvm/mmu/mmutrace.h     | 23 ++++++++++-----
+ arch/x86/kvm/mmu/paging_tmpl.h  | 19 +++++++++---
+ arch/x86/kvm/mmu/spte.c         | 51 ++++++++++++++++++++++++++++-----
+ arch/x86/kvm/mmu/spte.h         | 36 +++++++++++++++--------
+ arch/x86/kvm/mmu/tdp_mmu.c      |  2 +-
+ arch/x86/kvm/vmx/capabilities.h |  6 ++++
+ arch/x86/kvm/vmx/hyperv.c       |  5 +++-
+ arch/x86/kvm/vmx/hyperv_evmcs.h |  1 +
+ arch/x86/kvm/vmx/nested.c       |  4 +++
+ arch/x86/kvm/vmx/vmx.c          | 21 ++++++++++++--
+ arch/x86/kvm/vmx/vmx.h          |  7 +++++
+ arch/x86/kvm/x86.c              |  4 +++
+ 16 files changed, 192 insertions(+), 61 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Remove EPT_VIOLATIONS_ACC_*_BIT defines
+[RFC PATCH 01/18] KVM: VMX: Remove EPT_VIOLATIONS_ACC_*_BIT defines
+Author: Jon Kohler <jon@nutanix.com>
+
+
+Those defines are only used in the definition of the various
+EPT_VIOLATIONS_ACC_* macros which are then used to extract respective
+bits from vmexit error qualifications. Remove the _BIT defines and
+redefine the _ACC ones via BIT() macro. No functional changes.
+
+Signed-off-by: Nikolay Borisov <nik.borisov@suse.com>
+Link: https://lore.kernel.org/r/20250227000705.3199706-2-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+(cherry picked from commit fa6c8fc2d2673dcaf7333bc35eb759ab7c39b81f)
+(cherry picked from commit b55fd5c48d3ec1dbf566937a377817b390ec0768)
+
+---
+ arch/x86/include/asm/vmx.h | 15 +++++----------
+ 1 file changed, 5 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Move apicv_pre_state_restore to
+[PATCH 1/4] KVM: TDX: Move apicv_pre_state_restore to
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+In preparation for a cleanup of the x86_ops struct for TDX, which turns
+several of the ops definitions to macros, move the
+vt_apicv_pre_state_restore() helper into posted_intr.c.
+
+Based on a patch by Sean Christopherson <seanjc@google.com>
+
+Link: https://lore.kernel.org/kvm/Z6v9yjWLNTU6X90d@google.com/
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+---
+ arch/x86/kvm/vmx/posted_intr.h |  1 +
+ arch/x86/kvm/vmx/main.c        | 10 +---------
+ arch/x86/kvm/vmx/posted_intr.c |  8 ++++++++
+ 3 files changed, 10 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Cleanup the kvm_x86_ops structure for
+[PATCH 0/4] KVM: TDX: Cleanup the kvm_x86_ops structure for
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+This is a cleanup that should follow the initial TDX base support (i.e.
+not an immediate fix needed for kvm-coco-queue).
+
+In [1], Sean points out that the kvm_x86_ops structure and its
+associated helpers and wrappers can be cleaned up a lot by -
+
+1. Putting the wrappers under CONFIG_KVM_INTEL_TDX, and
+2. Defining the helpers with macros that switch between the tdx and
+   non-tdx case, as well as NULL out the TDX-only stubs when needed.
+
+This cleans up the generated code by completely removing trampolines
+that would otherwise be left behind in the CONFIG_KVM_INTEL_TDX=n case.
+
+[1]: https://lore.kernel.org/kvm/Z6v9yjWLNTU6X90d@google.com/
+
+For example, looking at vt_refresh_apicv_exec_ctrl(), before this cleanup,
+when CONFIG_KVM_INTEL_TDX=n, the following asm is generated:
+
+0000000000036490 <vt_refresh_apicv_exec_ctrl>:
+   36490:       f3 0f 1e fa             endbr64
+   36494:       e8 00 00 00 00          call   36499 <vt_refresh_apicv_exec_ctrl+0x9>
+                        36495: R_X86_64_PLT32   __fentry__-0x4
+   36499:       e9 00 00 00 00          jmp    3649e <vt_refresh_apicv_exec_ctrl+0xe>
+                        3649a: R_X86_64_PLT32   vmx_refresh_apicv_exec_ctrl-0x4
+   3649e:       66 90                   xchg   %ax,%ax
+
+But with these patches, it goes away completely.
+
+These patches have been tested with TDX kvm-unit-tests, booting a Linux
+TD, TDX enhanced KVM selftests, and building and examining the generated
+assembly (or lack thereof) with both CONFIG_KVM_INTEL_TDX=y and
+CONFIG_KVM_INTEL_TDX=n
+
+Based on a patch by Sean Christopherson <seanjc@google.com>
+
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+---
+Vishal Verma (4):
+      KVM: TDX: Move apicv_pre_state_restore to posted_intr.c
+      KVM: VMX: Move x86_ops wrappers under CONFIG_KVM_INTEL_TDX
+      KVM: VMX: Make naming consistent for kvm_complete_insn_gp via define
+      KVM: VMX: Clean up and macrofy x86_ops
+
+ arch/x86/kvm/vmx/posted_intr.h |   1 +
+ arch/x86/kvm/vmx/tdx.h         |   2 +-
+ arch/x86/kvm/vmx/x86_ops.h     |  68 +-------------
+ arch/x86/kvm/vmx/main.c        | 204 ++++++++++++++++++++---------------------
+ arch/x86/kvm/vmx/posted_intr.c |   8 ++
+ 5 files changed, 113 insertions(+), 170 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  exec/tswap: target code can use TARGET_BIG_ENDIAN instead of target_words_bigendian()
+[PATCH v4 01/17] exec/tswap: target code can use TARGET_BIG_ENDIAN instead of target_words_bigendian()
+Author: Pierrick Bouvier <pierrick.bouvier@linaro.org>
+
+Reviewed-by: Richard Henderson <richard.henderson@linaro.org>
+Signed-off-by: Pierrick Bouvier <pierrick.bouvier@linaro.org>
+---
+ include/exec/tswap.h | 11 ++++++-----
+ cpu-target.c         |  1 +
+ 2 files changed, 7 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  make system memory API available for common code
+[PATCH v4 00/17] make system memory API available for common code
+Author: Pierrick Bouvier <pierrick.bouvier@linaro.org>
+
+The main goal of this series is to be able to call any memory ld/st function
+from code that is *not* target dependent. As a positive side effect, we can
+turn related system compilation units into common code.
+
+The first 5 patches remove dependency of memory API to cpu headers and remove
+dependency to target specific code. This could be a series on its own, but it's
+great to be able to turn system memory compilation units into common code to
+make sure it can't regress, and prove it achieves the desired result.
+
+The next patches remove more dependencies on cpu headers (exec-all,
+memory-internal, ram_addr).
+Then, we add access to a needed function from kvm, some xen stubs, and we
+finally can turn our compilation units into common code.
+
+Every commit was tested to build correctly for all targets (on windows, linux,
+macos), and the series was fully tested by running all tests we have (linux,
+x86_64 host).
+
+v2:
+- reorder first commits (tswap change first, so memory cached functions can use it)
+- move st/ld*_p functions to tswap instead of bswap
+- add define for target_words_bigendian when COMPILING_PER_TARGET, equals to
+  TARGET_BIG_ENDIAN (avoid overhead in target code)
+- rewrite devend_memop
+- remove useless exec-all.h in concerned patch
+- extract devend_big_endian function to reuse in system/memory.c
+- rewrite changes to system/memory.c
+
+v3:
+- move devend functions to memory_internal.h
+- completed description for commits removing cpu.h dependency
+
+v4:
+- rebase on top of master
+  * missing include in 'codebase: prepare to remove cpu.h from exec/exec-all.h'
+  * meson build conflict
+
+Pierrick Bouvier (17):
+  exec/tswap: target code can use TARGET_BIG_ENDIAN instead of
+    target_words_bigendian()
+  exec/tswap: implement {ld,st}.*_p as functions instead of macros
+  exec/memory_ldst: extract memory_ldst declarations from cpu-all.h
+  exec/memory_ldst_phys: extract memory_ldst_phys declarations from
+    cpu-all.h
+  exec/memory.h: make devend_memop "target defines" agnostic
+  codebase: prepare to remove cpu.h from exec/exec-all.h
+  exec/exec-all: remove dependency on cpu.h
+  exec/memory-internal: remove dependency on cpu.h
+  exec/ram_addr: remove dependency on cpu.h
+  system/kvm: make kvm_flush_coalesced_mmio_buffer() accessible for
+    common code
+  exec/ram_addr: call xen_hvm_modified_memory only if xen is enabled
+  hw/xen: add stubs for various functions
+  system/physmem: compilation unit is now common to all targets
+  include/exec/memory: extract devend_big_endian from devend_memop
+  include/exec/memory: move devend functions to memory-internal.h
+  system/memory: make compilation unit common
+  system/ioport: make compilation unit common
+
+ include/exec/cpu-all.h              | 66 -----------------------
+ include/exec/exec-all.h             |  1 -
+ include/exec/memory-internal.h      | 21 +++++++-
+ include/exec/memory.h               | 30 ++++-------
+ include/exec/ram_addr.h             | 11 ++--
+ include/exec/tswap.h                | 81 +++++++++++++++++++++++++++--
+ include/system/kvm.h                |  6 +--
+ include/tcg/tcg-op.h                |  1 +
+ target/ppc/helper_regs.h            |  2 +
+ include/exec/memory_ldst.h.inc      |  4 --
+ include/exec/memory_ldst_phys.h.inc |  5 +-
+ cpu-target.c                        |  1 +
+ hw/ppc/spapr_nested.c               |  1 +
+ hw/sh4/sh7750.c                     |  1 +
+ hw/xen/xen_stubs.c                  | 56 ++++++++++++++++++++
+ page-vary-target.c                  |  2 +-
+ system/ioport.c                     |  1 -
+ system/memory.c                     | 17 ++----
+ target/ppc/tcg-excp_helper.c        |  1 +
+ target/riscv/bitmanip_helper.c      |  2 +-
+ hw/xen/meson.build                  |  3 ++
+ system/meson.build                  |  6 +--
+ 22 files changed, 193 insertions(+), 126 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  ida: Add ida_find_first_range()
+[PATCH v8 1/5] ida: Add ida_find_first_range()
+Author: Yi Liu <yi.l.liu@intel.com>
+
+There is no helpers for user to check if a given ID is allocated or not,
+neither a helper to loop all the allocated IDs in an IDA and do something
+for cleanup. With the two needs, a helper to get the lowest allocated ID
+of a range and two variants based on it.
+
+Caller can check if a given ID is allocated or not by:
+
+	bool ida_exists(struct ida *ida, unsigned int id)
+
+Caller can iterate all allocated IDs by:
+
+	int id;
+	while ((id = ida_find_first(&pasid_ida)) >= 0) {
+		//anything to do with the allocated ID
+		ida_free(pasid_ida, pasid);
+	}
+
+Cc: Matthew Wilcox (Oracle) <willy@infradead.org>
+Suggested-by: Jason Gunthorpe <jgg@nvidia.com>
+Reviewed-by: Jason Gunthorpe <jgg@nvidia.com>
+Reviewed-by: Kevin Tian <kevin.tian@intel.com>
+Acked-by: Matthew Wilcox (Oracle) <willy@infradead.org>
+Signed-off-by: Yi Liu <yi.l.liu@intel.com>
+---
+ include/linux/idr.h | 11 +++++++
+ lib/idr.c           | 67 +++++++++++++++++++++++++++++++++++++++++++
+ lib/test_ida.c      | 70 +++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 148 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vfio-pci support pasid attach/detach
+[PATCH v8 0/5] vfio-pci support pasid attach/detach
+Author: Yi Liu <yi.l.liu@intel.com>
+
+This series introduces the PASID attach/detach user APIs (uAPIs) that
+allow userspace to attach or detach a device's PASID to or from a specified
+IOAS/hwpt. Currently, only the vfio-pci driver is enabled in this series.
+
+Following this update, PASID-capable devices bound to vfio-pci can report
+PASID capabilities to userspace and virtual machines (VMs), facilitating
+PASID use cases such as Shared Virtual Addressing (SVA). In discussions
+about reporting the virtual PASID (vPASID) to VMs [1], it was agreed that
+the userspace virtual machine monitor (VMM) will synthesize the vPASID
+capability. The VMM must identify a suitable location to insert the vPASID
+capability, including handling hidden bits for certain devices. However,
+this responsibility lies with userspace and is not the focus of this series.
+
+This series begins by adding helpers for PASID attachment in the vfio core,
+then extends the device character device (cdev) attach/detach ioctls to
+support PASID attach/detach operations. At the conclusion of this series,
+the IOMMU_GET_HW_INFO ioctl is extended to report PCI PASID capabilities
+to userspace. Userspace should verify this capability before utilizing any
+PASID-related uAPIs provided by VFIO, as agreed in [2]. This series depends
+on the iommufd PASID attach/detach series [3].
+
+The complete code is available at [4] and has been tested with a modified
+QEMU branch [5].
+
+[1] https://lore.kernel.org/kvm/BN9PR11MB5276318969A212AD0649C7BE8CBE2@BN9PR11MB5276.namprd11.prod.outlook.com/
+[2] https://lore.kernel.org/kvm/4f2daf50-a5ad-4599-ab59-bcfc008688d8@intel.com/
+[3] https://lore.kernel.org/linux-iommu/20250313123532.103522-1-yi.l.liu@intel.com/
+[4] https://github.com/yiliu1765/iommufd/tree/iommufd_pasid
+[5] https://github.com/yiliu1765/qemu/tree/wip/zhenzhong/iommufd_nesting_rfcv2-test-pasid
+
+Change log:
+
+v8:
+ - Rebased on top of the latest iommufd series, mainly using the latest
+   kAPI for pasid attach
+
+v7: https://lore.kernel.org/kvm/20250216054638.24603-1-yi.l.liu@intel.com/#t
+ - Add Alex's and Kevin's r-b on vfio patches
+ - Minor tweaks on patch 04 (Kevin)
+
+v6: https://lore.kernel.org/kvm/20241219133534.16422-1-yi.l.liu@intel.com/
+ - Drop the vfio_copy_user_data() generalization as it is not totally clear
+   what it would cover. (Alex)
+ - Reworked the patch 03 of v5 a bit. e.g. lift the pasid_{at|de}tach_ioas op test
+   before the second user data copy; make 'if (xend > minsz)' to be 'if (xend)'
+   and remove the comment accordingly. This is because we don't generalize
+   the user data copy now, so xend is either 0 or non-zero, no need to check
+   against minsz.
+ - Make the IOMMU_GET_HW_INFO report out_max_pasid_log2 by checking the
+   dev->iommu->max_pasids. This is because iommu drivers enables PASID
+   as long as it supports. So checking it is enough. Also, it is more friendly
+   to non-PCI PASID supports compared with reading the PCI config space to
+   check if PASID is enabled.
+ - Add selftest coverage for reporting max_pasid_log2 in IOMMU_HW_INFO ioctl.
+
+v5: https://lore.kernel.org/kvm/20241108121742.18889-1-yi.l.liu@intel.com/
+ - Fix a wrong return value (Alex)
+ - Fix the policy of setting the xend array per flag extension (Alex)
+ - A separate patch to generalize the code of copy user data (Alex)
+
+v4: https://lore.kernel.org/kvm/20241104132732.16759-1-yi.l.liu@intel.com/
+ - Add acked-by for the ida patch from Matthew
+ - Add r-b from Kevin and Jason on patch 01, 02 and 04 of v3
+ - Add common code to copy user data for the user struct with new fields
+ - Extend the VFIO_DEVICE_[AT|DE]TACH_IOMMUFD_PT to support pasid, patch 03
+   is updated per this change. Hence drop r-b of it. (Kevin, Alex)
+ - Add t-b from Zhangfei for patch 4 of v3
+ - Nits from Vasant
+
+v3: https://lore.kernel.org/linux-iommu/20240912131729.14951-1-yi.l.liu@intel.com/
+ - Misc enhancement on patch 01 of v2 (Alex, Jason)
+ - Add Jason's r-b to patch 03 of v2
+ - Drop the logic that report PASID via VFIO_DEVICE_FEATURE ioctl
+ - Extend IOMMU_GET_HW_INFO to report PASID support (Kevin, Jason, Alex)
+
+v2: https://lore.kernel.org/kvm/20240412082121.33382-1-yi.l.liu@intel.com/
+ - Use IDA to track if PASID is attached or not in VFIO. (Jason)
+ - Fix the issue of calling pasid_at[de]tach_ioas callback unconditionally (Alex)
+ - Fix the wrong data copy in vfio_df_ioctl_pasid_detach_pt() (Zhenzhong)
+ - Minor tweaks in comments (Kevin)
+
+v1: https://lore.kernel.org/kvm/20231127063909.129153-1-yi.l.liu@intel.com/
+ - Report PASID capability via VFIO_DEVICE_FEATURE (Alex)
+
+rfc: https://lore.kernel.org/linux-iommu/20230926093121.18676-1-yi.l.liu@intel.com/
+
+Regards,
+	Yi Liu
+
+Yi Liu (5):
+  ida: Add ida_find_first_range()
+  vfio-iommufd: Support pasid [at|de]tach for physical VFIO devices
+  vfio: VFIO_DEVICE_[AT|DE]TACH_IOMMUFD_PT support pasid
+  iommufd: Extend IOMMU_GET_HW_INFO to report PASID capability
+  iommufd/selftest: Add coverage for reporting max_pasid_log2 via
+    IOMMU_HW_INFO
+
+ drivers/iommu/iommufd/device.c                | 35 +++++++++-
+ drivers/pci/ats.c                             | 33 +++++++++
+ drivers/vfio/device_cdev.c                    | 60 +++++++++++++---
+ drivers/vfio/iommufd.c                        | 50 +++++++++++++
+ drivers/vfio/pci/vfio_pci.c                   |  2 +
+ include/linux/idr.h                           | 11 +++
+ include/linux/pci-ats.h                       |  3 +
+ include/linux/vfio.h                          | 14 ++++
+ include/uapi/linux/iommufd.h                  | 14 +++-
+ include/uapi/linux/vfio.h                     | 29 +++++---
+ lib/idr.c                                     | 67 ++++++++++++++++++
+ lib/test_ida.c                                | 70 +++++++++++++++++++
+ tools/testing/selftests/iommu/iommufd.c       | 18 +++++
+ .../selftests/iommu/iommufd_fail_nth.c        |  3 +-
+ tools/testing/selftests/iommu/iommufd_utils.h | 17 +++--
+ 15 files changed, 401 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  hisi_acc_vfio_pci: fix XQE dma address error
+[PATCH v5 1/5] hisi_acc_vfio_pci: fix XQE dma address error
+Author: Longfang Liu <liulongfang@huawei.com>
+
+The dma addresses of EQE and AEQE are wrong after migration and
+results in guest kernel-mode encryption services  failure.
+Comparing the definition of hardware registers, we found that
+there was an error when the data read from the register was
+combined into an address. Therefore, the address combination
+sequence needs to be corrected.
+
+Even after fixing the above problem, we still have an issue
+where the Guest from an old kernel can get migrated to
+new kernel and may result in wrong data.
+
+In order to ensure that the address is correct after migration,
+if an old magic number is detected, the dma address needs to be
+updated.
+
+Fixes: b0eed085903e ("hisi_acc_vfio_pci: Add support for VFIO live migration")
+Signed-off-by: Longfang Liu <liulongfang@huawei.com>
+---
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 41 ++++++++++++++++---
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.h    | 14 ++++++-
+ 2 files changed, 47 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:   bugfix some driver issues
+[PATCH v5 0/5]  bugfix some driver issues
+Author: Longfang Liu <liulongfang@huawei.com>
+
+As the test scenarios for the live migration function become
+more and more extensive. Some previously undiscovered driver
+issues were found.
+Update and fix through this patchset.
+
+Change v4 -> v5
+	Update version matching strategy
+
+Change v3 -> v4
+	Modify version matching scheme
+
+Change v2 -> v3
+	Modify the magic digital field segment
+
+Change v1 -> v2
+	Add fixes line for patch comment
+
+Longfang Liu (5):
+  hisi_acc_vfio_pci: fix XQE dma address error
+  hisi_acc_vfio_pci: add eq and aeq interruption restore
+  hisi_acc_vfio_pci: bugfix cache write-back issue
+  hisi_acc_vfio_pci: bugfix the problem of uninstalling driver
+  hisi_acc_vfio_pci: bugfix live migration function without VF device
+    driver
+
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 97 +++++++++++++++----
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.h    | 14 ++-
+ 2 files changed, 89 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  virtio_net: Add functions for hashing
+[PATCH net-next v10 01/10] virtio_net: Add functions for hashing
+Author: Akihiko Odaki <akihiko.odaki@daynix.com>
+
+They are useful to implement VIRTIO_NET_F_RSS and
+VIRTIO_NET_F_HASH_REPORT.
+
+Signed-off-by: Akihiko Odaki <akihiko.odaki@daynix.com>
+Tested-by: Lei Yang <leiyang@redhat.com>
+---
+ include/linux/virtio_net.h | 188 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 188 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  tun: Introduce virtio-net hashing
+[PATCH net-next v10 00/10] tun: Introduce virtio-net hashing
+Author: Akihiko Odaki <akihiko.odaki@daynix.com>
+
+virtio-net have two usage of hashes: one is RSS and another is hash
+reporting. Conventionally the hash calculation was done by the VMM.
+However, computing the hash after the queue was chosen defeats the
+purpose of RSS.
+
+Another approach is to use eBPF steering program. This approach has
+another downside: it cannot report the calculated hash due to the
+restrictive nature of eBPF.
+
+Introduce the code to compute hashes to the kernel in order to overcome
+thse challenges.
+
+An alternative solution is to extend the eBPF steering program so that it
+will be able to report to the userspace, but it is based on context
+rewrites, which is in feature freeze. We can adopt kfuncs, but they will
+not be UAPIs. We opt to ioctl to align with other relevant UAPIs (KVM
+and vhost_net).
+
+The patches for QEMU to use this new feature was submitted as RFC and
+is available at:
+https://patchew.org/QEMU/20250313-hash-v4-0-c75c494b495e@daynix.com/
+
+This work was presented at LPC 2024:
+https://lpc.events/event/18/contributions/1963/
+
+V1 -> V2:
+  Changed to introduce a new BPF program type.
+
+Signed-off-by: Akihiko Odaki <akihiko.odaki@daynix.com>
+---
+Changes in v10:
+- Split common code and TUN/TAP-specific code into separate patches.
+- Reverted a spurious style change in patch "tun: Introduce virtio-net
+  hash feature".
+- Added a comment explaining disable_ipv6 in tests.
+- Used AF_PACKET for patch "selftest: tun: Add tests for
+  virtio-net hashing". I also added the usage of FIXTURE_VARIANT() as
+  the testing function now needs access to more variant-specific
+  variables.
+- Corrected the message of patch "selftest: tun: Add tests for
+  virtio-net hashing"; it mentioned validation of configuration but
+  it is not scope of this patch.
+- Expanded the description of patch "selftest: tun: Add tests for
+  virtio-net hashing".
+- Added patch "tun: Allow steering eBPF program to fall back".
+- Changed to handle TUNGETVNETHASHCAP before taking the rtnl lock.
+- Removed redundant tests for tun_vnet_ioctl().
+- Added patch "selftest: tap: Add tests for virtio-net ioctls".
+- Added a design explanation of ioctls for extensibility and migration.
+- Removed a few branches in patch
+  "vhost/net: Support VIRTIO_NET_F_HASH_REPORT".
+- Link to v9: https://lore.kernel.org/r/20250307-rss-v9-0-df76624025eb@daynix.com
+
+Changes in v9:
+- Added a missing return statement in patch
+  "tun: Introduce virtio-net hash feature".
+- Link to v8: https://lore.kernel.org/r/20250306-rss-v8-0-7ab4f56ff423@daynix.com
+
+Changes in v8:
+- Disabled IPv6 to eliminate noises in tests.
+- Added a branch in tap to avoid unnecessary dissection when hash
+  reporting is disabled.
+- Removed unnecessary rtnl_lock().
+- Extracted code to handle new ioctls into separate functions to avoid
+  adding extra NULL checks to the code handling other ioctls.
+- Introduced variable named "fd" to __tun_chr_ioctl().
+- s/-/=/g in a patch message to avoid confusing Git.
+- Link to v7: https://lore.kernel.org/r/20250228-rss-v7-0-844205cbbdd6@daynix.com
+
+Changes in v7:
+- Ensured to set hash_report to VIRTIO_NET_HASH_REPORT_NONE for
+  VHOST_NET_F_VIRTIO_NET_HDR.
+- s/4/sizeof(u32)/ in patch "virtio_net: Add functions for hashing".
+- Added tap_skb_cb type.
+- Rebased.
+- Link to v6: https://lore.kernel.org/r/20250109-rss-v6-0-b1c90ad708f6@daynix.com
+
+Changes in v6:
+- Extracted changes to fill vnet header holes into another series.
+- Squashed patches "skbuff: Introduce SKB_EXT_TUN_VNET_HASH", "tun:
+  Introduce virtio-net hash reporting feature", and "tun: Introduce
+  virtio-net RSS" into patch "tun: Introduce virtio-net hash feature".
+- Dropped the RFC tag.
+- Link to v5: https://lore.kernel.org/r/20241008-rss-v5-0-f3cf68df005d@daynix.com
+
+Changes in v5:
+- Fixed a compilation error with CONFIG_TUN_VNET_CROSS_LE.
+- Optimized the calculation of the hash value according to:
+  https://git.dpdk.org/dpdk/commit/?id=3fb1ea032bd6ff8317af5dac9af901f1f324cab4
+- Added patch "tun: Unify vnet implementation".
+- Dropped patch "tap: Pad virtio header with zero".
+- Added patch "selftest: tun: Test vnet ioctls without device".
+- Reworked selftests to skip for older kernels.
+- Documented the case when the underlying device is deleted and packets
+  have queue_mapping set by TC.
+- Reordered test harness arguments.
+- Added code to handle fragmented packets.
+- Link to v4: https://lore.kernel.org/r/20240924-rss-v4-0-84e932ec0e6c@daynix.com
+
+Changes in v4:
+- Moved tun_vnet_hash_ext to if_tun.h.
+- Renamed virtio_net_toeplitz() to virtio_net_toeplitz_calc().
+- Replaced htons() with cpu_to_be16().
+- Changed virtio_net_hash_rss() to return void.
+- Reordered variable declarations in virtio_net_hash_rss().
+- Removed virtio_net_hdr_v1_hash_from_skb().
+- Updated messages of "tap: Pad virtio header with zero" and
+  "tun: Pad virtio header with zero".
+- Fixed vnet_hash allocation size.
+- Ensured to free vnet_hash when destructing tun_struct.
+- Link to v3: https://lore.kernel.org/r/20240915-rss-v3-0-c630015db082@daynix.com
+
+Changes in v3:
+- Reverted back to add ioctl.
+- Split patch "tun: Introduce virtio-net hashing feature" into
+  "tun: Introduce virtio-net hash reporting feature" and
+  "tun: Introduce virtio-net RSS".
+- Changed to reuse hash values computed for automq instead of performing
+  RSS hashing when hash reporting is requested but RSS is not.
+- Extracted relevant data from struct tun_struct to keep it minimal.
+- Added kernel-doc.
+- Changed to allow calling TUNGETVNETHASHCAP before TUNSETIFF.
+- Initialized num_buffers with 1.
+- Added a test case for unclassified packets.
+- Fixed error handling in tests.
+- Changed tests to verify that the queue index will not overflow.
+- Rebased.
+- Link to v2: https://lore.kernel.org/r/20231015141644.260646-1-akihiko.odaki@daynix.com
+
+---
+Akihiko Odaki (10):
+      virtio_net: Add functions for hashing
+      net: flow_dissector: Export flow_keys_dissector_symmetric
+      tun: Allow steering eBPF program to fall back
+      tun: Add common virtio-net hash feature code
+      tun: Introduce virtio-net hash feature
+      tap: Introduce virtio-net hash feature
+      selftest: tun: Test vnet ioctls without device
+      selftest: tun: Add tests for virtio-net hashing
+      selftest: tap: Add tests for virtio-net ioctls
+      vhost/net: Support VIRTIO_NET_F_HASH_REPORT
+
+ Documentation/networking/tuntap.rst  |   7 +
+ drivers/net/Kconfig                  |   1 +
+ drivers/net/tap.c                    |  68 ++++-
+ drivers/net/tun.c                    |  90 +++++--
+ drivers/net/tun_vnet.h               | 155 ++++++++++-
+ drivers/vhost/net.c                  |  68 ++---
+ include/linux/if_tap.h               |   2 +
+ include/linux/skbuff.h               |   3 +
+ include/linux/virtio_net.h           | 188 ++++++++++++++
+ include/net/flow_dissector.h         |   1 +
+ include/uapi/linux/if_tun.h          |  82 ++++++
+ net/core/flow_dissector.c            |   3 +-
+ net/core/skbuff.c                    |   4 +
+ tools/testing/selftests/net/Makefile |   2 +-
+ tools/testing/selftests/net/tap.c    |  97 ++++++-
+ tools/testing/selftests/net/tun.c    | 491 ++++++++++++++++++++++++++++++++++-
+ 16 files changed, 1185 insertions(+), 77 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  nvmet: Remove duplicate uuid_copy
+[PATCH RFC 01/11] nvmet: Remove duplicate uuid_copy
+Author: Mike Christie <michael.christie@oracle.com>
+
+We do uuid_copy twice in nvmet_alloc_ctrl so this patch deletes one
+of the calls.
+
+Signed-off-by: Mike Christie <michael.christie@oracle.com>
+---
+ drivers/nvme/target/core.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  nvmet: Add NVMe target mdev/vfio driver
+[PATCH RFC 00/11] nvmet: Add NVMe target mdev/vfio driver
+Author: Mike Christie <michael.christie@oracle.com>
+
+
+----------------------------------------------------------------------
+
+New:  vfio/type1: conditional rescheduling while pinning
+[PATCH] vfio/type1: conditional rescheduling while pinning
+Author: Keith Busch <kbusch@meta.com>
+
+
+A large DMA mapping request can loop through dma address pinning for
+many pages. The repeated vmf_insert_pfn can be costly, so let the task
+reschedule as need to prevent CPU stalls.
+
+ rcu: INFO: rcu_sched self-detected stall on CPU
+ rcu: 	36-....: (20999 ticks this GP) idle=3Db01c/1/0x4000000000000000 so=
+ftirq=3D35839/35839 fqs=3D3538
+ rcu: 	         hardirqs   softirqs   csw/system
+ rcu: 	 number:        0        107            0
+ rcu: 	cputime:       50          0        10446   =3D=3D> 10556(ms)
+ rcu: 	(t=3D21075 jiffies g=3D377761 q=3D204059 ncpus=3D384)
+...
+  <TASK>
+  ? asm_sysvec_apic_timer_interrupt+0x16/0x20
+  ? walk_system_ram_range+0x63/0x120
+  ? walk_system_ram_range+0x46/0x120
+  ? pgprot_writethrough+0x20/0x20
+  lookup_memtype+0x67/0xf0
+  track_pfn_insert+0x20/0x40
+  vmf_insert_pfn_prot+0x88/0x140
+  vfio_pci_mmap_huge_fault+0xf9/0x1b0 [vfio_pci_core]
+  __do_fault+0x28/0x1b0
+  handle_mm_fault+0xef1/0x2560
+  fixup_user_fault+0xf5/0x270
+  vaddr_get_pfns+0x169/0x2f0 [vfio_iommu_type1]
+  vfio_pin_pages_remote+0x162/0x8e0 [vfio_iommu_type1]
+  vfio_iommu_type1_ioctl+0x1121/0x1810 [vfio_iommu_type1]
+  ? futex_wake+0x1c1/0x260
+  x64_sys_call+0x234/0x17a0
+  do_syscall_64+0x63/0x130
+  ? exc_page_fault+0x63/0x130
+  entry_SYSCALL_64_after_hwframe+0x4b/0x53
+
+Signed-off-by: Keith Busch <kbusch@kernel.org>
+---
+ drivers/vfio/vfio_iommu_type1.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
