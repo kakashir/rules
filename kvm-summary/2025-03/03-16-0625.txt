@@ -1,0 +1,235 @@
+From dc22a1ba to 5f0831e1
+KVM mailing list update from dc22a1ba to 5f0831e1
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     18  Sean Christopherson <seanjc@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  x86/irq: Ensure initial PIR loads are performed exactly once
+[PATCH 1/8] x86/irq: Ensure initial PIR loads are performed exactly once
+Author: Sean Christopherson <seanjc@google.com>
+
+Ensure the PIR is read exactly once at the start of handle_pending_pir(),
+to guarantee that checking for an outstanding posted interrupt in a given
+chuck doesn't reload the chunk from the "real" PIR.  Functionally, a reload
+is benign, but it would defeat the purpose of pre-loading into a copy.
+
+Fixes: 1b03d82ba15e ("x86/irq: Install posted MSI notification handler")
+Cc: Jacob Pan <jacob.jun.pan@linux.intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kernel/irq.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86/irq: KVM: Optimize KVM's PIR harvesting
+[PATCH 0/8] x86/irq: KVM: Optimize KVM's PIR harvesting
+Author: Sean Christopherson <seanjc@google.com>
+
+Optimizing KVM's PIR harvesting using the same techniques as posted MSIs,
+most notably to use 8-byte accesses on 64-bit kernels (/facepalm).
+
+Fix a few warts along the way, and finish up by adding a helper to dedup
+the PIR harvesting code between KVM and posted MSIs.
+
+Sean Christopherson (8):
+  x86/irq: Ensure initial PIR loads are performed exactly once
+  x86/irq: Track if IRQ was found in PIR during initial loop (to load
+    PIR vals)
+  KVM: VMX: Ensure vIRR isn't reloaded at odd times when sync'ing PIR
+  x86/irq: KVM: Track PIR bitmap as an "unsigned long" array
+  KVM: VMX: Process PIR using 64-bit accesses on 64-bit kernels
+  KVM: VMX: Isolate pure loads from atomic XCHG when processing PIR
+  KVM: VMX: Use arch_xchg() when processing PIR to avoid instrumentation
+  x86/irq: KVM: Add helper for harvesting PIR to deduplicate KVM and
+    posted MSIs
+
+ arch/x86/include/asm/posted_intr.h | 79 +++++++++++++++++++++++++++---
+ arch/x86/kernel/irq.c              | 63 ++++--------------------
+ arch/x86/kvm/lapic.c               | 20 ++++----
+ arch/x86/kvm/lapic.h               |  4 +-
+ arch/x86/kvm/vmx/posted_intr.h     |  2 +-
+ 5 files changed, 96 insertions(+), 72 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Add a module param to control and enumerate device
+[PATCH] KVM: x86: Add a module param to control and enumerate device
+Author: Sean Christopherson <seanjc@google.com>
+
+Add a module param to allow disabling device posted interrupts without
+having to sacrifice all of APICv/AVIC, and to also effectively enumerate
+to userspace whether or not KVM may be utilizing device posted IRQs.
+Disabling device posted interrupts is very desirable for testing, and can
+even be desirable for production environments, e.g. if the host kernel
+wants to interpose on device interrupts.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 1 +
+ arch/x86/kvm/svm/avic.c         | 3 +--
+ arch/x86/kvm/vmx/posted_intr.c  | 7 +++----
+ arch/x86/kvm/x86.c              | 9 ++++++++-
+ 4 files changed, 13 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Allow building irqbypass.ko as as module when kvm.ko is
+[PATCH] KVM: Allow building irqbypass.ko as as module when kvm.ko is
+Author: Sean Christopherson <seanjc@google.com>
+
+Convert HAVE_KVM_IRQ_BYPASS into a tristate so that selecting
+IRQ_BYPASS_MANAGER follows KVM={m,y}, i.e. doesn't force irqbypass.ko to
+be built-in.
+
+Note, PPC allows building KVM as a module, but selects HAVE_KVM_IRQ_BYPASS
+from a boolean Kconfig, i.e. KVM PPC unnecessarily forces irqbpass.ko to
+be built-in.  But that flaw is a longstanding PPC specific issue.
+
+Fixes: 61df71ee992d ("kvm: move "select IRQ_BYPASS_MANAGER" to common code")
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ include/linux/kvm_host.h |  2 +-
+ virt/kvm/Kconfig         |  2 +-
+ virt/kvm/eventfd.c       | 10 +++++-----
+ 3 files changed, 7 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Check MSR load/store list counts during VM-Enter
+[PATCH] KVM: nVMX: Check MSR load/store list counts during VM-Enter
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly verify the MSR load/store list counts are below the advertised
+limit as part of the initial consistency checks on the lists, so that code
+that consumes the count doesn't need to worry about extreme edge cases.
+Enforcing the limit during the initial checks fixes a flaw on 32-bit KVM
+where a sufficiently high @count could lead to overflow:
+
+	arch/x86/kvm/vmx/nested.c:834 nested_vmx_check_msr_switch()
+	warn: potential user controlled sizeof overflow 'addr + count * 16' '0-u64max + 16-68719476720'
+
+arch/x86/kvm/vmx/nested.c
+    827 static int nested_vmx_check_msr_switch(struct kvm_vcpu *vcpu,
+    828                                        u32 count, u64 addr)
+    829 {
+    830         if (count == 0)
+    831                 return 0;
+    832
+    833         if (!kvm_vcpu_is_legal_aligned_gpa(vcpu, addr, 16) ||
+--> 834             !kvm_vcpu_is_legal_gpa(vcpu, (addr + count * sizeof(struct vmx_msr_entry) - 1)))
+                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+While the SDM doesn't explicitly state an illegal count results in VM-Fail,
+the SDM states that exceeding the limit may result in undefined behavior.
+I.e. the SDM gives hardware, and thus KVM, carte blanche to do literally
+anything in response to a count that exceeds the "recommended" limit.
+
+  If the limit is exceeded, undefined processor behavior may result
+  (including a machine check during the VMX transition).
+
+KVM already enforces the limit when processing the MSRs, i.e. already
+signals a late VM-Exit Consistency Check for VM-Enter, and generates a
+VMX Abort for VM-Exit.  I.e. explicitly checking the limits simply means
+KVM will signal VM-Fail instead of VM-Exit or VMX Abort.
+
+Reported-by: Dan Carpenter <dan.carpenter@linaro.org>
+Closes: https://lore.kernel.org/all/44961459-2759-4164-b604-f6bd43da8ce9@stanley.mountain
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 31 ++++++++++++++++++++-----------
+ 1 file changed, 20 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Explicitly zero-initialize on-stack CPUID unions
+[PATCH] KVM: x86: Explicitly zero-initialize on-stack CPUID unions
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly zero/empty-initialize the unions used for PMU related CPUID
+entries, instead of manually zeroing all fields (hopefully), or in the
+case of 0x80000022, relying on the compiler to clobber the uninitialized
+bitfields.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/cpuid.c | 8 +++-----
+ 1 file changed, 3 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Dynamically allocate shadow MMU's hashed
+[PATCH 1/3] KVM: x86/mmu: Dynamically allocate shadow MMU's hashed
+Author: Sean Christopherson <seanjc@google.com>
+
+Dynamically allocate the (massive) array of hashed lists used to track
+shadow pages, as the array itself is 32KiB, i.e. is an order-3 allocation
+all on its own, and is *exactly* an order-3 allocation.  Dynamically
+allocating the array will allow allocating "struct kvm" using regular
+kmalloc(), and will also allow deferring allocation of the array until
+it's actually needed, i.e. until the first shadow root is allocated.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  4 ++--
+ arch/x86/kvm/mmu/mmu.c          | 21 ++++++++++++++++++++-
+ arch/x86/kvm/x86.c              |  5 ++++-
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Dynamically allocate hashed page list
+[PATCH 0/3] KVM: x86: Dynamically allocate hashed page list
+Author: Sean Christopherson <seanjc@google.com>
+
+Allocate the hashed list of shadow pages dynamically (separate from
+struct kvm), and on-demand.  The hashed list is 32KiB, i.e. absolutely
+belongs in a separate allocation, and is worth skipping if KVM isn't
+shadowing guest PTEs for the VM.
+
+Sean Christopherson (3):
+  KVM: x86/mmu: Dynamically allocate shadow MMU's hashed page list
+  KVM: x86: Allocate kvm_vmx/kvm_svm structures using kzalloc()
+  KVM: x86/mmu: Defer allocation of shadow MMU's hashed page list
+
+ arch/x86/include/asm/kvm_host.h |  6 ++---
+ arch/x86/kvm/mmu/mmu.c          | 48 +++++++++++++++++++++++++++++----
+ arch/x86/kvm/svm/svm.c          |  1 +
+ arch/x86/kvm/vmx/vmx.c          |  1 +
+ arch/x86/kvm/x86.c              |  5 +++-
+ 5 files changed, 52 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Wrap sanity check on number of TDP MMU pages
+[PATCH] KVM: x86/mmu: Wrap sanity check on number of TDP MMU pages
+Author: Sean Christopherson <seanjc@google.com>
+
+Wrap the TDP MMU page counter in CONFIG_KVM_PROVE_MMU so that the sanity
+check is omitted from production builds, and more importantly to remove
+the atomic accesses to account pages.  A one-off memory leak in production
+is relatively uninteresting, and a WARN_ON won't help mitigate a systemic
+issue; it's as much about helping triage memory leaks as it is about
+detecting them in the first place, and doesn't magically stop the leaks.
+I.e. production environments will be quite sad if a severe KVM bug escapes,
+regardless of whether or not KVM WARNs.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 7 ++++++-
+ arch/x86/kvm/mmu/tdp_mmu.c      | 8 +++++++-
+ 2 files changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
