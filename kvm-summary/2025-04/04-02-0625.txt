@@ -1,0 +1,1191 @@
+From e7f0ff2b to 1d980064
+KVM mailing list update from e7f0ff2b to 1d980064
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     35 google.com
+     31 redhat.com
+     18 amd.com
+      7 gmail.com
+      2 nutanix.com
+      1 intel.com
+      1 amazon.com
+
+Top 15 contributors (Based on Email Body)
+
+     35  Sean Christopherson <seanjc@google.com>
+     31  Paolo Bonzini <pbonzini@redhat.com>
+     16  Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+      7  Yuvraj Sakshith <yuvraj.kernel@gmail.com>
+      2  Kishon Vijay Abraham I <kvijayab@amd.com>
+      2  Jon Kohler <jon@nutanix.com>
+      1  Yan Zhao <yan.y.zhao@intel.com>
+      1  Alexander Graf <graf@amazon.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: VMX: Add a quirk to (not) honor guest PAT on CPUs that
+[PATCH] KVM: VMX: Add a quirk to (not) honor guest PAT on CPUs that
+Author: Sean Christopherson <seanjc@google.com>
+
+Add back support for honoring guest PAT on Intel CPUs that support self-
+snoop (and don't have errata), but guarded by a quirk so as not to break
+existing setups that subtly relied on KVM forcing WB for synthetic
+devices.
+
+This effectively reverts commit 9d70f3fec14421e793ffbc0ec2f739b24e534900
+and reapplies 377b2f359d1f71c75f8cc352b5c81f2210312d83, but with a quirk.
+
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+
+AFAIK, we don't have an answer as to whether the slow UC behavior on CLX+
+is working as intended or a CPU flaw, which Paolo was hoping we would get
+before adding a quirk.  But I don't want to lose sight of honoring guest
+PAT, nor am I particularly inclined to force end users to wait for a
+definitive answer on hardware they may not even care about.
+
+ Documentation/virt/kvm/api.rst  | 25 +++++++++++++++++++++++++
+ arch/x86/include/asm/kvm_host.h |  3 ++-
+ arch/x86/include/uapi/asm/kvm.h |  1 +
+ arch/x86/kvm/mmu.h              |  2 +-
+ arch/x86/kvm/mmu/mmu.c          | 17 +++++++++++++----
+ arch/x86/kvm/vmx/vmx.c          | 11 +++++++----
+ arch/x86/kvm/x86.c              |  2 +-
+ 7 files changed, 50 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Use a local struct to do the initial vfs_poll() on
+[PATCH 01/12] KVM: Use a local struct to do the initial vfs_poll() on
+Author: Sean Christopherson <seanjc@google.com>
+
+Use a function-local struct for the poll_table passted to vfs_poll(), as
+nothing in the vfs_poll() callchain grabs a long-term reference to the
+structure, i.e. its lifetime doesn't need to be tied to the irqfd.  Using
+a local structure will also allow propagating failures out of the polling
+callback without further polluting kvm_kernel_irqfd.
+
+Opportunstically rename irqfd_ptable_queue_proc() to kvm_irqfd_register()
+to capture what it actually does.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ include/linux/kvm_irqfd.h |  1 -
+ virt/kvm/eventfd.c        | 26 +++++++++++++++++---------
+ 2 files changed, 17 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Make irqfd registration globally unique
+[PATCH 00/12] KVM: Make irqfd registration globally unique
+Author: Sean Christopherson <seanjc@google.com>
+
+Xen folks, I Cc'd y'all because "sched/wait: Drop WQ_FLAG_EXCLUSIVE from
+add_wait_queue_priority()" changes the behavior of add_wait_queue_priority(),
+which Xen's privcmd uses.  Unless I've misread the code, the Xen behavior
+isn't actually affected, but extra eyeballs and any testing you can provide
+would be much appreciated.
+
+
+Rework KVM's irqfd registration to require that an eventfd is bound to at
+most one irqfd throughout the entire system.  KVM currently disallows
+binding an eventfd to multiple irqfds for a single VM, but doesn't reject
+attempts to bind an eventfd to multiple VMs.
+
+This is obvious an ABI change, but I'm fairly confident that it won't
+break userspace, because binding an eventfd to multiple irqfds hasn't
+truly worked since commit e8dbf19508a1 ("kvm/eventfd: Use priority waitqueue
+to catch events before userspace").  A somewhat undocumented, and perhaps
+even unintentional, side effect of suppressing eventfd notifications for
+userspace is that the priority+exclusive behavior also suppresses eventfd
+notifications for any subsequent waiters, even if they are priority waiters.
+I.e. only the first VM with an irqfd+eventfd binding will get notifications.
+
+And for IRQ bypass, a.k.a. device posted interrupts, globally unique
+bindings are a hard requirement (at least on x86; I assume other archs are
+the same).  KVM and the IRQ bypass manager kinda sorta handle this, but in
+the absolute worst way possible (IMO).  Instead of surfacing an error to
+userspace, KVM silently ignores IRQ bypass registration errors.
+
+The motivation for this series is to harden against userspace goofs.  AFAIK,
+we (Google) have never actually had a bug where userspace tries to assign
+an eventfd to multiple VMs, but the possibility has come up in more than one
+bug investigation (our intra-host, a.k.a. copyless, migration scheme
+transfers eventfds from the old to the new VM when updating the host VMM).
+
+Sean Christopherson (12):
+  KVM: Use a local struct to do the initial vfs_poll() on an irqfd
+  KVM: Acquire SCRU lock outside of irqfds.lock during assignment
+  KVM: Initialize irqfd waitqueue callback when adding to the queue
+  KVM: Add irqfd to KVM's list via the vfs_poll() callback
+  KVM: Add irqfd to eventfd's waitqueue while holding irqfds.lock
+  sched/wait: Add a waitqueue helper for fully exclusive priority
+    waiters
+  KVM: Disallow binding multiple irqfds to an eventfd with a priority
+    waiter
+  sched/wait: Drop WQ_FLAG_EXCLUSIVE from add_wait_queue_priority()
+  KVM: Drop sanity check that per-VM list of irqfds is unique
+  KVM: selftests: Assert that eventfd() succeeds in Xen shinfo test
+  KVM: selftests: Add utilities to create eventfds and do KVM_IRQFD
+  KVM: selftests: Add a KVM_IRQFD test to verify uniqueness requirements
+
+ include/linux/kvm_irqfd.h                     |   1 -
+ include/linux/wait.h                          |   2 +
+ kernel/sched/wait.c                           |  24 +++-
+ tools/testing/selftests/kvm/Makefile.kvm      |   4 +
+ tools/testing/selftests/kvm/arm64/vgic_irq.c  |  12 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |  40 ++++++
+ tools/testing/selftests/kvm/irqfd_test.c      | 130 ++++++++++++++++++
+ .../selftests/kvm/x86/xen_shinfo_test.c       |  21 +--
+ virt/kvm/eventfd.c                            | 130 +++++++++++++-----
+ 9 files changed, 299 insertions(+), 65 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: optee: Introduce OP-TEE Mediator for exposing secure world to KVM guests
+[RFC PATCH 0/7] KVM: optee: Introduce OP-TEE Mediator for exposing secure world to KVM guests
+Author: Yuvraj Sakshith <yuvraj.kernel@gmail.com>
+
+A KVM guest running on an arm64 machine will not be able to interact with a trusted execution environment
+(which supports non-secure guests) like OP-TEE in the secure world. This is because, instructions provided
+by the architecture (such as, SMC)  which switch control to the firmware, are trapped in EL2 when the guest
+is executes them.
+
+This series adds a feature into the kernel called the TEE mediator abstraction layer, which lets
+a guest interact with the secure world. Additionally, a OP-TEE specific mediator is also implemented, which
+hooks itself to the TEE mediator layer and intercepts guest SMCs targetted at OP-TEE.
+
+Overview
+=========
+
+Essentially, if the kernel wants to interact with OP-TEE, it makes an "smc - secure monitor call instruction",
+after loading in arguments into CPU registers. What these arguments consists of and how both these entities 
+communicate can vary. If a guest wants to establish a connection with the secure world, its not possible. 
+This is because of the fact that "smc" by the guest are trapped by the hypervisor in EL2. This is done by setting
+the HCR_EL2.TSC bit before entering the guest.
+
+Hence, this feature which I we may call TEE mediator, acts as an intermediary between the guest and OP-TEE.
+Instead of denying the guest SMC and jumping back into the guest, the mediator forwards the request to
+OP-TEE.
+
+OP-TEE supports virtualization in the normal world and expects 6 things from the NS-hypervisor:
+
+1. Notify OP-TEE when a VM is created.
+2. Notify OP-TEE when a VM is destroyed.
+3. Any SMC to OP-TEE has to contain the VMID in x7. If its the hypervisor sending, then VMID is 0.
+4. Hypervisor has to perform IPA->PA translations of the memory addresses sent by guest.
+5. Memory shared by the VM to OP-TEE has to remain pinned.
+6. The hypervisor has to follow the OP-TEE protocol, so the guest thinks it is directly speaking to OP-TEE.
+
+Its important to note that, if OP-TEE is built with NS-virtualization support, it can only function if there is 
+a hypervisor with a mediator in normal world.
+
+This implementation has been heavily inspired by Xen's OP-TEE mediator.
+
+Design
+======
+
+The unique design of KVM makes it quite challenging to implement such a mediator. OP-TEE is not aware of the host-guest
+paradigm. Hence, the mediator treats the host as a VM with VMID 1. The guests are assigned VMIDs starting from 2 (note,
+these are not the VMIDs tagged in TLB, rather we implement our own simple indexing mechanism).
+
+When the host's OP-TEE driver is initialised or released, OP-TEE is notified about VM 1 being created/destroyed.
+
+When a VMM (such as, QEMU) created a guest through KVM ioctls, a call to the TEE mediator layer is made, which in-turn
+calls OP-TEE mediator which eventually assigns a VM context, VMID, etc. and notifies OP-TEE about guest creation. The
+opposite happens on guest destruction.
+
+When the guest makes an SMC targetting OP-TEE, it is trapped by the hypervisor and the register state (kvm_vcpu) is sent to
+the OP-TEE mediator through the TEE layer. Here there are two possibilities.
+
+The guest may make an SMC with arguments which are simple numeric values, exchanging UUID, version information, etc.
+In this case, the mediator has much less work. It has to attach VMID into X7 and pass the register state to OP-TEE.
+
+But, when guest passes memory addresses as arguments, the mediator has to translate these into physical addresses from
+intermediate physical addresses (IPA). According to the OP-TEE protocol (as documented in optee_smc.h and optee_msg.h),
+the guest OP-TEE driver would share a buffer filled with pointers, which the mediator translates.
+
+The OP-TEE mediator also keeps track of active calls between each guest and OP-TEE, and pins pages which are already shared.
+This is to avoid swapping of shared pages by the host under memory pressure. These pages are unpinned as soon as guest's
+transaction completes with OP-TEE.
+
+Testing
+=======
+
+The feature has been tested on QEMU virt platform using "xtest" as the test suite. As of now, all of 35000+ tests pass.
+The mediator has also been stressed under memory pressure and all tests pass too. Any suggestions on further testing the
+feature are welcome.
+
+Call for review
+===============
+Any insights/suggestions regarding the implementation are appreciated.
+
+Yuvraj Sakshith (7):
+  firmware: smccc: Add macros for Trusted OS/App owner check on SMC
+    value
+  tee: Add TEE Mediator module which aims to expose TEE to a KVM guest.
+  KVM: Notify TEE Mediator when KVM creates and destroys guests
+  KVM: arm64: Forward guest CPU state to TEE mediator on SMC trap
+  tee: optee: Add OPTEE_SMC_VM_CREATED and OPTEE_SMC_VM_DESTROYED
+  tee: optee: Add OP-TEE Mediator
+  tee: optee: Notify TEE Mediator on OP-TEE driver initialization and
+    release
+
+ arch/arm64/kvm/hypercalls.c        |   15 +-
+ drivers/tee/Kconfig                |    5 +
+ drivers/tee/Makefile               |    1 +
+ drivers/tee/optee/Kconfig          |    7 +
+ drivers/tee/optee/Makefile         |    1 +
+ drivers/tee/optee/core.c           |   13 +-
+ drivers/tee/optee/optee_mediator.c | 1319 ++++++++++++++++++++++++++++
+ drivers/tee/optee/optee_mediator.h |  103 +++
+ drivers/tee/optee/optee_smc.h      |   53 ++
+ drivers/tee/optee/smc_abi.c        |    6 +
+ drivers/tee/tee_mediator.c         |  145 +++
+ include/linux/arm-smccc.h          |    8 +
+ include/linux/tee_mediator.h       |   39 +
+ virt/kvm/kvm_main.c                |   11 +-
+ 14 files changed, 1721 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/irq: Ensure initial PIR loads are performed
+[PATCH v2 1/8] x86/irq: Ensure initial PIR loads are performed
+Author: Sean Christopherson <seanjc@google.com>
+
+Ensure the PIR is read exactly once at the start of handle_pending_pir(),
+to guarantee that checking for an outstanding posted interrupt in a given
+chuck doesn't reload the chunk from the "real" PIR.  Functionally, a reload
+is benign, but it would defeat the purpose of pre-loading into a copy.
+
+Fixes: 1b03d82ba15e ("x86/irq: Install posted MSI notification handler")
+Reviewed-by: Thomas Gleixner <tglx@linutronix.de>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kernel/irq.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86/irq: KVM: Optimize KVM's PIR harvesting
+[PATCH v2 0/8] x86/irq: KVM: Optimize KVM's PIR harvesting
+Author: Sean Christopherson <seanjc@google.com>
+
+Optimizing KVM's PIR harvesting using the same techniques as posted MSIs,
+most notably to use 8-byte accesses on 64-bit kernels (/facepalm).
+
+Fix a few warts along the way, and finish up by adding a helper to dedup
+the PIR harvesting code between KVM and posted MSIs.
+
+v2:
+ - Collect a review. [tglx]
+ - Use an "unsigned long" with a bitwise-OR to gather PIR. [tglx]
+
+v1: https://lore.kernel.org/all/20250315030630.2371712-1-seanjc@google.com
+
+Sean Christopherson (8):
+  x86/irq: Ensure initial PIR loads are performed exactly once
+  x86/irq: Track if IRQ was found in PIR during initial loop (to load
+    PIR vals)
+  KVM: VMX: Ensure vIRR isn't reloaded at odd times when sync'ing PIR
+  x86/irq: KVM: Track PIR bitmap as an "unsigned long" array
+  KVM: VMX: Process PIR using 64-bit accesses on 64-bit kernels
+  KVM: VMX: Isolate pure loads from atomic XCHG when processing PIR
+  KVM: VMX: Use arch_xchg() when processing PIR to avoid instrumentation
+  x86/irq: KVM: Add helper for harvesting PIR to deduplicate KVM and
+    posted MSIs
+
+ arch/x86/include/asm/posted_intr.h | 78 +++++++++++++++++++++++++++---
+ arch/x86/kernel/irq.c              | 63 ++++--------------------
+ arch/x86/kvm/lapic.c               | 20 ++++----
+ arch/x86/kvm/lapic.h               |  4 +-
+ arch/x86/kvm/vmx/posted_intr.h     |  2 +-
+ 5 files changed, 95 insertions(+), 72 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Don't send UNBLOCK when starting device
+[PATCH v3 1/3] KVM: VMX: Don't send UNBLOCK when starting device
+Author: Sean Christopherson <seanjc@google.com>
+
+When starting device assignment, i.e. potential IRQ bypass, don't blast
+KVM_REQ_UNBLOCK if APICv is disabled/unsupported.  There is no need to
+wake vCPUs if they can never use VT-d posted IRQs (sending UNBLOCK guards
+against races being vCPUs blocking and devices starting IRQ bypass).
+
+Opportunistically use kvm_arch_has_irq_bypass() for all relevant checks in
+the VMX Posted Interrupt code so that all checks in KVM x86 incorporate
+the same information (once AMD/AVIC is given similar treatment).
+
+Cc: Yosry Ahmed <yosry.ahmed@linux.dev>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/posted_intr.c | 7 +++----
+ arch/x86/kvm/x86.c             | 1 +
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Add a module param for device posted IRQs
+[PATCH v3 0/3] KVM: x86: Add a module param for device posted IRQs
+Author: Sean Christopherson <seanjc@google.com>
+
+Add a module param, enable_device_posted_irqs, to control and enumerate
+KVM support for device posted IRQs.
+
+v3:
+ - Put the module param in vendor code to avoid issue with reloading vendor
+   modules, and to match enable_apicv (and enable_ipiv in the future).
+ - Fix a shortlog typo. [Jim]
+
+v2:
+ - https://lore.kernel.org/all/20250320142022.766201-1-seanjc@google.com
+ - Add prep patches to use kvm_arch_has_irq_bypass() in vendor code when
+   querying support IRQ bypass, a.k.a. device posted IRQs, so as not to
+   unexpectedly introduce a (desired) dependency on enable_apicv. [Yosry]
+ - Use "&=" when constraining enable_device_posted_irqs based on APICv
+   and IOMMU posting support. [Yosry]
+
+v1: https://lore.kernel.org/all/20250315025615.2367411-1-seanjc@google.com
+
+Sean Christopherson (3):
+  KVM: VMX: Don't send UNBLOCK when starting device assignment without
+    APICv
+  KVM: SVM: Don't update IRTEs if APICv/AVIC is disabled
+  KVM: x86: Add module param to control and enumerate device posted IRQs
+
+ arch/x86/include/asm/kvm_host.h | 1 +
+ arch/x86/kvm/svm/avic.c         | 3 +--
+ arch/x86/kvm/svm/svm.c          | 2 ++
+ arch/x86/kvm/vmx/posted_intr.c  | 7 +++----
+ arch/x86/kvm/vmx/vmx.c          | 2 ++
+ arch/x86/kvm/x86.c              | 9 ++++++++-
+ 6 files changed, 17 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Documentation: kvm: introduce "VM plane" concept
+[PATCH 01/29] Documentation: kvm: introduce "VM plane" concept
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+There have been multiple occurrences of processors introducing a virtual
+privilege level concept for guests, where the hypervisor hosts multiple
+copies of a vCPU's register state (or at least of most of it) and provides
+hypercalls or instructions to switch between them.  These include AMD
+VMPLs, Intel TDX partitions, Microsoft Hyper-V VTLs, and ARM CCA planes.
+Include documentation on how the feature will be exposed to userspace,
+based on a draft made between Plumbers and KVM Forum.
+
+In the past, two main solutions that were attempted, mostly in the context
+of Hyper-V VTLs and SEV-SNP VMPLs:
+
+- use a single vCPU file descriptor, and store multiple copies of the state
+  in a single struct kvm_vcpu.  This requires a lot of changes to
+  provide multiple copies of affected fields, especially MMUs and APICs;
+  and complex uAPI extensions to direct existing ioctls to a specific
+  privilege level.  This solution looked marginally okay for SEV-SNP
+  VMPLs, but only because the copies of the register state were hidden
+  in the VMSA (KVM does not manage it); it showed all its problems when
+  applied to Hyper-V VTLs.
+
+- use multiple VM and vCPU file descriptors, and handle the switch entirely
+  in userspace.  This got gnarly pretty fast for even more reasons than
+  the previous case, for example because VMs could not share anymore
+  memslots, including dirty bitmaps and private/shared attributes (a
+  substantial problem for SEV-SNP since VMPLs share their ASID).  Another
+  problem was the need to share _some_ register state across VTLs and
+  to control that vCPUs did not run in parallel; there needed to be a
+  lot of logic to be added in userspace to ensure that higher-privileged
+  VTL properly interrupted a lower-privileged one.
+
+  This solution also complicates in-kernel implementation of privilege
+  level switch, or even makes it impossible, because there is no kernel
+  knowledge of the relationship between vCPUs that have the same id but
+  belong to different privilege levels.
+
+Especially given the need to accelerate switches in kernel, it is clear
+that KVM needs some level of knowledge of the relationship between vCPUs
+that have the same id but belong to different privilege levels.  For this
+reason, I proposed a design that only gives the initial set of VM and vCPU file
+descriptors the full set of ioctls + struct kvm_run; other privilege
+levels instead only support a small part of the KVM API.  In fact for
+the vm file descriptor it is only three ioctls: KVM_CHECK_EXTENSION,
+KVM_SIGNAL_MSI, KVM_SET_MEMORY_ATTRIBUTES.  For vCPUs it is basically
+KVM_GET/SET_*.
+
+This solves a lot of the problems in the multiple-file-descriptors solution,
+namely it gets for free the ability to avoid parallel execution of the
+same vCPUs in different privilege levels.  Changes to the userspace API
+of course exist, but they are relatively small and more easily backwards
+compatible, because they boil down to the introduction of new file
+descriptor kinds instead of having to change the inputs to all affected
+ioctls.
+
+It does share some of the code churn issues in the single-file-descriptor
+solution; on the other hand a prototype multi-fd VMPL implementation[1]
+also needed large scale changes which therefore seem unavoidable when
+privilege levels are provided by hardware, and not a software concept
+only as is the case for VTLs.
+hardware
+
+   [1] https://lore.kernel.org/lkml/cover.1726506534.git.roy.hopkins@suse.com/
+
+Acknowledgements: thanks to everyone who participated in the discussions,
+you are too many to mention in a small margin.  Thanks to Roy Hopkins,
+Tom Lendacky, Anel Orazgaliyeva, Nicolas Saenz-Julienne for experimenting
+with implementations of VTLs and VMPLs.
+
+Ah, and because x86 has three names for it and Arm has one, choose the
+Arm name for all architectures to avoid bikeshedding and to displease
+everyone---including the KVM/arm64 folks, probably.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ Documentation/virt/kvm/api.rst           | 235 ++++++++++++++++++++---
+ Documentation/virt/kvm/vcpu-requests.rst |   7 +
+ 2 files changed, 211 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VM planes
+[RFC PATCH 00/29] KVM: VM planes
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+I guess April 1st is not the best date to send out such a large series
+after months of radio silence, but here we are.
+
+AMD VMPLs, Intel TDX partitions, Microsoft Hyper-V VTLs, and ARM CCA planes.
+are all examples of virtual privilege level concepts that are exclusive to
+guests.  In all these specifications the hypervisor hosts multiple
+copies of a vCPU's register state (or at least of most of it) and provides
+hypercalls or instructions to switch between them.
+
+This is the first draft of the implementation according to the sketch that
+was prepared last year between Linux Plumbers and KVM Forum.  The initial
+version of the API was posted last October, and the implementation only
+needed small changes.
+
+Attempts made in the past, mostly in the context of Hyper-V VTLs and SEV-SNP
+VMPLs, fell into two categories:
+
+- use a single vCPU file descriptor, and store multiple copies of the state
+  in a single struct kvm_vcpu.  This approach requires a lot of changes to
+  provide multiple copies of affected fields, especially MMUs and APICs;
+  and complex uAPI extensions to direct existing ioctls to a specific
+  privilege level.  While more or less workable for SEV-SNP VMPLs, that
+  was only because the copies of the register state were hidden
+  in the VMSA (KVM does not manage it); it showed all its problems when
+  applied to Hyper-V VTLs.
+
+  The main advantage was that KVM kept the knowledge of the relationship
+  between vCPUs that have the same id but belong to different privilege
+  levels.  This is important in order to accelerate switches in-kernel.
+
+- use multiple VM and vCPU file descriptors, and handle the switch entirely
+  in userspace.  This got gnarly pretty fast for even more reasons than
+  the previous case, for example because VMs could not share anymore
+  memslots, including dirty bitmaps and private/shared attributes (a
+  substantial problem for SEV-SNP since VMPLs share their ASID).
+
+  Opposite to the other case, the total lack of kernel-level sharing of
+  register state, and lack of control that vCPUs do not run in parallel,
+  is what makes this approach problematic for both kernel and userspace.
+  In-kernel implementation of privilege level switch becomes from
+  complicated to impossible, and userspace needs a lot of complexity
+  as well to ensure that higher-privileged VTLs properly interrupted a
+  lower-privileged one.
+
+This design sits squarely in the middle: it gives the initial set of
+VM and vCPU file descriptors the full set of ioctls + struct kvm_run,
+whereas other privilege levels ("planes") instead only support a small
+part of the KVM API.  In fact for the vm file descriptor it is only three
+ioctls: KVM_CHECK_EXTENSION, KVM_SIGNAL_MSI, KVM_SET_MEMORY_ATTRIBUTES.
+For vCPUs it is basically KVM_GET/SET_*.
+
+Most notably, memslots and KVM_RUN are *not* included (the choice of
+which plane to run is done via vcpu->run), which solves a lot of
+the problems in both of the previous approaches.  Compared to the
+multiple-file-descriptors solution, it gets for free the ability to
+avoid parallel execution of the same vCPUs in different privilege levels.
+Compared to having a single file descriptor churn is more limited, or
+at least can be attacked in small bites.  For example in this series
+only per-plane interrupt controllers are switched to use the new struct
+kvm_plane in place of struct kvm, and that's more or less enough in
+the absence of complex interrupt delivery scenarios.
+
+Changes to the userspace API are also relatively small; they boil down
+to the introduction of a single new kind of file descriptor and almost
+entirely fit in common code.  Reviewing these VM-wide and architecture-
+independent changes should be the main purpose of this RFC, since 
+there are still some things to fix:
+
+- I named some fields "plane" instead of "plane_id" because I expected no
+  fields of type struct kvm_plane*, but in retrospect that wasn't a great
+  idea.
+
+- online_vcpus counts across all planes but x86 code is still using it to
+  deal with TSC synchronization.  Probably I will try and make kvmclock
+  synchronization per-plane instead of per-VM.
+
+- we're going to need a struct kvm_vcpu_plane similar to what Roy had in
+  https://lore.kernel.org/kvm/cover.1726506534.git.roy.hopkins@suse.com/
+  (probably smaller though).  Requests are per-plane for example, and I'm
+  pretty sure any simplistic solution would have some corner cases where
+  it's wrong; but it's a high churn change and I wanted to avoid that
+  for this first posting.
+
+There's a handful of locking TODOs where things should be checked more
+carefully, but clearly identifying vCPU data that is not per-plane will
+also simplify locking, thanks to having a single vcpu->mutex for the
+whole plane.  So I'm not particularly worried about that; the TDX saga
+hopefully has taught everyone to move in baby steps towards the intended
+direction.
+
+The handling of interrupt priorities is way more complicated than I
+anticipated, unfortunately; everything else seems to fall into place
+decently well---even taking into account the above incompleteness,
+which anyway should not be a blocker for any VTL or VMPL experiments.
+But do shout if anything makes you feel like I was too lazy, and/or you
+want to puke.
+
+Patches 1-2 are documentation and uAPI definitions.
+
+Patches 3-9 are the common code for VM planes, while patches 10-14
+are the common code for vCPU file descriptors on non-default planes.
+
+Patches 15-26 are the x86-specific code, which is organized as follows:
+
+- 15-20: convert APIC code to place its data in the new struct
+kvm_arch_plane instead of struct kvm_arch.
+
+- 21-24: everything else except the new userspace exit, KVM_EXIT_PLANE_EVENT
+
+- 25: KVM_EXIT_PLANE_EVENT, which is used when one plane interrupts another.
+
+- 26: finally make the capability available to userspace
+
+Patches 27-29 finally are the testcases.  More are possible and planned,
+but these are enough to say that, despite the missing bits, what exits
+is not _completely_ broken.  I also didn't want to write dozens of tests
+before committing to a selftests API.
+
+Available for now at https://git.kernel.org/pub/scm/virt/kvm/kvm.git
+branch planes-20250401.  I plan to place it in kvm-coco-queue, for lack
+of a better place, as soon as TDX is merged into kvm/next and I test it
+with the usual battery of kvm-unit-tests and real world guests.
+
+Thanks,
+
+Paolo
+
+Paolo Bonzini (29):
+  Documentation: kvm: introduce "VM plane" concept
+  KVM: API definitions for plane userspace exit
+  KVM: add plane info to structs
+  KVM: introduce struct kvm_arch_plane
+  KVM: add plane support to KVM_SIGNAL_MSI
+  KVM: move mem_attr_array to kvm_plane
+  KVM: do not use online_vcpus to test vCPU validity
+  KVM: move vcpu_array to struct kvm_plane
+  KVM: implement plane file descriptors ioctl and creation
+  KVM: share statistics for same vCPU id on different planes
+  KVM: anticipate allocation of dirty ring
+  KVM: share dirty ring for same vCPU id on different planes
+  KVM: implement vCPU creation for extra planes
+  KVM: pass plane to kvm_arch_vcpu_create
+  KVM: x86: pass vcpu to kvm_pv_send_ipi()
+  KVM: x86: split "if" in __kvm_set_or_clear_apicv_inhibit
+  KVM: x86: block creating irqchip if planes are active
+  KVM: x86: track APICv inhibits per plane
+  KVM: x86: move APIC map to kvm_arch_plane
+  KVM: x86: add planes support for interrupt delivery
+  KVM: x86: add infrastructure to share FPU across planes
+  KVM: x86: implement initial plane support
+  KVM: x86: extract kvm_post_set_cpuid
+  KVM: x86: initialize CPUID for non-default planes
+  KVM: x86: handle interrupt priorities for planes
+  KVM: x86: enable up to 16 planes
+  selftests: kvm: introduce basic test for VM planes
+  selftests: kvm: add plane infrastructure
+  selftests: kvm: add x86-specific plane test
+
+ Documentation/virt/kvm/api.rst                | 245 +++++++--
+ Documentation/virt/kvm/locking.rst            |   3 +
+ Documentation/virt/kvm/vcpu-requests.rst      |   7 +
+ arch/arm64/include/asm/kvm_host.h             |   5 +
+ arch/arm64/kvm/arm.c                          |   4 +-
+ arch/arm64/kvm/handle_exit.c                  |   6 +-
+ arch/arm64/kvm/hyp/nvhe/gen-hyprel.c          |   4 +-
+ arch/arm64/kvm/mmio.c                         |   4 +-
+ arch/loongarch/include/asm/kvm_host.h         |   5 +
+ arch/loongarch/kvm/exit.c                     |   8 +-
+ arch/loongarch/kvm/vcpu.c                     |   4 +-
+ arch/mips/include/asm/kvm_host.h              |   5 +
+ arch/mips/kvm/emulate.c                       |   2 +-
+ arch/mips/kvm/mips.c                          |  32 +-
+ arch/mips/kvm/vz.c                            |  18 +-
+ arch/powerpc/include/asm/kvm_host.h           |   5 +
+ arch/powerpc/kvm/book3s.c                     |   2 +-
+ arch/powerpc/kvm/book3s_hv.c                  |  46 +-
+ arch/powerpc/kvm/book3s_hv_rm_xics.c          |   8 +-
+ arch/powerpc/kvm/book3s_pr.c                  |  22 +-
+ arch/powerpc/kvm/book3s_pr_papr.c             |   2 +-
+ arch/powerpc/kvm/powerpc.c                    |   6 +-
+ arch/powerpc/kvm/timing.h                     |  28 +-
+ arch/riscv/include/asm/kvm_host.h             |   5 +
+ arch/riscv/kvm/vcpu.c                         |   4 +-
+ arch/riscv/kvm/vcpu_exit.c                    |  10 +-
+ arch/riscv/kvm/vcpu_insn.c                    |  16 +-
+ arch/riscv/kvm/vcpu_sbi.c                     |   2 +-
+ arch/riscv/kvm/vcpu_sbi_hsm.c                 |   2 +-
+ arch/s390/include/asm/kvm_host.h              |   5 +
+ arch/s390/kvm/diag.c                          |  18 +-
+ arch/s390/kvm/intercept.c                     |  20 +-
+ arch/s390/kvm/interrupt.c                     |  48 +-
+ arch/s390/kvm/kvm-s390.c                      |  10 +-
+ arch/s390/kvm/priv.c                          |  60 +--
+ arch/s390/kvm/sigp.c                          |  50 +-
+ arch/s390/kvm/vsie.c                          |   2 +-
+ arch/x86/include/asm/kvm_host.h               |  46 +-
+ arch/x86/kvm/cpuid.c                          |  57 +-
+ arch/x86/kvm/cpuid.h                          |   2 +
+ arch/x86/kvm/debugfs.c                        |   2 +-
+ arch/x86/kvm/hyperv.c                         |   7 +-
+ arch/x86/kvm/i8254.c                          |   7 +-
+ arch/x86/kvm/ioapic.c                         |   4 +-
+ arch/x86/kvm/irq_comm.c                       |  14 +-
+ arch/x86/kvm/kvm_cache_regs.h                 |   4 +-
+ arch/x86/kvm/lapic.c                          | 147 +++--
+ arch/x86/kvm/mmu/mmu.c                        |  41 +-
+ arch/x86/kvm/mmu/tdp_mmu.c                    |   2 +-
+ arch/x86/kvm/svm/sev.c                        |   4 +-
+ arch/x86/kvm/svm/svm.c                        |  21 +-
+ arch/x86/kvm/vmx/tdx.c                        |   8 +-
+ arch/x86/kvm/vmx/vmx.c                        |  20 +-
+ arch/x86/kvm/x86.c                            | 319 ++++++++---
+ arch/x86/kvm/xen.c                            |   1 +
+ include/linux/kvm_host.h                      | 130 +++--
+ include/linux/kvm_types.h                     |   1 +
+ include/uapi/linux/kvm.h                      |  28 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  48 ++
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  65 ++-
+ .../testing/selftests/kvm/lib/x86/processor.c |  15 +
+ tools/testing/selftests/kvm/plane_test.c      | 103 ++++
+ tools/testing/selftests/kvm/x86/plane_test.c  | 270 ++++++++++
+ virt/kvm/dirty_ring.c                         |   5 +-
+ virt/kvm/guest_memfd.c                        |   3 +-
+ virt/kvm/irqchip.c                            |   5 +-
+ virt/kvm/kvm_main.c                           | 500 ++++++++++++++----
+ 69 files changed, 1991 insertions(+), 614 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Dynamically allocate shadow MMU's hashed
+[PATCH v2 1/3] KVM: x86/mmu: Dynamically allocate shadow MMU's hashed
+Author: Sean Christopherson <seanjc@google.com>
+
+Dynamically allocate the (massive) array of hashed lists used to track
+shadow pages, as the array itself is 32KiB, i.e. is an order-3 allocation
+all on its own, and is *exactly* an order-3 allocation.  Dynamically
+allocating the array will allow allocating "struct kvm" using regular
+kmalloc(), and will also allow deferring allocation of the array until
+it's actually needed, i.e. until the first shadow root is allocated.
+
+Cc: Vipin Sharma <vipinsh@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  4 ++--
+ arch/x86/kvm/mmu/mmu.c          | 23 ++++++++++++++++++++++-
+ arch/x86/kvm/x86.c              |  5 ++++-
+ 3 files changed, 28 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Dynamically allocate hashed page list
+[PATCH v2 0/3] KVM: x86: Dynamically allocate hashed page list
+Author: Sean Christopherson <seanjc@google.com>
+
+Allocate the hashed list of shadow pages dynamically (separate from
+struct kvm), and on-demand.  The hashed list is 32KiB, i.e. absolutely
+belongs in a separate allocation, and is worth skipping if KVM isn't
+shadowing guest PTEs for the VM.
+
+v2:
+ - Actually defer allocation when using TDP MMU. [Vipin]
+ - Free allocation on MMU teardown. [Vipin]
+
+v1: https://lore.kernel.org/all/20250315024010.2360884-1-seanjc@google.com
+
+Sean Christopherson (3):
+  KVM: x86/mmu: Dynamically allocate shadow MMU's hashed page list
+  KVM: x86: Allocate kvm_vmx/kvm_svm structures using kzalloc()
+  KVM: x86/mmu: Defer allocation of shadow MMU's hashed page list
+
+ arch/x86/include/asm/kvm_host.h |  6 ++--
+ arch/x86/kvm/mmu/mmu.c          | 53 +++++++++++++++++++++++++++++----
+ arch/x86/kvm/svm/svm.c          |  1 +
+ arch/x86/kvm/vmx/vmx.c          |  1 +
+ arch/x86/kvm/x86.c              |  5 +++-
+ 5 files changed, 56 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Assert that IRQs are disabled when putting vCPU
+[PATCH 1/2] KVM: VMX: Assert that IRQs are disabled when putting vCPU
+Author: Sean Christopherson <seanjc@google.com>
+
+Assert that IRQs are already disabled when putting a vCPU on a CPU's PI
+wakeup list, as opposed to saving/disabling+restoring IRQs.  KVM relies on
+IRQs being disabled until the vCPU task is fully scheduled out, i.e. until
+the scheduler has dropped all of its per-CPU locks (e.g. for the runqueue),
+as attempting to wake the task while it's being scheduled out could lead
+to deadlock.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/posted_intr.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Fix lockdep false positive on PI wakeup
+[PATCH 0/2] KVM: VMX: Fix lockdep false positive on PI wakeup
+Author: Sean Christopherson <seanjc@google.com>
+
+Yan's fix for the PI wakeup deadlock false positive, plus a prep patch to
+make the dependency on IRQs being disabled during sched_out explicit.
+
+Sean Christopherson (1):
+  KVM: VMX: Assert that IRQs are disabled when putting vCPU on PI wakeup
+    list
+
+Yan Zhao (1):
+  KVM: VMX: Use separate subclasses for PI wakeup lock to squash false
+    positive
+
+ arch/x86/kvm/vmx/posted_intr.c | 37 +++++++++++++++++++++++++++-------
+ 1 file changed, 30 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Acquire SRCU in KVM_GET_MP_STATE to protect guest
+[PATCH] KVM: x86: Acquire SRCU in KVM_GET_MP_STATE to protect guest
+Author: Sean Christopherson <seanjc@google.com>
+
+Acquire a lock on kvm->srcu when userspace is getting MP state to handle a
+rather extreme edge case where "accepting" APIC events, i.e. processing
+pending INIT or SIPI, can trigger accesses to guest memory.  If the vCPU
+is in L2 with INIT *and* a TRIPLE_FAULT request pending, then getting MP
+state will trigger a nested VM-Exit by way of ->check_nested_events(), and
+emuating the nested VM-Exit can access guest memory.
+
+The splat was originally hit by syzkaller on a Google-internal kernel, and
+reproduced on an upstream kernel by hacking the triple_fault_event_test
+selftest to stuff a pending INIT, store an MSR on VM-Exit (to generate a
+memory access on VMX), and do vcpu_mp_state_get() to trigger the scenario.
+
+  =============================
+  WARNING: suspicious RCU usage
+  6.14.0-rc3-b112d356288b-vmx/pi_lockdep_false_pos-lock #3 Not tainted
+  -----------------------------
+  include/linux/kvm_host.h:1058 suspicious rcu_dereference_check() usage!
+
+  other info that might help us debug this:
+
+  rcu_scheduler_active = 2, debug_locks = 1
+  1 lock held by triple_fault_ev/1256:
+   #0: ffff88810df5a330 (&vcpu->mutex){+.+.}-{4:4}, at: kvm_vcpu_ioctl+0x8b/0x9a0 [kvm]
+
+  stack backtrace:
+  CPU: 11 UID: 1000 PID: 1256 Comm: triple_fault_ev Not tainted 6.14.0-rc3-b112d356288b-vmx #3
+  Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS 0.0.0 02/06/2015
+  Call Trace:
+   <TASK>
+   dump_stack_lvl+0x7f/0x90
+   lockdep_rcu_suspicious+0x144/0x190
+   kvm_vcpu_gfn_to_memslot+0x156/0x180 [kvm]
+   kvm_vcpu_read_guest+0x3e/0x90 [kvm]
+   read_and_check_msr_entry+0x2e/0x180 [kvm_intel]
+   __nested_vmx_vmexit+0x550/0xde0 [kvm_intel]
+   kvm_check_nested_events+0x1b/0x30 [kvm]
+   kvm_apic_accept_events+0x33/0x100 [kvm]
+   kvm_arch_vcpu_ioctl_get_mpstate+0x30/0x1d0 [kvm]
+   kvm_vcpu_ioctl+0x33e/0x9a0 [kvm]
+   __x64_sys_ioctl+0x8b/0xb0
+   do_syscall_64+0x6c/0x170
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+   </TASK>
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Add option to rseq test to override /dev/cpu_dma_latency
+[PATCH] KVM: selftests: Add option to rseq test to override /dev/cpu_dma_latency
+Author: Sean Christopherson <seanjc@google.com>
+
+Add a "-l <latency>" param to the rseq test so that the user can override
+/dev/cpu_dma_latency, as described by the test's suggested workaround for
+not being able to complete enough migrations.
+
+cpu_dma_latency is not a normal file, even as far as procfs files go.
+Writes to cpu_dma_latency only persist so long as the file is open, e.g.
+so that the kernel automatically reverts back to a power-optimized state
+once the sensitive workload completes.  Provide the necessary functionality
+instead of effectively forcing the user to write a non-obvious wrapper.
+
+Cc: Dongsheng Zhang <dongsheng.x.zhang@intel.com>
+Cc: Zide Chen <zide.chen@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/rseq_test.c | 31 ++++++++++++++++++++-----
+ 1 file changed, 25 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  selftests: kvm: list once tests that are valid on all architectures
+[PATCH] selftests: kvm: list once tests that are valid on all architectures
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Several tests cover infrastructure from virt/kvm/ and userspace APIs that have
+only minimal requirements from architecture-specific code.  As such, they are
+available on all architectures that have libkvm support, and this presumably
+will apply also in the future (for example if loongarch gets selftests support).
+Put them in a separate variable and list them only once.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm | 45 ++++++++----------------
+ 1 file changed, 15 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/apic: Add new driver for Secure AVIC
+[PATCH v3 01/17] x86/apic: Add new driver for Secure AVIC
+Author: Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+
+The Secure AVIC feature provides SEV-SNP guests hardware acceleration
+for performance sensitive APIC accesses while securely managing the
+guest-owned APIC state through the use of a private APIC backing page.
+This helps prevent hypervisor from generating unexpected interrupts for
+a vCPU or otherwise violate architectural assumptions around APIC
+behavior.
+
+Add a new x2APIC driver that will serve as the base of the Secure AVIC
+support. It is initially the same as the x2APIC phys driver, but will be
+modified as features of Secure AVIC are implemented.
+
+If the hypervisor sets the Secure AVIC bit in SEV_STATUS and the bit is
+not set in SNP_FEATURES_PRESENT, maintain the current behavior to
+enforce the guest termination.
+
+Co-developed-by: Kishon Vijay Abraham I <kvijayab@amd.com>
+Signed-off-by: Kishon Vijay Abraham I <kvijayab@amd.com>
+Signed-off-by: Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+---
+Changes since v2:
+
+ - Do not autoselect AMD_SECURE_AVIC config when AMD_MEM_ENCRYPT config
+   is enabled. Make AMD_SECURE_AVIC depend on AMD_MEM_ENCRYPT.
+ - Misc cleanups.
+
+ arch/x86/Kconfig                    |  13 ++++
+ arch/x86/boot/compressed/sev.c      |   1 +
+ arch/x86/coco/core.c                |   3 +
+ arch/x86/include/asm/msr-index.h    |   4 +-
+ arch/x86/kernel/apic/Makefile       |   1 +
+ arch/x86/kernel/apic/x2apic_savic.c | 109 ++++++++++++++++++++++++++++
+ include/linux/cc_platform.h         |   8 ++
+ 7 files changed, 138 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  AMD: Add Secure AVIC Guest Support
+[PATCH v3 00/17] AMD: Add Secure AVIC Guest Support
+Author: Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+
+Introduction
+------------
+
+Secure AVIC is a new hardware feature in the AMD64 architecture to
+allow SEV-SNP guests to prevent the hypervisor from generating
+unexpected interrupts to a vCPU or otherwise violate architectural
+assumptions around APIC behavior.
+
+One of the significant differences from AVIC or emulated x2APIC is that
+Secure AVIC uses a guest-owned and managed APIC backing page. It also
+introduces additional fields in both the VMCB and the Secure AVIC backing
+page to aid the guest in limiting which interrupt vectors can be injected
+into the guest.
+
+Guest APIC Backing Page
+-----------------------
+Each vCPU has a guest-allocated APIC backing page of size 4K, which
+maintains APIC state for that vCPU. The x2APIC MSRs are mapped at
+their corresposing x2APIC MMIO offset within the guest APIC backing
+page. All x2APIC accesses by guest or Secure AVIC hardware operate
+on this backing page. The backing page should be pinned and NPT entry
+for it should be always mapped while the corresponding vCPU is running.
+
+
+MSR Accesses
+------------
+Secure AVIC only supports x2APIC MSR accesses. xAPIC MMIO offset based
+accesses are not supported.
+
+Some of the MSR accesses such as ICR writes (with shorthand equal to
+self), SELF_IPI, EOI, TPR writes are accelerated by Secure AVIC
+hardware. Other MSR accesses generate a #VC exception. The #VC
+exception handler reads/writes to the guest APIC backing page.
+As guest APIC backing page is accessible to the guest, the Secure
+AVIC driver code optimizes APIC register access by directly
+reading/writing to the guest APIC backing page (instead of taking
+the #VC exception route).
+
+In addition to the architected MSRs, following new fields are added to
+the guest APIC backing page which can be modified directly by the
+guest:
+
+a. ALLOWED_IRR
+
+ALLOWED_IRR reg offset indicates the interrupt vectors which the guest
+allows the hypervisor to send. The combination of host-controlled
+REQUESTED_IRR vectors (part of VMCB) and ALLOWED_IRR is used by
+hardware to update the IRR vectors of the Guest APIC backing page.
+
+#Offset        #bits        Description
+204h           31:0         Guest allowed vectors 0-31
+214h           31:0         Guest allowed vectors 32-63
+...
+274h           31:0         Guest allowed vectors 224-255
+
+ALLOWED_IRR is meant to be used specifically for vectors that the
+hypervisor is allowed to inject, such as device interrupts.  Interrupt
+vectors used exclusively by the guest itself (like IPI vectors) should
+not be allowed to be injected into the guest for security reasons.
+
+b. NMI Request
+ 
+#Offset        #bits        Description
+278h           0            Set by Guest to request Virtual NMI
+
+Guest need to set NMI Request register to allow the Hypervisor to
+inject vNMI to it.
+
+LAPIC Timer Support
+-------------------
+LAPIC timer is emulated by the hypervisor. So, APIC_LVTT, APIC_TMICT and
+APIC_TDCR, APIC_TMCCT APIC registers are not read/written to the guest
+APIC backing page and are communicated to the hypervisor using SVM_EXIT_MSR
+VMGEXIT. 
+
+IPI Support
+-----------
+Only SELF_IPI is accelerated by Secure AVIC hardware. Other IPIs require
+writing (from the Secure AVIC driver) to the IRR vector of the target CPU
+backing page and then issuing VMGEXIT for the hypervisor to notify the
+target vCPU.
+
+KEXEC Support
+-------------
+Secure AVIC enabled guest can kexec to another kernel which has Secure
+AVIC enabled, as the Hypervisor has Secure AVIC feature bit set in the
+sev_status.
+
+Open Points
+-----------
+
+The Secure AVIC driver only supports physical destination mode. If
+logical destination mode need to be supported, then a separate x2apic
+driver would be required for supporting logical destination mode.
+
+
+Testing
+-------
+
+This series is based on top of commit 535bd326c565 "Merge branch into
+tip/master: 'x86/tdx'" of tip/tip master branch.
+
+Host Secure AVIC support patch series is at [1].
+
+Qemu support patch is at [2].
+
+QEMU commandline for testing Secure AVIC enabled guest:
+
+qemu-system-x86_64 <...> -object sev-snp-guest,id=sev0,policy=0xb0000,cbitpos=51,reduced-phys-bits=1,allowed-sev-features=true,secure-avic=true
+
+Following tests are done:
+
+1) Boot to Prompt using initramfs and ubuntu fs.
+2) Verified timer and IPI as part of the guest bootup.
+3) Verified long run SCF TORTURE IPI test.
+
+[1] https://github.com/AMDESE/linux-kvm/tree/savic-host-latest
+[2] https://github.com/AMDESE/qemu/tree/secure-avic
+
+Change since v2
+
+  - Removed RFC tag.
+  - Change config rule to not select AMD_SECURE_AVIC config if
+    AMD_MEM_ENCRYPT config is enabled.
+  - Fix broken backing page GFP_KERNEL allocation in setup_local_APIC().
+    Use alloc_percpu() for APIC backing pages allocation during Secure
+    AVIC driver probe.
+  - Remove code to check for duplicate APIC_ID returned by the
+    Hypervisor. Topology evaluation code already does that during boot.
+  - Fix missing update_vector() callback invocation during vector
+    cleanup paths. Invoke update_vector() during setup and tearing down
+    of a vector.
+  - Reuse find_highest_vector() from kvm/lapic.c.
+  - Change savic_register_gpa/savic_unregister_gpa() interface to be
+    invoked only for the local CPU.
+  - Misc cleanups.
+
+Kishon Vijay Abraham I (2):
+  x86/sev: Initialize VGIF for secondary VCPUs for Secure AVIC
+  x86/sev: Enable NMI support for Secure AVIC
+
+Neeraj Upadhyay (15):
+  x86/apic: Add new driver for Secure AVIC
+  x86/apic: Initialize Secure AVIC APIC backing page
+  x86/apic: Populate .read()/.write() callbacks of Secure AVIC driver
+  x86/apic: Initialize APIC ID for Secure AVIC
+  x86/apic: Add update_vector callback for Secure AVIC
+  x86/apic: Add support to send IPI for Secure AVIC
+  x86/apic: Support LAPIC timer for Secure AVIC
+  x86/apic: Add support to send NMI IPI for Secure AVIC
+  x86/apic: Allow NMI to be injected from hypervisor for Secure AVIC
+  x86/apic: Read and write LVT* APIC registers from HV for SAVIC guests
+  x86/apic: Handle EOI writes for SAVIC guests
+  x86/apic: Add kexec support for Secure AVIC
+  x86/apic: Enable Secure AVIC in Control MSR
+  x86/sev: Prevent SECURE_AVIC_CONTROL MSR interception for Secure AVIC
+    guests
+  x86/sev: Indicate SEV-SNP guest supports Secure AVIC
+
+ arch/x86/Kconfig                    |  13 +
+ arch/x86/boot/compressed/sev.c      |  10 +-
+ arch/x86/coco/core.c                |   3 +
+ arch/x86/coco/sev/core.c            | 131 +++++++-
+ arch/x86/include/asm/apic-emul.h    |  28 ++
+ arch/x86/include/asm/apic.h         |  12 +
+ arch/x86/include/asm/apicdef.h      |   2 +
+ arch/x86/include/asm/msr-index.h    |   9 +-
+ arch/x86/include/asm/sev.h          |   8 +
+ arch/x86/include/uapi/asm/svm.h     |   3 +
+ arch/x86/kernel/apic/Makefile       |   1 +
+ arch/x86/kernel/apic/apic.c         |   7 +
+ arch/x86/kernel/apic/init.c         |   3 +
+ arch/x86/kernel/apic/vector.c       |  53 +++-
+ arch/x86/kernel/apic/x2apic_savic.c | 467 ++++++++++++++++++++++++++++
+ arch/x86/kvm/lapic.c                |  23 +-
+ include/linux/cc_platform.h         |   8 +
+ 17 files changed, 742 insertions(+), 39 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Expose ARCH_CAP_FB_CLEAR when invulnerable to MDS
+[PATCH] KVM: x86: Expose ARCH_CAP_FB_CLEAR when invulnerable to MDS
+Author: Jon Kohler <jon@nutanix.com>
+
+Expose FB_CLEAR in arch_capabilities for certain MDS-invulnerable cases 
+to support live migration from older hardware (e.g., Cascade Lake, Ice 
+Lake) to newer hardware (e.g., Sapphire Rapids or higher). This ensures 
+compatibility when user space has previously configured vCPUs to see 
+FB_CLEAR (ARCH_CAPABILITIES Bit 17).
+
+Newer hardware sets the following bits but does not set FB_CLEAR, which 
+can prevent user space from configuring a matching setup:
+    ARCH_CAP_MDS_NO
+    ARCH_CAP_TAA_NO
+    ARCH_CAP_PSDP_NO
+    ARCH_CAP_FBSDP_NO
+    ARCH_CAP_SBDR_SSDP_NO
+
+This change has minimal impact, as these bit combinations already mark 
+the host as MMIO immune (via arch_cap_mmio_immune()) and set 
+disable_fb_clear in vmx_update_fb_clear_dis(), resulting in no 
+additional overhead.
+
+Cc: Emanuele Giuseppe Esposito <eesposit@redhat.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Signed-off-by: Jon Kohler <jon@nutanix.com>
+
+---
+ arch/x86/kvm/x86.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vhost/net: Defer TX queue re-enable until after sendmsg
+[PATCH] vhost/net: Defer TX queue re-enable until after sendmsg
+Author: Jon Kohler <jon@nutanix.com>
+
+In handle_tx_copy, TX batching processes packets below ~PAGE_SIZE and
+batches up to 64 messages before calling sock->sendmsg.
+
+Currently, when there are no more messages on the ring to dequeue,
+handle_tx_copy re-enables kicks on the ring *before* firing off the
+batch sendmsg. However, sock->sendmsg incurs a non-zero delay,
+especially if it needs to wake up a thread (e.g., another vhost worker).
+
+If the guest submits additional messages immediately after the last ring
+check and disablement, it triggers an EPT_MISCONFIG vmexit to attempt to
+kick the vhost worker. This may happen while the worker is still
+processing the sendmsg, leading to wasteful exit(s).
+
+This is particularly problematic for single-threaded guest submission
+threads, as they must exit, wait for the exit to be processed
+(potentially involving a TTWU), and then resume.
+
+In scenarios like a constant stream of UDP messages, this results in a
+sawtooth pattern where the submitter frequently vmexits, and the
+vhost-net worker alternates between sleeping and waking.
+
+A common solution is to configure vhost-net busy polling via userspace
+(e.g., qemu poll-us). However, treating the sendmsg as the "busy"
+period by keeping kicks disabled during the final sendmsg and
+performing one additional ring check afterward provides a significant
+performance improvement without any excess busy poll cycles.
+
+If messages are found in the ring after the final sendmsg, requeue the
+TX handler. This ensures fairness for the RX handler and allows
+vhost_run_work_list to cond_resched() as needed.
+
+Test Case
+    TX VM: taskset -c 2 iperf3  -c rx-ip-here -t 60 -p 5200 -b 0 -u -i 5
+    RX VM: taskset -c 2 iperf3 -s -p 5200 -D
+    6.12.0, each worker backed by tun interface with IFF_NAPI setup.
+    Note: TCP side is largely unchanged as that was copy bound
+
+6.12.0 unpatched
+    EPT_MISCONFIG/second: 5411
+    Datagrams/second: ~382k
+    Interval         Transfer     Bitrate         Lost/Total Datagrams
+    0.00-30.00  sec  15.5 GBytes  4.43 Gbits/sec  0/11481630 (0%)  sender
+
+6.12.0 patched
+    EPT_MISCONFIG/second: 58 (~93x reduction)
+    Datagrams/second: ~650k  (~1.7x increase)
+    Interval         Transfer     Bitrate         Lost/Total Datagrams
+    0.00-30.00  sec  26.4 GBytes  7.55 Gbits/sec  0/19554720 (0%)  sender
+
+Signed-off-by: Jon Kohler <jon@nutanix.com>
+---
+ drivers/vhost/net.c | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
