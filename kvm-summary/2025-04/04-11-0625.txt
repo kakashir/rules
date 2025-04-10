@@ -1,0 +1,525 @@
+From 657ad386 to edc699b5
+KVM mailing list update from 657ad386 to edc699b5
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      7 intel.com
+      5 loongson.cn
+      1 linux.intel.com
+      1 linux.ibm.com
+      1 kernel.org
+      1 google.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      5  Chao Gao <chao.gao@intel.com>
+      5  Bibo Mao <maobibo@loongson.cn>
+      2  Yang Weijiang <weijiang.yang@intel.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+      1  Namhyung Kim <namhyung@kernel.org>
+      1  Gautam Menghani <gautam@linux.ibm.com>
+      1  Bagas Sanjaya <bagasdotme@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  x86/bugs/mmio: Rename mmio_stale_data_clear to
+[PATCH] x86/bugs/mmio: Rename mmio_stale_data_clear to
+Author: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+
+The static key mmio_stale_data_clear controls the KVM-only mitigation for
+MMIO Stale Data vulnerability. Rename it to reflect its purpose.
+
+No functional change.
+
+Signed-off-by: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+---
+ arch/x86/include/asm/nospec-branch.h |  2 +-
+ arch/x86/kernel/cpu/bugs.c           | 16 ++++++++++------
+ arch/x86/kvm/vmx/vmx.c               |  2 +-
+ 3 files changed, 12 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  hw/ppc/spapr_hcall: Return host mitigation characteristics in KVM mode
+[PATCH] hw/ppc/spapr_hcall: Return host mitigation characteristics in KVM mode
+Author: Gautam Menghani <gautam@linux.ibm.com>
+
+Currently, on a P10 KVM guest, the mitigations seen in the output of
+"lscpu" command are different from the host. The reason for this
+behaviour is that when the KVM guest makes the "h_get_cpu_characteristics"
+hcall, QEMU does not consider the data it received from the host via the
+KVM_PPC_GET_CPU_CHAR ioctl, and just uses the values present in
+spapr->eff.caps[], which in turn just contain the default values set in
+spapr_machine_class_init().
+
+Fix this behaviour by making sure that h_get_cpu_characteristics()
+returns the data received from the KVM ioctl for a KVM guest.
+
+Perf impact:
+With null syscall benchmark[1], ~45% improvement is observed.
+
+1. Vanilla QEMU
+$ ./null_syscall
+132.19 ns     456.54 cycles
+
+2. With this patch
+$ ./null_syscall
+91.18 ns     314.57 cycles
+
+[1]: https://ozlabs.org/~anton/junkcode/null_syscall.c
+
+Signed-off-by: Gautam Menghani <gautam@linux.ibm.com>
+---
+ hw/ppc/spapr_hcall.c   | 6 ++++++
+ include/hw/ppc/spapr.h | 1 +
+ target/ppc/kvm.c       | 2 ++
+ 3 files changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  x86/fpu/xstate: Always preserve non-user xfeatures/flags in __state_perm
+[PATCH v5 1/7] x86/fpu/xstate: Always preserve non-user xfeatures/flags in __state_perm
+Author: Chao Gao <chao.gao@intel.com>
+
+
+When granting userspace or a KVM guest access to an xfeature, preserve the
+entity's existing supervisor and software-defined permissions as tracked
+by __state_perm, i.e. use __state_perm to track *all* permissions even
+though all supported supervisor xfeatures are granted to all FPUs and
+FPU_GUEST_PERM_LOCKED disallows changing permissions.
+
+Effectively clobbering supervisor permissions results in inconsistent
+behavior, as xstate_get_group_perm() will report supervisor features for
+process that do NOT request access to dynamic user xfeatures, whereas any
+and all supervisor features will be absent from the set of permissions for
+any process that is granted access to one or more dynamic xfeatures (which
+right now means AMX).
+
+The inconsistency isn't problematic because fpu_xstate_prctl() already
+strips out everything except user xfeatures:
+
+        case ARCH_GET_XCOMP_PERM:
+                /*
+                 * Lockless snapshot as it can also change right after the
+                 * dropping the lock.
+                 */
+                permitted = xstate_get_host_group_perm();
+                permitted &= XFEATURE_MASK_USER_SUPPORTED;
+                return put_user(permitted, uptr);
+
+        case ARCH_GET_XCOMP_GUEST_PERM:
+                permitted = xstate_get_guest_group_perm();
+                permitted &= XFEATURE_MASK_USER_SUPPORTED;
+                return put_user(permitted, uptr);
+
+and similarly KVM doesn't apply the __state_perm to supervisor states
+(kvm_get_filtered_xcr0() incorporates xstate_get_guest_group_perm()):
+
+        case 0xd: {
+                u64 permitted_xcr0 = kvm_get_filtered_xcr0();
+                u64 permitted_xss = kvm_caps.supported_xss;
+
+But if KVM in particular were to ever change, dropping supervisor
+permissions would result in subtle bugs in KVM's reporting of supported
+CPUID settings.  And the above behavior also means that having supervisor
+xfeatures in __state_perm is correctly handled by all users.
+
+Dropping supervisor permissions also creates another landmine for KVM.  If
+more dynamic user xfeatures are ever added, requesting access to multiple
+xfeatures in separate ARCH_REQ_XCOMP_GUEST_PERM calls will result in the
+second invocation of __xstate_request_perm() computing the wrong ksize, as
+as the mask passed to xstate_calculate_size() would not contain *any*
+supervisor features.
+
+Commit 781c64bfcb73 ("x86/fpu/xstate: Handle supervisor states in XSTATE
+permissions") fudged around the size issue for userspace FPUs, but for
+reasons unknown skipped guest FPUs.  Lack of a fix for KVM "works" only
+because KVM doesn't yet support virtualizing features that have supervisor
+xfeatures, i.e. as of today, KVM guest FPUs will never need the relevant
+xfeatures.
+
+Simply extending the hack-a-fix for guests would temporarily solve the
+ksize issue, but wouldn't address the inconsistency issue and would leave
+another lurking pitfall for KVM.  KVM support for virtualizing CET will
+likely add CET_KERNEL as a guest-only xfeature, i.e. CET_KERNEL will not
+be set in xfeatures_mask_supervisor() and would again be dropped when
+granting access to dynamic xfeatures.
+
+Note, the existing clobbering behavior is rather subtle.  The @permitted
+parameter to __xstate_request_perm() comes from:
+
+	permitted = xstate_get_group_perm(guest);
+
+which is either fpu->guest_perm.__state_perm or fpu->perm.__state_perm,
+where __state_perm is initialized to:
+
+        fpu->perm.__state_perm          = fpu_kernel_cfg.default_features;
+
+and copied to the guest side of things:
+
+	/* Same defaults for guests */
+	fpu->guest_perm = fpu->perm;
+
+fpu_kernel_cfg.default_features contains everything except the dynamic
+xfeatures, i.e. everything except XFEATURE_MASK_XTILE_DATA:
+
+        fpu_kernel_cfg.default_features = fpu_kernel_cfg.max_features;
+        fpu_kernel_cfg.default_features &= ~XFEATURE_MASK_USER_DYNAMIC;
+
+When __xstate_request_perm() restricts the local "mask" variable to
+compute the user state size:
+
+	mask &= XFEATURE_MASK_USER_SUPPORTED;
+	usize = xstate_calculate_size(mask, false);
+
+it subtly overwrites the target __state_perm with "mask" containing only
+user xfeatures:
+
+	perm = guest ? &fpu->guest_perm : &fpu->perm;
+	/* Pairs with the READ_ONCE() in xstate_get_group_perm() */
+	WRITE_ONCE(perm->__state_perm, mask);
+
+Cc: Maxim Levitsky <mlevitsk@redhat.com>
+Cc: Weijiang Yang <weijiang.yang@intel.com>
+Cc: Dave Hansen <dave.hansen@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Chao Gao <chao.gao@intel.com>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: John Allen <john.allen@amd.com>
+Cc: kvm@vger.kernel.org
+Link: https://lore.kernel.org/all/ZTqgzZl-reO1m01I@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yang Weijiang <weijiang.yang@intel.com>
+Signed-off-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Maxim Levitsky <mlevitsk@redhat.com>
+Reviewed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Acked-by: Dave Hansen <dave.hansen@intel.com>
+---
+ arch/x86/include/asm/fpu/types.h |  8 +++++---
+ arch/x86/kernel/fpu/xstate.c     | 18 +++++++++++-------
+ 2 files changed, 16 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Introduce CET supervisor state support
+[PATCH v5 0/7] Introduce CET supervisor state support
+Author: Chao Gao <chao.gao@intel.com>
+
+Dear maintainers and reviewers,
+
+I would appreciate your feedback on two unresolved issues:
+
+1. Management of guest default features and sizes (patch 3)
+
+The CET supervisor state will be added as a guest-only feature, causing
+guest FPU default features and sizes to diverge from those of non-guest
+FPUs. Calculating guest FPU default features and sizes at runtime based on
+defaults in fpu_kernel/user_cfg is undesirable due to unnecessary runtime
+overhead and the need for calculations in multiple places, such as during
+vCPU fpstate allocation and FPU permission initialization.
+
+The preferred approach is to calculate guest default features and sizes
+at boot time and then cache them.
+
+Versions v3 and earlier used a guest-specific fpu_state_config to hold
+guest defaults, but the other fields in the struct were unused, suggesting
+that fpu_guest_cfg might not be the best fit. In v4, inspired by the
+existing independent_features field, I switched to adding guest defaults to
+fpu_kernel/user_cfg. During the review, Chang suggested a cleaner and more
+structured alternative by introducing a dedicated struct for guest
+defaults. This v5 follows Chang's suggestion.
+
+2. Naming of the guest-only feature mask (patch 6)
+
+Instead of hard-coding the CET supervisor state in various places, we
+establish an infrastructure that introduces a mask to abstract the features
+necessary for guest FPUs, which are not enabled by non-guest FPUs.
+
+The mask was previously named XFEATURE_MASK_KERNEL_DYNAMIC. It was slightly
+preferred because it reflected the XSAVE buffer state (some buffers have
+the features while others do not) rather than being tied to its
+usage - KVM. However, this name led to confusion. In this v5, it has been
+renamed to XFEATURE_MASK_GUEST_SUPERVISOR. Please refer to patch 6 for the
+decision-making process.
+
+Aside from these issues, I believe this series is in good shape. However,
+since most of the patches have not yet received Reviewed-by/Acked-by tags,
+please take a look at them as well.
+
+Also, credit to Chang and Rick for their help with this series.
+
+== Changelog ==
+v4->v5:
+ - Reorder patches to ensure new features come after cleanups and bug fixes
+   (Chang, Dave, Ingo)
+ - Add a dedicated structure for default xfeatures and sizes for guest FPUs
+   (Chang)
+ - Provide a detailed explanation for choosing XFEATURE_MASK_GUEST_SUPERVISOR
+   (Chang)
+ - Summarize the long history of the CET FPU series and the rationale behind
+   the "guest-only" approach in the cover-letter and the last patch
+ - Other minor changes; please see each patch for details. (Chang)
+ - v4: https://lore.kernel.org/kvm/20250318153316.1970147-1-chao.gao@intel.com/
+
+== Background ==
+
+CET defines two register states: CET user, which includes user-mode control
+registers, and CET supervisor, which consists of shadow-stack pointers for
+privilege levels 0-2.
+
+Current kernels disable shadow stacks in kernel mode, making the CET
+supervisor state unused and eliminating the need for context switching.
+
+== Problem ==
+
+To virtualize CET for guests, KVM must accurately emulate hardware
+behavior. A key challenge arises because there is no CPUID flag to indicate
+that shadow stack is supported only in user mode. Therefore, KVM cannot
+assume guests will not enable shadow stacks in kernel mode and must
+preserve the CET supervisor state of vCPUs.
+
+== Solution ==
+
+An initial proposal to manually save and restore CET supervisor states
+using raw RDMSR/WRMSR in KVM was rejected due to performance concerns and
+its impact on KVM's ABI. Instead, leveraging the kernel's FPU
+infrastructure for context switching was favored [1].
+
+The main question then became whether to enable the CET supervisor state
+globally for all processes or restrict it to vCPU processes. This decision
+involves a trade-off between a 24-byte XSTATE buffer waste for all non-vCPU
+processes and approximately 100 lines of code complexity in the kernel [2].
+The agreed approach is to first try this optimal solution [3], i.e.,
+restricting the CET supervisor state to guest FPUs only and eliminating
+unnecessary space waste.
+
+Key changes in this series are:
+
+1) Fix existing issue regarding enabling guest supervisor states support.
+2) Add default features and size for guest FPUs.
+3) Add infrastructure to support guest-only features.
+4) Add CET supervisor state as the first guest-only feature.
+
+With the series in place, guest FPUs have xstate_bv[12] == xcomp_bv[12] == 1
+and CET supervisor state is saved/reloaded when xsaves/xrstors executes on
+guest FPUs. non-guest FPUs have xstate_bv[12] == xcomp_bv[12] == 0, then
+CET supervisor state is not saved/restored.
+
+== Performance ==
+
+We measured context-switching performance with the benchmark [4] in following
+three cases.
+
+case 1: the baseline. i.e., this series isn't applied
+case 2: baseline + this series. CET-S space is allocated for guest fpu only.
+case 3: baseline + allocate CET-S space for all tasks. Hardware init
+        optimization avoids writing out CET-S space on each XSAVES.
+
+The performance differences in the three cases are very small and fall within the
+run-to-run variation.
+
+[1]: https://lore.kernel.org/kvm/ZM1jV3UPL0AMpVDI@google.com/
+[2]: https://lore.kernel.org/kvm/1c2fd06e-2e97-4724-80ab-8695aa4334e7@intel.com/
+[3]: https://lore.kernel.org/kvm/2597a87b-1248-b8ce-ce60-94074bc67ea4@intel.com/
+[4]: https://github.com/antonblanchard/will-it-scale/blob/master/tests/context_switch1.c
+
+Chao Gao (4):
+  x86/fpu: Drop @perm from guest pseudo FPU container
+  x86/fpu/xstate: Differentiate default features for host and guest FPUs
+  x86/fpu: Initialize guest FPU permissions from guest defaults
+  x86/fpu: Initialize guest fpstate and FPU pseudo container from guest
+    defaults
+
+Sean Christopherson (1):
+  x86/fpu/xstate: Always preserve non-user xfeatures/flags in
+    __state_perm
+
+Yang Weijiang (2):
+  x86/fpu/xstate: Introduce "guest-only" supervisor xfeature set
+  x86/fpu/xstate: Add CET supervisor xfeature support as a guest-only
+    feature
+
+ arch/x86/include/asm/fpu/types.h  | 81 +++++++++++++++++++++++++------
+ arch/x86/include/asm/fpu/xstate.h |  9 ++--
+ arch/x86/kernel/fpu/core.c        | 42 ++++++++++------
+ arch/x86/kernel/fpu/xstate.c      | 60 +++++++++++++++++------
+ arch/x86/kernel/fpu/xstate.h      |  5 ++
+ 5 files changed, 149 insertions(+), 48 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Add LoongArch support
+[PATCH v8 0/4] KVM: selftests: Add LoongArch support
+Author: Bibo Mao <maobibo@loongson.cn>
+
+This patchset adds KVM selftests for LoongArch system, currently only
+some common test cases are supported and pass to run. These testcase
+are listed as following:
+    coalesced_io_test
+    demand_paging_test
+    dirty_log_perf_test
+    dirty_log_test
+    guest_print_test
+    hardware_disable_test
+    kvm_binary_stats_test
+    kvm_create_max_vcpus
+    kvm_page_table_test
+    memslot_modification_stress_test
+    memslot_perf_test
+    set_memory_region_test
+
+This patchset originally is posted from zhaotianrui, I continue to work
+on his efforts.
+
+---
+Changes in v8:
+1. Porting patch based on the latest version.
+2. For macro PC_OFFSET_EXREGS, offsetof() method is used for C header file,
+   still hardcoded definition for assemble language.
+
+Changes in v7:
+1. Refine code to add LoongArch support in test case
+set_memory_region_test.
+
+Changes in v6:
+1. Refresh the patch based on latest kernel 6.8-rc1, add LoongArch
+support about testcase set_memory_region_test.
+2. Add hardware_disable_test test case.
+3. Drop modification about macro DEFAULT_GUEST_TEST_MEM, it is problem
+of LoongArch binutils, this issue is raised to LoongArch binutils owners.
+
+Changes in v5:
+1. In LoongArch kvm self tests, the DEFAULT_GUEST_TEST_MEM could be
+0x130000000, it is different from the default value in memstress.h.
+So we Move the definition of DEFAULT_GUEST_TEST_MEM into LoongArch
+ucall.h, and add 'ifndef' condition for DEFAULT_GUEST_TEST_MEM
+in memstress.h.
+
+Changes in v4:
+1. Remove the based-on flag, as the LoongArch KVM patch series
+have been accepted by Linux kernel, so this can be applied directly
+in kernel.
+
+Changes in v3:
+1. Improve implementation of LoongArch VM page walk.
+2. Add exception handler for LoongArch.
+3. Add dirty_log_test, dirty_log_perf_test, guest_print_test
+test cases for LoongArch.
+4. Add __ASSEMBLER__ macro to distinguish asm file and c file.
+5. Move ucall_arch_do_ucall to the header file and make it as
+static inline to avoid function calls.
+6. Change the DEFAULT_GUEST_TEST_MEM base addr for LoongArch.
+
+Changes in v2:
+1. We should use ".balign 4096" to align the assemble code with 4K in
+exception.S instead of "align 12".
+2. LoongArch only supports 3 or 4 levels page tables, so we remove the
+hanlders for 2-levels page table.
+3. Remove the DEFAULT_LOONGARCH_GUEST_STACK_VADDR_MIN and use the common
+DEFAULT_GUEST_STACK_VADDR_MIN to allocate stack memory in guest.
+4. Reorganize the test cases supported by LoongArch.
+5. Fix some code comments.
+6. Add kvm_binary_stats_test test case into LoongArch KVM selftests.
+
+---
+Bibo Mao (4):
+  KVM: selftests: Add KVM selftests header files for LoongArch
+  KVM: selftests: Add core KVM selftests support for LoongArch
+  KVM: selftests: Add ucall test support for LoongArch
+  KVM: selftests: Add test cases for LoongArch
+
+ tools/testing/selftests/kvm/Makefile          |   2 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |  18 +
+ .../testing/selftests/kvm/include/kvm_util.h  |   5 +
+ .../kvm/include/loongarch/kvm_util_arch.h     |   7 +
+ .../kvm/include/loongarch/processor.h         | 138 +++++++
+ .../selftests/kvm/include/loongarch/ucall.h   |  20 +
+ .../selftests/kvm/lib/loongarch/exception.S   |  59 +++
+ .../selftests/kvm/lib/loongarch/processor.c   | 349 ++++++++++++++++++
+ .../selftests/kvm/lib/loongarch/ucall.c       |  38 ++
+ .../selftests/kvm/set_memory_region_test.c    |   2 +-
+ 10 files changed, 636 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Add KVM selftests header files for LoongArch
+[PATCH v8 1/4] KVM: selftests: Add KVM selftests header files for LoongArch
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Add KVM selftests header files for LoongArch, including processor.h
+and kvm_util_base.h. It mainly contains LoongArch CSR register
+definition and page table entry definition.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |   5 +
+ .../kvm/include/loongarch/kvm_util_arch.h     |   7 +
+ .../kvm/include/loongarch/processor.h         | 138 ++++++++++++++++++
+ 3 files changed, 150 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  Documentation/virt/kvm: Fix TDX whitepaper footnote reference
+[PATCH] Documentation/virt/kvm: Fix TDX whitepaper footnote reference
+Author: Bagas Sanjaya <bagasdotme@gmail.com>
+
+Sphinx reports unreferenced footnote warning on TDX docs:
+
+Documentation/virt/kvm/x86/intel-tdx.rst:255: WARNING: Footnote [1] is not referenced. [ref.footnote]
+
+Fix footnote reference to the TDX docs on Intel website to squash away
+the warning.
+
+Fixes: 52f52ea79a4c ("Documentation/virt/kvm: Document on Trust Domain Extensions (TDX)")
+Reported-by: Stephen Rothwell <sfr@canb.auug.org.au>
+Closes: https://lore.kernel.org/linux-next/20250409131356.48683f58@canb.auug.org.au/
+Signed-off-by: Bagas Sanjaya <bagasdotme@gmail.com>
+---
+ Documentation/virt/kvm/x86/intel-tdx.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  tools headers: Update the KVM headers with the kernel sources
+[PATCH 01/10] tools headers: Update the KVM headers with the kernel sources
+Author: Namhyung Kim <namhyung@kernel.org>
+
+To pick up the changes in:
+
+  af5366bea2cb9dfb KVM: x86: Drop the now unused KVM_X86_DISABLE_VALID_EXITS
+  915d2f0718a42ee0 KVM: Move KVM_REG_SIZE() definition to common uAPI header
+  5c17848134ab1ffb KVM: x86/xen: Restrict hypercall MSR to unofficial synthetic range
+  9364789567f9b492 KVM: x86: Add a VM type define for TDX
+  fa662c9080732b1f KVM: SVM: Add Idle HLT intercept support
+  3adaee78306148da KVM: arm64: Allow userspace to change the implementation ID registers
+  faf7714a47a25c62 KVM: arm64: nv: Allow userland to set VGIC maintenance IRQ
+  c0000e58c74eed07 KVM: arm64: Introduce KVM_REG_ARM_VENDOR_HYP_BMAP_2
+  f83c41fb3dddbf47 KVM: arm64: Allow userspace to limit NV support to nVHE
+
+Addressing this perf tools build warning:
+
+  Warning: Kernel ABI header differences:
+    diff -u tools/include/uapi/linux/kvm.h include/uapi/linux/kvm.h
+    diff -u tools/arch/x86/include/uapi/asm/kvm.h arch/x86/include/uapi/asm/kvm.h
+    diff -u tools/arch/x86/include/uapi/asm/svm.h arch/x86/include/uapi/asm/svm.h
+    diff -u tools/arch/arm64/include/uapi/asm/kvm.h arch/arm64/include/uapi/asm/kvm.h
+
+Please see tools/include/uapi/README for further details.
+
+Cc: kvm@vger.kernel.org
+Signed-off-by: Namhyung Kim <namhyung@kernel.org>
+---
+ tools/arch/arm64/include/uapi/asm/kvm.h | 5 ++---
+ tools/arch/x86/include/uapi/asm/kvm.h   | 4 ++++
+ tools/arch/x86/include/uapi/asm/svm.h   | 2 ++
+ tools/include/uapi/linux/kvm.h          | 9 +++++----
+ 4 files changed, 13 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
