@@ -1,0 +1,601 @@
+From db5984f3 to cb39739d
+KVM mailing list update from db5984f3 to cb39739d
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     12 lst.de
+     11 nvidia.com
+      5 kernel.org
+      4 amd.com
+      1 tencent.com
+
+Top 15 contributors (Based on Email Body)
+
+     12  Christoph Hellwig <hch@lst.de>
+     11  Leon Romanovsky <leonro@nvidia.com>
+      4  "Aneesh Kumar K.V (Arm)" <aneesh.kumar@kernel.org>
+      3  Michael Roth <michael.roth@amd.com>
+      1  Tom Lendacky <thomas.lendacky@amd.com>
+      1  Peng Hao <flyingpeng@tencent.com>
+      1  Leon Romanovsky <leon@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: Introduce KVM_EXIT_SNP_REQ_CERTS for SNP certificate-fetching
+[PATCH v6 1/2] KVM: Introduce KVM_EXIT_SNP_REQ_CERTS for SNP certificate-fetching
+Author: Michael Roth <michael.roth@amd.com>
+
+For SEV-SNP, the host can optionally provide a certificate table to the
+guest when it issues an attestation request to firmware (see GHCB 2.0
+specification regarding "SNP Extended Guest Requests"). This certificate
+table can then be used to verify the endorsement key used by firmware to
+sign the attestation report.
+
+While it is possible for guests to obtain the certificates through other
+means, handling it via the host provides more flexibility in being able
+to keep the certificate data in sync with the endorsement key throughout
+host-side operations that might resulting in the endorsement key
+changing.
+
+In the case of KVM, userspace will be responsible for fetching the
+certificate table and keeping it in sync with any modifications to the
+endorsement key by other userspace management tools. Define a new
+KVM_EXIT_SNP_REQ_CERTS event where userspace is provided with the GPA of
+the buffer the guest has provided as part of the attestation request so
+that userspace can write the certificate data into it while relying on
+filesystem-based locking to keep the certificates up-to-date relative to
+the endorsement keys installed/utilized by firmware at the time the
+certificates are fetched.
+
+  [Melody: Update the documentation scheme about how file locking is
+  expected to happen.]
+
+Reviewed-by: Liam Merwick <liam.merwick@oracle.com>
+Tested-by: Liam Merwick <liam.merwick@oracle.com>
+Tested-by: Dionna Glaze <dionnaglaze@google.com>
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+Signed-off-by: Melody Wang <huibo.wang@amd.com>
+---
+ Documentation/virt/kvm/api.rst | 80 ++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/svm/sev.c         | 50 ++++++++++++++++++---
+ arch/x86/kvm/svm/svm.h         |  1 +
+ include/uapi/linux/kvm.h       |  9 ++++
+ include/uapi/linux/sev-guest.h |  8 ++++
+ 5 files changed, 142 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  SEV-SNP: Add KVM support for SNP certificate fetching
+[PATCH v6 0/2] SEV-SNP: Add KVM support for SNP certificate fetching
+Author: Michael Roth <michael.roth@amd.com>
+
+This patchset is also available at:
+
+  https://github.com/amdese/linux/commits/snp-certs-v6
+
+and is based on top of kvm/next (45eb29140e68)
+
+
+Overview
+--------
+
+The GHCB 2.0 specification defines 2 GHCB request types to allow SNP guests
+to send encrypted messages/requests to firmware: SNP Guest Requests and SNP
+Extended Guest Requests. These encrypted messages are used for things like
+servicing attestation requests issued by the guest. Implementing support for
+these is required to be fully GHCB-compliant.
+
+For the most part, KVM only needs to handle forwarding these requests to
+firmware (to be issued via the SNP_GUEST_REQUEST firmware command defined
+in the SEV-SNP Firmware ABI), and then forwarding the encrypted response to
+the guest.
+
+However, in the case of SNP Extended Guest Requests, the host is also
+able to provide the certificate data corresponding to the endorsement key
+used by firmware to sign attestation report requests. This certificate data
+is provided by userspace because:
+
+  1) It allows for different keys/key types to be used for each particular
+     guest with requiring any sort of KVM API to configure the certificate
+     table in advance on a per-guest basis.
+
+  2) It provides additional flexibility with how attestation requests might
+     be handled during live migration where the certificate data for
+     source/dest might be different.
+
+  3) It allows all synchronization between certificates and firmware/signing
+     key updates to be handled purely by userspace rather than requiring
+     some in-kernel mechanism to facilitate it. [1]
+
+To support fetching certificate data from userspace, a new KVM
+KVM_EXIT_SNP_REQ_CERTS exit type is used to fetch the data similarly to
+KVM_EXIT_MMIO/etc, with an associate KVM capability to detect/enable the
+exits depending on whether userspace has been configured to provide
+certificate data.
+
+[1] https://lore.kernel.org/kvm/ZS614OSoritrE1d2@google.com/
+
+
+Testing
+-------
+
+For testing this via QEMU, use the following tree:
+
+  https://github.com/amdese/qemu/commits/snp-certs-rfc3-wip0
+
+A basic command-line invocation for SNP with certificate data supplied
+would be:
+
+ qemu-system-x86_64 -smp 32,maxcpus=255 -cpu EPYC-Milan-v2
+  -machine q35,confidential-guest-support=sev0,memory-backend=ram1
+  -object memory-backend-memfd,id=ram1,size=4G,share=true,reserve=false
+  -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1,id-auth=,certs-filename=/home/mroth/cert.blob
+  -bios OVMF.fd
+
+Something like the following simple example can be used to simulate an
+exclusive lock being held on the certificate by management tools performing an
+update:
+
+  #include <stdlib.h>
+  #include <stdio.h>
+  #define __USE_GNU
+  #include <fcntl.h>
+  #include <unistd.h>
+  #include <errno.h>
+  #include <stdbool.h>
+  #include <sys/types.h>
+  #include <sys/stat.h>
+  
+  int main(int argc, void **argv)
+  {
+      int ret, fd, i = 0;
+      char *path = argv[1];
+  
+      struct flock fl = {
+          .l_whence = SEEK_SET,
+          .l_start = 0,
+          .l_len = 0,
+          .l_type = F_WRLCK
+      };
+  
+      fd = open(path, O_RDWR);
+      ret = fcntl(fd, F_OFD_SETLK, &fl);
+      if (ret) {
+          printf("error locking file, ret %d errno %d\n", ret, errno);
+          return ret;
+      }
+  
+      while (true) {
+          i++;
+          printf("now holding lock (%d seconds elapsed)...\n", i);
+          usleep(1000 * 1000);
+      }
+  
+      return 0;
+  }
+
+The format of the certificate blob is defined in the GHCB 2.0 specification,
+but if it's not being parsed on the guest-side then random data will suffice
+for testing the KVM bits.
+
+Any feedback/review is appreciated.
+
+Thanks!
+
+-Mike
+
+Changes since v5:
+
+ * Drop KVM capability in favor of a KVM device attribute to advertise
+   support to userspace, and introduce a new KVM_SEV_SNP_ENABLE_REQ_CERTS
+   command to switch it on (Sean)
+ * Only allow certificate-fetching to be enabled prior to starting any
+   vCPUs to avoid races/unexpected behavior (Sean)
+ * Drop unecessary cast in SNP_GUEST_VMM_ERR_GENERIC definition (Sean)
+ * Add checks to enforce that userspace only uses EIO to indicate generic
+   errors when fetching certificates to ensure that other error codes remain
+   usable for other/future error conditions (Joerg, Sean)
+ * Clean up setting of GHCB error codes via a small helper routine (Sean)
+ * Use READ_ONCE() when checking userspace's return value in struct kvm_run
+   (Sean)
+ * Use u64 instead of u32 for npages/ret fields in the kvm_run struct (Sean)
+ * Use a switch statement to handle individual error codes reported by
+   userspace (Sean)
+ * Move 'snp_certs_enabled' flag from struct kvm_arch to kvm_sev_info (Sean)
+ * Documentation fix-ups (Sean)
+ * Rebase to latest kvm/next
+
+Changes since v4:
+
+ * Minor documentation updates to make the implementation notes less
+   specific to QEMU.
+ * Collected Reviewed-by/Tested-by from v3 since there have been no
+   functional changes since then and only minor documentation updates.
+ * Rebased/re-tested on top of latest kvm/next (d3d0b8dfe060)
+
+Changes since v3:
+
+ * This version updates the documentation scheme about how file locking is
+   expected to happen.
+
+Changes since v2:
+
+ * As per discussion during PUCK, drop all the KVM_EXIT_COCO infrastructure
+   since there are enough differences with TDX's quote generation to make
+   unifying the 2 exits over-complicated for userspace, and the code-sharing
+   we stand to gain from placing everything under the KVM_EXIT_COCO_*
+   umbrella are of questionable benefit.
+ * Update/simplify documentation as per the above.
+ * Rebase/re-test on top of latest kvm-coco-queue
+
+Changes since v1:
+
+ * Drop subtype-specific error codes. Instead use standard error codes like
+   ENOSPC/etc. and let KVM determine whether a particular error requires
+   special handling for a particular KVM_EXIT_COCO subtype. (Sean)
+ * Introduce special handling for EAGAIN for KVM_EXIT_COCO_REQ_CERTS such
+   that the guest can be instructed to retry if userspace is temporarily unable
+   to immediately lock/provide the certificate data. (Sean)
+ * Move the 'ret' field of struct kvm_exit_coco to the top-level so all
+   sub-types can propagate error codes the same way.
+ * Add more clarifying details in KVM documentation about the suggested
+   file-locking scheme to avoid races between certificate requests and updates
+   to SNP firmware that might modify the endorsement key corresponding to the
+   certificate data.
+
+Changes since splitting this off from v15 SNP KVM patchset:
+
+ * Address clang-reported warnings regarding uninitialized variables 
+ * Address a memory leak of the request/response buffer pages, and refactor
+   the code based on Sean's suggestions:
+   https://lore.kernel.org/kvm/ZktbBRLXeOp9X6aH@google.com/
+ * Fix SNP Extended Guest Request handling to only attempt to fetch
+   certificates if handling MSG_REQ_REPORT (attestation) message types
+ * Drop KVM_EXIT_VMGEXIT and introduce KVM_EXIT_COCO events instead
+ * Refactor patch layout for easier handling/review
+
+----------------------------------------------------------------
+Michael Roth (2):
+      KVM: Introduce KVM_EXIT_SNP_REQ_CERTS for SNP certificate-fetching
+      KVM: SEV: Add KVM_SEV_SNP_ENABLE_REQ_CERTS command
+
+ Documentation/virt/kvm/api.rst                     | 80 ++++++++++++++++++++++
+ .../virt/kvm/x86/amd-memory-encryption.rst         | 17 ++++-
+ arch/x86/include/uapi/asm/kvm.h                    |  2 +
+ arch/x86/kvm/svm/sev.c                             | 67 ++++++++++++++++--
+ arch/x86/kvm/svm/svm.h                             |  1 +
+ include/uapi/linux/kvm.h                           |  9 +++
+ include/uapi/linux/sev-guest.h                     |  8 +++
+ 7 files changed, 176 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Update dump_ghcb() to use the GHCB snapshot fields
+[PATCH] KVM: SVM: Update dump_ghcb() to use the GHCB snapshot fields
+Author: Tom Lendacky <thomas.lendacky@amd.com>
+
+Commit 4e15a0ddc3ff ("KVM: SEV: snapshot the GHCB before accessing it")
+updated the SEV code to take a snapshot of the GHCB before using it. But
+the dump_ghcb() function wasn't updated to use the snapshot locations.
+This results in incorrect output from dump_ghcb() for the "is_valid" and
+"valid_bitmap" fields.
+
+Update dump_ghcb() to use the proper locations.
+
+Fixes: 4e15a0ddc3ff ("KVM: SEV: snapshot the GHCB before accessing it")
+Signed-off-by: Tom Lendacky <thomas.lendacky@amd.com>
+---
+ arch/x86/kvm/svm/sev.c | 24 ++++++++++++------------
+ 1 file changed, 12 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  cpu: vmexit: Handle KVM_EXIT_MEMORY_FAULT in KVM_RUN ioctl return
+[PATCH kvmtool v3 1/3] cpu: vmexit: Handle KVM_EXIT_MEMORY_FAULT in KVM_RUN ioctl return
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Linux kernel documentation states:
+
+"Note! KVM_EXIT_MEMORY_FAULT is unique among all KVM exit reasons in
+that it accompanies a return code of '-1', not '0'! errno will always be
+set to EFAULT or EHWPOISON when KVM exits with KVM_EXIT_MEMORY_FAULT,
+userspace should assume kvm_run.exit_reason is stale/undefined for all
+other error numbers." "
+
+Update KVM_RUN ioctl error handling to correctly handle
+KVM_EXIT_MEMORY_FAULT. This enables the memory fault exit handlers in
+the kernel to return -EFAULT as the return value. VMM support is
+still required to handle these memory fault exits, but that is not
+included in this change
+
+Reviewed-by: Alexandru Elisei <alexandru.elisei@arm.com>
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ kvm-cpu.c | 15 +++++++++++++--
+ kvm.c     |  1 +
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  cpu: vmexit: KVM_RUN ioctl error handling fixes
+[PATCH kvmtool v3 0/3] cpu: vmexit: KVM_RUN ioctl error handling fixes
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Changes from v2:
+* Fix smp boot failure on x86.
+
+Aneesh Kumar K.V (Arm) (3):
+  cpu: vmexit: Handle KVM_EXIT_MEMORY_FAULT in KVM_RUN ioctl return
+  cpu: vmexit: Retry KVM_RUN ioctl on EINTR and EAGAIN
+  cpu: vmexit: Handle KVM_EXIT_UNKNOWN exit reason correctly
+
+ include/kvm/kvm-cpu.h |  2 +-
+ kvm-cpu.c             | 30 ++++++++++++++++++++++++------
+ kvm.c                 |  1 +
+ 3 files changed, 26 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI/P2PDMA: Refactor the p2pdma mapping helpers
+[PATCH v10 01/24] PCI/P2PDMA: Refactor the p2pdma mapping helpers
+Author: Leon Romanovsky <leon@kernel.org>
+
+
+The current scheme with a single helper to determine the P2P status
+and map a scatterlist segment force users to always use the map_sg
+helper to DMA map, which we're trying to get away from because they
+are very cache inefficient.
+
+Refactor the code so that there is a single helper that checks the P2P
+state for a page, including the result that it is not a P2P page to
+simplify the callers, and a second one to perform the address translation
+for a bus mapped P2P transfer that does not depend on the scatterlist
+structure.
+
+Signed-off-by: Christoph Hellwig <hch@lst.de>
+Reviewed-by: Logan Gunthorpe <logang@deltatee.com>
+Acked-by: Bjorn Helgaas <bhelgaas@google.com>
+Tested-by: Jens Axboe <axboe@kernel.dk>
+Reviewed-by: Luis Chamberlain <mcgrof@kernel.org>
+Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+---
+ drivers/iommu/dma-iommu.c   | 47 +++++++++++++++++-----------------
+ drivers/pci/p2pdma.c        | 38 ++++-----------------------
+ include/linux/dma-map-ops.h | 51 +++++++++++++++++++++++++++++--------
+ kernel/dma/direct.c         | 43 +++++++++++++++----------------
+ 4 files changed, 91 insertions(+), 88 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Provide a new two step DMA mapping API
+[PATCH v10 00/24] Provide a new two step DMA mapping API
+Author: Leon Romanovsky <leon@kernel.org>
+
+Following recent on site LSF/MM 2025 [1] discussion, the overall
+response was extremely positive with many people expressed their
+desire to see this series merged, so they can base their work on it.
+
+It includes, but not limited:
+ * Luis's "nvme-pci: breaking the 512 KiB max IO boundary":
+   https://lore.kernel.org/all/20250320111328.2841690-1-mcgrof@kernel.org/
+ * Chuck's NFS conversion to use one structure (bio_vec) for all types
+   of RPC transports:
+   https://lore.kernel.org/all/913df4b4-fc4a-409d-9007-088a3e2c8291@oracle.com
+ * Matthew's vision for the world without struct page:
+   https://lore.kernel.org/all/20250320111328.2841690-1-mcgrof@kernel.org/
+ * Confidential computing roadmap from Dan:
+   https://lore.kernel.org/all/6801a8e3968da_71fe29411@dwillia2-xfh.jf.intel.com.notmuch
+
+This series is combination of effort of many people who contributed ideas,
+code and testing and I'm gratefully thankful for them.
+
+[1] https://lore.kernel.org/linux-rdma/20250122071600.GC10702@unreal/
+-----------------------------------------------------------------------
+Changelog:
+v10:
+ * Rebased on top v6.15-rc3
+ * Added Luis's tags
+ * Addressed review comments from Luis about DMA patches
+ * Removed segment size check from single-segment SGL optimization code
+ * Changed NVMe unmap data code as was suggested by Christoph
+v9: https://lore.kernel.org/all/cover.1745394536.git.leon@kernel.org/
+ * Added tested-by from Jens.
+ * Replaced is_pci_p2pdma_page(bv.bv_page) check with if
+   "(IS_ENABLED(CONFIG_PCI_P2PDMA) && (req->cmd_flags & REQ_P2PDMA))"
+   which is more aligned with the goal (do not access struct page) and
+   more efficient. This is the one line only that was changed in Jens's
+   performance testing flow, so I kept his tags as is.
+ * Restored single-segment optimization for SGL path.
+ * Added forgotten unmap of metdata SGL multi-segment flow.
+ * Split and squashed optimization patch from Kanchan.
+ * Converted "bool aborted" flag to use newly introduced flag variable.
+v8: https://lore.kernel.org/all/cover.1744825142.git.leon@kernel.org/
+ * Rebased to v6.15-rc1
+ * Added NVMe patches which are now patches and not RFC. They were in
+   RFC stage because block iterator caused to performance regression
+   for very extreme case scenario (~100M IOPS), but after Kanchan fixed
+   it, the code started to be ready for merging.
+ * @Niklas, i didn't change naming in this series as it follows iommu
+   naming format.
+v7: https://lore.kernel.org/all/cover.1738765879.git.leonro@nvidia.com/
+ * Rebased to v6.14-rc1
+v6: https://lore.kernel.org/all/cover.1737106761.git.leon@kernel.org
+ * Changed internal __size variable to u64 to properly set private flag
+   in most significant bit.
+ * Added comment about why we check DMA_IOVA_USE_SWIOTLB
+ * Break unlink loop if phys is NULL, condition which we shouldn't get.
+v5: https://lore.kernel.org/all/cover.1734436840.git.leon@kernel.org
+ * Trimmed long lines in all patches.
+ * Squashed "dma-mapping: Add check if IOVA can be used" into
+   "dma: Provide an interface to allow allocate IOVA" patch.
+ * Added tags from Christoph and Will.
+ * Fixed spelling/grammar errors.
+ * Change title from "dma: Provide an  ..." to be "dma-mapping: Provide
+   an ...".
+ * Slightly changed hmm patch to set sticky flags in one place.
+v4: https://lore.kernel.org/all/cover.1733398913.git.leon@kernel.org
+ * Added extra patch to add kernel-doc for iommu_unmap and iommu_unmap_fast
+ * Rebased to v6.13-rc1
+ * Added Will's tags
+v3: https://lore.kernel.org/all/cover.1731244445.git.leon@kernel.org
+ * Added DMA_ATTR_SKIP_CPU_SYNC to p2p pages in HMM.
+ * Fixed error unwind if dma_iova_sync fails in HMM.
+ * Clear all PFN flags which were set in map to make code.
+   more clean, the callers anyway cleaned them.
+ * Generalize sticky PFN flags logic in HMM.
+ * Removed not-needed #ifdef-#endif section.
+v2: https://lore.kernel.org/all/cover.1730892663.git.leon@kernel.org
+ * Fixed docs file as Randy suggested
+ * Fixed releases of memory in HMM path. It was allocated with kv..
+   variants but released with kfree instead of kvfree.
+ * Slightly changed commit message in VFIO patch.
+v1: https://lore.kernel.org/all/cover.1730298502.git.leon@kernel.org
+ * Squashed two VFIO patches into one
+ * Added Acked-by/Reviewed-by tags
+ * Fix docs spelling errors
+ * Simplified dma_iova_sync() API
+ * Added extra check in dma_iova_destroy() if mapped size to make code more clear
+ * Fixed checkpatch warnings in p2p patch
+ * Changed implementation of VFIO mlx5 mlx5vf_add_migration_pages() to
+   be more general
+ * Reduced the number of changes in VFIO patch
+v0: https://lore.kernel.org/all/cover.1730037276.git.leon@kernel.org
+
+----------------------------------------------------------------------------
+ LWN coverage:
+Dancing the DMA two-step - https://lwn.net/Articles/997563/
+----------------------------------------------------------------------------
+
+Currently the only efficient way to map a complex memory description through
+the DMA API is by using the scatterlist APIs. The SG APIs are unique in that
+they efficiently combine the two fundamental operations of sizing and allocating
+a large IOVA window from the IOMMU and processing all the per-address
+swiotlb/flushing/p2p/map details.
+
+This uniqueness has been a long standing pain point as the scatterlist API
+is mandatory, but expensive to use. It prevents any kind of optimization or
+feature improvement (such as avoiding struct page for P2P) due to the
+impossibility of improving the scatterlist.
+
+Several approaches have been explored to expand the DMA API with additional
+scatterlist-like structures (BIO, rlist), instead split up the DMA API
+to allow callers to bring their own data structure.
+
+The API is split up into parts:
+ - Allocate IOVA space:
+    To do any pre-allocation required. This is done based on the caller
+    supplying some details about how much IOMMU address space it would need
+    in worst case.
+ - Map and unmap relevant structures to pre-allocated IOVA space:
+    Perform the actual mapping into the pre-allocated IOVA. This is very
+    similar to dma_map_page().
+
+In this series, examples of three different users are converted to the new API
+to show the benefits and its versatility. Each user has a unique
+flow:
+ 1. RDMA ODP is an example of "SVA mirroring" using HMM that needs to
+    dynamically map/unmap large numbers of single pages. This becomes
+    significantly faster in the IOMMU case as the map/unmap is now just
+    a page table walk, the IOVA allocation is pre-computed once. Significant
+    amounts of memory are saved as there is no longer a need to store the
+    dma_addr_t of each page.
+ 2. VFIO PCI live migration code is building a very large "page list"
+    for the device. Instead of allocating a scatter list entry per allocated
+    page it can just allocate an array of 'struct page *', saving a large
+    amount of memory.
+ 3. NVMe PCI demonstrates how a BIO can be converted to a HW scatter
+    list without having to allocate then populate an intermediate SG table.
+
+To make the use of the new API easier, HMM and block subsystems are extended
+to hide the optimization details from the caller. Among these optimizations:
+ * Memory reduction as in most real use cases there is no need to store mapped
+   DMA addresses and unmap them.
+ * Reducing the function call overhead by removing the need to call function
+   pointers and use direct calls instead.
+
+This step is first along a path to provide alternatives to scatterlist and
+solve some of the abuses and design mistakes.
+
+The whole series can be found here:
+https://git.kernel.org/pub/scm/linux/kernel/git/leon/linux-rdma.git dma-split-Apr-27
+
+Thanks
+
+Christoph Hellwig (12):
+  PCI/P2PDMA: Refactor the p2pdma mapping helpers
+  dma-mapping: move the PCI P2PDMA mapping helpers to pci-p2pdma.h
+  iommu: generalize the batched sync after map interface
+  iommu/dma: Factor out a iommu_dma_map_swiotlb helper
+  dma-mapping: add a dma_need_unmap helper
+  docs: core-api: document the IOVA-based API
+  block: share more code for bio addition helper
+  block: don't merge different kinds of P2P transfers in a single bio
+  blk-mq: add scatterlist-less DMA mapping helpers
+  nvme-pci: remove struct nvme_descriptor
+  nvme-pci: use a better encoding for small prp pool allocations
+  nvme-pci: convert to blk_rq_dma_map
+
+Leon Romanovsky (12):
+  iommu: add kernel-doc for iommu_unmap_fast
+  dma-mapping: Provide an interface to allow allocate IOVA
+  dma-mapping: Implement link/unlink ranges API
+  mm/hmm: let users to tag specific PFN with DMA mapped bit
+  mm/hmm: provide generic DMA managing logic
+  RDMA/umem: Store ODP access mask information in PFN
+  RDMA/core: Convert UMEM ODP DMA mapping to caching IOVA and page
+    linkage
+  RDMA/umem: Separate implicit ODP initialization from explicit ODP
+  vfio/mlx5: Explicitly use number of pages instead of allocated length
+  vfio/mlx5: Rewrite create mkey flow to allow better code reuse
+  vfio/mlx5: Enable the DMA link API
+  nvme-pci: store aborted state in flags variable
+
+ Documentation/core-api/dma-api.rst   |  71 +++
+ block/bio.c                          |  83 ++--
+ block/blk-merge.c                    | 180 ++++++-
+ drivers/infiniband/core/umem_odp.c   | 252 ++++------
+ drivers/infiniband/hw/mlx5/mlx5_ib.h |  12 +-
+ drivers/infiniband/hw/mlx5/odp.c     |  65 ++-
+ drivers/infiniband/hw/mlx5/umr.c     |  12 +-
+ drivers/infiniband/sw/rxe/rxe_odp.c  |  18 +-
+ drivers/iommu/dma-iommu.c            | 482 +++++++++++++++---
+ drivers/iommu/iommu.c                |  84 ++--
+ drivers/nvme/host/pci.c              | 699 +++++++++++++++------------
+ drivers/pci/p2pdma.c                 |  38 +-
+ drivers/vfio/pci/mlx5/cmd.c          | 375 +++++++-------
+ drivers/vfio/pci/mlx5/cmd.h          |  35 +-
+ drivers/vfio/pci/mlx5/main.c         |  87 ++--
+ include/linux/blk-mq-dma.h           |  63 +++
+ include/linux/blk_types.h            |   2 +
+ include/linux/dma-map-ops.h          |  54 ---
+ include/linux/dma-mapping.h          |  85 ++++
+ include/linux/hmm-dma.h              |  33 ++
+ include/linux/hmm.h                  |  24 +-
+ include/linux/iommu.h                |   4 +
+ include/linux/pci-p2pdma.h           |  85 ++++
+ include/rdma/ib_umem_odp.h           |  25 +-
+ kernel/dma/direct.c                  |  44 +-
+ kernel/dma/mapping.c                 |  18 +
+ mm/hmm.c                             | 263 +++++++++-
+ 27 files changed, 2115 insertions(+), 1078 deletions(-)
+
+----------------------------------------------------------------------
+
+New:   x86/sev: Remove unnecessary GFP_KERNEL_ACCOUNT for temporary variables
+[PATCH]  x86/sev: Remove unnecessary GFP_KERNEL_ACCOUNT for temporary variables
+Author: flyingpenghao <flyingpenghao@gmail.com>
+
+
+Some variables allocated in sev_send_update_data are released when
+the function exits, so there is no need to set GFP_KERNEL_ACCOUNT.
+
+Signed-off-by: Peng Hao <flyingpeng@tencent.com>
+---
+ arch/x86/kvm/svm/sev.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
