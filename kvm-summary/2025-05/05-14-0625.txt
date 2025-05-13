@@ -1,0 +1,434 @@
+From 5e2db18c to 32f1e3f4
+KVM mailing list update from 5e2db18c to 32f1e3f4
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 intel.com
+     18 google.com
+      1 linux.intel.com
+      1 bytedance.com
+
+Top 15 contributors (Based on Email Body)
+
+     14  Fuad Tabba <tabba@google.com>
+      8  Sohil Mehta <sohil.mehta@intel.com>
+      8  Chao Gao <chao.gao@intel.com>
+      4  Ackerley Tng <ackerleytng@google.com>
+      1  Zeng Guang <guang.zeng@intel.com>
+      1  Yang Weijiang <weijiang.yang@intel.com>
+      1  Li Zhe <lizhe.67@bytedance.com>
+      1  Jacob Pan <jacob.jun.pan@linux.intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  x86/fred, KVM: VMX: Pass event data to the FRED entry point from KVM
+[PATCH v6 1/9] x86/fred, KVM: VMX: Pass event data to the FRED entry point from KVM
+Author: Sohil Mehta <sohil.mehta@intel.com>
+
+
+Extend the FRED entry point from KVM to take an extra argument to allow
+KVM to invoke the FRED event dispatch framework with event data.
+
+The first use of this extended API is to pass the NMI-source bitmap for
+NMI-induced VM exits. Read the VMCS exit qualification field to get the
+NMI-source information and store it as event data precisely in the
+format expected by the FRED event framework.
+
+Read the VMCS exit qualification unconditionally since almost all
+upcoming CPUs are expected to enable FRED and NMI-source together. In
+the rare case that NMI-source isn't enabled, the extra VMREAD would be
+harmless since the exit qualification is expected to be zero.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Zeng Guang <guang.zeng@intel.com>
+Signed-off-by: Sohil Mehta <sohil.mehta@intel.com>
+---
+v6: No change
+
+v5: Read the VMCS exit qualification unconditionally. (Sean)
+    Combine related patches into one.
+---
+ arch/x86/entry/entry_64_fred.S | 2 +-
+ arch/x86/include/asm/fred.h    | 9 +++++----
+ arch/x86/kvm/vmx/vmx.c         | 5 +++--
+ 3 files changed, 9 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86: Add support for NMI-source reporting with FRED
+[PATCH v6 0/9] x86: Add support for NMI-source reporting with FRED
+Author: Sohil Mehta <sohil.mehta@intel.com>
+
+Introduction
+============
+NMI-source reporting with FRED [1] provides a new mechanism for
+identifying the source of NMIs. As part of the FRED event delivery
+framework, a 16-bit vector bitmap is provided that identifies one or
+more sources that caused the NMI.
+
+Using the source bitmap, the kernel can precisely run the relevant NMI
+handlers instead of polling the entire NMI handler list. Additionally,
+the source information would be invaluable for debugging misbehaving
+handlers and unknown NMIs.
+
+Changes since v5
+================
+This series mainly implements PeterZ's suggestions in patches 4,5,6:
+
+ * Simplify NMI handling by always setting and using the source bitmap.
+ * Add runtime warnings for unexpected values.
+ * Fix a compile issue in apic.h with a specific config.
+ * Drop the tracepoint changes for now (include it with the DebugFS series).
+ * Pick-up Sandipan's tested-by for the perf patch.
+
+The previous posting included a major simplification compared to the
+series posted last year[2]. Refer the v5 cover letter for details.
+v5: https://lore.kernel.org/lkml/20250507012145.2998143-1-sohil.mehta@intel.com/
+
+Overview of NMI-source usage
+============================
+Code snippets:
+
+// Allocate a static source vector at compile time
+#define NMIS_VECTOR_TEST	1
+
+// Register an NMI handler with the vector
+register_nmi_handler(NMI_LOCAL, test_handler, 0, "nmi_test", NMIS_VECTOR_TEST);
+
+// Generate an NMI with the source vector using NMI encoded delivery
+__apic_send_IPI_mask(cpumask, APIC_DM_NMI | NMIS_VECTOR_TEST);
+
+// Handle an NMI with or without the source information (oversimplified)
+source_bitmap = fred_event_data(regs);
+if (!source_bitmap || (source_bitmap & BIT(NMIS_VECTOR_TEST)))
+        test_handler();
+
+// Unregister handler along with the vector
+unregister_nmi_handler(NMI_LOCAL, "nmi_test");
+
+Patch structure
+===============
+The patches are based on tip:x86/nmi because they depend on the NMI
+cleanup series merged earlier [3].
+
+Patch 1-2: Prepare FRED/KVM and enumerate NMI-source reporting
+Patch 3-5: Register and handle NMI-source vectors 
+Patch 6-8: APIC changes to generate NMIs with vectors
+Patch   9: Improve debug print with NMI-source information
+
+Many thanks to Sean Christopherson, Xin Li, H. Peter Anvin, Andi Kleen,
+Tony Luck, Kan Liang, Jacob Pan Jun, Zeng Guang, Peter Zijlstra,
+Sandipan Das, Steven Rostedt and others for their contributions, reviews
+and feedback.
+
+Future work / Opens
+===================
+I am considering a few additional changes that would be valuable for
+enhancing NMI handling support. Any feedback, preferences or suggestions
+on the following would be helpful.
+
+Assigning more NMI-source vectors
+---------------------------------
+The current patches assign NMI vectors to a limited number of sources.
+The microcode rendezvous and crash reboot code use NMI but do not go
+through the typical register_nmi_handler() path. Their handling is
+special-cased in exc_nmi(). To isolate blame and improve debugging, it
+would be useful to assign vectors to them, even if the vectors are
+ignored during handling.
+
+Other NMI sources, such as GHES and Platform NMIs, can also be assigned
+vectors to speed up their NMI handling and improve isolation. However,
+this would require a software/hardware agreement on vector reservation
+and usage. Such an endeavor is likely not worth the effort.
+
+Explicitly enabling NMIs
+------------------------
+HPA brought up the idea [4] of explicitly enabling NMIs only when the
+kernel is ready to take them. With FRED, if we enter the kernel with
+NMIs disabled, they could remain disabled until returning back to
+userspace. I am evaluating the request and related code changes.
+
+Debug support (Tracing and DebugFS)
+-----------------------
+NMI-source information can help identify issues when multiple NMIs occur
+simultaneously or if certain NMI handlers consistently misbehave. Based
+on feedback from Steven Rostedt[5], the plan is to move the trace event
+to arch/x86 and then add source_bitmap to the nmi_handler() trace event.
+
+Currently, the kernel has counters for unknown NMIs, swallowed NMIs and
+other NMI handling data. However, there is no easy way to access that.
+To identify issues that happen over a longer timeframe, it might be
+useful to add DebugFS support for NMI statistics.
+
+KVM support
+-----------
+The NMI-source feature can be useful for perf users and other NMI use
+cases in guest VMs. Exposing NMI-source to guests once FRED support is
+in place should be relatively easier. The prototype code for this is
+under evaluation.
+
+Links
+=====
+[1]: Chapter 9, https://www.intel.com/content/www/us/en/content-details/819481/flexible-return-and-event-delivery-fred-specification.html
+[2]: https://lore.kernel.org/lkml/20240709143906.1040477-1-jacob.jun.pan@linux.intel.com/
+[3]: https://lore.kernel.org/lkml/20250327234629.3953536-1-sohil.mehta@intel.com/
+[4]: https://lore.kernel.org/lkml/F5D36889-A868-46D2-A678-8EE26E28556D@zytor.com/
+[5]: https://lore.kernel.org/lkml/20250507174809.10cfc5ac@gandalf.local.home/
+
+Jacob Pan (1):
+  perf/x86: Enable NMI-source reporting for perfmon
+
+Sohil Mehta (7):
+  x86/cpufeatures: Add the CPUID feature bit for NMI-source reporting
+  x86/nmi: Extend the registration interface to include the NMI-source
+    vector
+  x86/nmi: Assign and register NMI-source vectors
+  x86/nmi: Add support to handle NMIs with source information
+  x86/nmi: Prepare for the new NMI-source vector encoding
+  x86/nmi: Enable NMI-source for IPIs delivered as NMIs
+  x86/nmi: Print source information with the unknown NMI console message
+
+Zeng Guang (1):
+  x86/fred, KVM: VMX: Pass event data to the FRED entry point from KVM
+
+ arch/x86/entry/entry_64_fred.S      |  2 +-
+ arch/x86/events/amd/ibs.c           |  2 +-
+ arch/x86/events/core.c              |  6 ++---
+ arch/x86/events/intel/core.c        |  6 ++---
+ arch/x86/include/asm/apic.h         | 39 +++++++++++++++++++++++++++++
+ arch/x86/include/asm/apicdef.h      |  2 +-
+ arch/x86/include/asm/cpufeatures.h  |  1 +
+ arch/x86/include/asm/fred.h         |  9 ++++---
+ arch/x86/include/asm/nmi.h          | 37 ++++++++++++++++++++++++++-
+ arch/x86/kernel/apic/hw_nmi.c       |  5 ++--
+ arch/x86/kernel/apic/ipi.c          |  4 +--
+ arch/x86/kernel/apic/local.h        | 24 ++++++++++--------
+ arch/x86/kernel/cpu/cpuid-deps.c    |  1 +
+ arch/x86/kernel/cpu/mce/inject.c    |  4 +--
+ arch/x86/kernel/cpu/mshyperv.c      |  3 +--
+ arch/x86/kernel/kgdb.c              |  8 +++---
+ arch/x86/kernel/kvm.c               |  9 +------
+ arch/x86/kernel/nmi.c               | 37 +++++++++++++++++++++++++++
+ arch/x86/kernel/nmi_selftest.c      |  9 +++----
+ arch/x86/kernel/smp.c               |  6 ++---
+ arch/x86/kvm/vmx/vmx.c              |  5 ++--
+ arch/x86/platform/uv/uv_nmi.c       |  4 +--
+ drivers/acpi/apei/ghes.c            |  2 +-
+ drivers/char/ipmi/ipmi_watchdog.c   |  3 +--
+ drivers/edac/igen6_edac.c           |  3 +--
+ drivers/thermal/intel/therm_throt.c |  2 +-
+ drivers/watchdog/hpwdt.c            |  6 ++---
+ 27 files changed, 171 insertions(+), 68 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+[PATCH v9 01/17] KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+Author: Fuad Tabba <tabba@google.com>
+
+The option KVM_PRIVATE_MEM enables guest_memfd in general. Subsequent
+patches add shared memory support to guest_memfd. Therefore, rename it
+to KVM_GMEM to make its purpose clearer.
+
+Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+Co-developed-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ include/linux/kvm_host.h        | 10 +++++-----
+ virt/kvm/Kconfig                |  8 ++++----
+ virt/kvm/Makefile.kvm           |  2 +-
+ virt/kvm/kvm_main.c             |  4 ++--
+ virt/kvm/kvm_mm.h               |  4 ++--
+ 6 files changed, 15 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Mapping guest_memfd backed memory at the host
+[PATCH v9 00/17] KVM: Mapping guest_memfd backed memory at the host
+Author: Fuad Tabba <tabba@google.com>
+
+Main changes since v8 [1]:
+- Added guest_memfd flag that toggles support for in-place shared memory
+- Added best-effort validation that the userspace memory address range
+  matches the shared memory backed by guest_memfd
+- Rework handling faults for shared guest_memfd memory in x86
+- Fixes based on feedback from the previous series
+- Rebase on Linux 6.15-rc6
+
+The purpose of this series is to allow mapping guest_memfd backed memory
+at the host. This support enables VMMs like Firecracker to run guests
+backed completely by guest_memfd [2]. Combined with Patrick's series for
+direct map removal in guest_memfd [3], this would allow running VMs that
+offer additional hardening against Spectre-like transient execution
+attacks.
+
+This series will also serve as a base for _restricted_ mmap() support
+for guest_memfd backed memory at the host for CoCos that allow sharing
+guest memory in-place with the host [4].
+
+Patches 1 to 6 are mainly about decoupling the concept of guest memory
+being private vs guest memory being backed by guest_memfd. They are
+mostly refactoring and renaming.
+
+Patches 7 and 8 add support for in-place shared memory, as well as the
+ability to map it by the host as long as it is shared, gated by a new
+configuration option, toggled by a new flag, and advertised to userspace
+by a new capability (introduced in patch 15).
+
+Patches 9 to 14 add x86 and arm64 support for in-place shared memory.
+
+Patch 15 introduces the capability that advertises support for in-place
+shared memory, and updates the documentation.
+
+Patches 16 and 17 add new selftests for the added features.
+
+For details on how to test this patch series, and on how to boot a guest
+has uses the new features, please refer to v8 [1].
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20250430165655.605595-1-tabba@google.com/
+[2] https://github.com/firecracker-microvm/firecracker/tree/feature/secret-hiding
+[3] https://lore.kernel.org/all/20250221160728.1584559-1-roypat@amazon.co.uk/
+[4] https://lore.kernel.org/all/20250328153133.3504118-1-tabba@google.com/
+
+Ackerley Tng (4):
+  KVM: guest_memfd: Check that userspace_addr and fd+offset refer to
+    same range
+  KVM: x86/mmu: Handle guest page faults for guest_memfd with shared
+    memory
+  KVM: x86: Compute max_mapping_level with input from guest_memfd
+  KVM: selftests: Test guest_memfd same-range validation
+
+Fuad Tabba (13):
+  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+  KVM: Rename CONFIG_KVM_GENERIC_PRIVATE_MEM to
+    CONFIG_KVM_GENERIC_GMEM_POPULATE
+  KVM: Rename kvm_arch_has_private_mem() to kvm_arch_supports_gmem()
+  KVM: x86: Rename kvm->arch.has_private_mem to kvm->arch.supports_gmem
+  KVM: Rename kvm_slot_can_be_private() to kvm_slot_has_gmem()
+  KVM: Fix comments that refer to slots_lock
+  KVM: guest_memfd: Allow host to map guest_memfd() pages
+  KVM: arm64: Refactor user_mem_abort() calculation of force_pte
+  KVM: arm64: Rename variables in user_mem_abort()
+  KVM: arm64: Handle guest_memfd()-backed guest page faults
+  KVM: arm64: Enable mapping guest_memfd in arm64
+  KVM: Introduce the KVM capability KVM_CAP_GMEM_SHARED_MEM
+  KVM: selftests: guest_memfd mmap() test when mapping is allowed
+
+ Documentation/virt/kvm/api.rst                |  18 +
+ arch/arm64/include/asm/kvm_host.h             |  10 +
+ arch/arm64/kvm/Kconfig                        |   1 +
+ arch/arm64/kvm/mmu.c                          | 149 +++++----
+ arch/x86/include/asm/kvm_host.h               |  22 +-
+ arch/x86/kvm/Kconfig                          |   4 +-
+ arch/x86/kvm/mmu/mmu.c                        | 135 +++++---
+ arch/x86/kvm/svm/sev.c                        |   4 +-
+ arch/x86/kvm/svm/svm.c                        |   4 +-
+ arch/x86/kvm/x86.c                            |   3 +-
+ include/linux/kvm_host.h                      |  76 ++++-
+ include/uapi/linux/kvm.h                      |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/guest_memfd_test.c  | 313 ++++++++++++++++--
+ virt/kvm/Kconfig                              |  15 +-
+ virt/kvm/Makefile.kvm                         |   2 +-
+ virt/kvm/guest_memfd.c                        | 152 ++++++++-
+ virt/kvm/kvm_main.c                           |  21 +-
+ virt/kvm/kvm_mm.h                             |   4 +-
+ 19 files changed, 753 insertions(+), 183 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Improve CET tests
+[kvm-unit-tests PATCH v1 0/8] Improve CET tests
+Author: Chao Gao <chao.gao@intel.com>
+
+Fix a bug in the current CET tests (the first patch) and do some cleanups
+and add more tests for CET nested support.
+
+New CET tests reveal that consistency checks are missing for CET states
+during nested VM-entry [*]
+
+*: https://lore.kernel.org/kvm/20240219074733.122080-27-weijiang.yang@intel.com/
+
+Chao Gao (7):
+  x86: cet: Remove unnecessary memory zeroing for shadow stack
+  x86: cet: Directly check for #CP exception in run_in_user()
+  x86: cet: Validate #CP error code
+  x86: cet: Use report_skip()
+  x86: cet: Drop unnecessary casting
+  x86: cet: Validate writing unaligned values to SSP MSR causes #GP
+  x86: cet: Validate CET states during VMX transitions
+
+Yang Weijiang (1):
+  x86: cet: Fix parameter issue when flush TLBs for shadow stack
+
+ lib/x86/msr.h      |  1 +
+ lib/x86/usermode.c |  4 +++
+ x86/cet.c          | 43 ++++++++----------------
+ x86/unittests.cfg  |  7 ++++
+ x86/vmx.h          |  8 +++--
+ x86/vmx_tests.c    | 81 ++++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 112 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86: cet: Pass virtual addresses to invlpg
+[kvm-unit-tests PATCH v1 1/8] x86: cet: Pass virtual addresses to invlpg
+Author: Chao Gao <chao.gao@intel.com>
+
+
+Correct the parameter passed to invlpg.
+
+The invlpg instruction should take a virtual address instead of a physical
+address when flushing TLBs. Using shstk_phys results in TLBs associated
+with the virtual address (shstk_virt) not being flushed, and the virtual
+address may not be treated as a shadow stack address if there is a stale
+TLB. So, subsequent shadow stack accesses to shstk_virt may cause a #PF,
+which terminates the test unexpectedly.
+
+Signed-off-by: Yang Weijiang <weijiang.yang@intel.com>
+Signed-off-by: Chao Gao <chao.gao@intel.com>
+---
+ x86/cet.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/type1: optimize vfio_pin_pages_remote() for hugetlbfs folio
+[PATCH] vfio/type1: optimize vfio_pin_pages_remote() for hugetlbfs folio
+Author: lizhe.67 <lizhe.67@bytedance.com>
+
+
+When vfio_pin_pages_remote() is called with a range of addresses that
+includes hugetlbfs folios, the function currently performs individual
+statistics counting operations for each page. This can lead to significant
+performance overheads, especially when dealing with large ranges of pages.
+
+This patch optimize this process by batching the statistics counting
+operations.
+
+The performance test results for completing the 8G VFIO IOMMU DMA mapping,
+obtained through trace-cmd, are as follows. In this case, the 8G virtual
+address space has been mapped to physical memory using hugetlbfs with
+pagesize=2M.
+
+Before this patch:
+funcgraph_entry:      # 33813.703 us |  vfio_pin_map_dma();
+
+After this patch:
+funcgraph_entry:      # 15635.055 us |  vfio_pin_map_dma();
+
+Signed-off-by: Li Zhe <lizhe.67@bytedance.com>
+---
+ drivers/vfio/vfio_iommu_type1.c | 49 +++++++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+----------------------------------------------------------------------
+
