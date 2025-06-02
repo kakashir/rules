@@ -1,0 +1,293 @@
+From 57d1cd1e0 to d6f868dfe
+KVM mailing list update from 57d1cd1e0 to d6f868dfe
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 google.com
+      3 redhat.com
+      1 linux.ibm.com
+      1 kernel.org
+      1 amd.com
+
+Top 15 contributors (Based on Email Body)
+
+     15  Colton Lewis <coltonlewis@google.com>
+      3  Gerd Hoffmann <kraxel@redhat.com>
+      3  Ackerley Tng <ackerleytng@google.com>
+      1  Shivank Garg <shivankg@amd.com>
+      1  Marc Zyngier <maz@kernel.org>
+      1  Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  ARM64 PMU Partitioning
+[PATCH 00/17] ARM64 PMU Partitioning
+Author: Colton Lewis <coltonlewis@google.com>
+
+Overview:
+
+This series implements a new PMU scheme on ARM, a partitioned PMU
+that exists alongside the existing emulated PMU and may be enabled by
+the kernel command line kvm.reserved_host_counters or by the vcpu
+ioctl KVM_ARM_PARTITION_PMU. This is a continuation of the RFC posted
+earlier this year. [1]
+
+The high level overview and reason for the name is that this
+implementation takes advantage of recent CPU features to partition the
+PMU counters into a host-reserved set and a guest-reserved set. Guests
+are allowed untrapped hardware access to the most frequently used PMU
+registers and features for the guest-reserved counters only.
+
+This untrapped hardware access significantly reduces the overhead of
+using performance monitoring capabilities such as the `perf` tool
+inside a guest VM. Register accesses that aren't trapping to KVM mean
+less time spent in the host kernel and more time on the workloads
+guests care about. This optimization especially shines during high
+`perf` sample rates or large numbers of events that require
+multiplexing hardware counters.
+
+Performance:
+
+For example, the following tests were carried out on identical ARM
+machines with 10 general purpose counters with identical guest images
+run on QEMU, the only difference being my PMU implementation or the
+existing one. Some arguments have been simplified here to clarify the
+purpose of the test:
+
+1) time perf record -e ${FIFTEEN_HW_EVENTS} -F 1000 -- \
+   gzip -c tmpfs/random.64M.img >/dev/null
+
+On emulated PMU this command took 4.143s real time with 0.159s system
+time. On partitioned PMU this command took 3.139s real time with
+0.110s system time, runtime reductions of 24.23% and 30.82%.
+
+2) time perf stat -dd -- \
+   automated_specint2017.sh
+
+On emulated PMU this benchmark completed in 3789.16s real time with
+224.45s system time and a final benchmark score of 4.28. On
+partitioned PMU this benchmark completed in 3525.67s real time with
+15.98s system time and a final benchmark score of 4.56. That is a
+6.95% reduction in runtime, 92.88% reduction in system time, and
+6.54% improvement in overall benchmark score.
+
+Seeing these improvements on something as lightweight as perf stat is
+remarkable and implies there would have been a much greater
+improvement with perf record. I did not test that because I was not
+confident it would even finish in a reasonable time on the emulated
+PMU
+
+Test 3 was slightly different, I ran the workload in a VM with a
+single VCPU pinned to a physical CPU and analyzed from the host where
+the physical CPU spent its time using mpstat.
+
+3) perf record -e ${FIFTEEN_HW_EVENTS} -F 4000 -- \
+   stress-ng --cpu 0 --timeout 30
+
+Over a period of 30s the cpu running with the emulated PMU spent
+34.96% of the time in the host kernel and 55.85% of the time in the
+guest. The cpu running the partitioned PMU spent 0.97% of its time in
+the host kernel and 91.06% of its time in the guest.
+
+Taken together, these tests represent a remarkable performance
+improvement for anything perf related using this new PMU
+implementation.
+
+Caveats:
+
+Because the most consistent and performant thing to do was untrap
+PMCR_EL0, the number of counters visible to the guest via PMCR_EL0.N
+is always equal to the value KVM sets for MDCR_EL2.HPMN. Previously
+allowed writes to PMCR_EL0.N via {GET,SET}_ONE_REG no longer affect
+the guest.
+
+These improvements come at a cost to 7-35 new registers that must be
+swapped at every vcpu_load and vcpu_put if the feature is enabled. I
+have been informed KVM would like to avoid paying this cost when
+possible.
+
+One solution is to make the trapping changes and context swapping lazy
+such that the trapping changes and context swapping only take place
+after the guest has actually accessed the PMU so guests that never
+access the PMU never pay the cost.
+
+This is not done here because it is not crucial to the primary
+functionality and I thought review would be more productive as soon as
+I had something complete enough for reviewers to easily play with.
+
+However, this or any better ideas are on the table for inclusion in
+future re-rolls.
+
+[1] https://lore.kernel.org/kvmarm/20250213180317.3205285-1-coltonlewis@google.com/
+
+Colton Lewis (16):
+  arm64: cpufeature: Add cpucap for HPMN0
+  arm64: Generate sign macro for sysreg Enums
+  arm64: cpufeature: Add cpucap for PMICNTR
+  KVM: arm64: Reorganize PMU functions
+  KVM: arm64: Introduce method to partition the PMU
+  perf: arm_pmuv3: Generalize counter bitmasks
+  perf: arm_pmuv3: Keep out of guest counter partition
+  KVM: arm64: Set up FGT for Partitioned PMU
+  KVM: arm64: Writethrough trapped PMEVTYPER register
+  KVM: arm64: Use physical PMSELR for PMXEVTYPER if partitioned
+  KVM: arm64: Writethrough trapped PMOVS register
+  KVM: arm64: Context switch Partitioned PMU guest registers
+  perf: pmuv3: Handle IRQs for Partitioned PMU guest counters
+  KVM: arm64: Inject recorded guest interrupts
+  KVM: arm64: Add ioctl to partition the PMU when supported
+  KVM: arm64: selftests: Add test case for partitioned PMU
+
+Marc Zyngier (1):
+  KVM: arm64: Cleanup PMU includes
+
+ Documentation/virt/kvm/api.rst                |  16 +
+ arch/arm/include/asm/arm_pmuv3.h              |  24 +
+ arch/arm64/include/asm/arm_pmuv3.h            |  36 +-
+ arch/arm64/include/asm/kvm_host.h             | 208 +++++-
+ arch/arm64/include/asm/kvm_pmu.h              |  82 +++
+ arch/arm64/kernel/cpufeature.c                |  15 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arm.c                          |  24 +-
+ arch/arm64/kvm/debug.c                        |  13 +-
+ arch/arm64/kvm/hyp/include/hyp/switch.h       |  65 +-
+ arch/arm64/kvm/pmu-emul.c                     | 629 +----------------
+ arch/arm64/kvm/pmu-part.c                     | 358 ++++++++++
+ arch/arm64/kvm/pmu.c                          | 630 ++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c                     |  54 +-
+ arch/arm64/tools/cpucaps                      |   2 +
+ arch/arm64/tools/gen-sysreg.awk               |   1 +
+ arch/arm64/tools/sysreg                       |   6 +-
+ drivers/perf/arm_pmuv3.c                      |  55 +-
+ include/kvm/arm_pmu.h                         | 199 ------
+ include/linux/perf/arm_pmu.h                  |  15 +-
+ include/linux/perf/arm_pmuv3.h                |  14 +-
+ include/uapi/linux/kvm.h                      |   4 +
+ tools/include/uapi/linux/kvm.h                |   2 +
+ .../selftests/kvm/arm64/vpmu_counter_access.c |  40 +-
+ virt/kvm/kvm_main.c                           |   1 +
+ 25 files changed, 1616 insertions(+), 879 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  fs: Provide function that allocates a secure anonymous inode
+[PATCH 1/2] fs: Provide function that allocates a secure anonymous inode
+Author: Ackerley Tng <ackerleytng@google.com>
+
+The new function, alloc_anon_secure_inode(), returns an inode after
+running checks in security_inode_init_security_anon().
+
+Also refactor secretmem's file creation process to use the new
+function.
+
+Suggested-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ fs/anon_inodes.c   | 22 ++++++++++++++++------
+ include/linux/fs.h |  1 +
+ mm/secretmem.c     |  9 +--------
+ 3 files changed, 18 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Use guest mem inodes instead of anonymous inodes
+[PATCH 0/2] Use guest mem inodes instead of anonymous inodes
+Author: Ackerley Tng <ackerleytng@google.com>
+
+Hi,
+
+This small patch series makes guest_memfd use guest mem inodes instead
+of anonymous inodes and also includes some refactoring to expose a new
+function that allocates an inode and runs security checks.
+
+This patch series will serve as a common base for some in-flight series:
+
+* Add NUMA mempolicy support for KVM guest-memfd [1]
+* New KVM ioctl to link a gmem inode to a new gmem file [2]
+* Restricted mapping of guest_memfd at the host and arm64 support [3]
+  aka shared/private conversion support for guest_memfd
+
+[1] https://lore.kernel.org/all/20250408112402.181574-1-shivankg@amd.com/
+[2] https://lore.kernel.org/lkml/cover.1747368092.git.afranji@google.com/
+[3] https://lore.kernel.org/all/20250328153133.3504118-1-tabba@google.com/
+
+Ackerley Tng (2):
+  fs: Provide function that allocates a secure anonymous inode
+  KVM: guest_memfd: Use guest mem inodes instead of anonymous inodes
+
+ fs/anon_inodes.c           |  22 ++++--
+ include/linux/fs.h         |   1 +
+ include/uapi/linux/magic.h |   1 +
+ mm/secretmem.c             |   9 +--
+ virt/kvm/guest_memfd.c     | 134 +++++++++++++++++++++++++++++++------
+ virt/kvm/kvm_main.c        |   7 +-
+ virt/kvm/kvm_mm.h          |   9 ++-
+ 7 files changed, 143 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Remove redundant kvm_gmem_getattr implementation
+[PATCH] KVM: guest_memfd: Remove redundant kvm_gmem_getattr implementation
+Author: Shivank Garg <shivankg@amd.com>
+
+Remove the redundant kvm_gmem_getattr() implementation that simply calls
+generic_fillattr() without any special handling. The VFS layer
+(vfs_getattr_nosec()) will call generic_fillattr() by default when no
+custom getattr operation is provided in the inode_operations structure.
+
+This is a cleanup with no functional change.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ virt/kvm/guest_memfd.c | 11 -----------
+ 1 file changed, 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/sev/vc: fix efi runtime instruction emulation
+[PATCH v2 1/2] x86/sev/vc: fix efi runtime instruction emulation
+Author: Gerd Hoffmann <kraxel@redhat.com>
+
+In case efi_mm is active go use the userspace instruction decoder which
+supports fetching instructions from active_mm.  This is needed to make
+instruction emulation work for EFI runtime code, so it can use cpuid
+and rdmsr.
+
+EFI runtime code uses the cpuid instruction to gather information about
+the environment it is running in, such as SEV being enabled or not, and
+choose (if needed) the SEV code path for ioport access.
+
+EFI runtime code uses the rdmsr instruction to get the location of the
+CAA page (see SVSM spec, section 4.2 - "Post Boot").
+
+Signed-off-by: Gerd Hoffmann <kraxel@redhat.com>
+---
+ arch/x86/coco/sev/vc-handle.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86/sev: improve efi runtime code support.
+[PATCH v2 0/2] x86/sev: improve efi runtime code support.
+Author: Gerd Hoffmann <kraxel@redhat.com>
+
+v2 changes:
+ - rebase to latest master.
+ - update error message (Dionna).
+ - more details in the commit message (Borislav).
+
+Gerd Hoffmann (2):
+  x86/sev/vc: fix efi runtime instruction emulation
+  x86/sev: let sev_es_efi_map_ghcbs map the caa pages too
+
+ arch/x86/include/asm/sev.h     |  4 ++--
+ arch/x86/coco/sev/core.c       | 14 ++++++++++++--
+ arch/x86/coco/sev/vc-handle.c  |  3 ++-
+ arch/x86/platform/efi/efi_64.c |  4 ++--
+ 4 files changed, 18 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
