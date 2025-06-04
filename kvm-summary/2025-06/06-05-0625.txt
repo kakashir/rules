@@ -1,0 +1,273 @@
+From e843f61c0 to 65aa4c890
+KVM mailing list update from e843f61c0 to 65aa4c890
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     16 google.com
+      1 kylinos.cn
+
+Top 15 contributors (Based on Email Body)
+
+      9  Sean Christopherson <seanjc@google.com>
+      6  Jiaqi Yan <jiaqiyan@google.com>
+      1  Raghavendra Rao Ananta <rananta@google.com>
+      1  Pei Xiao <xiaopei01@kylinos.cn>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  x86: Call setup_idt() from start{32,64}(),
+[kvm-unit-tests PATCH 1/6] x86: Call setup_idt() from start{32,64}(),
+Author: Sean Christopherson <seanjc@google.com>
+
+Call setup_idt() from the (non-EFI) 32-bit and 64-bit BSP boot paths so
+that setup_idt() is called exactly once for all flavors.  To be able to
+handle #VC, EFI calls setup_idt() early on, before smp_init().
+
+This will allow moving the call to load_idt() into setup_idt(), without
+creating weirdness, which in turn will allow taking faults in setup_idt(),
+e.g. to probe for forced emulation support.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ lib/x86/smp.c  | 1 -
+ x86/cstart.S   | 1 +
+ x86/cstart64.S | 1 +
+ 3 files changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86: FEP related cleanups and fix
+[kvm-unit-tests PATCH 0/6] x86: FEP related cleanups and fix
+Author: Sean Christopherson <seanjc@google.com>
+
+The ultimate goal of this series is to be able to check for forced emulation
+support in a nVMX test that runs with a garbage IDT (the test currently
+assumed forced emulation is always available, which fails for obvious reasons).
+
+Getting there is a bit annoying, mostly because the EFI path happens to load
+the IDT after setup_idt().  I _could_ have just tweaked the EFI path, but opted
+for a slightly bigger overhaul, e.g. so that it's easier to see that the BSP is
+responsible for loading the IDT, and so that setup_idt() can _guarantee_ it can
+handle a #UD without exploding.
+
+Sean Christopherson (6):
+  x86: Call setup_idt() from start{32,64}(), not from smp_init()
+  x86: Drop protection against setup_idt() being called multiple times
+  x86: Move call to load_idt() out of setup_tr_and_percpu macro
+  x86: Load IDT on BSP as part of setup_idt()
+  x86: Cache availability of forced emulation during setup_idt()
+  nVMX: Force emulation of LGDT/LIDT in iff FEP is available
+
+ lib/x86/desc.c   | 29 ++++++++++++++++++++++++-----
+ lib/x86/desc.h   | 14 +-------------
+ lib/x86/setup.c  |  1 -
+ lib/x86/smp.c    |  1 -
+ x86/access.c     |  2 +-
+ x86/cstart.S     |  3 ++-
+ x86/cstart64.S   |  2 +-
+ x86/emulator.c   | 11 +++++------
+ x86/emulator64.c |  2 +-
+ x86/la57.c       |  2 +-
+ x86/lam.c        |  2 +-
+ x86/msr.c        |  2 +-
+ x86/pmu.c        |  2 +-
+ x86/vmx_tests.c  |  7 ++++---
+ 14 files changed, 43 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost:  Use ERR_CAST inlined function instead of ERR_PTR(PTR_ERR(...))
+[PATCH] vhost:  Use ERR_CAST inlined function instead of ERR_PTR(PTR_ERR(...))
+Author: Pei Xiao <xiaopei01@kylinos.cn>
+
+cocci warning:
+./kernel/vhost_task.c:148:9-16: WARNING: ERR_CAST can be used with tsk
+
+Use ERR_CAST inlined function instead of ERR_PTR(PTR_ERR(...)).
+
+Signed-off-by: Pei Xiao <xiaopei01@kylinos.cn>
+---
+ kernel/vhost_task.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: VM exit to userspace to handle SEA
+[PATCH v2 1/6] KVM: arm64: VM exit to userspace to handle SEA
+Author: Jiaqi Yan <jiaqiyan@google.com>
+
+When APEI fails to handle a stage-2 synchronous external abort (SEA),
+today KVM directly injects an async SError to the VCPU then resumes it,
+which usually results in unpleasant guest kernel panic.
+
+One major situation of guest SEA is when vCPU consumes recoverable
+uncorrected memory error (UER). Although SError and guest kernel panic
+effectively stops the propagation of corrupted memory, there is room
+to recover from an UER in a more graceful manner.
+
+Alternatively KVM can redirect the synchronous SEA event to VMM to
+- Reduce blast radius if possible. VMM can inject a SEA to VCPU via
+  KVM's existing KVM_SET_VCPU_EVENTS API. If the memory poison
+  consumption or fault is not from guest kernel, blast radius can be
+  limited to the triggering thread in guest userspace, so VM can
+  keep running.
+- VMM can protect from future memory poison consumption by unmapping
+  the page from stage-2, or interrupt guest of the poisoned guest page
+  so guest kernel can unmap it from stage-1.
+- VMM can also track SEA events that VM customers care about, restart
+  VM when certain number of distinct poison events have happened,
+  provide observability to customers in log management UI.
+
+Introduce an userspace-visible feature to enable VMM to handle SEA:
+- KVM_CAP_ARM_SEA_TO_USER. As the alternative fallback behavior
+  when host APEI fails to claim a SEA, userspace can opt in this new
+  capability to let KVM exit to userspace during SEA if it is not
+  caused by access on memory of stage-2 translation table.
+- KVM_EXIT_ARM_SEA. A new exit reason is introduced for this.
+  KVM fills kvm_run.arm_sea with as much as possible information about
+  the SEA, enabling VMM to emulate SEA to guest by itself.
+  - Sanitized ESR_EL2. The general rule is to keep only the bits
+    useful for userspace and relevant to guest memory. See code
+    comments for why bits are hidden/reported.
+  - If faulting guest virtual and physical addresses are available.
+  - Faulting guest virtual address if available.
+  - Faulting guest physical address if available.
+
+Signed-off-by: Jiaqi Yan <jiaqiyan@google.com>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 67 ++++++++++++++++++++++++++++
+ arch/arm64/include/asm/kvm_host.h    |  8 ++++
+ arch/arm64/include/asm/kvm_ras.h     |  2 +-
+ arch/arm64/kvm/arm.c                 |  5 +++
+ arch/arm64/kvm/mmu.c                 | 59 +++++++++++++++++++-----
+ include/uapi/linux/kvm.h             | 11 +++++
+ 6 files changed, 141 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  VMM can handle guest SEA via KVM_EXIT_ARM_SEA
+[PATCH v2 0/6] VMM can handle guest SEA via KVM_EXIT_ARM_SEA
+Author: Jiaqi Yan <jiaqiyan@google.com>
+
+Problem
+=======
+
+When host APEI is unable to claim synchronous external abort (SEA)
+during stage-2 guest abort, today KVM directly injects an async SError
+into the VCPU then resumes it. The injected SError usually results in
+unpleasant guest kernel panic.
+
+One of the major situation of guest SEA is when VCPU consumes recoverable
+uncorrected memory error (UER), which is not uncommon at all in modern
+datacenter servers with large amounts of physical memory. Although SError
+and guest panic is sufficient to stop the propagation of corrupted memory
+there is room to recover from an UER in a more graceful manner.
+
+Proposed Solution
+=================
+
+Alternatively KVM can replay the SEA to the faulting VCPU, via existing
+KVM_SET_VCPU_EVENTS API. If the memory poison consumption or the fault
+that cause SEA is not from guest kernel, the blast radius can be limited
+to the consuming or faulting guest userspace process, so the VM can keep
+running.
+
+In addition, instead of doing under the hood without involving userspace,
+there are benefits to redirect the SEA to VMM:
+
+- VM customers care about the disruptions caused by memory errors, and
+  VMM usually has the responsibility to start the process of notifying
+  the customers of memory error events in their VMs. For example some
+  cloud provider emits a critical log in their observability UI [1], and
+  provides playbook for customers on how to mitigate disruptions to
+  their workloads.
+
+- VMM can protect future memory error consumption by unmapping the poisoned
+  pages from stage-2 page table with KVM userfault, or by splitting the
+  memslot that contains the poisoned guest pages [2].
+
+- VMM can keep track of SEA events in the VM. When VMM thinks the status
+  on the host or the VM is bad enough, e.g. number of distinct SEAs
+  exceeds a threshold, it can restart the VM on another healthy host.
+
+- Behavior parity with x86 architecture. When machine check exception
+  (MCE) is caused by VCPU, kernel or KVM signals userspace SIGBUS to
+  let VMM either recover from the MCE, or terminate itself with VM.
+  The prior RFC proposes to implement SIGBUS on arm64 as well, but
+  Marc preferred VCPU exit over signal [3]. However, implementation
+  aside, returning SEA to VMM is on par with returning MCE to VMM.
+
+Once SEA is redirected to VMM, among other actions, VMM is encouraged
+to inject external aborts into the faulting VCPU, which is already
+supported by KVM on arm64. We notice injecting instruction abort is not
+fully supported by KVM_SET_VCPU_EVENTS. Complement it in the patchset.
+
+New UAPIs
+=========
+
+This patchset introduces following userspace-visiable changes to empower
+VMM to control what happens next for SEA on guest memory:
+
+- KVM_CAP_ARM_SEA_TO_USER. While taking SEA, if userspace has enabled
+  this new capability at VM creation, and the SEA is not caused by
+  memory allocated for stage-2 translation table, instead of injecting
+  SError, return KVM_EXIT_ARM_SEA to userspace.
+
+- KVM_EXIT_ARM_SEA. This is the VM exit reason VMM gets. The details
+  about the SEA is provided in arm_sea as much as possible, including
+  sanitized ESR value at EL2, if guest virtual and physical addresses
+  (GPA and GVA) are available and the values if available.
+
+- KVM_CAP_ARM_INJECT_EXT_IABT. VMM today can inject external data abort
+  to VCPU via KVM_SET_VCPU_EVENTS API. However, in case of instruction
+  abort, VMM cannot inject it via KVM_SET_VCPU_EVENTS.
+  KVM_CAP_ARM_INJECT_EXT_IABT is just a natural extend to
+  KVM_CAP_ARM_INJECT_EXT_DABT that tells VMM KVM_SET_VCPU_EVENTS now
+  supports external instruction abort.
+
+
+* From v1 [4]:
+  - Rebased on commit 4d62121ce9b5 ("KVM: arm64: vgic-debug: Avoid
+    dereferencing NULL ITE pointer").
+  - Sanitize ESR_EL2 before reporting it to userspace.
+  - Do not do KVM_EXIT_ARM_SEA when SEA is caused by memory allocated to
+    stage-2 translation table.
+
+[1] https://cloud.google.com/solutions/sap/docs/manage-host-errors
+[2] https://lore.kernel.org/kvm/20250109204929.1106563-1-jthoughton@google.com
+[3] https://lore.kernel.org/kvm/86pljbqqh0.wl-maz@kernel.org
+[4] https://lore.kernel.org/kvm/20250505161412.1926643-1-jiaqiyan@google.com
+
+Jiaqi Yan (5):
+  KVM: arm64: VM exit to userspace to handle SEA
+  KVM: arm64: Set FnV for VCPU when FAR_EL2 is invalid
+  KVM: selftests: Test for KVM_EXIT_ARM_SEA and KVM_CAP_ARM_SEA_TO_USER
+  KVM: selftests: Test for KVM_CAP_INJECT_EXT_IABT
+  Documentation: kvm: new uAPI for handling SEA
+
+Raghavendra Rao Ananta (1):
+  KVM: arm64: Allow userspace to inject external instruction aborts
+
+ Documentation/virt/kvm/api.rst                | 128 ++++++-
+ arch/arm64/include/asm/kvm_emulate.h          |  67 ++++
+ arch/arm64/include/asm/kvm_host.h             |   8 +
+ arch/arm64/include/asm/kvm_ras.h              |   2 +-
+ arch/arm64/include/uapi/asm/kvm.h             |   3 +-
+ arch/arm64/kvm/arm.c                          |   6 +
+ arch/arm64/kvm/guest.c                        |  13 +-
+ arch/arm64/kvm/inject_fault.c                 |   3 +
+ arch/arm64/kvm/mmu.c                          |  59 ++-
+ include/uapi/linux/kvm.h                      |  12 +
+ tools/arch/arm64/include/asm/esr.h            |   2 +
+ tools/arch/arm64/include/uapi/asm/kvm.h       |   3 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../testing/selftests/kvm/arm64/inject_iabt.c |  98 +++++
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 340 ++++++++++++++++++
+ tools/testing/selftests/kvm/lib/kvm_util.c    |   1 +
+ 16 files changed, 718 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
