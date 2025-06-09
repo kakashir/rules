@@ -1,0 +1,385 @@
+From cc93e2c1a to 499b67518
+KVM mailing list update from cc93e2c1a to 499b67518
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     13 linux.intel.com
+      4 oracle.com
+      1 virtuozzo.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     13  "Kirill A. Shutemov" <kirill.shutemov@linux.intel.com>
+      4  Liam Merwick <liam.merwick@oracle.com>
+      1  Bobby Eshleman <bobbyeshleman@gmail.com>
+      1  Andrey Zhadchenko <andrey.zhadchenko@virtuozzo.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  TDX: Enable Dynamic PAMT
+[PATCHv2 00/12] TDX: Enable Dynamic PAMT
+Author: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+
+This patchset enables Dynamic PAMT in TDX. Please review.
+
+Previously, we thought it can get upstreamed after huge page support, but
+huge pages require support on guestmemfd side which might take time to hit
+upstream. Dynamic PAMT doesn't have dependencies.
+
+The patchset can be found here:
+
+git://git.kernel.org/pub/scm/linux/kernel/git/kas/linux.git tdx/dpamt
+
+==========================================================================
+
+The Physical Address Metadata Table (PAMT) holds TDX metadata for
+physical memory and must be allocated by the kernel during TDX module
+initialization.
+
+The exact size of the required PAMT memory is determined by the TDX
+module and may vary between TDX module versions, but currently it is
+approximately 0.4% of the system memory. This is a significant
+commitment, especially if it is not known upfront whether the machine
+will run any TDX guests.
+
+The Dynamic PAMT feature reduces static PAMT allocations. PAMT_1G and
+PAMT_2M levels are still allocated on TDX module initialization, but the
+PAMT_4K level is allocated dynamically, reducing static allocations to
+approximately 0.004% of the system memory.
+
+PAMT memory is dynamically allocated as pages gain TDX protections.
+It is reclaimed when TDX protections have been removed from all
+pages in a contiguous area.
+
+Dynamic PAMT support in TDX module
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Dynamic PAMT is a TDX feature that allows VMM to allocate PAMT_4K as
+needed. PAMT_1G and PAMT_2M are still allocated statically at the time of
+TDX module initialization. At init stage allocation of PAMT_4K is replaced
+with PAMT_PAGE_BITMAP which currently requires one bit of memory per 4k.
+
+VMM is responsible for allocating and freeing PAMT_4K. There's a couple of
+new SEAMCALLs for this: TDH.PHYMEM.PAMT.ADD and TDH.PHYMEM.PAMT.REMOVE.
+They add/remove PAMT memory in form of page pair. There's no requirement
+for these pages to be contiguous.
+
+Page pair supplied via TDH.PHYMEM.PAMT.ADD will cover specified 2M region.
+It allows any 4K from the region to be usable by TDX module.
+
+With Dynamic PAMT, a number of SEAMCALLs can now fail due to missing PAMT
+memory (TDX_MISSING_PAMT_PAGE_PAIR):
+
+ - TDH.MNG.CREATE
+ - TDH.MNG.ADDCX
+ - TDH.VP.ADDCX
+ - TDH.VP.CREATE
+ - TDH.MEM.PAGE.ADD
+ - TDH.MEM.PAGE.AUG
+ - TDH.MEM.PAGE.DEMOTE
+ - TDH.MEM.PAGE.RELOCATE
+
+Basically, if you supply memory to a TD, this memory has to backed by PAMT
+memory.
+
+Once no TD uses the 2M range, the PAMT page pair can be reclaimed with
+TDH.PHYMEM.PAMT.REMOVE.
+
+TDX module track PAMT memory usage and can give VMM a hint that PAMT
+memory can be removed. Such hint is provided from all SEAMCALLs that
+removes memory from TD:
+
+ - TDH.MEM.SEPT.REMOVE
+ - TDH.MEM.PAGE.REMOVE
+ - TDH.MEM.PAGE.PROMOTE
+ - TDH.MEM.PAGE.RELOCATE
+ - TDH.PHYMEM.PAGE.RECLAIM
+
+With Dynamic PAMT, TDH.MEM.PAGE.DEMOTE takes PAMT page pair as additional
+input to populate PAMT_4K on split. TDH.MEM.PAGE.PROMOTE returns no longer
+needed PAMT page pair.
+
+PAMT memory is global resource and not tied to a specific TD. TDX modules
+maintains PAMT memory in a radix tree addressed by physical address. Each
+entry in the tree can be locked with shared or exclusive lock. Any
+modification of the tree requires exclusive lock.
+
+Any SEAMCALL that takes explicit HPA as an argument will walk the tree
+taking shared lock on entries. It required to make sure that the page
+pointed by HPA is of compatible type for the usage.
+
+TDCALLs don't take PAMT locks as none of the take HPA as an argument.
+
+Dynamic PAMT enabling in kernel
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Kernel maintains refcounts for every 2M regions with two helpers
+tdx_pamt_get() and tdx_pamt_put().
+
+The refcount represents number of users for the PAMT memory in the region.
+Kernel calls TDH.PHYMEM.PAMT.ADD on 0->1 transition and
+TDH.PHYMEM.PAMT.REMOVE on transition 1->0.
+
+The function tdx_alloc_page() allocates a new page and ensures that it is
+backed by PAMT memory. Pages allocated in this manner are ready to be used
+for a TD. The function tdx_free_page() frees the page and releases the
+PAMT memory for the 2M region if it is no longer needed.
+
+PAMT memory gets allocated as part of TD init, VCPU init, on populating
+SEPT tree and adding guest memory (both during TD build and via AUG on
+accept). Splitting 2M page into 4K also requires PAMT memory.
+
+PAMT memory removed on reclaim of control pages and guest memory.
+
+Populating PAMT memory on fault and on split is tricky as kernel cannot
+allocate memory from the context where it is needed. These code paths use
+pre-allocated PAMT memory pools.
+
+Previous attempt on Dynamic PAMT enabling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The initial attempt at kernel enabling was quite different. It was built
+around lazy PAMT allocation: only trying to add a PAMT page pair if a
+SEAMCALL fails due to a missing PAMT and reclaiming it based on hints
+provided by the TDX module.
+
+The motivation was to avoid duplicating the PAMT memory refcounting that
+the TDX module does on the kernel side.
+
+This approach is inherently more racy as there is no serialization of
+PAMT memory add/remove against SEAMCALLs that add/remove memory for a TD.
+Such serialization would require global locking, which is not feasible.
+
+This approach worked, but at some point it became clear that it could not
+be robust as long as the kernel avoids TDX_OPERAND_BUSY loops.
+TDX_OPERAND_BUSY will occur as a result of the races mentioned above.
+
+This approach was abandoned in favor of explicit refcounting.
+
+v2:
+ - Drop phys_prepare/clenup. Use kvm_get_running_vcpu() to reach per-VCPU PAMT
+   memory pool from TDX code instead.
+ - Move code that allocates/frees PAMT out of KVM;
+ - Allocate refcounts per-memblock, not per-TDMR;
+ - Fix free_pamt_metadata() for machines without Dynamic PAMT;
+ - Fix refcounting in tdx_pamt_put() error path;
+ - Export functions where they are used;
+ - Consolidate TDX error handling code;
+ - Add documentation for Dynamic PAMT;
+ - Mark /proc/meminfo patch [NOT-FOR-UPSTREAM];
+Kirill A. Shutemov (12):
+  x86/tdx: Consolidate TDX error handling
+  x86/virt/tdx: Allocate page bitmap for Dynamic PAMT
+  x86/virt/tdx: Allocate reference counters for PAMT memory
+  x86/virt/tdx: Add tdx_alloc/free_page() helpers
+  KVM: TDX: Allocate PAMT memory in __tdx_td_init()
+  KVM: TDX: Allocate PAMT memory in tdx_td_vcpu_init()
+  KVM: TDX: Preallocate PAMT pages to be used in page fault path
+  KVM: TDX: Handle PAMT allocation in fault path
+  KVM: TDX: Reclaim PAMT memory
+  [NOT-FOR-UPSTREAM] x86/virt/tdx: Account PAMT memory and print it in
+    /proc/meminfo
+  x86/virt/tdx: Enable Dynamic PAMT
+  Documentation/x86: Add documentation for TDX's Dynamic PAMT
+
+ Documentation/arch/x86/tdx.rst              | 108 ++++++
+ arch/x86/coco/tdx/tdx.c                     |   6 +-
+ arch/x86/include/asm/kvm_host.h             |   2 +
+ arch/x86/include/asm/set_memory.h           |   3 +
+ arch/x86/include/asm/tdx.h                  |  40 ++-
+ arch/x86/include/asm/tdx_errno.h            |  96 +++++
+ arch/x86/include/asm/tdx_global_metadata.h  |   1 +
+ arch/x86/kvm/mmu/mmu.c                      |   7 +
+ arch/x86/kvm/vmx/tdx.c                      | 102 ++++--
+ arch/x86/kvm/vmx/tdx.h                      |   1 -
+ arch/x86/kvm/vmx/tdx_errno.h                |  40 ---
+ arch/x86/mm/Makefile                        |   2 +
+ arch/x86/mm/meminfo.c                       |  11 +
+ arch/x86/mm/pat/set_memory.c                |   2 +-
+ arch/x86/virt/vmx/tdx/tdx.c                 | 380 +++++++++++++++++++-
+ arch/x86/virt/vmx/tdx/tdx.h                 |   5 +-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c |   3 +
+ virt/kvm/kvm_main.c                         |   1 +
+ 18 files changed, 702 insertions(+), 108 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/tdx: Consolidate TDX error handling
+[PATCHv2 01/12] x86/tdx: Consolidate TDX error handling
+Author: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+
+Move all (host, kvm, guest) code related to TDX error handling into
+<asm/tdx_errno.h>.
+
+Add inline functions to check errors.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+---
+ arch/x86/coco/tdx/tdx.c                       |  6 +-
+ arch/x86/include/asm/tdx.h                    | 21 +------
+ arch/x86/{kvm/vmx => include/asm}/tdx_errno.h | 60 +++++++++++++++++--
+ arch/x86/kvm/vmx/tdx.c                        | 18 ++----
+ arch/x86/kvm/vmx/tdx.h                        |  1 -
+ 5 files changed, 63 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  target/i386: KVM: add hack for Windows vCPU hotplug with SGX
+[PATCH] target/i386: KVM: add hack for Windows vCPU hotplug with SGX
+Author: Andrey Zhadchenko <andrey.zhadchenko@virtuozzo.com>
+
+When hotplugging vCPUs to the Windows vms, we observed strange instance
+crash on Intel(R) Xeon(R) CPU E3-1230 v6:
+panic hyper-v: arg1='0x3e', arg2='0x46d359bbdff', arg3='0x56d359bbdff', arg4='0x0', arg5='0x0'
+
+Presumably, Windows thinks that hotplugged CPU is not "equivalent enough"
+to the previous ones. The problem lies within msr 3a. During the startup,
+Windows assigns some value to this register. During the hotplug it
+expects similar value on the new vCPU in msr 3a. But by default it
+is zero.
+
+   CPU 0/KVM-16856   [007] .......   380.398695: kvm_msr: msr_read 3a = 0x0        <debug_before_write>
+   CPU 0/KVM-16856   [007] .......   380.398696: kvm_msr: msr_write 3a = 0x40005
+   CPU 3/KVM-16859   [001] .......   380.398914: kvm_msr: msr_read 3a = 0x0        <debug_before_write>
+   CPU 3/KVM-16859   [001] .......   380.398914: kvm_msr: msr_write 3a = 0x40005
+   CPU 2/KVM-16858   [006] .......   380.398963: kvm_msr: msr_read 3a = 0x0        <debug_before_write>
+   CPU 2/KVM-16858   [006] .......   380.398964: kvm_msr: msr_write 3a = 0x40005
+   CPU 1/KVM-16857   [004] .......   380.399007: kvm_msr: msr_read 3a = 0x0        <debug_before_write>
+   CPU 1/KVM-16857   [004] .......   380.399007: kvm_msr: msr_write 3a = 0x40005
+   CPU 0/KVM-16856   [001] .......   384.497714: kvm_msr: msr_read 3a = 0x40005
+   CPU 0/KVM-16856   [001] .......   384.497716: kvm_msr: msr_read 3a = 0x40005
+   CPU 1/KVM-16857   [007] .......   384.934791: kvm_msr: msr_read 3a = 0x40005
+   CPU 1/KVM-16857   [007] .......   384.934793: kvm_msr: msr_read 3a = 0x40005
+   CPU 2/KVM-16858   [002] .......   384.977871: kvm_msr: msr_read 3a = 0x40005
+   CPU 2/KVM-16858   [002] .......   384.977873: kvm_msr: msr_read 3a = 0x40005
+   CPU 3/KVM-16859   [006] .......   385.021217: kvm_msr: msr_read 3a = 0x40005
+   CPU 3/KVM-16859   [006] .......   385.021220: kvm_msr: msr_read 3a = 0x40005
+   CPU 4/KVM-17500   [002] .......   453.733743: kvm_msr: msr_read 3a = 0x0        <- new vcpu, Windows wants to see 0x40005 here instead of default value>
+   CPU 4/KVM-17500   [002] .......   453.733745: kvm_msr: msr_read 3a = 0x0
+
+Bit #18 probably means that Intel SGX is supported, because disabling
+it via CPU arguments results is successfull hotplug (and msr value 0x5).
+
+At least Win2k16, Win2k19, Win2k22 are affected. This a Windows bug, but
+in my opinion, given the broad range of affected OSes, it is worth to
+have a hack.
+
+This patch introduces new CPU option: QEMU will copy msr 3a value from
+the first vCPU during the hotplug. This problem may not be limited to
+SGX feature, so the whole register is copied.
+By default the option is set to auto and hyper-v is used as Windows
+indicator to enable this new feature.
+
+Resolves: #2669
+Signed-off-by: Andrey Zhadchenko <andrey.zhadchenko@virtuozzo.com>
+---
+ target/i386/cpu.c     |  2 ++
+ target/i386/cpu.h     |  3 +++
+ target/i386/kvm/kvm.c | 43 +++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 48 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: Allow CPU to reschedule while setting per-page memory attributes
+[PATCH v2 1/3] KVM: Allow CPU to reschedule while setting per-page memory attributes
+Author: Liam Merwick <liam.merwick@oracle.com>
+
+When running an SEV-SNP guest with a sufficiently large amount of memory (1TB+),
+the host can experience CPU soft lockups when running an operation in
+kvm_vm_set_mem_attributes() to set memory attributes on the whole
+range of guest memory.
+
+watchdog: BUG: soft lockup - CPU#8 stuck for 26s! [qemu-kvm:6372]
+CPU: 8 UID: 0 PID: 6372 Comm: qemu-kvm Kdump: loaded Not tainted 6.15.0-rc7.20250520.el9uek.rc1.x86_64 #1 PREEMPT(voluntary)
+Hardware name: Oracle Corporation ORACLE SERVER E4-2c/Asm,MB Tray,2U,E4-2c, BIOS 78016600 11/13/2024
+RIP: 0010:xas_create+0x78/0x1f0
+Code: 00 00 00 41 80 fc 01 0f 84 82 00 00 00 ba 06 00 00 00 bd 06 00 00 00 49 8b 45 08 4d 8d 65 08 41 39 d6 73 20 83 ed 06 48 85 c0 <74> 67 48 89 c2 83 e2 03 48 83 fa 02 75 0c 48 3d 00 10 00 00 0f 87
+RSP: 0018:ffffad890a34b940 EFLAGS: 00000286
+RAX: ffff96f30b261daa RBX: ffffad890a34b9c8 RCX: 0000000000000000
+RDX: 000000000000001e RSI: 0000000000000000 RDI: 0000000000000000
+RBP: 0000000000000018 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000000 R12: ffffad890a356868
+R13: ffffad890a356860 R14: 0000000000000000 R15: ffffad890a356868
+FS:  00007f5578a2a400(0000) GS:ffff97ed317e1000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 00007f015c70fb18 CR3: 00000001109fd006 CR4: 0000000000f70ef0
+PKRU: 55555554
+Call Trace:
+ <TASK>
+ xas_store+0x58/0x630
+ __xa_store+0xa5/0x130
+ xa_store+0x2c/0x50
+ kvm_vm_set_mem_attributes+0x343/0x710 [kvm]
+ kvm_vm_ioctl+0x796/0xab0 [kvm]
+ __x64_sys_ioctl+0xa3/0xd0
+ do_syscall_64+0x8c/0x7a0
+ entry_SYSCALL_64_after_hwframe+0x76/0x7e
+RIP: 0033:0x7f5578d031bb
+Code: ff ff ff 85 c0 79 9b 49 c7 c4 ff ff ff ff 5b 5d 4c 89 e0 41 5c c3 66 0f 1f 84 00 00 00 00 00 f3 0f 1e fa b8 10 00 00 00 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 8b 0d 2d 4c 0f 00 f7 d8 64 89 01 48
+RSP: 002b:00007ffe0a742b88 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 000000004020aed2 RCX: 00007f5578d031bb
+RDX: 00007ffe0a742c80 RSI: 000000004020aed2 RDI: 000000000000000b
+RBP: 0000010000000000 R08: 0000010000000000 R09: 0000017680000000
+R10: 0000000000000080 R11: 0000000000000246 R12: 00005575e5f95120
+R13: 00007ffe0a742c80 R14: 0000000000000008 R15: 00005575e5f961e0
+
+While looping through the range of memory setting the attributes,
+call cond_resched() to give the scheduler a chance to run a higher
+priority task on the runqueue if necessary and avoid staying in
+kernel mode long enough to trigger the lockup.
+
+Fixes: 5a475554db1e ("KVM: Introduce per-page memory attributes")
+Cc: stable@vger.kernel.org # 6.12.x
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Liam Merwick <liam.merwick@oracle.com>
+---
+ virt/kvm/kvm_main.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  SEV-SNP fix for cpu soft lockup on 1TB+ guests
+[PATCH v2 0/3] SEV-SNP fix for cpu soft lockup on 1TB+ guests
+Author: Liam Merwick <liam.merwick@oracle.com>
+
+When creating SEV-SNP guests with a large amount of memory (940GB or greater)
+the host experiences a soft cpu lockup while setting the per-page memory
+attributes on the whole range of memory in the guest.
+
+The underlying issue is that the implementation of setting the
+memory attributes using an Xarray implementation is a time-consuming
+operation (e.g. a 1.9TB guest takes over 30 seconds to set the attributes)
+
+Fix the lockup by modifying kvm_vm_set_mem_attributes() to call cond_resched()
+during the loops to reserve and store the Xarray entries to give the scheduler
+a chance to run a higher priority task on the runqueue if necessary and avoid
+staying in kernel mode long enough to trigger the lockup.
+
+Tested with VMs up to 1900GB in size (the limit of hardware available to me)
+
+The functionality was introduced in v6.8 but I tagged as just needing
+backporting as far as linux-6.12.y (applies cleanly)
+
+Based on tag: kvm-6.16-1
+
+v1 -> v2
+Implement suggestion by Sean to use cond_resched() rather than splitting operations
+into batches.
+
+v1: https://lore.kernel.org/all/20250605152502.919385-1-liam.merwick@oracle.com 
+
+Liam Merwick (3):
+  KVM: Allow CPU to reschedule while setting per-page memory attributes
+  KVM: Add trace_kvm_vm_set_mem_attributes()
+  KVM: fix typo in kvm_vm_set_mem_attributes() comment
+
+ include/trace/events/kvm.h | 27 +++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c        |  7 ++++++-
+ 2 files changed, 33 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
