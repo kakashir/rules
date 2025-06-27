@@ -1,0 +1,484 @@
+From f5985c7b9 to 69c1c233e
+KVM mailing list update from f5985c7b9 to 69c1c233e
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     22 amd.com
+      7 loongson.cn
+      6 arm.com
+      1 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     10  Mario Limonciello <mario.limonciello@amd.com>
+      7  Manali Shukla <manali.shukla@amd.com>
+      7  Bibo Mao <maobibo@loongson.cn>
+      6  Sascha Bischoff <Sascha.Bischoff@arm.com>
+      5  Santosh Shukla <santosh.shukla@amd.com>
+      1  Alex Williamson <alex.williamson@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  Implement support for IBS virtualization
+[PATCH v1 00/11] Implement support for IBS virtualization
+Author: Manali Shukla <manali.shukla@amd.com>
+
+Add support for IBS virtualization (VIBS). VIBS feature allows the
+guest to collect IBS samples without exiting the guest.  There are
+2 parts to it [1].
+ - Virtualizing the IBS register state.
+ - Ensuring the IBS interrupt is handled in the guest without exiting
+  the hypervisor.
+
+To deliver virtualized IBS interrupts to the guest, VIBS requires either
+AVIC or Virtual NMI (VNMI) support [1]. During IBS sampling, the
+hardware signals a VNMI. The source of this VNMI depends on the AVIC
+configuration:
+
+ - With AVIC disabled, the virtual NMI is hardware-accelerated.
+ - With AVIC enabled, the virtual NMI is delivered via AVIC using Extended LVT.
+
+The local interrupts are extended to include more LVT registers, to
+allow additional interrupt sources, like instruction based sampling
+etc. [3].
+
+Although IBS virtualization requires either AVIC or VNMI to be enabled
+in order to successfully deliver IBS NMIs to the guest, VNMI must be
+enabled to ensure reliable delivery. This requirement stems from the
+dynamic behavior of AVIC. While a guest is launched with AVIC enabled,
+AVIC can be inhibited at runtime. When AVIC is inhibited and VNMI is
+disabled, there is no mechanism to deliver IBS NMIs to the guest.
+Therefore, enabling VNMI is necessary to support IBS virtualization
+reliably.
+
+Note that, since IBS registers are swap type C [2], the hypervisor is
+responsible for saving and restoring of IBS host state. Hypervisor needs
+to disable host IBS before saving the state and enter the guest. After a
+guest exit, the hypervisor needs to restore host IBS state and re-enable
+IBS.
+
+The mediated PMU has the capability to save the host context when
+entering the guest by scheduling out all exclude_guest events, and to
+restore the host context when exiting the guest by scheduling in the
+previously scheduled-out events. This behavior aligns with the
+requirement for IBS registers being of swap type C. Therefore, the
+mediated PMU design can be leveraged to implement IBS virtualization.
+As a result, enabling the mediated PMU is a necessary requirement for
+IBS virtualization.
+
+The initial version of this series has been posted here:
+https://lore.kernel.org/kvm/f98687e0-1fee-8208-261f-d93152871f00@amd.com/
+
+Since then, the mediated PMU patches [5] have matured significantly.
+This series is a resurrection of previous VIBS series and leverages the
+mediated PMU infrastructure to enable IBS virtualization.
+
+How to enable VIBS?
+----------------------------------------------
+sudo echo 0 | sudo tee /proc/sys/kernel/nmi_watchdog
+sudo modprobe -r kvm_amd
+sudo modprobe kvm_amd enable_mediated_pmu=1 vnmi=1
+
+Qemu changes can be found at below location:
+----------------------------------------------
+https://github.com/AMDESE/qemu/tree/vibs_v1
+
+Qemu commandline to enable IBS virtualization:
+------------------------------------------------
+qemu-system-x86_64 -enable-kvm -cpu EPYC-Genoa,+ibs,+extlvt,+extapic,+svm,+pmu \ ..
+
+Testing done:
+------------------------------------------------
+- Following tests were executed on guest
+  sudo perf record -e ibs_op// -c 100000 -a
+  sudo perf record -e ibs_op// -c 100000 -C 10
+  sudo perf record -e ibs_op/cnt_ctl=1/ -c 100000 -a
+  sudo perf record -e ibs_op/cnt_ctl=1/ -c 100000 -a --raw-samples
+  sudo perf record -e ibs_op/cnt_ctl=1,l3missonly=1/ -c 100000 -a
+  sudo perf record -e ibs_op/cnt_ctl=1/ -c 100000 -p 1234
+  sudo perf record -e ibs_op/cnt_ctl=1/ -c 100000 -- ls
+  sudo ./tools/perf/perf record -e ibs_op// -e ibs_fetch// -a --raw-samples -c 100000
+  sudo perf report
+  sudo perf script
+  sudo perf report -D | grep -P "LdOp 1.*StOp 0" | wc -l
+  sudo perf report -D | grep -P "LdOp 1.*StOp 0.*DcMiss 1" | wc -l
+  sudo perf report -D | grep -P "LdOp 1.*StOp 0.*DcMiss 1.*L2Miss 1" | wc -l
+  sudo perf report -D | grep -B1 -P "LdOp 1.*StOp 0.*DcMiss 1.*L2Miss 1" | grep -P "DataSrc ([02-9]|1[0-2])=" | wc -l
+- perf_fuzzer was run for 3hrs, no softlockups or unknown NMIs were
+  seen.
+
+TO-DO: 
+-----------------------------------
+Enable IBS virtualization on SEV-ES and SEV-SNP guests.
+
+base-commit (61374cc145f4) + [4] (Clean up KVM's MSR interception code)
++ [5] (Mediated vPMU 4.0 for x86). 
+
+[1]: https://bugzilla.kernel.org/attachment.cgi?id=306250
+     AMD64 Architecture Programmer’s Manual, Vol 2, Section 15.38
+     Instruction-Based Sampling Virtualization.
+
+[2]: https://bugzilla.kernel.org/attachment.cgi?id=306250
+     AMD64 Architecture Programmer’s Manual, Vol 2, Appendix B Layout
+     of VMCB, Table B-3 Swap Types.
+
+[3]: https://bugzilla.kernel.org/attachment.cgi?id=306250
+     AMD64 Architecture Programmer’s Manual, Vol 2, Section 16.4.5
+     Extended Interrupts.
+
+[4]: https://lore.kernel.org/kvm/20250610225737.156318-1-seanjc@google.com/
+
+[5]: https://lore.kernel.org/kvm/20250324173121.1275209-1-mizhang@google.com/
+
+Manali Shukla (6):
+  perf/amd/ibs: Fix race condition in IBS
+  KVM: Add KVM_GET_LAPIC_W_EXTAPIC and KVM_SET_LAPIC_W_EXTAPIC for
+    extapic
+  KVM: x86/cpuid: Add a KVM-only leaf for IBS capabilities
+  KVM: x86: Extend CPUID range to include new leaf
+  perf/x86/amd: Enable VPMU passthrough capability for IBS PMU
+  perf/x86/amd: Remove exclude_guest check from perf_ibs_init()
+
+Santosh Shukla (5):
+  x86/cpufeatures: Add CPUID feature bit for Extended LVT
+  KVM: x86: Add emulation support for Extented LVT registers
+  x86/cpufeatures: Add CPUID feature bit for VIBS in SVM/SEV guests
+  KVM: SVM: Extend VMCB area for virtualized IBS registers
+  KVM: SVM: Add support for IBS Virtualization
+
+ Documentation/virt/kvm/api.rst     | 23 +++++++
+ arch/x86/events/amd/ibs.c          |  8 ++-
+ arch/x86/include/asm/apicdef.h     | 17 ++++++
+ arch/x86/include/asm/cpufeatures.h |  2 +
+ arch/x86/include/asm/kvm_host.h    |  1 +
+ arch/x86/include/asm/svm.h         | 16 ++++-
+ arch/x86/include/uapi/asm/kvm.h    |  5 ++
+ arch/x86/kvm/cpuid.c               | 13 ++++
+ arch/x86/kvm/lapic.c               | 81 ++++++++++++++++++++++---
+ arch/x86/kvm/lapic.h               |  7 ++-
+ arch/x86/kvm/reverse_cpuid.h       | 16 +++++
+ arch/x86/kvm/svm/avic.c            |  4 ++
+ arch/x86/kvm/svm/svm.c             | 96 ++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.c                 | 37 ++++++++----
+ include/uapi/linux/kvm.h           | 10 ++++
+ 15 files changed, 313 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  perf/amd/ibs: Fix race condition in IBS
+[PATCH v1 01/11] perf/amd/ibs: Fix race condition in IBS
+Author: Manali Shukla <manali.shukla@amd.com>
+
+Consider the following scenario,
+
+While scheduling out an IBS event from perf's core scheduling path,
+event_sched_out() disables the IBS event by clearing the IBS enable
+bit in perf_ibs_disable_event(). However, if a delayed IBS NMI is
+delivered after the IBS enable bit is cleared, the IBS NMI handler
+may still observe the valid bit set and incorrectly treat the sample
+as valid. As a result, it re-enables IBS by setting the enable bit,
+even though the event has already been scheduled out.
+
+This leads to a situation where IBS is re-enabled after being
+explicitly disabled, which is incorrect. Although this race does not
+have visible side effects, it violates the expected behavior of the
+perf subsystem.
+
+The race is particularly noticeable when userspace repeatedly disables
+and re-enables IBS using PERF_EVENT_IOC_DISABLE and
+PERF_EVENT_IOC_ENABLE ioctls in a loop.
+
+Fix this by checking the IBS_STOPPED bit in the IBS NMI handler before
+re-enabling the IBS event. If the IBS_STOPPED bit is set, it indicates
+that the event is either disabled or in the process of being disabled,
+and the NMI handler should not re-enable it.
+
+Signed-off-by: Manali Shukla <manali.shukla@amd.com>
+---
+ arch/x86/events/amd/ibs.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  irqchip/gic-v5: Skip deactivate for forwarded PPI
+[PATCH v2 1/5] irqchip/gic-v5: Skip deactivate for forwarded PPI
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+If a PPI interrupt is forwarded to a guest, skip the deactivate and
+only EOI. Rely on the guest deactivating both the virtual and physical
+interrupts (due to ICH_LRx_EL2.HW being set) later on as part of
+handling the injected interrupt. This mimics the behaviour seen on
+native GICv3.
+
+This is part of adding support for the GICv3 compatibility mode on a
+GICv5 host.
+
+Reviewed-by: Lorenzo Pieralisi <lpieralisi@kernel.org>
+
+Co-authored-by: Timothy Hayes <timothy.hayes@arm.com>
+Signed-off-by: Timothy Hayes <timothy.hayes@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ drivers/irqchip/irq-gic-v5.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Enable GICv3 guests on GICv5 hosts using
+[PATCH v2 0/5] KVM: arm64: Enable GICv3 guests on GICv5 hosts using
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Hi all,
+
+This series introduces support for running GICv3 guests on GICv5 hosts
+by leveraging the GICv5 legacy compatibility feature
+(FEAT_GCIE_LEGACY). The main motivation is to enable existing GICv3
+VMs on GICv5 system without VM or VMM modifications - things should
+work out of the box.
+
+The changes are focused on two main areas:
+
+    KVM GIC support: Enabling detection of a GICv5 host and
+    configuring it to support GICv3 guests.
+
+    IRQ chip support: Ensuring forwarded PPIs behave consistently with
+    GICv3 expectations.
+
+Summary of the patches:
+
+    Ensure injected guest interrupts behave correctly by deferring
+    deactivation to the guest, matching GICv3-native behavior.
+
+    Set up the necessary GIC capabilities to advertise
+    FEAT_GCIE_LEGACY to KVM.
+
+    Add missing system register required for enabling GICv3 compat
+    mode from EL2.
+
+    Enable full support for running GICv3 VMs on a GICv5 host when
+    compat mode is present, covering VHE, nVHE, and protected KVM
+    configurations (excluding nested virt).
+
+    Introduce a probe routine to enable GICv5 when FEAT_GCIE_LEGACY is
+    detected. This consumes the gic_kvm_info populated earlier.
+
+This support has been co-developed with T.Hayes, indicated with
+Co-authored-by tags.
+
+This series is based and dependent on [PATCH v6 00/31] Arm GICv5: Host
+driver implementation [1].
+
+Feedback welcome!
+
+Thanks,
+Sascha
+
+[1] https://lore.kernel.org/all/20250626-gicv5-host-v6-0-48e046af4642@kerne=
+l.org/
+---
+Changes in v2:
+- Switched to a lazy-disable approach for compat mode
+- Merged compat mode enable into __vgic_v3_restore_vmcr_aprs
+- Moved to using GICV5_CPUIF cpucap, where possible
+- Cleaned up helper functions
+- Added Reviewed-by tag
+- Link to v1: https://lore.kernel.org/all/20250620160741.3513940-1-sascha.b=
+ischoff@arm.com/
+---
+Sascha Bischoff (5):
+  irqchip/gic-v5: Skip deactivate for forwarded PPI interrupts
+  irqchip/gic-v5: Populate struct gic_kvm_info
+  arm64/sysreg: Add ICH_VCTLR_EL2
+  KVM: arm64: gic-v5: Support GICv3 compat
+  KVM: arm64: gic-v5: Probe for GICv5
+
+ arch/arm64/kvm/Makefile               |  3 +-
+ arch/arm64/kvm/hyp/vgic-v3-sr.c       | 51 +++++++++++++++++++++-----
+ arch/arm64/kvm/sys_regs.c             | 10 +++++-
+ arch/arm64/kvm/vgic/vgic-init.c       |  9 +++--
+ arch/arm64/kvm/vgic/vgic-v5.c         | 52 +++++++++++++++++++++++++++
+ arch/arm64/kvm/vgic/vgic.h            | 13 +++++++
+ arch/arm64/tools/sysreg               |  6 ++++
+ drivers/irqchip/irq-gic-v5.c          | 50 ++++++++++++++++++++++++++
+ include/kvm/arm_vgic.h                |  6 +++-
+ include/linux/irqchip/arm-vgic-info.h |  4 +++
+ 10 files changed, 191 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Fix interrupt route update with eiointc
+[PATCH v4 1/6] LoongArch: KVM: Fix interrupt route update with eiointc
+Author: Bibo Mao <maobibo@loongson.cn>
+
+With function eiointc_update_sw_coremap(), there is forced assignment
+like val = *(u64 *)pvalue. Parameter pvalue may be pointer to char type
+or others, there is problem with forced assignment with u64 type.
+
+Here the detailed value is passed rather address pointer.
+
+Cc: stable@vger.kernel.org
+Fixes: 3956a52bc05b ("LoongArch: KVM: Add EIOINTC read and write functions")
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/intc/eiointc.c | 13 ++++++-------
+ 1 file changed, 6 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Fixes with eiointc emulation
+[PATCH v4 0/6] LoongArch: KVM: Fixes with eiointc emulation
+Author: Bibo Mao <maobibo@loongson.cn>
+
+This series fix five issues about kernel eiointc emulation list as
+follows:
+  1. The first patch fixes type forced assignment issue.
+  2. The second patch fixes interrupt route with physical cpu.
+  3. The third patch disables update property num_cpu and feature
+  4. The fourth patch adds validation check about num_cpu from user
+     space.
+  5. Overflow with array index when emulate register EIOINTC_ENABLE
+     writing operation.
+  6. The sixth patch adds address alignment check
+  
+---
+v3 ... v4:
+  1. Remove patch about enhancement and only keep bugfix relative
+     patches.
+  2. Remove INTC indication in the patch title.
+  3. With access size, keep default case unchanged besides 1/2/4/8 since
+     here all patches are bugfix
+  4. Firstly check return value of copy_from_user() with error path,
+     keep the same order with old patch in patch 4.
+
+v2 ... v3:
+  1. Add prefix INTC: in title of every patch.
+  2. Fix array index overflow when emulate register EIOINTC_ENABLE
+     writing operation.
+  3. Add address alignment check with eiointc register access operation.
+
+v1 ... v2:
+  1. Add extra fix in patch 3 and patch 4, add num_cpu validation check
+  2. Name of stat information keeps unchanged, only move it from VM stat
+     to vCPU stat.
+---
+Bibo Mao (6):
+  LoongArch: KVM: Fix interrupt route update with eiointc
+  LoongArch: KVM: Check interrupt route from physical cpu
+  LoongArch: KVM: Disable update property num_cpu and feature
+  LoongArch: KVM: Check validation of num_cpu from user space
+  LoongArch: KVM: Avoid overflow with array index
+  LoongArch: KVM: Add address alignment check
+
+ arch/loongarch/kvm/intc/eiointc.c | 96 ++++++++++++++++++++++---------
+ 1 file changed, 68 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI: Add helper for checking if a PCI device is a display controller
+[PATCH v6 1/9] PCI: Add helper for checking if a PCI device is a display controller
+Author: Mario Limonciello <superm1@kernel.org>
+
+
+Several places in the kernel do class shifting to match whether a
+PCI device is display class.  Introduce a helper for those places to
+use.
+
+Acked-by: Bjorn Helgaas <bhelgaas@google.com>
+Reviewed-by: Daniel Dadap <ddadap@nvidia.com>
+Reviewed-by: Simona Vetter <simona.vetter@ffwll.ch>
+Signed-off-by: Mario Limonciello <mario.limonciello@amd.com>
+---
+ include/linux/pci.h | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  Adjust fbcon console device detection
+[PATCH v6 0/9] Adjust fbcon console device detection
+Author: Mario Limonciello <superm1@kernel.org>
+
+
+This series started out as changes to VGA arbiter to try to handle a case
+of a system with 2 GPUs that are not VGA devices [1].  This was discussed
+but decided not to overload the VGA arbiter for non VGA devices.
+
+Instead move the x86 specific detection of framebuffer resources into x86
+specific code that the fbcon can use to properly identify the primary
+device. This code is still called from the VGA arbiter, and the logic does
+not change there. To avoid regression default to VGA arbiter and only fall
+back to looking up with x86 specific detection method.
+
+In order for userspace to also be able to discover which device was the
+primary video display device create a new sysfs file 'boot_display'.
+
+A matching userspace implementation for this file is available here:
+https://gitlab.freedesktop.org/xorg/lib/libpciaccess/-/merge_requests/39
+https://gitlab.freedesktop.org/xorg/xserver/-/merge_requests/2038
+
+It is suggested that this series merge entirely through the PCI tree.
+
+Mario Limonciello (9):
+  PCI: Add helper for checking if a PCI device is a display controller
+  vfio/pci: Use pci_is_display()
+  vga_switcheroo: Use pci_is_display()
+  iommu/vt-d: Use pci_is_display()
+  ALSA: hda: Use pci_is_display()
+  Fix access to video_is_primary_device() when compiled without
+    CONFIG_VIDEO
+  PCI/VGA: Replace vga_is_firmware_default() with a screen info check
+  fbcon: Use screen info to find primary device
+  PCI: Add a new 'boot_display' attribute
+
+ Documentation/ABI/testing/sysfs-bus-pci |  8 +++++
+ arch/parisc/include/asm/video.h         |  2 +-
+ arch/sparc/include/asm/video.h          |  2 ++
+ arch/x86/include/asm/video.h            |  2 ++
+ arch/x86/video/video-common.c           | 13 ++++++-
+ drivers/gpu/vga/vga_switcheroo.c        |  2 +-
+ drivers/iommu/intel/iommu.c             |  2 +-
+ drivers/pci/pci-sysfs.c                 | 46 +++++++++++++++++++++++++
+ drivers/pci/vgaarb.c                    | 31 +++--------------
+ drivers/vfio/pci/vfio_pci_igd.c         |  3 +-
+ include/linux/pci.h                     | 15 ++++++++
+ sound/hda/hdac_i915.c                   |  2 +-
+ sound/pci/hda/hda_intel.c               |  4 +--
+ 13 files changed, 97 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Separate SR-IOV VF dev_set
+[PATCH] vfio/pci: Separate SR-IOV VF dev_set
+Author: Alex Williamson <alex.williamson@redhat.com>
+
+In the below noted Fixes commit we introduced a reflck mutex to allow
+better scaling between devices for open and close.  The reflck was
+based on the hot reset granularity, device level for root bus devices
+which cannot support hot reset or bus/slot reset otherwise.  Overlooked
+in this were SR-IOV VFs, where there's also no bus reset option, but
+the default for a non-root-bus, non-slot-based device is bus level
+reflck granularity.
+
+The reflck mutex has since become the dev_set mutex and is our defacto
+serialization for various operations and ioctls.  It still seems to be
+the case though that sets of vfio-pci devices really only need
+serialization relative to hot resets affecting the entire set, which
+is not relevant to SR-IOV VFs.  As described in the Closes link below,
+this serialization contributes to startup latency when multiple VFs
+sharing the same "bus" are opened concurrently.
+
+Mark the device itself as the basis of the dev_set for SR-IOV VFs.
+
+Reported-by: Aaron Lewis <aaronlewis@google.com>
+Closes: https://lore.kernel.org/all/20250626180424.632628-1-aaronlewis@google.com
+Tested-by: Aaron Lewis <aaronlewis@google.com>
+Fixes: e309df5b0c9e ("vfio/pci: Parallelize device open and release")
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
