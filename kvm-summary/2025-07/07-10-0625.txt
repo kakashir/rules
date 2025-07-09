@@ -1,0 +1,946 @@
+From 75a4db779 to a46bd38d7
+KVM mailing list update from 75a4db779 to a46bd38d7
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     35 amd.com
+     26 google.com
+     17 nvidia.com
+      9 loongson.cn
+      4 intel.com
+      2 rivosinc.com
+      1 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     33  Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+     17  Jason Gunthorpe <jgg@nvidia.com>
+     17  Fuad Tabba <tabba@google.com>
+      9  Bibo Mao <maobibo@loongson.cn>
+      4  Suleiman Souhlal <suleiman@google.com>
+      4  Ackerley Tng <ackerleytng@google.com>
+      3  Kai Huang <kai.huang@intel.com>
+      2  Kishon Vijay Abraham I <kvijayab@amd.com>
+      2  Jesse Taube <jesse@rivosinc.com>
+      1  Xiaoyao Li <xiaoyao.li@intel.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86: avoid underflow when scaling TSC frequency
+[PATCH] KVM: x86: avoid underflow when scaling TSC frequency
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+In function kvm_guest_time_update(), __scale_tsc() is used to calculate
+a TSC *frequency* rather than a TSC value.  With low-enough ratios,
+a TSC value that is less than 1 would underflow to 0 and to an infinite
+while loop in kvm_get_time_scale():
+
+  kvm_guest_time_update(struct kvm_vcpu *v)
+    if (kvm_caps.has_tsc_control)
+      tgt_tsc_khz = kvm_scale_tsc(tgt_tsc_khz,
+                                  v->arch.l1_tsc_scaling_ratio);
+        __scale_tsc(u64 ratio, u64 tsc)
+          ratio=122380531, tsc=2299998, N=48
+          ratio*tsc >> N = 0.999... -> 0
+
+Later in the function:
+
+  Call Trace:
+   <TASK>
+   kvm_get_time_scale arch/x86/kvm/x86.c:2458 [inline]
+   kvm_guest_time_update+0x926/0xb00 arch/x86/kvm/x86.c:3268
+   vcpu_enter_guest.constprop.0+0x1e70/0x3cf0 arch/x86/kvm/x86.c:10678
+   vcpu_run+0x129/0x8d0 arch/x86/kvm/x86.c:11126
+   kvm_arch_vcpu_ioctl_run+0x37a/0x13d0 arch/x86/kvm/x86.c:11352
+   kvm_vcpu_ioctl+0x56b/0xe60 virt/kvm/kvm_main.c:4188
+   vfs_ioctl fs/ioctl.c:51 [inline]
+   __do_sys_ioctl fs/ioctl.c:871 [inline]
+   __se_sys_ioctl+0x12d/0x190 fs/ioctl.c:857
+   do_syscall_x64 arch/x86/entry/common.c:51 [inline]
+   do_syscall_64+0x59/0x110 arch/x86/entry/common.c:81
+   entry_SYSCALL_64_after_hwframe+0x78/0xe2
+
+This can really happen only when fuzzing, since the TSC frequency
+would have to be nonsensically low.
+
+Fixes: 35181e86df97 ("KVM: x86: Add a common TSC scaling function")
+Reported-by: Yuntao Liu <liuyuntao12@huawei.com>
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/x86.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Fix incorrect iommu_groups with PCIe ACS
+[PATCH v2 00/16] Fix incorrect iommu_groups with PCIe ACS
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+The series patches have extensive descriptions as to the problem and
+solution, but in short the ACS flags are not analyzed according to the
+spec to form the iommu_groups that VFIO is expecting for security.
+
+ACS is an egress control only. For a path the ACS flags on each hop only
+effect what other devices the TLP is allowed to reach. It does not prevent
+other devices from reaching into this path.
+
+For VFIO if device A is permitted to access device B's MMIO then A and B
+must be grouped together. This says that even if a path has isolating ACS
+flags on each hop, off-path devices with non-isolating ACS can still reach
+into that path and must be grouped gother.
+
+For switches, a PCIe topology like:
+
+                               -- DSP 02:00.0 -> End Point A
+ Root 00:00.0 -> USP 01:00.0 --|
+                               -- DSP 02:03.0 -> End Point B
+
+Will generate unique single device groups for every device even if ACS is
+not enabled on the two DSP ports. It should at least group A/B together
+because no ACS means A can reach the MMIO of B. This is a serious failure
+for the VFIO security model.
+
+For multi-function-devices, a PCIe topology like:
+
+                  -- MFD 00:1f.0 ACS != REQ_ACS_FLAGS
+  Root 00:00.00 --|- MFD 00:1f.2 ACS != REQ_ACS_FLAGS
+                  |- MFD 00:1f.6 ACS = REQ_ACS_FLAGS
+
+Will group [1f.0, 1f.2] and 1f.6 gets a single device group. In many cases
+we suspect that the MFD actually doesn't need ACS, so this is probably not
+as important a security failure, but from a spec perspective the correct
+answer is one group of [1f.0, 1f.2, 1f.6] beacuse 1f.0/2 have no ACS
+preventing them from reaching the MMIO of 1f.6.
+
+There is also some confusing spec language about how ACS and SRIOV works
+which this series does not address.
+
+This entire series goes further and makes some additional improvements to
+the ACS validation found while studying this problem. The groups around a
+PCIe to PCI bridge are shrunk to not include the PCIe bridge.
+
+The last patches implement "ACS Enhanced" on top of it. Due to how ACS
+Enhanced was defined as a non-backward compatible feature it is important
+to get SW support out there.
+
+Due to the potential of iommu_groups becoming winder and thus non-usable
+for VFIO this should go to a linux-next tree to give it some more
+exposure.
+
+I have now tested this a few systems I could get:
+
+ - Various Intel client systems:
+   * Raptor Lake, with VMD enabled and using the real_dev mechanism
+   * 6/7th generation 100 Series/C320
+   * 5/6th generation 100 Series/C320 with a NIC MFD quirk
+   * Tiger Lake
+   * 5/6th generation Sunrise Point
+  No change in grouping on any of these systems
+
+ - NVIDIA Grace system with 5 different PCI switches from two vendors
+   Bug fix widening the iommu_groups works as expected here
+
+ - AMD Milan Starship/Matisse
+   * Groups are similar, this series generates narrow groups because the
+     dummy host bridges always get their own groups. Something forcibly
+     disables ACS SV on one bridge which correctly causes one larger
+     group.
+
+This is on github: https://github.com/jgunthorpe/linux/commits/pcie_switch_groups
+
+v2:
+ - Revise comments and commit messages
+ - Rename struct pci_alias_set to pci_reachable_set
+ - Make more sense of the special bus->self = NULL case for SRIOV
+ - Add pci_group_alloc_non_isolated() for readability
+ - Rename BUS_DATA_PCI_UNISOLATED to BUS_DATA_PCI_NON_ISOLATED
+ - Propogate BUS_DATA_PCI_NON_ISOLATED downstream from a MFD in case a MFD
+   function is a bridge
+ - New patches to add pci_mfd_isolation() to retain more cases of narrow
+   groups on MFDs with missing ACS.
+ - Redescribe the MFD related change as a bug fix. For a MFD to be
+   isolated all functions must have egress control on their P2P.
+v1: https://patch.msgid.link/r/0-v1-74184c5043c6+195-pcie_switch_groups_jgg@nvidia.com
+
+Jason Gunthorpe (16):
+  PCI: Move REQ_ACS_FLAGS into pci_regs.h as PCI_ACS_ISOLATED
+  PCI: Add pci_bus_isolation()
+  iommu: Compute iommu_groups properly for PCIe switches
+  iommu: Organize iommu_group by member size
+  PCI: Add pci_reachable_set()
+  PCI: Remove duplication in calling pci_acs_ctrl_enabled()
+  PCI: Use pci_quirk_mf_endpoint_acs() for pci_quirk_amd_sb_acs()
+  PCI: Use pci_acs_ctrl_isolated() for pci_quirk_al_acs()
+  PCI: Widen the acs_flags to u32 within the quirk callback
+  PCI: Add pci_mfd_isolation()
+  iommu: Compute iommu_groups properly for PCIe MFDs
+  iommu: Validate that pci_for_each_dma_alias() matches the groups
+  PCI: Add the ACS Enhanced Capability definitions
+  PCI: Enable ACS Enhanced bits for enable_acs and config_acs
+  PCI: Check ACS DSP/USP redirect bits in pci_enable_pasid()
+  PCI: Check ACS Extended flags for pci_bus_isolated()
+
+ drivers/iommu/iommu.c         | 486 +++++++++++++++++++++++-----------
+ drivers/pci/ats.c             |   4 +-
+ drivers/pci/pci.c             |  73 ++++-
+ drivers/pci/pci.h             |   5 +
+ drivers/pci/quirks.c          | 137 ++++++----
+ drivers/pci/search.c          | 294 ++++++++++++++++++++
+ include/linux/pci.h           |  50 ++++
+ include/uapi/linux/pci_regs.h |  18 ++
+ 8 files changed, 846 insertions(+), 221 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI: Move REQ_ACS_FLAGS into pci_regs.h as PCI_ACS_ISOLATED
+[PATCH v2 01/16] PCI: Move REQ_ACS_FLAGS into pci_regs.h as PCI_ACS_ISOLATED
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+The next patch wants to use this constant, share it.
+
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ drivers/iommu/iommu.c         | 16 +++-------------
+ include/uapi/linux/pci_regs.h | 10 ++++++++++
+ 2 files changed, 13 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  MAINTAINERS: Add KVM mail list to the TDX entry
+[PATCH] MAINTAINERS: Add KVM mail list to the TDX entry
+Author: Xiaoyao Li <xiaoyao.li@intel.com>
+
+KVM is the primary user of TDX within the kernel, and it is KVM that
+provides support for running TDX guests.
+
+Add the KVM mailing list to the TDX entry so that KVM people can be
+informed of proposed changes and updates related to TDX.
+
+Signed-off-by: Xiaoyao Li <xiaoyao.li@intel.com>
+---
+ MAINTAINERS | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  lib: Add STR_IS_Y and STR_IS_N for checking env vars
+[kvm-unit-tests PATCH v3 1/2] lib: Add STR_IS_Y and STR_IS_N for checking env vars
+Author: Jesse Taube <jesse@rivosinc.com>
+
+the line:
+(s && (*s == '1' || *s == 'y' || *s == 'Y'))
+is used in a few places add a macro for it and its 'n' counterpart.
+
+Add a copy of Linux's IS_ENABLED macro to be used in GET_ENV_OR_CONFIG.
+Add GET_ENV_OR_CONFIG for CONFIG values which can be overridden by
+the environment.
+
+Signed-off-by: Jesse Taube <jesse@rivosinc.com>
+---
+V1 -> V2:
+ - New commit
+V2 -> V3:
+ - Add IS_ENABLED so CONFIG_##name can be undefined
+ - Change GET_ENV_OR_CONFIG to GET_CONFIG_OR_ENV
+ - Fix it's to its
+---
+ lib/argv.h        | 38 ++++++++++++++++++++++++++++++++++++++
+ lib/errata.h      |  7 ++++---
+ riscv/sbi-tests.h |  3 ++-
+ 3 files changed, 44 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+[PATCH v13 01/20] KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+Author: Fuad Tabba <tabba@google.com>
+
+Rename the Kconfig option CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM. The
+original name implied that the feature only supported "private" memory.
+However, CONFIG_KVM_PRIVATE_MEM enables guest_memfd in general, which is
+not exclusively for private memory. Subsequent patches in this series
+will add guest_memfd support for non-CoCo VMs, whose memory is not
+private.
+
+Renaming the Kconfig option to CONFIG_KVM_GMEM more accurately reflects
+its broader scope as the main Kconfig option for all guest_memfd-backed
+memory. This provides clearer semantics for the option and avoids
+confusion as new features are introduced.
+
+Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
+Co-developed-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ include/linux/kvm_host.h        | 14 +++++++-------
+ virt/kvm/Kconfig                |  8 ++++----
+ virt/kvm/Makefile.kvm           |  2 +-
+ virt/kvm/kvm_main.c             |  4 ++--
+ virt/kvm/kvm_mm.h               |  4 ++--
+ 6 files changed, 17 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Enable host userspace mapping for
+[PATCH v13 00/20] KVM: Enable host userspace mapping for
+Author: Fuad Tabba <tabba@google.com>
+
+Main changes since v12 [1]:
+* Rename various functions and variables
+* Expand and clarify commit messages
+* Rebase on Linux 6.16-rc5
+
+This patch series enables host userspace mapping of guest_memfd-backed
+memory for non-CoCo VMs. This is required for several evolving KVM use
+cases:
+
+* Allows VMMs like Firecracker to run guests entirely backed by
+  guest_memfd [2]. This provides a unified memory management model for
+  both confidential and non-confidential guests, simplifying VMM design.
+
+* Enhanced Security via direct map removal: When combined with Patrick's
+  series for direct map removal [3], this provides additional hardening
+  against Spectre-like transient execution attacks by eliminating the
+  need for host kernel direct maps of guest memory.
+
+* Lays the groundwork for *restricted* mmap() support for
+  guest_memfd-backed memory on CoCo platforms [4] that permit in-place
+  sharing of guest memory with the host.
+
+Patch breakdown:
+
+Patches 1-7: Primarily infrastructure refactorings and renames to decouple
+guest_memfd from the concept of "private" memory.
+
+Patches 8-9: Add support for the host to map guest_memfd backed memory
+for non-CoCo VMs, which includes support for mmap() and fault handling.
+This is gated by a new configuration option, toggled by a new flag, and
+advertised to userspace by a new capability (introduced in patch 18).
+
+Patches 10-14: Implement x86 guest_memfd mmap support.
+
+Patches 15-17: Implement arm64 guest_memfd mmap support.
+
+Patch 18: Introduce the new capability to advertise this support and
+update the documentation.
+
+Patches 19-20: Update and expand selftests for guest_memfd to include
+mmap functionality and improve portability.
+
+To test this patch series and boot a guest utilizing the new features,
+please refer to the instructions in v8 of the series [5]. Note that
+kvmtool for Linux 6.16 (available at [6]) is required, as the
+KVM_CAP_GMEM_MMAP capability number has changed, additionally, drop the
+--sw_protected kvmtool parameter to test with the default VM type.
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20250611133330.1514028-3-tabba@google.com/T/
+[2] https://github.com/firecracker-microvm/firecracker/tree/feature/secret-hiding
+[3] https://lore.kernel.org/all/20250221160728.1584559-1-roypat@amazon.co.uk/
+[4] https://lore.kernel.org/all/20250328153133.3504118-1-tabba@google.com/
+[5] https://lore.kernel.org/all/20250430165655.605595-1-tabba@google.com/
+[6] https://android-kvm.googlesource.com/kvmtool/+/refs/heads/tabba/guestmem-basic-6.16
+
+Ackerley Tng (4):
+  KVM: x86/mmu: Generalize private_max_mapping_level x86 op to
+    max_mapping_level
+  KVM: x86/mmu: Allow NULL-able fault in kvm_max_private_mapping_level
+  KVM: x86/mmu: Consult guest_memfd when computing max_mapping_level
+  KVM: x86/mmu: Handle guest page faults for guest_memfd with shared
+    memory
+
+Fuad Tabba (16):
+  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+  KVM: Rename CONFIG_KVM_GENERIC_PRIVATE_MEM to
+    CONFIG_KVM_GENERIC_GMEM_POPULATE
+  KVM: Introduce kvm_arch_supports_gmem()
+  KVM: x86: Introduce kvm->arch.supports_gmem
+  KVM: Rename kvm_slot_can_be_private() to kvm_slot_has_gmem()
+  KVM: Fix comments that refer to slots_lock
+  KVM: Fix comment that refers to kvm uapi header path
+  KVM: guest_memfd: Allow host to map guest_memfd pages
+  KVM: guest_memfd: Track guest_memfd mmap support in memslot
+  KVM: x86: Enable guest_memfd mmap for default VM type
+  KVM: arm64: Refactor user_mem_abort()
+  KVM: arm64: Handle guest_memfd-backed guest page faults
+  KVM: arm64: Enable host mapping of shared guest_memfd memory
+  KVM: Introduce the KVM capability KVM_CAP_GMEM_MMAP
+  KVM: selftests: Do not use hardcoded page sizes in guest_memfd test
+  KVM: selftests: guest_memfd mmap() test when mmap is supported
+
+ Documentation/virt/kvm/api.rst                |   9 +
+ arch/arm64/include/asm/kvm_host.h             |   4 +
+ arch/arm64/kvm/Kconfig                        |   1 +
+ arch/arm64/kvm/mmu.c                          | 190 ++++++++++++----
+ arch/x86/include/asm/kvm-x86-ops.h            |   2 +-
+ arch/x86/include/asm/kvm_host.h               |  18 +-
+ arch/x86/kvm/Kconfig                          |   7 +-
+ arch/x86/kvm/mmu/mmu.c                        | 115 ++++++----
+ arch/x86/kvm/svm/sev.c                        |  12 +-
+ arch/x86/kvm/svm/svm.c                        |   3 +-
+ arch/x86/kvm/svm/svm.h                        |   4 +-
+ arch/x86/kvm/vmx/main.c                       |   6 +-
+ arch/x86/kvm/vmx/tdx.c                        |   6 +-
+ arch/x86/kvm/vmx/x86_ops.h                    |   2 +-
+ arch/x86/kvm/x86.c                            |   5 +-
+ include/linux/kvm_host.h                      |  64 +++++-
+ include/uapi/linux/kvm.h                      |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/guest_memfd_test.c  | 208 +++++++++++++++---
+ virt/kvm/Kconfig                              |  14 +-
+ virt/kvm/Makefile.kvm                         |   2 +-
+ virt/kvm/guest_memfd.c                        |  96 +++++++-
+ virt/kvm/kvm_main.c                           |  14 +-
+ virt/kvm/kvm_mm.h                             |   4 +-
+ 24 files changed, 622 insertions(+), 167 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Enhancement with eiointc emulation
+[PATCH v6 0/8] LoongArch: KVM: Enhancement with eiointc emulation
+Author: Bibo Mao <maobibo@loongson.cn>
+
+This series add generic eiointc 8 bytes access interface, so that 1/2/4/8
+bytes access can use the generic 8 bytes access interface. It reduce
+about 500 lines redundant code and make eiointc emulation driver
+simpler than ever.
+
+---
+v5 ... v6:
+  1. Merge previous patch 5 & 6 into one, patch 7 & 10 into into one and
+     patch 12 and patch 13 into one.
+  2. Use sign extension with destination register for IOCSRRD.{B/H/W}
+     kernel emulation.
+
+v4 ... v5
+  1. Rebase patch on latest kernel where bugfix of eiointc has been
+     merged.
+  2. Add generic eiointc 8 bytes access interface, 1/2/4/8 bytes access
+     uses generic 8 bytes access interface.
+
+v3 ... v4:
+  1. Remove patch about enhancement and only keep bugfix relative
+     patches.
+  2. Remove INTC indication in the patch title.
+  3. With access size, keep default case unchanged besides 1/2/4/8 since
+     here all patches are bugfix
+  4. Firstly check return value of copy_from_user() with error path,
+     keep the same order with old patch in patch 4.
+
+v2 ... v3:
+  1. Add prefix INTC: in title of every patch.
+  2. Fix array index overflow when emulate register EIOINTC_ENABLE
+     writing operation.
+  3. Add address alignment check with eiointc register access operation.
+
+v1 ... v2:
+  1. Add extra fix in patch 3 and patch 4, add num_cpu validation check
+  2. Name of stat information keeps unchanged, only move it from VM stat
+     to vCPU stat.
+---
+Bibo Mao (8):
+  LoongArch: KVM: Use standard bitops API with eiointc
+  LoongArch: KVM: Remove unused parameter len
+  LoongArch: KVM: Add stat information with kernel irqchip
+  LoongArch: KVM: Remove never called default case statement
+  LoongArch: KVM: Use generic function loongarch_eiointc_read()
+  LoongArch: KVM: Remove some unnecessary local variables
+  LoongArch: KVM: Replace eiointc_enable_irq() with eiointc_update_irq()
+  LoongArch: KVM: Add generic function loongarch_eiointc_write()
+
+ arch/loongarch/include/asm/kvm_host.h |  12 +-
+ arch/loongarch/kvm/intc/eiointc.c     | 558 ++++----------------------
+ arch/loongarch/kvm/intc/ipi.c         |  28 +-
+ arch/loongarch/kvm/intc/pch_pic.c     |   4 +-
+ arch/loongarch/kvm/vcpu.c             |   8 +-
+ 5 files changed, 102 insertions(+), 508 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Use standard bitops API with eiointc
+[PATCH v6 1/8] LoongArch: KVM: Use standard bitops API with eiointc
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Standard bitops APIs such test_bit() is used here, rather than manually
+calculate the offset and mask. Also use non-atomic API __set_bit()
+and __clear_bit() rather than set_bit() and clear_bit(), since global
+spinlock is held already.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/intc/eiointc.c | 27 +++++++++++----------------
+ 1 file changed, 11 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Advance guest TSC after deep suspend.
+[PATCH v6 1/3] KVM: x86: Advance guest TSC after deep suspend.
+Author: Suleiman Souhlal <suleiman@google.com>
+
+Advance guest TSC to current time after suspend when the host
+TSCs went backwards.
+
+This makes the behavior consistent between suspends where host TSC
+resets and suspends where it doesn't, such as suspend-to-idle, where
+in the former case if the host TSC resets, the guests' would
+previously be "frozen" due to KVM's backwards TSC prevention, while
+in the latter case they would advance.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Suleiman Souhlal <suleiman@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/x86.c              | 28 +++++++++++++++++++++++++++-
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Include host suspended time in steal time
+[PATCH v6 0/3] KVM: x86: Include host suspended time in steal time
+Author: Suleiman Souhlal <suleiman@google.com>
+
+This series makes it so that the time that the host is suspended is
+included in guests' steal time.
+
+When the host resumes from a suspend, the guest thinks any task
+that was running during the suspend ran for a long time, even though
+the effective run time was much shorter, which can end up having
+negative effects with scheduling.
+
+To mitigate this issue, include the time that the host was
+suspended in steal time, if the guest requests it, which lets the
+guest subtract the duration from the tasks' runtime. Add new ABI 
+to make this behavior opt-in per-guest.
+
+In addition, make the guest TSC behavior consistent whether the
+host TSC went backwards or not.
+
+v6:
+- Use true/false for bools.
+- Indentation.
+- Remove superfluous flag. 
+- Use atomic operations for accumulating suspend duration.
+- Reuse generic vcpu block/kick infrastructure instead of rolling our own.
+- Add ABI to make the behavior opt-in per-guest.
+- Add command line parameter to make guest use this.
+- Reword commit messages in imperative mood.
+
+v5: https://lore.kernel.org/kvm/20250325041350.1728373-1-suleiman@google.com/
+- Fix grammar mistakes in commit message.
+
+v4: https://lore.kernel.org/kvm/20250221053927.486476-1-suleiman@google.com/
+- Advance guest TSC on suspends where host TSC goes backwards.
+- Block vCPUs from running until resume notifier.
+- Move suspend duration accounting out of machine-independent kvm to
+  x86.
+- Merge code and documentation patches.
+- Reworded documentation.
+
+v3: https://lore.kernel.org/kvm/20250107042202.2554063-1-suleiman@google.com/
+- Use PM notifier instead of syscore ops (kvm_suspend()/kvm_resume()),
+  because the latter doesn't get called on shallow suspend.
+- Don't call function under UACCESS.
+- Whitespace.
+
+v2: https://lore.kernel.org/kvm/20240820043543.837914-1-suleiman@google.com/
+- Accumulate suspend time at machine-independent kvm layer and track per-VCPU
+  instead of per-VM.
+- Document changes.
+
+v1: https://lore.kernel.org/kvm/20240710074410.770409-1-suleiman@google.com/
+
+Suleiman Souhlal (3):
+  KVM: x86: Advance guest TSC after deep suspend.
+  KVM: x86: Include host suspended duration in steal time
+  KVM: x86: Add "suspendsteal" cmdline to request host to add suspend
+    duration in steal time
+
+ .../admin-guide/kernel-parameters.txt         |   5 +
+ Documentation/virt/kvm/x86/cpuid.rst          |   4 +
+ Documentation/virt/kvm/x86/msr.rst            |  15 +++
+ arch/x86/include/asm/kvm_host.h               |   4 +
+ arch/x86/include/uapi/asm/kvm_para.h          |   2 +
+ arch/x86/kernel/kvm.c                         |  15 +++
+ arch/x86/kvm/cpuid.c                          |   4 +-
+ arch/x86/kvm/x86.c                            | 108 +++++++++++++++++-
+ 8 files changed, 150 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Reject KVM_SET_TSC_KHZ vCPU ioctl for TSC protected guest
+[PATCH 1/2] KVM: x86: Reject KVM_SET_TSC_KHZ vCPU ioctl for TSC protected guest
+Author: Kai Huang <kai.huang@intel.com>
+
+Reject KVM_SET_TSC_KHZ vCPU ioctl if guest's TSC is protected and not
+changeable by KVM.
+
+For such TSC protected guests, e.g. TDX guests, typically the TSC is
+configured once at VM level before any vCPU are created and remains
+unchanged during VM's lifetime.  KVM provides the KVM_SET_TSC_KHZ VM
+scope ioctl to allow the userspace VMM to configure the TSC of such VM.
+After that the userspace VMM is not supposed to call the KVM_SET_TSC_KHZ
+vCPU scope ioctl anymore when creating the vCPU.
+
+The de facto userspace VMM Qemu does this for TDX guests.  The upcoming
+SEV-SNP guests with Secure TSC should follow.
+
+Note this could be a break of ABI.  But for now only TDX guests are TSC
+protected and only Qemu supports TDX, thus in practice this should not
+break any existing userspace.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Kai Huang <kai.huang@intel.com>
+---
+ arch/x86/kvm/x86.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  Improve KVM_SET_TSC_KHZ handling for CoCo VMs
+[PATCH 0/2] Improve KVM_SET_TSC_KHZ handling for CoCo VMs
+Author: Kai Huang <kai.huang@intel.com>
+
+This series follows Sean's suggestions [1][2] to:
+
+ - Reject vCPU scope KVM_SET_TSC_KHZ ioctl for TSC protected vCPU
+ - Reject VM scope KVM_SET_TSC_KHZ ioctl when vCPUs have been created
+
+.. in the discussion of SEV-SNP Secure TSC support series.
+
+This series has been sanity tested with TDX guests using today's Qemu:
+
+ - With this series Qemu can still run TDX guests successfully.
+ - With some hack to the Qemu, both VM and vCPU scope KVM_SET_TSC_KHZ
+   ioctls failed as expected.
+
+Currently only TDX guests are TSC protected.  The SEV-SNP Secure TSC
+support will enable protected TSC too and can also benefit from this
+series.
+
+[1]: https://lore.kernel.org/kvm/aG0uUdY6QPnit6my@google.com/
+[2]: https://lore.kernel.org/kvm/aG2k2BFBJHL-szZc@google.com/
+
+Kai Huang (2):
+  KVM: x86: Reject KVM_SET_TSC_KHZ vCPU ioctl for TSC protected guest
+  KVM: x86: Reject KVM_SET_TSC_KHZ VM ioctl when vCPU has been created
+
+ arch/x86/kvm/x86.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Open code setting/clearing of bits in the ISR
+[RFC PATCH v8 01/35] KVM: x86: Open code setting/clearing of bits in the ISR
+Author: Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+
+Remove __apic_test_and_set_vector() and __apic_test_and_clear_vector(),
+because the _only_ register that's safe to modify with a non-atomic
+operation is ISR, because KVM isn't running the vCPU, i.e. hardware can't
+service an IRQ or process an EOI for the relevant (virtual) APIC.
+
+No functional change intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+---
+Changes since v7:
+ - Removed "inline" from apic_vector_to_isr().
+ - Commit log updates.
+
+ arch/x86/kvm/lapic.c | 19 +++++++------------
+ 1 file changed, 7 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  AMD: Add Secure AVIC Guest Support
+[RFC PATCH v8 00/35] AMD: Add Secure AVIC Guest Support
+Author: Neeraj Upadhyay <Neeraj.Upadhyay@amd.com>
+
+Introduction
+------------
+
+Secure AVIC is a new hardware feature in the AMD64 architecture to
+allow SEV-SNP guests to prevent the hypervisor from generating
+unexpected interrupts to a vCPU or otherwise violate architectural
+assumptions around APIC behavior.
+
+One of the significant differences from AVIC or emulated x2APIC is that
+Secure AVIC uses a guest-owned and managed APIC backing page. It also
+introduces additional fields in both the VMCB and the Secure AVIC backing
+page to aid the guest in limiting which interrupt vectors can be injected
+into the guest.
+
+Guest APIC Backing Page
+-----------------------
+Each vCPU has a guest-allocated APIC backing page of size 4K, which
+maintains APIC state for that vCPU. The x2APIC MSRs are mapped at
+their corresposing x2APIC MMIO offset within the guest APIC backing
+page. All x2APIC accesses by guest or Secure AVIC hardware operate
+on this backing page. The backing page should be pinned and NPT entry
+for it should be always mapped while the corresponding vCPU is running.
+
+
+MSR Accesses
+------------
+Secure AVIC only supports x2APIC MSR accesses. xAPIC MMIO offset based
+accesses are not supported.
+
+Some of the MSR accesses such as ICR writes (with shorthand equal to
+self), SELF_IPI, EOI, TPR writes are accelerated by Secure AVIC
+hardware. Other MSR accesses generate a #VC exception. The #VC
+exception handler reads/writes to the guest APIC backing page.
+As guest APIC backing page is accessible to the guest, the Secure
+AVIC driver code optimizes APIC register access by directly
+reading/writing to the guest APIC backing page (instead of taking
+the #VC exception route).
+
+In addition to the architected MSRs, following new fields are added to
+the guest APIC backing page which can be modified directly by the
+guest:
+
+a. ALLOWED_IRR
+
+ALLOWED_IRR reg offset indicates the interrupt vectors which the guest
+allows the hypervisor to send. The combination of host-controlled
+REQUESTED_IRR vectors (part of VMCB) and ALLOWED_IRR is used by
+hardware to update the IRR vectors of the Guest APIC backing page.
+
+#Offset        #bits        Description
+204h           31:0         Guest allowed vectors 0-31
+214h           31:0         Guest allowed vectors 32-63
+...
+274h           31:0         Guest allowed vectors 224-255
+
+ALLOWED_IRR is meant to be used specifically for vectors that the
+hypervisor is allowed to inject, such as device interrupts.  Interrupt
+vectors used exclusively by the guest itself (like IPI vectors) should
+not be allowed to be injected into the guest for security reasons.
+
+b. NMI Request
+ 
+#Offset        #bits        Description
+278h           0            Set by Guest to request Virtual NMI
+
+Guest need to set NMI Request register to allow the Hypervisor to
+inject vNMI to it.
+
+LAPIC Timer Support
+-------------------
+LAPIC timer is emulated by the hypervisor. So, APIC_LVTT, APIC_TMICT and
+APIC_TDCR, APIC_TMCCT APIC registers are not read/written to the guest
+APIC backing page and are communicated to the hypervisor using SVM_EXIT_MSR
+VMGEXIT. 
+
+IPI Support
+-----------
+Only SELF_IPI is accelerated by Secure AVIC hardware. Other IPIs require
+writing (from the Secure AVIC driver) to the IRR vector of the target CPU
+backing page and then issuing VMGEXIT for the hypervisor to notify the
+target vCPU.
+
+KEXEC Support
+-------------
+Secure AVIC enabled guest can kexec to another kernel which has Secure
+AVIC enabled, as the Hypervisor has Secure AVIC feature bit set in the
+sev_status.
+
+Open Points
+-----------
+
+The Secure AVIC driver only supports physical destination mode. If
+logical destination mode need to be supported, then a separate x2apic
+driver would be required for supporting logical destination mode.
+
+
+Testing
+-------
+
+This series is based on top of commit 262fcdc7c5e8 Revert "sched/numa: add statistics of numa balance task" of tip/tip master branch.
+
+Host Secure AVIC support patch series is at [1].
+
+Qemu support patch is at [2].
+
+QEMU commandline for testing Secure AVIC enabled guest:
+
+qemu-system-x86_64 <...> -object sev-snp-guest,id=sev0,policy=0xb0000,cbitpos=51,
+reduced-phys-bits=1,allowed-sev-features=true,secure-avic=true
+
+Following tests are done:
+
+1) Boot to Prompt using initramfs and ubuntu fs.
+2) Verified timer and IPI as part of the guest bootup.
+3) Verified long run SCF TORTURE IPI test.
+
+[1] https://github.com/AMDESE/linux-kvm/tree/savic-host-latest
+[2] https://github.com/AMDESE/qemu/tree/secure-avic
+
+Changes since v7
+
+v7: https://lore.kernel.org/lkml/20250610175424.209796-1-Neeraj.Upadhyay@amd.com/
+
+   - Commit log updates.
+   - Applied Reviewed-by and Acked-by.
+   - Combined few patches.
+
+Changes since v6
+
+v6: https://lore.kernel.org/lkml/20250514071803.209166-1-Neeraj.Upadhyay@amd.com/
+
+  - Restructured the patches to split out function/macro rename into
+    separate patches.
+  - Update commit logs with more details on impact to kvm.ko text size.
+  - Updated the new macros in patch "x86/apic: KVM: Deduplicate APIC vector =>
+    register+bit math" to type cast macro parameter to unsigned int.
+    This ensures better code generation for cases where signed int is
+    passed to these macros. With this update, below patches have been
+    removed in this version:
+
+    x86/apic: Change apic_*_vector() vector param to unsigned
+    x86/apic: Change get/set reg operations reg param to unsigned
+
+  - Added Tianyu's Reviewed-by's.
+
+Changes since v5
+
+v5: https://lore.kernel.org/lkml/20250429061004.205839-1-Neeraj.Upadhyay@amd.com/
+
+  - Add back RFC tag due to new changes to share code between KVM's
+    lapic emulation and Secure AVIC.
+  - Minor optimizations to the apic bitwise ops and set/get reg
+    operations.
+  - Other misc fixes, cleanups and refactoring due to code sharing with
+    KVM lapic implementation.
+
+Change since v4
+
+v4: https://lore.kernel.org/lkml/20250417091708.215826-1-Neeraj.Upadhyay@amd.com/
+
+  - Add separate patch for update_vector() apic callback addition.
+  - Add a cleanup patch for moving apic_update_irq_cfg() calls to
+    apic_update_vector().
+  - Cleaned up change logs.
+  - Rebased to latest tip/tip master. Resolved merge conflicts due to
+    sev code movement to sev-startup.c in mainline.
+  - Other misc cleanups.
+
+Change since v3
+
+v3: https://lore.kernel.org/lkml/20250401113616.204203-1-Neeraj.Upadhyay@amd.com/
+
+  - Move KVM updates to a separate patch.
+  - Cleanups to use guard().
+  - Refactored IPI callbacks addition.
+  - Misc cleanups.
+
+Change since v2
+
+v2: https://lore.kernel.org/lkml/20250226090525.231882-1-Neeraj.Upadhyay@amd.com/
+
+  - Removed RFC tag.
+  - Change config rule to not select AMD_SECURE_AVIC config if
+    AMD_MEM_ENCRYPT config is enabled.
+  - Fix broken backing page GFP_KERNEL allocation in setup_local_APIC().
+    Use alloc_percpu() for APIC backing pages allocation during Secure
+    AVIC driver probe.
+  - Remove code to check for duplicate APIC_ID returned by the
+    Hypervisor. Topology evaluation code already does that during boot.
+  - Fix missing update_vector() callback invocation during vector
+    cleanup paths. Invoke update_vector() during setup and tearing down
+    of a vector.
+  - Reuse find_highest_vector() from kvm/lapic.c.
+  - Change savic_register_gpa/savic_unregister_gpa() interface to be
+    invoked only for the local CPU.
+  - Misc cleanups.
+
+Change since v1
+
+v1: https://lore.kernel.org/lkml/20240913113705.419146-1-Neeraj.Upadhyay@amd.com/
+
+  - Added Kexec support.
+  - Instead of doing a 2M aligned allocation for backing pages,
+    allocate individual PAGE_SIZE pages for vCPUs.
+  - Instead of reading Extended Topology Enumeration CPUID, APIC_ID
+    value is read from Hv and updated in APIC backing page. Hv returned
+    ID is checked for any duplicates.
+  - Propagate all LVT* register reads and writes to Hv.
+  - Check that Secure AVIC control MSR is not intercepted by Hv.
+  - Fix EOI handling for level-triggered interrupts.
+  - Misc cleanups and commit log updates.
+
+Kishon Vijay Abraham I (2):
+  x86/sev: Initialize VGIF for secondary VCPUs for Secure AVIC
+  x86/sev: Enable NMI support for Secure AVIC
+
+Neeraj Upadhyay (32):
+  KVM: x86: Open code setting/clearing of bits in the ISR
+  KVM: x86: Remove redundant parentheses around 'bitmap'
+  KVM: x86: Rename VEC_POS/REG_POS macro usages
+  KVM: x86: Change lapic regs base address to void pointer
+  KVM: x86: Rename find_highest_vector()
+  KVM: x86: Rename lapic get/set_reg() helpers
+  KVM: x86: Rename lapic get/set_reg64() helpers
+  KVM: x86: Rename lapic set/clear vector helpers
+  x86/apic: KVM: Move apic_find_highest_vector() to a common header
+  x86/apic: KVM: Move lapic get/set helpers to common code
+  x86/apic: KVM: Move lapic set/clear_vector() helpers to common code
+  x86/apic: KVM: Move apic_test)vector() to common code
+  x86/apic: Rename 'reg_off' to 'reg'
+  x86/apic: Unionize apic regs for 32bit/64bit access w/o type casting
+  x86/apic: Simplify bitwise operations on apic bitmap
+  x86/apic: Move apic_update_irq_cfg() calls to apic_update_vector()
+  x86/apic: Add new driver for Secure AVIC
+  x86/apic: Initialize Secure AVIC APIC backing page
+  x86/apic: Populate .read()/.write() callbacks of Secure AVIC driver
+  x86/apic: Initialize APIC ID for Secure AVIC
+  x86/apic: Add update_vector() callback for apic drivers
+  x86/apic: Add update_vector() callback for Secure AVIC
+  x86/apic: Add support to send IPI for Secure AVIC
+  x86/apic: Support LAPIC timer for Secure AVIC
+  x86/apic: Add support to send NMI IPI for Secure AVIC
+  x86/apic: Allow NMI to be injected from hypervisor for Secure AVIC
+  x86/apic: Read and write LVT* APIC registers from HV for SAVIC guests
+  x86/apic: Handle EOI writes for Secure AVIC guests
+  x86/apic: Add kexec support for Secure AVIC
+  x86/apic: Enable Secure AVIC in Control MSR
+  x86/sev: Prevent SECURE_AVIC_CONTROL MSR interception for Secure AVIC
+    guests
+  x86/sev: Indicate SEV-SNP guest supports Secure AVIC
+
+Sean Christopherson (1):
+  x86/apic: KVM: Deduplicate APIC vector => register+bit math
+
+ arch/x86/Kconfig                    |  13 +
+ arch/x86/boot/compressed/sev.c      |  10 +-
+ arch/x86/coco/core.c                |   3 +
+ arch/x86/coco/sev/core.c            | 103 +++++++
+ arch/x86/coco/sev/vc-handle.c       |  20 +-
+ arch/x86/include/asm/apic.h         | 103 ++++++-
+ arch/x86/include/asm/apicdef.h      |   2 +
+ arch/x86/include/asm/msr-index.h    |   9 +-
+ arch/x86/include/asm/sev-internal.h |   2 +
+ arch/x86/include/asm/sev.h          |   8 +
+ arch/x86/include/uapi/asm/svm.h     |   4 +
+ arch/x86/kernel/apic/Makefile       |   1 +
+ arch/x86/kernel/apic/apic.c         |   8 +
+ arch/x86/kernel/apic/vector.c       |  33 ++-
+ arch/x86/kernel/apic/x2apic_savic.c | 437 ++++++++++++++++++++++++++++
+ arch/x86/kvm/lapic.c                |  95 ++----
+ arch/x86/kvm/lapic.h                |  24 +-
+ include/linux/cc_platform.h         |   8 +
+ 18 files changed, 770 insertions(+), 113 deletions(-)
+
+----------------------------------------------------------------------
+
