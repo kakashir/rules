@@ -1,0 +1,910 @@
+From c86a74a9f to c05eb3e6a
+KVM mailing list update from c86a74a9f to c05eb3e6a
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     44 google.com
+     14 intel.com
+     13 amd.com
+     10 uniontech.com
+      3 oracle.com
+      3 linux.intel.com
+      3 kernel.org
+      1 zytor.com
+      1 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     21  Colton Lewis <coltonlewis@google.com>
+     18  Fuad Tabba <tabba@google.com>
+     13  Ashish Kalra <ashish.kalra@amd.com>
+     10  Xiaoyao Li <xiaoyao.li@intel.com>
+     10  WangYuli <wangyuli@uniontech.com>
+      4  Ackerley Tng <ackerleytng@google.com>
+      3  Dongli Zhang <dongli.zhang@oracle.com>
+      3  Dapeng Mi <dapeng1.mi@linux.intel.com>
+      1  Yan Zhao <yan.y.zhao@intel.com>
+      1  Xin Zeng <xin.zeng@intel.com>
+      1  "Xin Li (Intel)" <xin@zytor.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+      1  Mark Brown <broonie@kernel.org>
+      1  Marc Zyngier <maz@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+[PATCH v3 1/4] iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+After a panic if SNP is enabled in the previous kernel then the kdump
+kernel boots with IOMMU SNP enforcement still enabled.
+
+IOMMU completion wait buffers (CWBs), command buffers and event buffer
+registers remain locked and exclusive to the previous kernel. Attempts
+to allocate and use new buffers in the kdump kernel fail, as hardware
+ignores writes to the locked MMIO registers as per AMD IOMMU spec
+Section 2.12.2.1.
+
+This results in repeated "Completion-Wait loop timed out" errors and a
+second kernel panic: "Kernel panic - not syncing: timer doesn't work
+through Interrupt-remapped IO-APIC"
+
+The following MMIO registers are locked and ignore writes after failed
+SNP shutdown:
+Command Buffer Base Address Register
+Event Log Base Address Register
+Completion Store Base Register/Exclusion Base Register
+Completion Store Limit Register/Exclusion Limit Register
+As a result, the kdump kernel cannot initialize the IOMMU or enable IRQ
+remapping, which is required for proper operation.
+
+Reuse the pages of the previous kernel for completion wait buffers,
+command buffers, event buffers and memremap them during kdump boot
+and essentially work with an already enabled IOMMU configuration and
+re-using the previous kernel’s data structures.
+
+Reusing of command buffers and event buffers is now done for kdump boot
+irrespective of SNP being enabled during kdump.
+
+Re-use of completion wait buffers is only done when SNP is enabled as
+the exclusion base register is used for the completion wait buffer
+(CWB) address only when SNP is enabled.
+
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ drivers/iommu/amd/amd_iommu_types.h |   5 +
+ drivers/iommu/amd/init.c            | 163 ++++++++++++++++++++++++++--
+ drivers/iommu/amd/iommu.c           |   2 +-
+ 3 files changed, 157 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  iommu/amd: Fix host kdump support for SNP
+[PATCH v3 0/4] iommu/amd: Fix host kdump support for SNP
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+When a crash is triggered the kernel attempts to shut down SEV-SNP
+using the SNP_SHUTDOWN_EX command. If active SNP VMs are present,
+SNP_SHUTDOWN_EX fails as firmware checks all encryption-capable ASIDs
+to ensure none are in use and that a DF_FLUSH is not required. 
+
+This casues the kdump kernel to boot with IOMMU SNP enforcement still
+enabled and IOMMU completion wait buffers (CWBs), command buffers,
+device tables and event buffer registers remain locked and exclusive
+to the previous kernel. Attempts to allocate and use new buffers in
+the kdump kernel fail, as the hardware ignores writes to the locked
+MMIO registers (per AMD IOMMU spec Section 2.12.2.1).
+
+As a result, the kdump kernel cannot initialize the IOMMU or enable IRQ
+remapping which is required for proper operation.
+
+This results in repeated "Completion-Wait loop timed out" errors and a
+second kernel panic: "Kernel panic - not syncing: timer doesn't work
+through Interrupt-remapped IO-APIC"
+
+The following MMIO registers are locked and ignore writes after failed
+SNP shutdown:
+Device Table Base Address Register
+Command Buffer Base Address Register
+Event Buffer Base Address Register
+Completion Store Base Register/Exclusion Base Register
+Completion Store Limit Register/Exclusion Range Limit Register
+
+Instead of allocating new buffers, re-use the previous kernel’s pages
+for completion wait buffers, command buffers, event buffers and device
+tables and operate with the already enabled SNP configuration and
+existing data structures.
+
+This approach is now used for kdump boot regardless of whether SNP is
+enabled during kdump.
+
+The fix enables successful crashkernel/kdump operation on SNP hosts
+even when SNP_SHUTDOWN_EX fails.
+
+Fixes: c3b86e61b756 ("x86/cpufeatures: Enable/unmask SEV-SNP CPU feature")
+
+v3:
+- Moving to AMD IOMMU driver fix so that there is no need to do SNP_DECOMMISSION
+during panic() and kdump kernel boot will be more agnostic to 
+whether or not SNP_SHUTDOWN is done properly (or even done at all),
+i.e., even with active SNP guests. Fixing crashkernel/kdump boot with IOMMU SNP/RMP
+enforcement still enabled prior to kdump boot by reusing the pages of the previous 
+kernel for IOMMU completion wait buffers, command buffer and device table and
+memremap them during kdump boot.
+- Rebased on linux-next.
+- Split the original patch into smaller patches and prepare separate
+patches for adding iommu_memremap() helper and remapping/unmapping of 
+IOMMU buffers for kdump, Reusing device table for kdump and skip the
+enabling of IOMMU buffers for kdump.
+- Add new functions for remapping/unmapping IOMMU buffers and call
+them from alloc_iommu_buffers/free_iommu_buffers in case of kdump boot
+else call the exisiting alloc/free variants of CWB, command and event buffers.
+- Skip SNP INIT in case of kdump boot.
+- The final patch skips enabling IOMMU command buffer and event buffer
+for kdump boot which fixes kdump on SNP host.
+- Add comment that completion wait buffers are only re-used when SNP is
+enabled.
+
+Ashish Kalra (4):
+  iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+  iommu/amd: Reuse device table for kdump
+  crypto: ccp: Skip SNP INIT for kdump boot
+  iommu/amd: Fix host kdump support for SNP
+
+ drivers/crypto/ccp/sev-dev.c        |   8 +
+ drivers/iommu/amd/amd_iommu_types.h |   5 +
+ drivers/iommu/amd/init.c            | 288 +++++++++++++++++++---------
+ drivers/iommu/amd/iommu.c           |   2 +-
+ 4 files changed, 212 insertions(+), 91 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Don't (re)check L1 intercepts when completing
+[PATCH] KVM: x86: Don't (re)check L1 intercepts when completing
+Author: Sean Christopherson <seanjc@google.com>
+
+When completing emulation of instruction that generated a userspace exit
+for I/O, don't recheck L1 intercepts as KVM has already finished that
+phase of instruction execution, i.e. has already committed to allowing L2
+to perform I/O.  If L1 (or host userspace) modifies the I/O permission
+bitmaps during the exit to userspace,  KVM will treat the access as being
+intercepted despite already having emulated the I/O access.
+
+Pivot on EMULTYPE_NO_DECODE to detect that KVM is completing emulation.
+Of the three users of EMULTYPE_NO_DECODE, only complete_emulated_io() (the
+intended "recipient") can reach the code in question.  gp_interception()'s
+use is mutually exclusive with is_guest_mode(), and
+complete_emulated_insn_gp() unconditionally pairs EMULTYPE_NO_DECODE with
+EMULTYPE_SKIP.
+
+The bad behavior was detected by a syzkaller program that toggles port I/O
+interception during the userspace I/O exit, ultimately resulting in a WARN
+on vcpu->arch.pio.count being non-zero due to KVM no completing emulation
+of the I/O instruction.
+
+  WARNING: CPU: 23 PID: 1083 at arch/x86/kvm/x86.c:8039 emulator_pio_in_out+0x154/0x170 [kvm]
+  Modules linked in: kvm_intel kvm irqbypass
+  CPU: 23 UID: 1000 PID: 1083 Comm: repro Not tainted 6.16.0-rc5-c1610d2d66b1-next-vm #74 NONE
+  Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS 0.0.0 02/06/2015
+  RIP: 0010:emulator_pio_in_out+0x154/0x170 [kvm]
+  PKRU: 55555554
+  Call Trace:
+   <TASK>
+   kvm_fast_pio+0xd6/0x1d0 [kvm]
+   vmx_handle_exit+0x149/0x610 [kvm_intel]
+   kvm_arch_vcpu_ioctl_run+0xda8/0x1ac0 [kvm]
+   kvm_vcpu_ioctl+0x244/0x8c0 [kvm]
+   __x64_sys_ioctl+0x8a/0xd0
+   do_syscall_64+0x5d/0xc60
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+   </TASK>
+
+Fixes: 8a76d7f25f8f ("KVM: x86: Add x86 callback for intercept check")
+Cc: stable@vger.kernel.org
+Cc: Jim Mattson <jmattson@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/emulate.c     |  9 ++++-----
+ arch/x86/kvm/kvm_emulate.h |  3 +--
+ arch/x86/kvm/x86.c         | 15 ++++++++-------
+ 3 files changed, 13 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Fix typo "notifer"
+[PATCH v2 1/8] KVM: x86: Fix typo "notifer"
+Author: WangYuli <wangyuli@uniontech.com>
+
+There are some spelling mistakes of 'notifer' which should be 'notifier'.
+
+Link: https://lore.kernel.org/all/B3C019B63C93846F+20250715071245.398846-1-wangyuli@uniontech.com/
+Signed-off-by: WangYuli <wangyuli@uniontech.com>
+---
+ arch/x86/kvm/i8254.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  treewide: Fix typo "notifer"
+[PATCH v2 0/8] treewide: Fix typo "notifer"
+Author: WangYuli <wangyuli@uniontech.com>
+
+There are some spelling mistakes of 'notifer' in comments which
+should be 'notifier'.
+
+Fix them and add it to scripts/spelling.txt.
+
+Link: https://lore.kernel.org/all/B3C019B63C93846F+20250715071245.398846-1-wangyuli@uniontech.com/
+
+WangYuli (8):
+  KVM: x86: Fix typo "notifer"
+  cxl: mce: Fix typo "notifer"
+  drm/xe: Fix typo "notifer"
+  net: mvneta: Fix typo "notifer"
+  wifi: brcmfmac: Fix typo "notifer"
+  serial: 8250_dw: Fix typo "notifer"
+  xen/xenbus: Fix typo "notifer"
+  scripts/spelling.txt: Add notifer||notifier to spelling.txt
+
+ arch/x86/kvm/i8254.c                                        | 4 ++--
+ drivers/cxl/core/mce.h                                      | 2 +-
+ drivers/gpu/drm/xe/xe_vm_types.h                            | 2 +-
+ drivers/net/ethernet/marvell/mvneta.c                       | 2 +-
+ drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c | 2 +-
+ drivers/tty/serial/8250/8250_dw.c                           | 2 +-
+ include/xen/xenbus.h                                        | 2 +-
+ scripts/spelling.txt                                        | 1 +
+ 8 files changed, 9 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+[PATCH v14 01/21] KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+Author: Fuad Tabba <tabba@google.com>
+
+Rename the Kconfig option CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM. The
+original name implied that the feature only supported "private" memory.
+However, CONFIG_KVM_PRIVATE_MEM enables guest_memfd in general, which is
+not exclusively for private memory. Subsequent patches in this series
+will add guest_memfd support for non-CoCo VMs, whose memory is not
+private.
+
+Renaming the Kconfig option to CONFIG_KVM_GMEM more accurately reflects
+its broader scope as the main Kconfig option for all guest_memfd-backed
+memory. This provides clearer semantics for the option and avoids
+confusion as new features are introduced.
+
+Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
+Co-developed-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ include/linux/kvm_host.h        | 14 +++++++-------
+ virt/kvm/Kconfig                |  8 ++++----
+ virt/kvm/Makefile.kvm           |  2 +-
+ virt/kvm/kvm_main.c             |  4 ++--
+ virt/kvm/kvm_mm.h               |  4 ++--
+ 6 files changed, 17 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Enable host userspace mapping for
+[PATCH v14 00/21] KVM: Enable host userspace mapping for
+Author: Fuad Tabba <tabba@google.com>
+
+Main changes since v13 [1]:
+* Fixed handling of guest faults in case of invalidation in arm64
+* Handle VNCR_EL2-triggered faults backed by guest_memfd (arm64 nested
+  virt)
+* Applied suggestions from latest feedback
+* Rebase on Linux 6.16-rc6
+
+This patch series enables host userspace mapping of guest_memfd-backed
+memory for non-CoCo VMs. This is required for several evolving KVM use
+cases:
+
+* Allows VMMs like Firecracker to run guests entirely backed by
+  guest_memfd [2]. This provides a unified memory management model for
+  both confidential and non-confidential guests, simplifying VMM design.
+
+* Enhanced Security via direct map removal: When combined with Patrick's
+  series for direct map removal [3], this provides additional hardening
+  against Spectre-like transient execution attacks by eliminating the
+  need for host kernel direct maps of guest memory.
+
+* Lays the groundwork for *restricted* mmap() support for
+  guest_memfd-backed memory on CoCo platforms [4] that permit in-place
+  sharing of guest memory with the host.
+
+Patch breakdown:
+
+Patches 1-7: Primarily infrastructure refactorings and renames to decouple
+guest_memfd from the concept of "private" memory.
+
+Patches 8-9: Add support for the host to map guest_memfd backed memory
+for non-CoCo VMs, which includes support for mmap() and fault handling.
+This is gated by a new configuration option, toggled by a new flag, and
+advertised to userspace by a new capability (introduced in patch 18).
+
+Patches 10-14: Implement x86 guest_memfd mmap support.
+
+Patches 15-18: Implement arm64 guest_memfd mmap support.
+
+Patch 19: Introduce the new capability to advertise this support and
+update the documentation.
+
+Patches 20-21: Update and expand selftests for guest_memfd to include
+mmap functionality and improve portability.
+
+To test this patch series and boot a guest utilizing the new features,
+please refer to the instructions in v8 of the series [5]. Note that
+kvmtool for Linux 6.16 (available at [6]) is required, as the
+KVM_CAP_GMEM_MMAP capability number has changed, additionally, drop the
+--sw_protected kvmtool parameter to test with the default VM type.
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20250709105946.4009897-1-tabba@google.com/
+[2] https://github.com/firecracker-microvm/firecracker/tree/feature/secret-hiding
+[3] https://lore.kernel.org/all/20250221160728.1584559-1-roypat@amazon.co.uk/
+[4] https://lore.kernel.org/all/20250328153133.3504118-1-tabba@google.com/
+[5] https://lore.kernel.org/all/20250430165655.605595-1-tabba@google.com/
+[6] https://android-kvm.googlesource.com/kvmtool/+/refs/heads/tabba/guestmem-basic-6.16
+
+Ackerley Tng (4):
+  KVM: x86/mmu: Generalize private_max_mapping_level x86 op to
+    max_mapping_level
+  KVM: x86/mmu: Allow NULL-able fault in kvm_max_private_mapping_level
+  KVM: x86/mmu: Consult guest_memfd when computing max_mapping_level
+  KVM: x86/mmu: Handle guest page faults for guest_memfd with shared
+    memory
+
+Fuad Tabba (17):
+  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GMEM
+  KVM: Rename CONFIG_KVM_GENERIC_PRIVATE_MEM to
+    CONFIG_KVM_GENERIC_GMEM_POPULATE
+  KVM: Introduce kvm_arch_supports_gmem()
+  KVM: x86: Introduce kvm->arch.supports_gmem
+  KVM: Rename kvm_slot_can_be_private() to kvm_slot_has_gmem()
+  KVM: Fix comments that refer to slots_lock
+  KVM: Fix comment that refers to kvm uapi header path
+  KVM: guest_memfd: Allow host to map guest_memfd pages
+  KVM: guest_memfd: Track guest_memfd mmap support in memslot
+  KVM: x86: Enable guest_memfd mmap for default VM type
+  KVM: arm64: Refactor user_mem_abort()
+  KVM: arm64: Handle guest_memfd-backed guest page faults
+  KVM: arm64: nv: Handle VNCR_EL2-triggered faults backed by guest_memfd
+  KVM: arm64: Enable host mapping of shared guest_memfd memory
+  KVM: Introduce the KVM capability KVM_CAP_GMEM_MMAP
+  KVM: selftests: Do not use hardcoded page sizes in guest_memfd test
+  KVM: selftests: guest_memfd mmap() test when mmap is supported
+
+ Documentation/virt/kvm/api.rst                |   9 +
+ arch/arm64/include/asm/kvm_host.h             |   4 +
+ arch/arm64/kvm/Kconfig                        |   2 +
+ arch/arm64/kvm/mmu.c                          | 203 ++++++++++++-----
+ arch/arm64/kvm/nested.c                       |  41 +++-
+ arch/x86/include/asm/kvm-x86-ops.h            |   2 +-
+ arch/x86/include/asm/kvm_host.h               |  18 +-
+ arch/x86/kvm/Kconfig                          |   7 +-
+ arch/x86/kvm/mmu/mmu.c                        | 114 ++++++----
+ arch/x86/kvm/svm/sev.c                        |  12 +-
+ arch/x86/kvm/svm/svm.c                        |   3 +-
+ arch/x86/kvm/svm/svm.h                        |   4 +-
+ arch/x86/kvm/vmx/main.c                       |   6 +-
+ arch/x86/kvm/vmx/tdx.c                        |   6 +-
+ arch/x86/kvm/vmx/x86_ops.h                    |   2 +-
+ arch/x86/kvm/x86.c                            |   5 +-
+ include/linux/kvm_host.h                      |  64 +++++-
+ include/uapi/linux/kvm.h                      |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/guest_memfd_test.c  | 208 +++++++++++++++---
+ virt/kvm/Kconfig                              |  14 +-
+ virt/kvm/Makefile.kvm                         |   2 +-
+ virt/kvm/guest_memfd.c                        |  96 +++++++-
+ virt/kvm/kvm_main.c                           |  14 +-
+ virt/kvm/kvm_mm.h                             |   4 +-
+ 25 files changed, 664 insertions(+), 179 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/tdx: Fix the typo in TDX_ATTR_MIGRTABLE
+[PATCH v3 1/4] x86/tdx: Fix the typo in TDX_ATTR_MIGRTABLE
+Author: Xiaoyao Li <xiaoyao.li@intel.com>
+
+The TD scoped TDCS attributes are defined by bit positions. In the guest
+side of the TDX code, the 'tdx_attributes' string array holds pretty
+print names for these attributes, which are generated via macros and
+defines. Today these pretty print names are only used to print the
+attribute names to dmesg.
+
+Unfortunately there is a typo in the define for the migratable bit.
+Change the defines TDX_ATTR_MIGRTABLE* to TDX_ATTR_MIGRATABLE*. Update
+the sole user, the tdx_attributes array, to use the fixed name.
+
+Since these defines control the string printed to dmesg, the change is
+user visible. But the risk of breakage is almost zero since it is not
+exposed in any interface expected to be consumed programmatically.
+
+Fixes: 564ea84c8c14 ("x86/tdx: Dump attributes and TD_CTLS on boot")
+Reviewed-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Xiaoyao Li <xiaoyao.li@intel.com>
+---
+Changes in v3:
+ - Use the rewritten changelog from Rick.
+
+Changes in v2:
+ - Add the impact of the change in the commit message. (provided by Rick)
+---
+ arch/x86/coco/tdx/debug.c         | 2 +-
+ arch/x86/include/asm/shared/tdx.h | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  TDX: Clean up the definitions of TDX TD ATTRIBUTES
+[PATCH v3 0/4] TDX: Clean up the definitions of TDX TD ATTRIBUTES
+Author: Xiaoyao Li <xiaoyao.li@intel.com>
+
+The main purpose of this series was to remove redundant macros between
+core TDX and KVM, along with a typo fix. They were implemented as patch1
+and patch2.
+
+During the review of v1 and v2, there was encouragement to refine the
+names of the macros related to TD attributes to clarify their scope.
+Thus patch3 and patch 4 are added.
+
+Discussion details can be found in previrous versions.
+
+
+Changes in v3:
+ - use the changelog provided by Rick for patch 1;
+ - collect Reviewed-by on patch 4;
+ - Add patch 3;
+
+v2: https://lore.kernel.org/all/20250711132620.262334-1-xiaoyao.li@intel.com/
+Changes in v2:
+ - collect Reviewed-by;
+ - Explains the impact of the change in patch 1 changelog;
+ - Add patch 3.
+
+v1: https://lore.kernel.org/all/20250708080314.43081-1-xiaoyao.li@intel.com/ 
+
+Xiaoyao Li (4):
+  x86/tdx: Fix the typo in TDX_ATTR_MIGRTABLE
+  KVM: TDX: Remove redundant definitions of TDX_TD_ATTR_*
+  x86/tdx: Rename TDX_ATTR_* to TDX_TD_ATTR_*
+  KVM: TDX: Rename KVM_SUPPORTED_TD_ATTRS to KVM_SUPPORTED_TDX_TD_ATTRS
+
+ arch/x86/coco/tdx/debug.c         | 26 ++++++++--------
+ arch/x86/coco/tdx/tdx.c           |  8 ++---
+ arch/x86/include/asm/shared/tdx.h | 50 +++++++++++++++----------------
+ arch/x86/kvm/vmx/tdx.c            |  4 +--
+ arch/x86/kvm/vmx/tdx_arch.h       |  6 ----
+ 5 files changed, 44 insertions(+), 50 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/qat: add support for intel QAT 6xxx virtual functions
+[PATCH] vfio/qat: add support for intel QAT 6xxx virtual functions
+Author: Suman Kumar Chakraborty <suman.kumar.chakraborty@intel.com>
+
+
+Extend the qat_vfio_pci variant driver to support QAT 6xxx Virtual
+Functions (VFs). Add the relevant QAT 6xxx VF device IDs to the driver's
+probe table, enabling proper detection and initialization of these devices.
+
+Update the module description to reflect that the driver now supports all
+QAT generations.
+
+Signed-off-by: Małgorzata Mielnik <malgorzata.mielnik@intel.com>
+Signed-off-by: Suman Kumar Chakraborty <suman.kumar.chakraborty@intel.com>
+Reviewed-by: Giovanni Cabiddu <giovanni.cabiddu@intel.com>
+---
+ drivers/vfio/pci/qat/main.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Selftests: Validate more arch-events in pmu_counters_test
+[PATCH 1/3] KVM: Selftests: Validate more arch-events in pmu_counters_test
+Author: Dapeng Mi <dapeng1.mi@linux.intel.com>
+
+Clearwater Forest introduces 5 new architectural events (4 topdown
+level 1 metrics events and LBR inserts event). This patch supports
+to validate these 5 newly added events. The detailed info about these
+5 events can be found in SDM section 21.2.7 "Pre-defined Architectural
+ Performance Events".
+
+It becomes unrealistic to traverse all possible combinations of
+unavailable events mask (may need dozens of minutes to finish all
+possible combination validation). So only limit unavailable events mask
+traverse to the first 8 arch-events.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Tested-by: Yi Lai <yi1.lai@intel.com>
+---
+ tools/testing/selftests/kvm/include/x86/pmu.h | 10 +++++++++
+ .../selftests/kvm/include/x86/processor.h     |  7 +++++-
+ tools/testing/selftests/kvm/lib/x86/pmu.c     |  5 +++++
+ .../selftests/kvm/x86/pmu_counters_test.c     | 22 ++++++++++++++-----
+ 4 files changed, 38 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Fix PMU kselftests errors on SRF and CWF 
+[PATCH 0/3] Fix PMU kselftests errors on SRF and CWF 
+Author: Dapeng Mi <dapeng1.mi@linux.intel.com>
+
+This small patchset fixes PMU kselftest errors on Sierra Forest (SRF) and
+Clearwater Forest (CWF).
+
+Patch 1/3 adds validation support for newly introduced 5 architectural
+events on CWF. Without this patch, pmu_counter_test asserts failure
+ "New architectural event(s) detected; please update this test".
+
+On Intel Atom platforms, the PMU events "Instruction Retired" or
+"Branch Instruction Retired" may be overcounted for some certain
+instructions, like FAR CALL/JMP, RETF, IRET, VMENTRY/VMEXIT/VMPTRLD
+and complex SGX/SMX/CSTATE instructions/flows[1].
+
+In details, for the Atom platforms before Sierra Forest (including
+Sierra Forest), Both 2 events "Instruction Retired" and
+"Branch Instruction Retired" would be overcounted on these certain
+instructions, but for Clearwater Forest only "Instruction Retired" event
+is overcounted on these instructions.
+
+As this overcount issue, pmu_counters_test and pmu_event_filter_test
+would fail on the precise event count validation for these 2 events on
+Atom platforms.
+
+To work around this Atom platform overcount issue, Patches 2-3/3 relax
+the precise event count validation if the platform is detected to have
+the overcount issue.
+
+Tests:
+  * PMU kselftests (pmu_counters_test/pmu_event_filter_test/
+    vmx_pmu_caps_test) passed on GNR/SRF/CWF platforms.
+
+Ref:
+  [1] https://edc.intel.com/content/www/us/en/design/products-and-solutions/processors-and-chipsets/sierra-forest/xeon-6700-series-processor-with-e-cores-specification-update/errata-details
+
+Dapeng Mi (2):
+  KVM: Selftests: Validate more arch-events in pmu_counters_test
+  KVM: selftests: Relax branches event count check for event_filter test
+
+dongsheng (1):
+  KVM: selftests: Relax precise event count validation as overcount
+    issue
+
+ tools/testing/selftests/kvm/include/x86/pmu.h | 19 ++++++++
+ .../selftests/kvm/include/x86/processor.h     |  7 ++-
+ tools/testing/selftests/kvm/lib/x86/pmu.c     | 43 +++++++++++++++++++
+ .../selftests/kvm/x86/pmu_counters_test.c     | 39 ++++++++++++++---
+ .../selftests/kvm/x86/pmu_event_filter_test.c |  9 +++-
+ 5 files changed, 108 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v2 0/8] treewide: Fix typo "notifer"
+ Skip: [PATCH] treewide: Fix typo "notifer"
+New:  update-linux-headers: Add guestmem.h
+[POC PATCH 1/5] update-linux-headers: Add guestmem.h
+Author: Xiaoyao Li <xiaoyao.li@intel.com>
+
+Signed-off-by: Xiaoyao Li <xiaoyao.li@intel.com>
+---
+ scripts/update-linux-headers.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  QEMU: Enable in-place conversion and hugetlb gmem
+[POC PATCH 0/5] QEMU: Enable in-place conversion and hugetlb gmem
+Author: Xiaoyao Li <xiaoyao.li@intel.com>
+
+Hi all,
+
+This is the POC to enable in-place conversion and hugetlb support of
+gmem (guest memfd) in QEMU. It can work with 1G gmem support series[1] and
+TDX hugepage support series[2] to run TDX guest with hugepage. I don't
+have SNP environment and don't know how it goes with SNP.
+
+It is just the POC and we share it to show how QEMU work with gmem ABI.
+
+The POC uses the simple implementation that switches to use in-place
+conversion and hugetlb when it is supported and it doesn't introduce new
+interface in QEMU so that existing command line to boot TDX can work without
+any change.
+
+Please go to each patch (specifically patch 3/4/5) to discuss the ABI
+usage, potential issue, and maybe the upstreamable design.
+
+[1] https://lore.kernel.org/all/cover.1747264138.git.ackerleytng@google.com/
+[2] https://lore.kernel.org/all/20250424030033.32635-1-yan.y.zhao@intel.com/
+
+Xiaoyao Li (4):
+  update-linux-headers: Add guestmem.h
+  headers: Fetch gmem updates
+  memory/guest_memfd: Enable hugetlb support
+  [HACK] memory: Don't enable in-place conversion for internal
+    MemoryRegion with gmem
+
+Yan Zhao (1):
+  memory/guest_memfd: Enable in-place conversion when available
+
+ accel/kvm/kvm-all.c             | 82 ++++++++++++++++++++++++---------
+ accel/stubs/kvm-stub.c          |  2 +
+ include/system/kvm.h            |  2 +
+ include/system/memory.h         |  5 ++
+ include/system/ramblock.h       |  1 +
+ linux-headers/linux/guestmem.h  | 29 ++++++++++++
+ linux-headers/linux/kvm.h       | 18 ++++++++
+ scripts/update-linux-headers.sh |  2 +-
+ system/memory.c                 |  9 +++-
+ system/physmem.c                | 40 ++++++++++++++--
+ 10 files changed, 163 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Fix an indentation
+[PATCH v1 1/1] KVM: VMX: Fix an indentation
+Author: Xin Li (Intel) <xin@zytor.com>
+
+Fix an indentation by replacing 8 spaces with a tab.
+
+While at it, add empty lines before and after for better readability.
+
+Signed-off-by: Xin Li (Intel) <xin@zytor.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/qat: Remove myself from VFIO QAT PCI driver maintainers
+[PATCH] vfio/qat: Remove myself from VFIO QAT PCI driver maintainers
+Author: Xin Zeng <xin.zeng@intel.com>
+
+Remove myself from VFIO QAT PCI driver maintainers as I'm leaving
+Intel.
+
+Signed-off-by: Xin Zeng <xin.zeng@intel.com>
+---
+ MAINTAINERS | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  ARM64 PMU Partitioning
+[PATCH v4 00/23] ARM64 PMU Partitioning
+Author: Colton Lewis <coltonlewis@google.com>
+
+This series creates a new PMU scheme on ARM, a partitioned PMU that
+allows reserving a subset of counters for more direct guest access,
+significantly reducing overhead. More details, including performance
+benchmarks, can be read in the v1 cover letter linked below.
+
+v4:
+
+* Apply Mark Brown's non-UNDEF FGT control commit to the PMU FGT
+  controls and calculate those controls with the others in
+  kvm_calculate_traps()
+
+* Introduce lazy context swaps for guests that only turns on for
+  guests that have enabled partitioning and accessed PMU registers.
+
+* Rename pmu-part.c to pmu-direct.c because future features might
+  achieve direct PMU access without partitioning.
+
+* Better explain certain commits, such as why the untrapped registers
+  are safe to untrap.
+
+* Reduce the PMU include cleanup down to only what is still necessary
+  and explain why.
+
+v3:
+https://lore.kernel.org/kvm/20250626200459.1153955-1-coltonlewis@google.com/
+
+v2:
+https://lore.kernel.org/kvm/20250620221326.1261128-1-coltonlewis@google.com/
+
+v1:
+https://lore.kernel.org/kvm/20250602192702.2125115-1-coltonlewis@google.com/
+
+Colton Lewis (21):
+  arm64: cpufeature: Add cpucap for HPMN0
+  KVM: arm64: Reorganize PMU functions
+  perf: arm_pmuv3: Introduce method to partition the PMU
+  perf: arm_pmuv3: Generalize counter bitmasks
+  perf: arm_pmuv3: Keep out of guest counter partition
+  KVM: arm64: Account for partitioning in kvm_pmu_get_max_counters()
+  KVM: arm64: Set up FGT for Partitioned PMU
+  KVM: arm64: Writethrough trapped PMEVTYPER register
+  KVM: arm64: Use physical PMSELR for PMXEVTYPER if partitioned
+  KVM: arm64: Writethrough trapped PMOVS register
+  KVM: arm64: Write fast path PMU register handlers
+  KVM: arm64: Setup MDCR_EL2 to handle a partitioned PMU
+  KVM: arm64: Account for partitioning in PMCR_EL0 access
+  KVM: arm64: Context swap Partitioned PMU guest registers
+  KVM: arm64: Enforce PMU event filter at vcpu_load()
+  KVM: arm64: Extract enum debug_owner to enum vcpu_register_owner
+  KVM: arm64: Implement lazy PMU context swaps
+  perf: arm_pmuv3: Handle IRQs for Partitioned PMU guest counters
+  KVM: arm64: Inject recorded guest interrupts
+  KVM: arm64: Add ioctl to partition the PMU when supported
+  KVM: arm64: selftests: Add test case for partitioned PMU
+
+Marc Zyngier (1):
+  KVM: arm64: Reorganize PMU includes
+
+Mark Brown (1):
+  KVM: arm64: Introduce non-UNDEF FGT control
+
+ Documentation/virt/kvm/api.rst                |  21 +
+ arch/arm/include/asm/arm_pmuv3.h              |  38 +
+ arch/arm64/include/asm/arm_pmuv3.h            |  61 +-
+ arch/arm64/include/asm/kvm_host.h             |  34 +-
+ arch/arm64/include/asm/kvm_pmu.h              | 123 +++
+ arch/arm64/include/asm/kvm_types.h            |   7 +-
+ arch/arm64/kernel/cpufeature.c                |   8 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arm.c                          |  22 +
+ arch/arm64/kvm/debug.c                        |  33 +-
+ arch/arm64/kvm/hyp/include/hyp/debug-sr.h     |   6 +-
+ arch/arm64/kvm/hyp/include/hyp/switch.h       | 181 ++++-
+ arch/arm64/kvm/pmu-direct.c                   | 395 ++++++++++
+ arch/arm64/kvm/pmu-emul.c                     | 674 +---------------
+ arch/arm64/kvm/pmu.c                          | 725 ++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c                     | 137 +++-
+ arch/arm64/tools/cpucaps                      |   1 +
+ arch/arm64/tools/sysreg                       |   6 +-
+ drivers/perf/arm_pmuv3.c                      | 128 +++-
+ include/linux/perf/arm_pmu.h                  |   1 +
+ include/linux/perf/arm_pmuv3.h                |  14 +-
+ include/uapi/linux/kvm.h                      |   4 +
+ tools/include/uapi/linux/kvm.h                |   2 +
+ .../selftests/kvm/arm64/vpmu_counter_access.c |  62 +-
+ 24 files changed, 1910 insertions(+), 775 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  crypto: ccp - New bit-field definitions for SNP_PLATFORM_STATUS command
+[PATCH v6 1/7] crypto: ccp - New bit-field definitions for SNP_PLATFORM_STATUS command
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+Define new bit-field definitions returned by SNP_PLATFORM_STATUS command
+such as new capabilities like SNP_FEATURE_INFO command availability,
+ciphertext hiding enabled and capability.
+
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ include/uapi/linux/psp-sev.h | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Add SEV-SNP CipherTextHiding feature support
+[PATCH v6 0/7] Add SEV-SNP CipherTextHiding feature support
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+Ciphertext hiding prevents host accesses from reading the ciphertext
+of SNP guest private memory. Instead of reading ciphertext, the host
+will see constant default values (0xff).
+
+The SEV ASID space is split into SEV and SEV-ES/SNP ASID ranges.
+Enabling ciphertext hiding further splits the SEV-ES/SEV-SNP ASID space
+into separate ASID ranges for SEV-ES and SEV-SNP guests.
+
+Add new module parameter to the KVM module to enable ciphertext hiding
+support and a user configurable system-wide maximum SNP ASID value. If
+the module parameter value is "max" then the complete SEV-ES/SEV-SNP
+space is allocated to SEV-SNP guests.
+
+v6:
+- Fix module parameter ciphertext_hiding_asids=0 case.
+- Coalesce multiple cases of handling invalid module parameter
+ciphertext_hiding_asids into a single branch/label.
+- Fix commit logs.
+- Fix Documentation.
+
+v5:
+- Add pre-patch to cache SEV platform status and use this cached
+information to set api_major/api_minor/build.
+- Since the SEV platform status and SNP platform status differ, 
+remove the state field from sev_device structure and instead track
+SEV platform state from cached SEV platform status.
+- If SNP is enabled then cached SNP platform status is used for 
+api_major/api_minor/build.
+- Fix using sev_do_cmd() instead of __sev_do_cmd_locked().
+- Fix commit logs.
+- Fix kernel-parameters documentation. 
+- Modify KVM module parameter to enable CipherTextHiding to support
+"max" option to allow complete SEV-ES+ ASID space to be allocated
+to SEV-SNP guests.
+- Do not enable ciphertext hiding if module parameter to specify
+maximum SNP ASID is invalid.
+
+v4:
+- Fix buffer allocation for SNP_FEATURE_INFO command to correctly
+handle page boundary check requirements.
+- Return correct length for SNP_FEATURE_INFO command from
+sev_cmd_buffer_len().
+- Switch to using SNP platform status instead of SEV platform status if
+SNP is enabled and cache SNP platform status and feature information.
+Modify sev_get_api_version() accordingly.
+- Fix commit logs.
+- Expand the comments on why both the feature info and the platform
+status fields have to be checked for CipherTextHiding feature 
+detection and enablement.
+- Add new preperation patch for CipherTextHiding feature which
+introduces new {min,max}_{sev_es,snp}_asid variables along with
+existing {min,max}_sev_asid variable to simplify partitioning of the
+SEV and SEV-ES+ ASID space.
+- Switch to single KVM module parameter to enable CipherTextHiding
+feature and the maximum SNP ASID usable for SNP guests when 
+CipherTextHiding feature is enabled.
+
+v3:
+- rebase to linux-next.
+- rebase on top of support to move SEV-SNP initialization to
+KVM module from CCP driver.
+- Split CipherTextHiding support between CCP driver and KVM module
+with KVM module calling into CCP driver to initialize SNP with
+CipherTextHiding enabled and MAX ASID usable for SNP guest if
+KVM is enabling CipherTextHiding feature.
+- Move module parameters to enable CipherTextHiding feature and
+MAX ASID usable for SNP guests from CCP driver to KVM module
+which allows KVM to be responsible for enabling CipherTextHiding
+feature if end-user requests it.
+
+v2:
+- Fix and add more description to commit logs.
+- Rename sev_cache_snp_platform_status_and_discover_features() to 
+snp_get_platform_data().
+- Add check in snp_get_platform_data to guard against being called
+after SNP_INIT_EX.
+- Fix comments for new structure field definitions being added.
+- Fix naming for new structure being added.
+- Add new vm-type parameter to sev_asid_new().
+- Fix identation.
+- Rename CCP module parameters psp_cth_enabled to cipher_text_hiding and 
+psp_max_snp_asid to max_snp_asid.
+- Rename max_snp_asid to snp_max_snp_asid. 
+
+Ashish Kalra (7):
+  crypto: ccp - New bit-field definitions for SNP_PLATFORM_STATUS
+    command
+  crypto: ccp - Cache SEV platform status and platform state
+  crypto: ccp - Add support for SNP_FEATURE_INFO command
+  crypto: ccp - Introduce new API interface to indicate SEV-SNP
+    Ciphertext hiding feature
+  crypto: ccp - Add support to enable CipherTextHiding on SNP_INIT_EX
+  KVM: SEV: Introduce new min,max sev_es and sev_snp asid variables
+  KVM: SEV: Add SEV-SNP CipherTextHiding support
+
+ .../admin-guide/kernel-parameters.txt         |  18 +++
+ arch/x86/kvm/svm/sev.c                        |  97 +++++++++++--
+ drivers/crypto/ccp/sev-dev.c                  | 127 ++++++++++++++++--
+ drivers/crypto/ccp/sev-dev.h                  |   6 +-
+ include/linux/psp-sev.h                       |  44 +++++-
+ include/uapi/linux/psp-sev.h                  |  10 +-
+ 6 files changed, 275 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
