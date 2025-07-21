@@ -1,0 +1,380 @@
+From 8bf8366cc to 3fe9e5b67
+KVM mailing list update from 8bf8366cc to 3fe9e5b67
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     13 amd.com
+      9 kernel.org
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     13  Ashish Kalra <ashish.kalra@amd.com>
+      9  Marc Zyngier <maz@kernel.org>
+      1  Colin Ian King <colin.i.king@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+[PATCH v4 1/4] iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+After a panic if SNP is enabled in the previous kernel then the kdump
+kernel boots with IOMMU SNP enforcement still enabled.
+
+IOMMU completion wait buffers (CWBs), command buffers and event buffer
+registers remain locked and exclusive to the previous kernel. Attempts
+to allocate and use new buffers in the kdump kernel fail, as hardware
+ignores writes to the locked MMIO registers as per AMD IOMMU spec
+Section 2.12.2.1.
+
+This results in repeated "Completion-Wait loop timed out" errors and a
+second kernel panic: "Kernel panic - not syncing: timer doesn't work
+through Interrupt-remapped IO-APIC"
+
+The list of MMIO registers locked and which ignore writes after failed
+SNP shutdown are mentioned in the AMD IOMMU specifications below:
+
+Section 2.12.2.1.
+https://docs.amd.com/v/u/en-US/48882_3.10_PUB
+
+Reuse the pages of the previous kernel for completion wait buffers,
+command buffers, event buffers and memremap them during kdump boot
+and essentially work with an already enabled IOMMU configuration and
+re-using the previous kernel’s data structures.
+
+Reusing of command buffers and event buffers is now done for kdump boot
+irrespective of SNP being enabled during kdump.
+
+Re-use of completion wait buffers is only done when SNP is enabled as
+the exclusion base register is used for the completion wait buffer
+(CWB) address only when SNP is enabled.
+
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ drivers/iommu/amd/amd_iommu_types.h |   5 +
+ drivers/iommu/amd/init.c            | 164 ++++++++++++++++++++++++++--
+ drivers/iommu/amd/iommu.c           |   2 +-
+ 3 files changed, 158 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Add host kdump support for SNP
+[PATCH v4 0/4] Add host kdump support for SNP
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+When a crash is triggered the kernel attempts to shut down SEV-SNP
+using the SNP_SHUTDOWN_EX command. If active SNP VMs are present,
+SNP_SHUTDOWN_EX fails as firmware checks all encryption-capable ASIDs
+to ensure none are in use and that a DF_FLUSH is not required. 
+
+This casues the kdump kernel to boot with IOMMU SNP enforcement still
+enabled and IOMMU completion wait buffers (CWBs), command buffers,
+device tables and event buffer registers remain locked and exclusive
+to the previous kernel. Attempts to allocate and use new buffers in
+the kdump kernel fail, as the hardware ignores writes to the locked
+MMIO registers (per AMD IOMMU spec Section 2.12.2.1).
+
+As a result, the kdump kernel cannot initialize the IOMMU or enable IRQ
+remapping which is required for proper operation.
+
+This results in repeated "Completion-Wait loop timed out" errors and a
+second kernel panic: "Kernel panic - not syncing: timer doesn't work
+through Interrupt-remapped IO-APIC"
+
+The list of MMIO registers locked and which ignore writes after failed
+SNP shutdown are mentioned in the AMD IOMMU specifications below:
+
+Section 2.12.2.1.
+https://docs.amd.com/v/u/en-US/48882_3.10_PUB
+
+Instead of allocating new buffers, re-use the previous kernel’s pages
+for completion wait buffers, command buffers, event buffers and device
+tables and operate with the already enabled SNP configuration and
+existing data structures.
+
+This approach is now used for kdump boot regardless of whether SNP is
+enabled during kdump.
+
+The patch-series enables successful crashkernel/kdump operation on SNP
+hosts even when SNP_SHUTDOWN_EX fails.
+
+v4:
+- Fix commit logs.
+- Explicitly call ioremap_encrypted() if SME is enabled and memremap()
+otherwise if SME is not enabled in iommu_memremap().
+- Rename remap_cwwb_sem() to remap_or_alloc_cwwb_sem().
+- Fix inline comments.
+- Skip both SEV and SNP INIT for kdump boot.
+- Add a BUG_ON() if reuse_device_table() fails in case of SNP enabled.
+- Drop "Fixes:" tag as this patch-series enables host kdump for SNP.
+
+v3:
+- Moving to AMD IOMMU driver fix so that there is no need to do SNP_DECOMMISSION
+during panic() and kdump kernel boot will be more agnostic to 
+whether or not SNP_SHUTDOWN is done properly (or even done at all),
+i.e., even with active SNP guests. Fixing crashkernel/kdump boot with IOMMU SNP/RMP
+enforcement still enabled prior to kdump boot by reusing the pages of the previous 
+kernel for IOMMU completion wait buffers, command buffer and device table and
+memremap them during kdump boot.
+- Rebased on linux-next.
+- Split the original patch into smaller patches and prepare separate
+patches for adding iommu_memremap() helper and remapping/unmapping of 
+IOMMU buffers for kdump, Reusing device table for kdump and skip the
+enabling of IOMMU buffers for kdump.
+- Add new functions for remapping/unmapping IOMMU buffers and call
+them from alloc_iommu_buffers/free_iommu_buffers in case of kdump boot
+else call the exisiting alloc/free variants of CWB, command and event buffers.
+- Skip SNP INIT in case of kdump boot.
+- The final patch skips enabling IOMMU command buffer and event buffer
+for kdump boot which fixes kdump on SNP host.
+- Add comment that completion wait buffers are only re-used when SNP is
+enabled.
+
+Ashish Kalra (4):
+  iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+  iommu/amd: Reuse device table for kdump
+  crypto: ccp: Skip SEV and SNP INIT for kdump boot
+  iommu/amd: Skip enabling command/event buffers for kdump
+
+ drivers/crypto/ccp/sev-dev.c        |   8 +
+ drivers/iommu/amd/amd_iommu_types.h |   5 +
+ drivers/iommu/amd/init.c            | 298 +++++++++++++++++++---------
+ drivers/iommu/amd/iommu.c           |   2 +-
+ 4 files changed, 221 insertions(+), 92 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: selftest: Add standalone test checking for KVM's own UUID
+[PATCH] KVM: arm64: selftest: Add standalone test checking for KVM's own UUID
+Author: Marc Zyngier <maz@kernel.org>
+
+Tinkering with UUIDs is a perilious task, and the KVM UUID gets
+broken at times. In order to spot this early enough, add a selftest
+that will shout if the expected value isn't found.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Link: https://lore.kernel.org/r/20250721130558.50823-1-jackabt.amazon@gmail.com
+---
+ tools/testing/selftests/kvm/Makefile.kvm     |  1 +
+ tools/testing/selftests/kvm/arm64/kvm-uuid.c | 67 ++++++++++++++++++++
+ 2 files changed, 68 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  crypto: ccp - New bit-field definitions for SNP_PLATFORM_STATUS command
+[PATCH v7 1/7] crypto: ccp - New bit-field definitions for SNP_PLATFORM_STATUS command
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+Define new bit-field definitions returned by SNP_PLATFORM_STATUS command
+such as new capabilities like SNP_FEATURE_INFO command availability,
+ciphertext hiding enabled and capability.
+
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ include/uapi/linux/psp-sev.h | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Add SEV-SNP CipherTextHiding feature support
+[PATCH v7 0/7] Add SEV-SNP CipherTextHiding feature support
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+Ciphertext hiding prevents host accesses from reading the ciphertext
+of SNP guest private memory. Instead of reading ciphertext, the host
+will see constant default values (0xff).
+
+The SEV ASID space is split into SEV and SEV-ES/SNP ASID ranges.
+Enabling ciphertext hiding further splits the SEV-ES/SEV-SNP ASID space
+into separate ASID ranges for SEV-ES and SEV-SNP guests.
+
+Add new module parameter to the KVM module to enable ciphertext hiding
+support and a user configurable system-wide maximum SNP ASID value. If
+the module parameter value is "max" then the complete SEV-ES/SEV-SNP
+space is allocated to SEV-SNP guests.
+
+v7:
+- Fix comments.
+- Move the check for module parameter ciphertext_hiding_asids inside
+check_and_enable_sev_snp_ciphertext_hiding(), this keeps all the logic
+related to the parameter in a single function.
+
+v6:
+- Fix module parameter ciphertext_hiding_asids=0 case.
+- Coalesce multiple cases of handling invalid module parameter
+ciphertext_hiding_asids into a single branch/label.
+- Fix commit logs.
+- Fix Documentation.
+
+v5:
+- Add pre-patch to cache SEV platform status and use this cached
+information to set api_major/api_minor/build.
+- Since the SEV platform status and SNP platform status differ, 
+remove the state field from sev_device structure and instead track
+SEV platform state from cached SEV platform status.
+- If SNP is enabled then cached SNP platform status is used for 
+api_major/api_minor/build.
+- Fix using sev_do_cmd() instead of __sev_do_cmd_locked().
+- Fix commit logs.
+- Fix kernel-parameters documentation. 
+- Modify KVM module parameter to enable CipherTextHiding to support
+"max" option to allow complete SEV-ES+ ASID space to be allocated
+to SEV-SNP guests.
+- Do not enable ciphertext hiding if module parameter to specify
+maximum SNP ASID is invalid.
+
+v4:
+- Fix buffer allocation for SNP_FEATURE_INFO command to correctly
+handle page boundary check requirements.
+- Return correct length for SNP_FEATURE_INFO command from
+sev_cmd_buffer_len().
+- Switch to using SNP platform status instead of SEV platform status if
+SNP is enabled and cache SNP platform status and feature information.
+Modify sev_get_api_version() accordingly.
+- Fix commit logs.
+- Expand the comments on why both the feature info and the platform
+status fields have to be checked for CipherTextHiding feature 
+detection and enablement.
+- Add new preperation patch for CipherTextHiding feature which
+introduces new {min,max}_{sev_es,snp}_asid variables along with
+existing {min,max}_sev_asid variable to simplify partitioning of the
+SEV and SEV-ES+ ASID space.
+- Switch to single KVM module parameter to enable CipherTextHiding
+feature and the maximum SNP ASID usable for SNP guests when 
+CipherTextHiding feature is enabled.
+
+v3:
+- rebase to linux-next.
+- rebase on top of support to move SEV-SNP initialization to
+KVM module from CCP driver.
+- Split CipherTextHiding support between CCP driver and KVM module
+with KVM module calling into CCP driver to initialize SNP with
+CipherTextHiding enabled and MAX ASID usable for SNP guest if
+KVM is enabling CipherTextHiding feature.
+- Move module parameters to enable CipherTextHiding feature and
+MAX ASID usable for SNP guests from CCP driver to KVM module
+which allows KVM to be responsible for enabling CipherTextHiding
+feature if end-user requests it.
+
+v2:
+- Fix and add more description to commit logs.
+- Rename sev_cache_snp_platform_status_and_discover_features() to 
+snp_get_platform_data().
+- Add check in snp_get_platform_data to guard against being called
+after SNP_INIT_EX.
+- Fix comments for new structure field definitions being added.
+- Fix naming for new structure being added.
+- Add new vm-type parameter to sev_asid_new().
+- Fix identation.
+- Rename CCP module parameters psp_cth_enabled to cipher_text_hiding and 
+psp_max_snp_asid to max_snp_asid.
+- Rename max_snp_asid to snp_max_snp_asid. 
+
+Ashish Kalra (7):
+  crypto: ccp - New bit-field definitions for SNP_PLATFORM_STATUS
+    command
+  crypto: ccp - Cache SEV platform status and platform state
+  crypto: ccp - Add support for SNP_FEATURE_INFO command
+  crypto: ccp - Introduce new API interface to indicate SEV-SNP
+    Ciphertext hiding feature
+  crypto: ccp - Add support to enable CipherTextHiding on SNP_INIT_EX
+  KVM: SEV: Introduce new min,max sev_es and sev_snp asid variables
+  KVM: SEV: Add SEV-SNP CipherTextHiding support
+
+ .../admin-guide/kernel-parameters.txt         |  18 +++
+ arch/x86/kvm/svm/sev.c                        |  96 +++++++++++--
+ drivers/crypto/ccp/sev-dev.c                  | 127 ++++++++++++++++--
+ drivers/crypto/ccp/sev-dev.h                  |   6 +-
+ include/linux/psp-sev.h                       |  44 +++++-
+ include/uapi/linux/psp-sev.h                  |  10 +-
+ 6 files changed, 274 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Remove space before \n newline
+[PATCH][next] KVM: x86: Remove space before \n newline
+Author: Colin Ian King <colin.i.king@gmail.com>
+
+There is a extraneous space before a newline in a pr_debug_ratelimited
+message. Remove it.
+
+Signed-off-by: Colin Ian King <colin.i.king@gmail.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Add capability denoting FEAT_RASv1p1
+[PATCH 1/7] arm64: Add capability denoting FEAT_RASv1p1
+Author: Marc Zyngier <maz@kernel.org>
+
+Detecting FEAT_RASv1p1 is rather complicated, as there are two
+ways for the architecture to advertise the same thing (always a
+delight...).
+
+Add a capability that will advertise this in a synthetic way to
+the rest of the kernel.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kernel/cpufeature.c | 24 ++++++++++++++++++++++++
+ arch/arm64/tools/cpucaps       |  1 +
+ 2 files changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: FEAT_RASv1p1 support and RAS selection
+[PATCH 0/7] KVM: arm64: FEAT_RASv1p1 support and RAS selection
+Author: Marc Zyngier <maz@kernel.org>
+
+As I was debugging some RAS-related issues[1], I realised that:
+
+- My test box is implementing RASv1p1
+
+- We unconditionally advertise it to guests
+
+- Issuing RASv1p1 accesses doesn't end very well
+
+- [...]
+
+- Profit?
+
+The overall goal of this is to allow the RAS support to be downgraded
+to not much, as we're not implementing anything interesting yet, while
+still offering the appearance of architecture compliance up to RASv1p1
+(everything is RAZ/WI). Along the way, we plug the most glaring holes
+(HCR_EL2 bits propagated at the wrong spot, HCR_EL2.FIEN not being
+filtered out).
+
+Unusually, this is on top of the DoubleFault2 series, as this is where
+the problems started.
+
+[1] https://lore.kernel.org/r/87tt37ulvf.wl-maz@kernel.org
+
+Marc Zyngier (7):
+  arm64: Add capability denoting FEAT_RASv1p1
+  KVM: arm64: Filter out HCR_EL2 bits when running in hypervisor context
+  KVM: arm64: Make RAS registers UNDEF when RAS isn't advertised
+  KVM: arm64: Handle RASv1p1 registers
+  KVM: arm64: Ignore HCR_EL2.FIEN set by L1 guest's EL2
+  KVM: arm64: Expose FEAT_RASv1p1 in a canonical manner
+  KVM: arm64: Make ID_AA64PFR0_EL1.RAS writable
+
+ arch/arm64/kernel/cpufeature.c  | 24 ++++++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c | 19 +++++++++--
+ arch/arm64/kvm/sys_regs.c       | 56 +++++++++++++++++++++++++++------
+ arch/arm64/tools/cpucaps        |  1 +
+ 4 files changed, 88 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
