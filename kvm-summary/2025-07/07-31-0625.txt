@@ -1,0 +1,445 @@
+From e38e79a26 to 4ea00e16a
+KVM mailing list update from e38e79a26 to 4ea00e16a
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     25 google.com
+      5 zytor.com
+      5 amd.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     15  Fuad Tabba <tabba@google.com>
+      8  Sean Christopherson <seanjc@google.com>
+      5  "Xin Li (Intel)" <xin@zytor.com>
+      5  Ashish Kalra <ashish.kalra@amd.com>
+      2  Ackerley Tng <ackerleytng@google.com>
+      1  Marc Zyngier <maz@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+[PATCH v5 1/4] iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+After a panic if SNP is enabled in the previous kernel then the kdump
+kernel boots with IOMMU SNP enforcement still enabled.
+
+IOMMU completion wait buffers (CWBs), command buffers and event buffer
+registers remain locked and exclusive to the previous kernel. Attempts
+to allocate and use new buffers in the kdump kernel fail, as hardware
+ignores writes to the locked MMIO registers as per AMD IOMMU spec
+Section 2.12.2.1.
+
+This results in repeated "Completion-Wait loop timed out" errors and a
+second kernel panic: "Kernel panic - not syncing: timer doesn't work
+through Interrupt-remapped IO-APIC"
+
+The list of MMIO registers locked and which ignore writes after failed
+SNP shutdown are mentioned in the AMD IOMMU specifications below:
+
+Section 2.12.2.1.
+https://docs.amd.com/v/u/en-US/48882_3.10_PUB
+
+Reuse the pages of the previous kernel for completion wait buffers,
+command buffers, event buffers and memremap them during kdump boot
+and essentially work with an already enabled IOMMU configuration and
+re-using the previous kernel’s data structures.
+
+Reusing of command buffers and event buffers is now done for kdump boot
+irrespective of SNP being enabled during kdump.
+
+Re-use of completion wait buffers is only done when SNP is enabled as
+the exclusion base register is used for the completion wait buffer
+(CWB) address only when SNP is enabled.
+
+Tested-by: Sairaj Kodilkar <sarunkod@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ drivers/iommu/amd/amd_iommu_types.h |   5 +
+ drivers/iommu/amd/init.c            | 164 ++++++++++++++++++++++++++--
+ drivers/iommu/amd/iommu.c           |   2 +-
+ 3 files changed, 158 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Add host kdump support for SNP
+[PATCH v5 0/4] Add host kdump support for SNP
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+When a crash is triggered the kernel attempts to shut down SEV-SNP
+using the SNP_SHUTDOWN_EX command. If active SNP VMs are present,
+SNP_SHUTDOWN_EX fails as firmware checks all encryption-capable ASIDs
+to ensure none are in use and that a DF_FLUSH is not required. 
+
+This casues the kdump kernel to boot with IOMMU SNP enforcement still
+enabled and IOMMU completion wait buffers (CWBs), command buffers,
+device tables and event buffer registers remain locked and exclusive
+to the previous kernel. Attempts to allocate and use new buffers in
+the kdump kernel fail, as the hardware ignores writes to the locked
+MMIO registers (per AMD IOMMU spec Section 2.12.2.1).
+
+As a result, the kdump kernel cannot initialize the IOMMU or enable IRQ
+remapping which is required for proper operation.
+
+This results in repeated "Completion-Wait loop timed out" errors and a
+second kernel panic: "Kernel panic - not syncing: timer doesn't work
+through Interrupt-remapped IO-APIC"
+
+The list of MMIO registers locked and which ignore writes after failed
+SNP shutdown are mentioned in the AMD IOMMU specifications below:
+
+Section 2.12.2.1.
+https://docs.amd.com/v/u/en-US/48882_3.10_PUB
+
+Instead of allocating new buffers, re-use the previous kernel’s pages
+for completion wait buffers, command buffers, event buffers and device
+tables and operate with the already enabled SNP configuration and
+existing data structures.
+
+This approach is now used for kdump boot regardless of whether SNP is
+enabled during kdump.
+
+The patch-series enables successful crashkernel/kdump operation on SNP
+hosts even when SNP_SHUTDOWN_EX fails.
+
+v5:
+- Fix sparse build warnings, use (__force void *) for
+  fixing cast return of (void __iomem *) to (void *) from ioremap_encrypted()
+  in iommu_memremap().
+- Add Tested-by tags.
+
+v4:
+- Fix commit logs.
+- Explicitly call ioremap_encrypted() if SME is enabled and memremap()
+otherwise if SME is not enabled in iommu_memremap().
+- Rename remap_cwwb_sem() to remap_or_alloc_cwwb_sem().
+- Fix inline comments.
+- Skip both SEV and SNP INIT for kdump boot.
+- Add a BUG_ON() if reuse_device_table() fails in case of SNP enabled.
+- Drop "Fixes:" tag as this patch-series enables host kdump for SNP.
+
+v3:
+- Moving to AMD IOMMU driver fix so that there is no need to do SNP_DECOMMISSION
+during panic() and kdump kernel boot will be more agnostic to 
+whether or not SNP_SHUTDOWN is done properly (or even done at all),
+i.e., even with active SNP guests. Fixing crashkernel/kdump boot with IOMMU SNP/RMP
+enforcement still enabled prior to kdump boot by reusing the pages of the previous 
+kernel for IOMMU completion wait buffers, command buffer and device table and
+memremap them during kdump boot.
+- Rebased on linux-next.
+- Split the original patch into smaller patches and prepare separate
+patches for adding iommu_memremap() helper and remapping/unmapping of 
+IOMMU buffers for kdump, Reusing device table for kdump and skip the
+enabling of IOMMU buffers for kdump.
+- Add new functions for remapping/unmapping IOMMU buffers and call
+them from alloc_iommu_buffers/free_iommu_buffers in case of kdump boot
+else call the exisiting alloc/free variants of CWB, command and event buffers.
+- Skip SNP INIT in case of kdump boot.
+- The final patch skips enabling IOMMU command buffer and event buffer
+for kdump boot which fixes kdump on SNP host.
+- Add comment that completion wait buffers are only re-used when SNP is
+enabled.
+
+Ashish Kalra (4):
+  iommu/amd: Add support to remap/unmap IOMMU buffers for kdump
+  iommu/amd: Reuse device table for kdump
+  crypto: ccp: Skip SEV and SNP INIT for kdump boot
+  iommu/amd: Skip enabling command/event buffers for kdump
+
+ drivers/crypto/ccp/sev-dev.c        |   8 +
+ drivers/iommu/amd/amd_iommu_types.h |   5 +
+ drivers/iommu/amd/init.c            | 298 +++++++++++++++++++---------
+ drivers/iommu/amd/iommu.c           |   2 +-
+ 4 files changed, 221 insertions(+), 92 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/cpufeatures: Add a CPU feature bit for MSR immediate form instructions
+[PATCH v1 1/4] x86/cpufeatures: Add a CPU feature bit for MSR immediate form instructions
+Author: Xin Li (Intel) <xin@zytor.com>
+
+The immediate form of MSR access instructions are primarily motivated
+by performance, not code size: by having the MSR number in an immediate,
+it is available *much* earlier in the pipeline, which allows the
+hardware much more leeway about how a particular MSR is handled.
+
+Use a scattered CPU feature bit for MSR immediate form instructions.
+
+Suggested-by: Borislav Petkov (AMD) <bp@alien8.de>
+Signed-off-by: Xin Li (Intel) <xin@zytor.com>
+---
+ arch/x86/include/asm/cpufeatures.h | 1 +
+ arch/x86/kernel/cpu/scattered.c    | 1 +
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Handle the immediate form of MSR instructions
+[PATCH v1 0/4] KVM: VMX: Handle the immediate form of MSR instructions
+Author: Xin Li (Intel) <xin@zytor.com>
+
+This patch set handles two newly introduced VM exit reasons associated
+with the immediate form of MSR instructions to ensure proper
+virtualization of these instructions.
+
+The immediate form of MSR access instructions are primarily motivated
+by performance, not code size: by having the MSR number in an immediate,
+it is available *much* earlier in the pipeline, which allows the
+hardware much more leeway about how a particular MSR is handled.
+
+For proper virtualization of the immediate form of MSR instructions,
+Intel VMX architecture adds the following changes:
+
+  1) The immediate form of RDMSR uses VM exit reason 84.
+
+  2) The immediate form of WRMSRNS uses VM exit reason 85.
+
+  3) For both VM exit reasons 84 and 85, the exit qualification is set
+     to the MSR address causing the VM exit.
+
+  4) Bits 3 ~ 6 of the VM exit instruction information field represent
+     the operand register used in the immediate form of MSR instruction.
+
+  5) The VM-exit instruction length field records the size of the
+     immediate form of the MSR instruction.
+
+Note: The VMX specification for the immediate form of MSR instructions
+was inadvertently omitted from the last published ISE, but it will be
+included in the upcoming edition.
+
+Linux bare metal support of the immediate form of MSR instructions is
+still under development; however, the KVM support effort is proceeding
+independently of the bare metal implementation.
+
+
+Xin Li (Intel) (4):
+  x86/cpufeatures: Add a CPU feature bit for MSR immediate form
+    instructions
+  KVM: x86: Introduce MSR read/write emulation helpers
+  KVM: VMX: Handle the immediate form of MSR instructions
+  KVM: x86: Advertise support for the immediate form of MSR instructions
+
+ arch/x86/include/asm/cpufeatures.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  5 ++
+ arch/x86/include/uapi/asm/vmx.h    |  6 +-
+ arch/x86/kernel/cpu/scattered.c    |  1 +
+ arch/x86/kvm/cpuid.c               |  6 +-
+ arch/x86/kvm/reverse_cpuid.h       |  5 ++
+ arch/x86/kvm/vmx/vmx.c             | 26 ++++++++
+ arch/x86/kvm/vmx/vmx.h             |  5 ++
+ arch/x86/kvm/x86.c                 | 96 +++++++++++++++++++++++-------
+ arch/x86/kvm/x86.h                 |  1 +
+ 10 files changed, 130 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Properly check ESR_EL2.VNCR on taking a VNCR_EL2 related fault
+[PATCH] KVM: arm64: nv: Properly check ESR_EL2.VNCR on taking a VNCR_EL2 related fault
+Author: Marc Zyngier <maz@kernel.org>
+
+Instead of checking for the ESR_EL2.VNCR bit being set (the only case
+we should be here), we are actually testing random bits in ESR_EL2.DFSC.
+
+13 obviously being a lucky number, it matches both permission and
+translation fault status codes, which explains why we never saw it
+failing. This was found by inspection, while reviewing a vaguely
+related patch.
+
+Whilst we're at it, turn the BUG_ON() into a WARN_ON_ONCE(), as
+exploding here is just silly.
+
+Fixes: 069a05e535496 ("KVM: arm64: nv: Handle VNCR_EL2-triggered faults")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GUEST_MEMFD
+[PATCH v17 01/24] KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GUEST_MEMFD
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Rename the Kconfig option CONFIG_KVM_PRIVATE_MEM to
+CONFIG_KVM_GUEST_MEMFD. The original name implied that the feature only
+supported "private" memory. However, CONFIG_KVM_PRIVATE_MEM enables
+guest_memfd in general, which is not exclusively for private memory.
+Subsequent patches in this series will add guest_memfd support for
+non-CoCo VMs, whose memory is not private.
+
+Renaming the Kconfig option to CONFIG_KVM_GUEST_MEMFD more accurately
+reflects its broader scope as the main Kconfig option for all
+guest_memfd-backed memory. This provides clearer semantics for the
+option and avoids confusion as new features are introduced.
+
+Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Co-developed-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: David Hildenbrand <david@redhat.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ include/linux/kvm_host.h        | 14 +++++++-------
+ virt/kvm/Kconfig                |  8 ++++----
+ virt/kvm/Makefile.kvm           |  2 +-
+ virt/kvm/kvm_main.c             |  4 ++--
+ virt/kvm/kvm_mm.h               |  4 ++--
+ 6 files changed, 17 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Enable mmap() for guest_memfd
+[PATCH v17 00/24] KVM: Enable mmap() for guest_memfd
+Author: Sean Christopherson <seanjc@google.com>
+
+Paolo,
+
+The arm64 patches have been Reviewed-by Marc, and AFAICT the x86 side of
+things is a go.  Barring a screwup on my end, this just needs your approval.
+
+Assuming everything looks good, it'd be helpful to get this into kvm/next
+shortly after rc1.  The x86 Kconfig changes in particular create semantic
+conflicts with in-flight series.
+
+
+Add support for host userspace mapping of guest_memfd-backed memory for VM
+types that do NOT use support KVM_MEMORY_ATTRIBUTE_PRIVATE (which isn't
+precisely the same thing as CoCo VMs, since x86's SEV-MEM and SEV-ES have
+no way to detect private vs. shared).
+
+mmap() support paves the way for several evolving KVM use cases:
+
+ * Allows VMMs like Firecracker to run guests entirely backed by
+   guest_memfd [1]. This provides a unified memory management model for
+   both confidential and non-confidential guests, simplifying VMM design.
+
+ * Enhanced Security via direct map removal: When combined with Patrick's
+   series for direct map removal [2], this provides additional hardening
+   against Spectre-like transient execution attacks by eliminating the
+   need for host kernel direct maps of guest memory.
+
+ * Lays the groundwork for *restricted* mmap() support for guest_memfd-backed
+   memory on CoCo platforms [3] that permit in-place
+   sharing of guest memory with the host.
+
+Based on kvm/queue.
+
+[1] https://github.com/firecracker-microvm/firecracker/tree/feature/secret-hiding
+[2] https://lore.kernel.org/all/20250221160728.1584559-1-roypat@amazon.co.uk
+[3] https://lore.kernel.org/all/20250328153133.3504118-1-tabba@google.com
+
+v17:
+ - Collect reviews. [Xiaoyao, David H.]
+ - Write a better changelog for the CONFIG_KVM_GENERIC_PRIVATE_MEM =>
+   CONFIG_HAVE_KVM_ARCH_GMEM_POPULATE rename. [Xiaoyao]
+ - Correctly gmem_max_mapping_level()'s '0' return in the right patch. [Xiaoyao]
+ - Replace call to kvm_gmem_get_pfn() with a WARN_ONCE() in the hugepage
+   recovery path. [Ackerley]
+ - Add back "KVM: x86/mmu: Handle guest page faults for guest_memfd with
+   shared memory". [Ackerley]
+ - Rework the selftest flags testcase to query MMAP support for a given VM
+   type instead of hardcoding expectations in the test. [Sean]
+ - Add a testcase to verify KVM can map guest_memfd memory into the guest
+   even if the userspace address in the memslot isn't (properly) mmap'd. [Sean]
+
+v16:
+ - https://lore.kernel.org/all/20250723104714.1674617-1-tabba@google.com
+ - Rework and simplify Kconfig selection and dependencies.
+ - Always enable guest_memfd for KVM x86 (64-bit) and arm64, which
+   simplifies the enablement checks.
+ - Based on kvm-x86/next: commit 33f843444e28 ("Merge branch 'vmx'").
+
+v15:
+ - https://lore.kernel.org/all/20250717162731.446579-1-tabba@google.com
+ - Removed KVM_SW_PROTECTED_VM dependency on KVM_GENERIC_GMEM_POPULATE
+ - Fixed some commit messages
+
+v14:
+ - https://lore.kernel.org/all/20250715093350.2584932-1-tabba@google.com
+ - Fixed handling of guest faults in case of invalidation in arm64
+ - Handle VNCR_EL2-triggered faults backed by guest_memfd (arm64 nested
+   virt)
+ - Applied suggestions from latest feedback
+ - Rebase on Linux 6.16-rc6
+
+Ackerley Tng (2):
+  KVM: x86/mmu: Rename .private_max_mapping_level() to
+    .gmem_max_mapping_level()
+  KVM: x86/mmu: Handle guest page faults for guest_memfd with shared
+    memory
+
+Fuad Tabba (15):
+  KVM: Rename CONFIG_KVM_PRIVATE_MEM to CONFIG_KVM_GUEST_MEMFD
+  KVM: Rename CONFIG_KVM_GENERIC_PRIVATE_MEM to
+    CONFIG_HAVE_KVM_ARCH_GMEM_POPULATE
+  KVM: Rename kvm_slot_can_be_private() to kvm_slot_has_gmem()
+  KVM: Fix comments that refer to slots_lock
+  KVM: Fix comment that refers to kvm uapi header path
+  KVM: x86: Enable KVM_GUEST_MEMFD for all 64-bit builds
+  KVM: guest_memfd: Add plumbing to host to map guest_memfd pages
+  KVM: guest_memfd: Track guest_memfd mmap support in memslot
+  KVM: arm64: Refactor user_mem_abort()
+  KVM: arm64: Handle guest_memfd-backed guest page faults
+  KVM: arm64: nv: Handle VNCR_EL2-triggered faults backed by guest_memfd
+  KVM: arm64: Enable support for guest_memfd backed memory
+  KVM: Allow and advertise support for host mmap() on guest_memfd files
+  KVM: selftests: Do not use hardcoded page sizes in guest_memfd test
+  KVM: selftests: guest_memfd mmap() test when mmap is supported
+
+Sean Christopherson (7):
+  KVM: x86: Have all vendor neutral sub-configs depend on KVM_X86, not
+    just KVM
+  KVM: x86: Select KVM_GENERIC_PRIVATE_MEM directly from
+    KVM_SW_PROTECTED_VM
+  KVM: x86: Select TDX's KVM_GENERIC_xxx dependencies iff
+    CONFIG_KVM_INTEL_TDX=y
+  KVM: x86/mmu: Hoist guest_memfd max level/order helpers "up" in mmu.c
+  KVM: x86/mmu: Enforce guest_memfd's max order when recovering
+    hugepages
+  KVM: x86/mmu: Extend guest_memfd's max mapping level to shared
+    mappings
+  KVM: selftests: Add guest_memfd testcase to fault-in on !mmap()'d
+    memory
+
+ Documentation/virt/kvm/api.rst                |   9 +
+ arch/arm64/kvm/Kconfig                        |   1 +
+ arch/arm64/kvm/mmu.c                          | 203 +++++++++++----
+ arch/arm64/kvm/nested.c                       |  41 ++-
+ arch/x86/include/asm/kvm-x86-ops.h            |   2 +-
+ arch/x86/include/asm/kvm_host.h               |   6 +-
+ arch/x86/kvm/Kconfig                          |  26 +-
+ arch/x86/kvm/mmu/mmu.c                        | 142 ++++++-----
+ arch/x86/kvm/mmu/mmu_internal.h               |   2 +-
+ arch/x86/kvm/mmu/tdp_mmu.c                    |   2 +-
+ arch/x86/kvm/svm/sev.c                        |   6 +-
+ arch/x86/kvm/svm/svm.c                        |   2 +-
+ arch/x86/kvm/svm/svm.h                        |   4 +-
+ arch/x86/kvm/vmx/main.c                       |   7 +-
+ arch/x86/kvm/vmx/tdx.c                        |   5 +-
+ arch/x86/kvm/vmx/x86_ops.h                    |   2 +-
+ arch/x86/kvm/x86.c                            |  11 +
+ include/linux/kvm_host.h                      |  38 +--
+ include/uapi/linux/kvm.h                      |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/guest_memfd_test.c  | 236 ++++++++++++++++--
+ virt/kvm/Kconfig                              |  15 +-
+ virt/kvm/Makefile.kvm                         |   2 +-
+ virt/kvm/guest_memfd.c                        |  81 +++++-
+ virt/kvm/kvm_main.c                           |  12 +-
+ virt/kvm/kvm_mm.h                             |   4 +-
+ 26 files changed, 648 insertions(+), 214 deletions(-)
+
+----------------------------------------------------------------------
+
