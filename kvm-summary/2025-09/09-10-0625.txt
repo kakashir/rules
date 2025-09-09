@@ -1,0 +1,907 @@
+From f31eea711 to 2b5f9bef8
+KVM mailing list update from f31eea711 to 2b5f9bef8
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     29 intel.com
+     12 google.com
+      9 rivosinc.com
+      6 zytor.com
+      2 gmail.com
+      1 redhat.com
+      1 raptorengineering.com
+      1 linux.intel.com
+      1 bytedance.com
+      1 amazon.co.uk
+
+Top 15 contributors (Based on Email Body)
+
+     15  Yang Weijiang <weijiang.yang@intel.com>
+      9  Atish Patra <atishp@rivosinc.com>
+      8  Jacob Keller <jacob.e.keller@intel.com>
+      7  Sean Christopherson <seanjc@google.com>
+      6  "Xin Li (Intel)" <xin@zytor.com>
+      6  Chao Gao <chao.gao@intel.com>
+      5  Keir Fraser <keirf@google.com>
+      1  Tony Lindgren <tony.lindgren@linux.intel.com>
+      1  Timothy Pearson <tpearson@raptorengineering.com>
+      1  Thomas Huth <thuth@redhat.com>
+      1  Fred Griffoul <fgriffo@amazon.co.uk>
+      1  Fei Li <lifei.shirley@bytedance.com>
+      1  Dzmitry Sankouski <dsankouski@gmail.com>
+      1  Bagas Sanjaya <bagasdotme@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  ice: add basic skeleton and TLV framework
+[PATCH RFC net-next 1/7] ice: add basic skeleton and TLV framework
+Author: Jacob Keller <jacob.e.keller@intel.com>
+
+In preparation for supporting VF live migration, introduce a new functional
+block to the ice driver to expose hooks for migrating a VF.
+
+The ice-vfio-pci driver will call ice_migration_init_dev() to indicate that
+the migration driver is loaded.
+
+When the host wants to migrate the device, first it suspends the device by
+calling ice_migration_suspend_dev(). Then it saves any device state by
+calling ice_migration_save_devstate() which serializes the VF device state
+into a buffer payload which is sent to the resuming host. This target
+system calls ice_migration_suspend_dev() to stop the target VF device, and
+finally calls ice_migration_load_devstate() to deserialize the migration
+state and program the target VF.
+
+Add the virt/migration.c file and implement the skeleton for these
+functions. A basic framework is implemented, but the following patches will
+fully flesh out the serialization and deserialization for the various kinds
+of VF data.
+
+Previous implementations of live migration were implemented by serializing
+device state as a series of virtchnl messages. It was thought that this
+would be simple since virtchnl is the ABI for communication between the PF
+and VF.
+
+Unfortunately, use of virtchnl presented numerous problems. To avoid these
+issues, the migration buffer will be implemented using a custom
+Type-Length-Value format which avoids a few key issues with the virtchnl
+solution:
+
+1. Migration data is only captured when a live migration event is
+   requested. The driver no longer caches a copy of every virtchnl message
+   sent by the VF.
+2. Migration data size is bounded, and the VF cannot indirectly increase it
+   to arbitrary sizes by sending unexpected sequences of virtchnl messages.
+3. Replay of VF state is controlled precisely, and no longer requires
+   modification of the standard virtchnl communication flow.
+4. Additional data about the VF state is sent over the migration buffer,
+   which is not captured by virtchnl messages. This includes host state
+   such as the VF trust flag, MSI-X configuration, RSS configuration, etc.
+
+Introduce the initial support for this TLV format along with the first TLV
+for storing basic VF info.
+
+The TLV definitions are placed in virt/migration_tlv.h which defines the
+payload data and describes the ABI for this communication format. The first
+TLV must be the ICE_MIG_TLV_HEADER which consists of a magic number and a
+version used to identify the payload format. This allows for the
+possibility of future extension should the entire format need to be
+changed.
+
+TLVs are specified as a series of ice_migration_tlv_structures, which are
+variable length structures using a flexible array of bytes. These
+structures are __packed. However, access to unaligned memory requires the
+compiler to insert additional instructions to avoid unaligned access on
+some platforms. To minimize -- but not completely remove -- this, the
+length for all TLVs is required to be aligned to 4-bytes. The header itself
+is 4 bytes, and this ensures that the header and all values with a size 4
+bytes or smaller will have aligned access. 8 byte values may potentially be
+unaligned, but use if the __packed attribute ensures that the compiler will
+insert appropriate access instructions for all platforms.
+
+Note that this migration implementation generally assumes the host and
+target system are of the same endianness, integer size, etc. The chosen
+magic number of 0xE8000001 will catch byte order difference, and all types
+in the TLVs are fixed size.
+
+The type of the  TLVs is specified by the ice_migration_tlvs enumeration.
+This *is* ABI, and any extension must add new TLVs at the end of this list
+just prior to the NUM_ICE_MIG_TLV which specifies the number of recognized
+TLVs by this version of the ABI.
+
+The exact "version" of the ABI is specified by a combination of the magic
+number, the version in the header, and the number of TLVs as specified by
+NUM_ICE_MIG_TLV, which is sent in the header. This allows for new TLVs to
+be added in the future without needing to increment the version number.
+Such an increment should only be done if any existing TLV format must
+change, or if the entire format must change for some reason.
+
+The payload *must* begin with the ICE_MIG_TLV_HEADER, as this specifies the
+format. All other TLVs do not have an order, and receiving code must be
+capable of handling TLVs in an arbitrary order. Some TLVs will be sent
+multiple times, such as for Tx and Rx queue information.
+
+The special ICE_MIG_TLV_END type must come last and is a marker to indicate
+the end of the payload buffer. It has a size of 0.
+
+Implement a few macros to help reduce boiler plate. The ice_mig_tlv_type()
+macro converts a structure pointer to its TLV type using _Generic(). The
+ice_mig_alloc_tlv() macro allocates a new TLV, returning the pointer to the
+value structure. This macro ensures the 4-byte alignment required for all
+TLV lengths. The ice_mig_alloc_flex_tlv() is similar, but allows allocating
+a TLV whose element structure ends in a flexible array. Finally, the
+ice_mig_tlv_add_tail() macro takes a pointer to an element structure and
+inserts the container ice_mig_tlv_entry and inserts it into the TLV list
+used for temporary storage.
+
+Signed-off-by: Jacob Keller <jacob.e.keller@intel.com>
+---
+ drivers/net/ethernet/intel/ice/ice.h               |   2 +
+ drivers/net/ethernet/intel/ice/ice_vf_lib.h        |   2 +
+ .../net/ethernet/intel/ice/virt/migration_tlv.h    | 221 +++++++++
+ include/linux/net/intel/ice_migration.h            |  49 ++
+ drivers/net/ethernet/intel/ice/ice_main.c          |  16 +
+ drivers/net/ethernet/intel/ice/ice_vf_lib.c        |   3 +
+ drivers/net/ethernet/intel/ice/virt/migration.c    | 506 +++++++++++++++++++++
+ drivers/net/ethernet/intel/ice/Makefile            |   1 +
+ 8 files changed, 800 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  ice: implement live migration driver for
+[PATCH RFC net-next 0/7] ice: implement live migration driver for
+Author: Jacob Keller <jacob.e.keller@intel.com>
+
+This series implements the QEMU/KVM live migration support for the ice E800
+series hardware. It is a long-overdue followup to the version from Yahui
+back in 2023. That version itself is an evolution of the original v1
+protocol from some years before that.
+
+This version is a significant rework and complete replaces the
+virtchnl message based approach with one based on the PF serializing state
+via a custom Type-Length-Value format.
+
+This solution significantly reduces the impact a VF can have on the payload
+size, as the size is no longer based directly on messages sent by the VF.
+It also ensures that other data such as host-based RSS and MSI-X is sent,
+which previously was ignored since there were no equivalent virtchnl
+messages.
+
+Finally, replay can now be ordered to safely restore Tx and Rx queues
+without needing hacks to the virtchnl initialization flows, and the driver
+now only holds migration data for a short limited time while suspending,
+rather than requiring we save every virtchnl message the VF sends for the
+life time of the VF.
+
+To test this, I used QEMU/KVM:
+
+  echo 2 >/sys/class/net/enp175s0f0np0/device/sriov_numvfs
+
+  echo "0000:af:01.0" >/sys/bus/pci/drivers/iavf/unbind
+  echo "0000:af:01.1" >/sys/bus/pci/drivers/iavf/unbind
+
+  modprobe ice_vfio_pci
+
+  echo "8086 1889" >/sys/bus/pci/drivers/ice-vfio-pci/new_id
+
+I've tested with QEMU using the "enable-migration=on" and
+"x-pre-copy-dirty-page-tracking=off" settings, as we do not currently
+support dirty page tracking.
+
+The initial host QEMU instance is launched as usual, while the target QEMU
+instance is launched with the -incoming tcp:localhost:4444 option.
+
+To initiate migration you can issue the migration command from the QEMU
+console:
+
+  migrate tcp:localhost:4444
+
+I've tested with and without traffic, and I tried to cover a wide variety
+of VF settings and configuration.
+
+REVIEWER NOTES AND REQUESTS:
+
+  I am sending this as RFC to the netdev and VFIO mailing lists, as I am
+  uncertain what the preferred path for merging is. I am also awaiting
+  testing from Intel's virtualization team.
+
+  I've managed to reduce the overall patch series size as much as possible
+  by sending many of the cleanups ahead of time. These have finally all
+  merged into net-next.
+
+  This work is based on the original live migration patches from Yahui.
+  However, the ice driver implementation is entirely rewritten. The VFIO
+  driver code is still primarily Yahui's, with some minor alterations and
+  cleanups applied.
+
+  I decided to separate the deferred reset logic in the VFIO driver to its
+  own patch, and am open to alternative suggestions for resolving this
+  potential deadlock. I saw a similar deferred logic in other drivers. I
+  have thus far not come up with a better solution.
+
+  The biggest remaining gap on the ice driver side is that I don't have a
+  good idea how to best plan for future VF enhancements. Currently, all the
+  existing configuration and features now work. However, a future feature
+  might require new migration data, and I don't have a good idea how to
+  make the driver safely disable such features until they're supported
+  within the migration.
+
+  The TLV format does allow for extension, (both with a full version field
+  and with passing the set of known TLVs). However, the driver likely could
+  use some sort of infrastructure so that new VF virtchnl commands or
+  features get blocked by default until they are confirmed to work with
+  migration. Suggestions on how best to implement that are welcome.
+
+Link: https://lore.kernel.org/netdev/20231121025111.257597-1-yahui.cao@intel.com/
+Signed-off-by: Jacob Keller <jacob.e.keller@intel.com>
+---
+Jacob Keller (7):
+      ice: add basic skeleton and TLV framework for live migration support
+      ice: implement device suspension for live migration
+      ice: add migration TLV for basic VF information
+      ice: add migration TLVs for queue and interrupt state
+      ice: add remaining migration TLVs
+      ice-vfio-pci: add ice VFIO PCI live migration driver
+      ice-vfio-pci: implement PCI .reset_done handling
+
+ drivers/net/ethernet/intel/ice/ice.h               |    2 +
+ drivers/net/ethernet/intel/ice/ice_hw_autogen.h    |    8 +
+ drivers/net/ethernet/intel/ice/ice_vf_lib.h        |    2 +
+ .../net/ethernet/intel/ice/virt/migration_tlv.h    |  495 +++++
+ include/linux/net/intel/ice_migration.h            |   49 +
+ drivers/net/ethernet/intel/ice/ice_main.c          |   16 +
+ drivers/net/ethernet/intel/ice/ice_vf_lib.c        |    3 +
+ drivers/net/ethernet/intel/ice/virt/migration.c    | 2147 ++++++++++++++++++++
+ drivers/net/ethernet/intel/ice/virt/queues.c       |   21 +
+ drivers/vfio/pci/ice/main.c                        |  764 +++++++
+ MAINTAINERS                                        |    7 +
+ drivers/net/ethernet/intel/ice/Makefile            |    1 +
+ drivers/vfio/pci/Kconfig                           |    2 +
+ drivers/vfio/pci/Makefile                          |    2 +
+ drivers/vfio/pci/ice/Kconfig                       |    8 +
+ drivers/vfio/pci/ice/Makefile                      |    4 +
+ 16 files changed, 3531 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Fix INTx handling on legacy DisINTx- PCI devices
+[PATCH] vfio/pci: Fix INTx handling on legacy DisINTx- PCI devices
+Author: Timothy Pearson <tpearson@raptorengineering.com>
+
+PCI devices prior to PCI 2.3 both use level interrupts and do not support
+interrupt masking, leading to a failure when passed through to a KVM guest on
+at least the ppc64 platform, which does not utilize the resample IRQFD. This
+failure manifests as receiving and acknowledging a single interrupt in the guest
+while leaving the host physical device VFIO IRQ pending.
+
+Level interrupts in general require special handling due to their inherently
+asynchronous nature; both the host and guest interrupt controller need to
+remain in synchronization in order to coordinate mask and unmask operations.
+When lazy IRQ masking is used on DisINTx- hardware, the following sequence
+occurs:
+
+ * Level IRQ assertion on host
+ * IRQ trigger within host interrupt controller, routed to VFIO driver
+ * Host EOI with hardware level IRQ still asserted
+ * Software mask of interrupt source by VFIO driver
+ * Generation of event and IRQ trigger in KVM guest interrupt controller
+ * Level IRQ deassertion on host
+ * Guest EOI
+ * Guest IRQ level deassertion
+ * Removal of software mask by VFIO driver
+
+Note that no actual state change occurs within the host interrupt controller,
+unlike what would happen with either DisINTx+ hardware or message interrupts.
+The host EOI is not fired with the hardware level IRQ deasserted, and the
+level interrupt is not re-armed within the host interrupt controller, leading
+to an unrecoverable stall of the device.
+
+Work around this by disabling lazy IRQ masking for DisINTx- INTx devices.
+
+---
+ drivers/vfio/pci/vfio_pci_intrs.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Add support for #DE exception fixup
+[PATCH 1/4] KVM: selftests: Add support for #DE exception fixup
+Author: Sean Christopherson <seanjc@google.com>
+
+Add support for handling #DE (divide error) exceptions in KVM selftests
+so that the fastops test can verify KVM correctly handles #DE when
+emulating DIV or IDIV on behalf of the guest.  Morph #DE to 0xff (i.e.
+to -1) as a mostly-arbitrary vector to indicate #DE, so that '0' (the
+real #DE vector) can still be used to indicate "no exception".
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/processor.h | 6 ++++++
+ tools/testing/selftests/kvm/lib/x86/processor.c     | 2 +-
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Fastops DIV testcases
+[PATCH 0/4] KVM: selftests: Fastops DIV testcases
+Author: Sean Christopherson <seanjc@google.com>
+
+Add DIV and IDIV support to the so called fastops test to add coverage for #DE
+(the only exception that can occur during fastops execution), which was broken
+due to a typo in PeterZ's overhaul[*].
+
+I meant to post this back in July and forgot...
+
+[*] https://lore.kernel.org/all/aIF7ZhWZxlkcpm4y@google.com
+
+Sean Christopherson (4):
+  KVM: selftests: Add support for #DE exception fixup
+  KVM: selftests: Add coverage for 'b' (byte) sized fastops emulation
+  KVM: selftests: Dedup the gnarly constraints of the fastops tests
+    (more macros!)
+  KVM: selftests: Add support for DIV and IDIV in the fastops test
+
+ .../selftests/kvm/include/x86/processor.h     |  6 ++
+ .../testing/selftests/kvm/lib/x86/processor.c |  2 +-
+ .../testing/selftests/kvm/x86/fastops_test.c  | 82 ++++++++++++++-----
+ 3 files changed, 70 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Mark APIC access page dirty when syncing vmcs12 pages
+[PATCH] KVM: nVMX: Mark APIC access page dirty when syncing vmcs12 pages
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+For consistency with commit 7afe79f5734 ("KVM: nVMX: Mark vmcs12's APIC
+access page dirty when unmapping"), which marks the page dirty during
+unmap operations, also mark it dirty during vmcs12 page synchronization.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/x86/kvm/vmx/nested.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/boot: Shift VMXON from KVM init to CPU startup phase
+[RFC PATCH v1 1/5] x86/boot: Shift VMXON from KVM init to CPU startup phase
+Author: Xin Li (Intel) <xin@zytor.com>
+
+Move the VMXON setup from the KVM initialization path to the CPU startup
+phase to guarantee that hardware virtualization is enabled early and
+without interruption.
+
+As a result, KVM, often loaded as a kernel module, no longer needs to worry
+about whether or not VMXON has been executed on a CPU (e.g., CPU offline
+events or system reboots while KVM is loading).
+
+Signed-off-by: Xin Li (Intel) <xin@zytor.com>
+---
+ arch/x86/include/asm/processor.h |   1 +
+ arch/x86/include/asm/vmx.h       |   5 ++
+ arch/x86/kernel/cpu/common.c     |  91 ++++++++++++++++++++++++
+ arch/x86/kvm/vmx/vmcs.h          |   5 --
+ arch/x86/kvm/vmx/vmx.c           | 117 ++-----------------------------
+ arch/x86/power/cpu.c             |   7 +-
+ 6 files changed, 107 insertions(+), 119 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/boot, KVM: Move VMXON/VMXOFF handling from KVM to CPU lifecycle
+[RFC PATCH v1 0/5] x86/boot, KVM: Move VMXON/VMXOFF handling from KVM to CPU lifecycle
+Author: Xin Li (Intel) <xin@zytor.com>
+
+There is now broad consensus that TDX should be decoupled from KVM. To
+achieve this separation, it is necessary to move VMXON/VMXOFF handling
+out of KVM. Sean has also discussed this approach in several TDX patch
+series threads, e.g. [1], and has already done a round of refactoring
+in KVM [2].
+
+The simplest thing we could think of is to execute VMXON during the CPU
+startup phase and VMXOFF during the CPU shutdown phase, even although
+this leaves VMX on when it doesn't strictly need to be on.
+
+This RFC series demonstrates the idea and seeks feedback from the KVM
+community on its viability.
+
+
+The benefits of doing VMXON/VMXOFF in the CPU startup/shutdown phase:
+
+  1) Eliminates in-flight VMXON/VMXOFF during CPU hotplug, system reboot,
+     or kexec while KVM is loading or unloading.
+
+  2) Removes the “insane dances” for handling unexpected VMXON/VMXOFF
+     execution, including the emergency reboot disable virtualization
+     mechanism and kvm_rebooting.
+
+  3) Allows KVM and other hypervisors on Linux to omit explicit VMX
+     enable/disable logic.
+
+
+This RFC series follows the direction and does the following:
+
+  1) Move VMXON to the CPU startup phase instead of KVM initialization.
+
+  2) Move VMXOFF to the CPU shutdown phase instead of KVM teardown.
+
+  3) Move VMCLEAR of VMCSs to cpu_disable_virtualization().
+
+  4) Remove the emergency reboot disable virtualization mechanism.
+
+  5) Remove kvm_rebooting.
+
+
+AMD SVM support is not included, as I do not have access to AMD hardware,
+but adding it should be straightforward (currently broken in this RFC).
+
+Note, the first two patches should ideally be merged into a single patch
+to avoid breaking functionality in between. However, they are kept
+separate in this RFC for clarity and easier review. I will merge them
+if this approach proves viable.
+
+
+[1] https://lore.kernel.org/lkml/ZhawUG0BduPVvVhN@google.com/
+[2] https://lore.kernel.org/lkml/20240830043600.127750-1-seanjc@google.com/
+
+
+Xin Li (Intel) (5):
+  x86/boot: Shift VMXON from KVM init to CPU startup phase
+  x86/boot: Move VMXOFF from KVM teardown to CPU shutdown phase
+  x86/shutdown, KVM: VMX: Move VMCLEAR of VMCSs to
+    cpu_disable_virtualization()
+  x86/reboot: Remove emergency_reboot_disable_virtualization()
+  KVM: Remove kvm_rebooting and its references
+
+ arch/x86/include/asm/kvm_host.h  |   1 -
+ arch/x86/include/asm/processor.h |   3 +
+ arch/x86/include/asm/reboot.h    |  11 --
+ arch/x86/include/asm/vmx.h       |   5 +
+ arch/x86/kernel/cpu/common.c     | 162 +++++++++++++++++++++++++++
+ arch/x86/kernel/crash.c          |   5 +-
+ arch/x86/kernel/process.c        |   3 +
+ arch/x86/kernel/reboot.c         |  88 ++-------------
+ arch/x86/kernel/smp.c            |   3 +-
+ arch/x86/kernel/smpboot.c        |   6 +
+ arch/x86/kvm/svm/svm.c           |   8 --
+ arch/x86/kvm/svm/vmenter.S       |  42 +++----
+ arch/x86/kvm/vmx/main.c          |   1 -
+ arch/x86/kvm/vmx/tdx.c           |   4 +-
+ arch/x86/kvm/vmx/vmcs.h          |  10 +-
+ arch/x86/kvm/vmx/vmenter.S       |   2 -
+ arch/x86/kvm/vmx/vmx.c           | 185 ++-----------------------------
+ arch/x86/kvm/x86.c               |  18 +--
+ arch/x86/power/cpu.c             |  10 +-
+ include/linux/kvm_host.h         |   9 --
+ virt/kvm/kvm_main.c              |  29 +----
+ 21 files changed, 230 insertions(+), 375 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Fix uninitialized error code for __tdx_bringup()
+[PATCH 1/1] KVM: TDX: Fix uninitialized error code for __tdx_bringup()
+Author: Tony Lindgren <tony.lindgren@linux.intel.com>
+
+Fix a Smatch static checker warning reported by Dan:
+
+	arch/x86/kvm/vmx/tdx.c:3464 __tdx_bringup()
+	warn: missing error code 'r'
+
+Reported-by: Dan Carpenter <dan.carpenter@linaro.org>
+Fixes:  61bb28279623 ("KVM: TDX: Get system-wide info about TDX module on initialization")
+Signed-off-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+ arch/x86/kvm/vmx/tdx.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-init: Remove vgic_ready() macro
+[PATCH v4 1/4] KVM: arm64: vgic-init: Remove vgic_ready() macro
+Author: Keir Fraser <keirf@google.com>
+
+It is now used only within kvm_vgic_map_resources(). vgic_dist::ready
+is already written directly by this function, so it is clearer to
+bypass the macro for reads as well.
+
+Signed-off-by: Keir Fraser <keirf@google.com>
+---
+ arch/arm64/kvm/vgic/vgic-init.c | 5 ++---
+ include/kvm/arm_vgic.h          | 1 -
+ 2 files changed, 2 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Speed up MMIO registrations
+[PATCH v4 0/4] KVM: Speed up MMIO registrations
+Author: Keir Fraser <keirf@google.com>
+
+This is version 4 of the patches I previously posted here:
+
+ https://lore.kernel.org/all/20250819090853.3988626-1-keirf@google.com/
+
+Changes since v3:
+
+ * Rebased to v6.17-rc5
+ * Added Tested-by tag to patch 4
+ * Fixed reproducible syzkaller splat
+ * Tweaked comments to Sean's specification
+
+Keir Fraser (4):
+  KVM: arm64: vgic-init: Remove vgic_ready() macro
+  KVM: arm64: vgic: Explicitly implement vgic_dist::ready ordering
+  KVM: Implement barriers before accessing kvm->buses[] on SRCU read
+    paths
+  KVM: Avoid synchronize_srcu() in kvm_io_bus_register_dev()
+
+ arch/arm64/kvm/vgic/vgic-init.c | 14 +++--------
+ arch/x86/kvm/vmx/vmx.c          |  7 ++++++
+ include/kvm/arm_vgic.h          |  1 -
+ include/linux/kvm_host.h        | 11 ++++++---
+ virt/kvm/kvm_main.c             | 43 +++++++++++++++++++++++++++------
+ 5 files changed, 53 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Enable CET Virtualization
+[PATCH v14 00/22] Enable CET Virtualization
+Author: Chao Gao <chao.gao@intel.com>
+
+The FPU support for CET virtualization has already been merged into 6.17-rc1.
+Building on that, this series introduces Intel CET virtualization support for
+KVM.
+
+Changes in v14
+1. rename the type of guest SSP register to KVM_X86_REG_KVM and add docs
+   for register IDs in api.rst (Sean, Xiaoyao)
+2. update commit message of patch 1
+3. use rdmsrq/wrmsrq() instead of rdmsrl/wrmsrl() in patch 6 (Xin)
+4. split the introduction of per-guest guest_supported_xss into a
+separate patch. (Xiaoyao)
+5. make guest FPU and VMCS consistent regarding MSR_IA32_S_CET
+6. collect reviews from Xiaoyao.
+
+---
+Control-flow Enforcement Technology (CET) is a kind of CPU feature used
+to prevent Return/CALL/Jump-Oriented Programming (ROP/COP/JOP) attacks.
+It provides two sub-features(SHSTK,IBT) to defend against ROP/COP/JOP
+style control-flow subversion attacks.
+
+Shadow Stack (SHSTK):
+  A shadow stack is a second stack used exclusively for control transfer
+  operations. The shadow stack is separate from the data/normal stack and
+  can be enabled individually in user and kernel mode. When shadow stack
+  is enabled, CALL pushes the return address on both the data and shadow
+  stack. RET pops the return address from both stacks and compares them.
+  If the return addresses from the two stacks do not match, the processor
+  generates a #CP.
+
+Indirect Branch Tracking (IBT):
+  IBT introduces new instruction(ENDBRANCH)to mark valid target addresses
+  of indirect branches (CALL, JMP etc...). If an indirect branch is
+  executed and the next instruction is _not_ an ENDBRANCH, the processor
+  generates a #CP. These instruction behaves as a NOP on platforms that
+  doesn't support CET.
+
+CET states management
+=====================
+KVM cooperates with host kernel FPU framework to manage guest CET registers.
+With CET supervisor mode state support in this series, KVM can save/restore
+full guest CET xsave-managed states.
+
+CET user mode and supervisor mode xstates, i.e., MSR_IA32_{U_CET,PL3_SSP}
+and MSR_IA32_PL{0,1,2}, depend on host FPU framework to swap guest and host
+xstates. On VM-Exit, guest CET xstates are saved to guest fpu area and host
+CET xstates are loaded from task/thread context before vCPU returns to
+userspace, vice-versa on VM-Entry. See details in kvm_{load,put}_guest_fpu().
+
+CET supervisor mode states are grouped into two categories : XSAVE-managed
+and non-XSAVE-managed, the former includes MSR_IA32_PL{0,1,2}_SSP and are
+controlled by CET supervisor mode bit(S_CET bit) in XSS, the later consists
+of MSR_IA32_S_CET and MSR_IA32_INTR_SSP_TBL.
+
+VMX introduces new VMCS fields, {GUEST|HOST}_{S_CET,SSP,INTR_SSP_TABL}, to
+facilitate guest/host non-XSAVES-managed states. When VMX CET entry/exit load
+bits are set, guest/host MSR_IA32_{S_CET,INTR_SSP_TBL,SSP} are loaded from
+equivalent fields at VM-Exit/Entry. With these new fields, such supervisor
+states require no addtional KVM save/reload actions.
+
+Tests
+======
+This series has successfully passed the basic CET user shadow stack test
+and kernel IBT test in both L1 and L2 guests. The newly added
+KVM-unit-tests [2] also passed, and its v11 has been tested with the AMD
+CET series by John [3].
+
+For your convenience, you can use my WIP QEMU [1] for testing.
+
+[1]: https://github.com/gaochaointel/qemu-dev qemu-cet
+[2]: https://lore.kernel.org/kvm/20250626073459.12990-1-minipli@grsecurity.net/
+[3]: https://lore.kernel.org/kvm/aH6CH+x5mCDrvtoz@AUSJOHALLEN.amd.com/
+
+Chao Gao (5):
+  KVM: x86: Check XSS validity against guest CPUIDs
+  KVM: nVMX: Add consistency checks for CR0.WP and CR4.CET
+  KVM: nVMX: Add consistency checks for CET states
+  KVM: nVMX: Advertise new VM-Entry/Exit control bits for CET state
+  KVM: selftest: Add tests for KVM_{GET,SET}_ONE_REG
+
+Sean Christopherson (2):
+  KVM: x86: Report XSS as to-be-saved if there are supported features
+  KVM: x86: Load guest FPU state when access XSAVE-managed MSRs
+
+Yang Weijiang (15):
+  KVM: x86: Introduce KVM_{G,S}ET_ONE_REG uAPIs support
+  KVM: x86: Refresh CPUID on write to guest MSR_IA32_XSS
+  KVM: x86: Initialize kvm_caps.supported_xss
+  KVM: x86: Add fault checks for guest CR4.CET setting
+  KVM: x86: Report KVM supported CET MSRs as to-be-saved
+  KVM: VMX: Introduce CET VMCS fields and control bits
+  KVM: x86: Enable guest SSP read/write interface with new uAPIs
+  KVM: VMX: Emulate read and write to CET MSRs
+  KVM: x86: Save and reload SSP to/from SMRAM
+  KVM: VMX: Set up interception for CET MSRs
+  KVM: VMX: Set host constant supervisor states to VMCS fields
+  KVM: x86: Don't emulate instructions guarded by CET
+  KVM: x86: Enable CET virtualization for VMX and advertise to userspace
+  KVM: nVMX: Virtualize NO_HW_ERROR_CODE_CC for L1 event injection to L2
+  KVM: nVMX: Prepare for enabling CET support for nested guest
+
+ Documentation/virt/kvm/api.rst                |   9 +
+ arch/x86/include/asm/kvm_host.h               |   5 +-
+ arch/x86/include/asm/vmx.h                    |   9 +
+ arch/x86/include/uapi/asm/kvm.h               |  29 ++
+ arch/x86/kvm/cpuid.c                          |  17 +-
+ arch/x86/kvm/emulate.c                        |  46 ++-
+ arch/x86/kvm/smm.c                            |   8 +
+ arch/x86/kvm/smm.h                            |   2 +-
+ arch/x86/kvm/svm/svm.c                        |   4 +
+ arch/x86/kvm/vmx/capabilities.h               |   9 +
+ arch/x86/kvm/vmx/nested.c                     | 163 ++++++++++-
+ arch/x86/kvm/vmx/nested.h                     |   5 +
+ arch/x86/kvm/vmx/vmcs12.c                     |   6 +
+ arch/x86/kvm/vmx/vmcs12.h                     |  14 +-
+ arch/x86/kvm/vmx/vmx.c                        |  85 +++++-
+ arch/x86/kvm/vmx/vmx.h                        |   9 +-
+ arch/x86/kvm/x86.c                            | 264 +++++++++++++++++-
+ arch/x86/kvm/x86.h                            |  61 ++++
+ tools/arch/x86/include/uapi/asm/kvm.h         |  29 ++
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/get_set_one_reg.c       |  30 ++
+ 21 files changed, 764 insertions(+), 41 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Introduce KVM_{G,S}ET_ONE_REG uAPIs support
+[PATCH v14 01/22] KVM: x86: Introduce KVM_{G,S}ET_ONE_REG uAPIs support
+Author: Chao Gao <chao.gao@intel.com>
+
+
+Enable KVM_{G,S}ET_ONE_REG uAPIs so that userspace can access MSRs and
+other non-MSR registers through them.
+
+This is in preparation for allowing userspace to read/write the guest SSP
+register, which is needed for the upcoming CET virtualization support.
+
+Currently, two types of registers are supported: KVM_X86_REG_TYPE_MSR and
+KVM_X86_REG_TYPE_KVM. All MSRs are in the former type; the latter type is
+added for registers that lack existing KVM uAPIs to access them. The "KVM"
+in the name is intended to be vague to give KVM flexibility to include
+other potential registers. We considered some specific names, like
+"SYNTHETIC" and "SYNTHETIC_MSR" before, but both are confusing and may put
+KVM itself into a corner.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yang Weijiang <weijiang.yang@intel.com>
+Link: https://lore.kernel.org/all/20240219074733.122080-18-weijiang.yang@intel.com/ [1]
+Tested-by: Mathias Krause <minipli@grsecurity.net>
+Tested-by: John Allen <john.allen@amd.com>
+Tested-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Chao Gao <chao.gao@intel.com>
+---
+v14:
+- Rename the group type of guest SSP register to KVM_X86_REG_KVM
+- Add docs for id patterns for x86 in api.rst
+- Update commit message
+---
+ Documentation/virt/kvm/api.rst  |  2 +
+ arch/x86/include/uapi/asm/kvm.h | 26 +++++++++++
+ arch/x86/kvm/x86.c              | 78 +++++++++++++++++++++++++++++++++
+ 3 files changed, 106 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  drivers/perf: riscv: Add SBI v3.0 flag
+[PATCH v6 1/8] drivers/perf: riscv: Add SBI v3.0 flag
+Author: Atish Patra <atishp@rivosinc.com>
+
+There are new PMU related features introduced in SBI v3.0.
+1. Raw Event v2 which allows mhpmeventX value to be 56 bit wide.
+2. Get Event info function to do a bulk query at one shot.
+
+Reviewed-by: Anup Patel <anup@brainfault.org>
+Signed-off-by: Atish Patra <atishp@rivosinc.com>
+---
+ drivers/perf/riscv_pmu_sbi.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  Add SBI v3.0 PMU enhancements
+[PATCH v6 0/8] Add SBI v3.0 PMU enhancements
+Author: Atish Patra <atishp@rivosinc.com>
+
+SBI v3.0 specification[1] added two new improvements to the PMU chaper.
+The SBI v3.0 specification is frozen and under public review phase as
+per the RISC-V International guidelines. 
+
+1. Added an additional get_event_info function to query event availablity
+in bulk instead of individual SBI calls for each event. This helps in
+improving the boot time.
+
+2. Raw event width allowed by the platform is widened to have 56 bits
+with RAW event v2 as per new clarification in the priv ISA[2].
+
+Apart from implementing these new features, this series improves the gpa
+range check in KVM and updates the kvm SBI implementation to SBI v3.0.
+
+The opensbi patches have been merged. This series can be found at [3].
+
+[1] https://github.com/riscv-non-isa/riscv-sbi-doc/releases/download/v3.0-rc7/riscv-sbi.pdf 
+[2] https://github.com/riscv/riscv-isa-manual/issues/1578
+[3] https://github.com/atishp04/linux/tree/b4/pmu_event_info_v6
+
+Signed-off-by: Atish Patra <atishp@rivosinc.com>
+---
+Changes in v6:
+- Dropped the helper function to check writable slot 
+- Updated PATCH 7 to return invalid address error if vcpu_write_guest fails
+- Link to v5: https://lore.kernel.org/r/20250829-pmu_event_info-v5-0-9dca26139a33@rivosinc.com
+
+Changes in v5:
+- Rebased on top of v6.17-rc3
+- Updated PATCH 6 as per feedback to improve the generic helper function
+- Adapted PATCH 7 & 8 as per PATCH 6.
+- Link to v4: https://lore.kernel.org/r/20250721-pmu_event_info-v4-0-ac76758a4269@rivosinc.com
+
+Changes in v4:
+- Rebased on top of v6.16-rc7 
+- Fixed a potential compilation issue in PATCH5.
+- Minor typos fixed PATCH2 and PATCH3.
+- Fixed variable ordering in PATCH6 
+- Link to v3: https://lore.kernel.org/r/20250522-pmu_event_info-v3-0-f7bba7fd9cfe@rivosinc.com
+
+Changes in v3:
+- Rebased on top of v6.15-rc7 
+- Link to v2: https://lore.kernel.org/r/20250115-pmu_event_info-v2-0-84815b70383b@rivosinc.com
+
+Changes in v2:
+- Dropped PATCH 2 to be taken during rcX.
+- Improved gpa range check validation by introducing a helper function
+  and checking the entire range.
+- Link to v1: https://lore.kernel.org/r/20241119-pmu_event_info-v1-0-a4f9691421f8@rivosinc.com
+
+---
+Atish Patra (8):
+      drivers/perf: riscv: Add SBI v3.0 flag
+      drivers/perf: riscv: Add raw event v2 support
+      RISC-V: KVM: Add support for Raw event v2
+      drivers/perf: riscv: Implement PMU event info function
+      drivers/perf: riscv: Export PMU event info function
+      RISC-V: KVM: No need of explicit writable slot check
+      RISC-V: KVM: Implement get event info function
+      RISC-V: KVM: Upgrade the supported SBI version to 3.0
+
+ arch/riscv/include/asm/kvm_vcpu_pmu.h |   3 +
+ arch/riscv/include/asm/kvm_vcpu_sbi.h |   2 +-
+ arch/riscv/include/asm/sbi.h          |  13 +++
+ arch/riscv/kvm/vcpu_pmu.c             |  74 +++++++++++--
+ arch/riscv/kvm/vcpu_sbi_pmu.c         |   3 +
+ arch/riscv/kvm/vcpu_sbi_sta.c         |   9 +-
+ drivers/perf/riscv_pmu_sbi.c          | 191 +++++++++++++++++++++++++---------
+ include/linux/perf/riscv_pmu.h        |   1 +
+ 8 files changed, 229 insertions(+), 67 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Restrict writeback of SMI VCPU state
+[PATCH] KVM: x86: Restrict writeback of SMI VCPU state
+Author: Fei Li <lifei.shirley@bytedance.com>
+
+Recently, we meet a SMI race bug triggered by one monitor tool in our
+production environment. This monitor executes 'info registers -a' hmp
+at a fixed frequency, even during VM startup process, which makes
+some AP stay in KVM_MP_STATE_UNINITIALIZED forever, thus VM hangs.
+
+The complete calling processes for the SMI race are as follows:
+
+//thread1                      //thread2               //thread3
+`info registers -a` hmp [1]    AP(vcpu1) thread [2]    BSP(vcpu0) send INIT/SIPI [3]
+
+                               [2]
+                               KVM: KVM_RUN and then
+                                    schedule() in kvm_vcpu_block() loop
+
+[1]
+for each cpu: cpu_synchronize_state
+if !qemu_thread_is_self()
+1. insert to cpu->work_list, and handle asynchronously
+2. then kick the AP(vcpu1) by sending SIG_IPI/SIGUSR1 signal
+
+                               [2]
+                               KVM: checks signal_pending, breaks loop and returns -EINTR
+                               Qemu: break kvm_cpu_exec loop, run
+                                     1. qemu_wait_io_event()
+                                     => process_queued_cpu_work => cpu->work_list.func()
+                                        e.i. do_kvm_cpu_synchronize_state() callback
+                                        => kvm_arch_get_registers
+                                           => kvm_get_mp_state /* KVM: get_mpstate also calls
+                                              kvm_apic_accept_events() to handle INIT and SIPI */
+                                     => cpu->vcpu_dirty = true;
+                                     // end of qemu_wait_io_event
+
+                                                       [3]
+                                                       SeaBIOS: BSP enters non-root mode and runs reset_vector() in SeaBIOS.
+                                                                send INIT and then SIPI by writing APIC_ICR during smp_scan
+                                                       KVM: BSP(vcpu0) exits, then => handle_apic_write
+                                                            => kvm_lapic_reg_write => kvm_apic_send_ipi to all APs
+                                                            => for each AP: __apic_accept_irq, e.g. for AP(vcpu1)
+                                                            ==> case APIC_DM_INIT: apic->pending_events = (1UL << KVM_APIC_INIT)
+                                                                (not kick the AP yet)
+                                                            ==> case APIC_DM_STARTUP: set_bit(KVM_APIC_SIPI, &apic->pending_events)
+                                                                (not kick the AP yet)
+
+                               [2]
+                               Qemu continue:
+                                    2. kvm_cpu_exec()
+                                    => if (cpu->vcpu_dirty):
+                                       => kvm_arch_put_registers
+                                          => kvm_put_vcpu_events
+                               KVM: kvm_vcpu_ioctl_x86_set_vcpu_events
+                                    => clear_bit(KVM_APIC_INIT, &vcpu->arch.apic->pending_events);
+                                       e.i. pending_events changes from 11b to 10b
+                                      // end of kvm_vcpu_ioctl_x86_set_vcpu_events
+                               Qemu: => after put_registers, cpu->vcpu_dirty = false;
+                                     => kvm_vcpu_ioctl(cpu, KVM_RUN, 0)
+                               KVM: KVM_RUN
+                                    => schedule() in kvm_vcpu_block() until Qemu's next SIG_IPI/SIGUSR1 signal
+                                    /* But AP(vcpu1)'s mp_state will never change from KVM_MP_STATE_UNINITIALIZED
+                                      to KVM_MP_STATE_INIT_RECEIVED, even then to KVM_MP_STATE_RUNNABLE without
+                                      handling INIT inside kvm_apic_accept_events(), considering BSP will never
+                                      send INIT/SIPI again during smp_scan. Then AP(vcpu1) will never enter
+                                      non-root mode */
+
+                                                       [3]
+                                                       SeaBIOS: waits CountCPUs == expected_cpus_count and loops forever
+                                                                e.i. the AP(vcpu1) stays: EIP=0000fff0 && CS =f000 ffff0000
+                                                                and BSP(vcpu0) appears 100% utilized as it is in a while loop.
+
+To fix this, avoid clobbering SMI when not putting "reset" state, just
+like NMI abd SIPI does.
+
+Signed-off-by: Fei Li <lifei.shirley@bytedance.com>
+---
+ target/i386/kvm/kvm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Fix hypercalls docs section number order
+[PATCH] KVM: x86: Fix hypercalls docs section number order
+Author: Bagas Sanjaya <bagasdotme@gmail.com>
+
+Commit 4180bf1b655a79 ("KVM: X86: Implement "send IPI" hypercall")
+documents KVM_HC_SEND_IPI hypercall, yet its section number duplicates
+KVM_HC_CLOCK_PAIRING one (which both are 6th). Fix the numbering order
+so that the former should be 7th.
+
+Fixes: 4180bf1b655a ("KVM: X86: Implement "send IPI" hypercall")
+Signed-off-by: Bagas Sanjaya <bagasdotme@gmail.com>
+---
+ Documentation/virt/kvm/x86/hypercalls.rst | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
