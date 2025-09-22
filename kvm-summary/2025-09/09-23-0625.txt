@@ -1,0 +1,189 @@
+From 76ed3b9e3 to 475df9bc0
+KVM mailing list update from 76ed3b9e3 to 475df9bc0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      9 tu-dortmund.de
+      4 google.com
+      2 raptorengineering.com
+
+Top 15 contributors (Based on Email Body)
+
+      9  Simon Schippers <simon.schippers@tu-dortmund.de>
+      3  Jim Mattson <jmattson@google.com>
+      2  Timothy Pearson <tpearson@raptorengineering.com>
+      1  Sean Christopherson <seanjc@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  TUN/TAP & vhost_net: netdev queue flow control to avoid ptr_ring tail drop
+[PATCH net-next v5 0/8] TUN/TAP & vhost_net: netdev queue flow control to avoid ptr_ring tail drop
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch series deals with TUN, TAP and vhost_net which drop incoming 
+SKBs whenever their internal ptr_ring buffer is full. Instead, with this 
+patch series, the associated netdev queue is stopped before this happens. 
+This allows the connected qdisc to function correctly as reported by [1] 
+and improves application-layer performance, see our paper [2]. Meanwhile 
+the theoretical performance differs only slightly:
+
++------------------------+----------+----------+
+| pktgen benchmarks      | Stock    | Patched  |
+| i5 6300HQ, 20M packets |          |          |
++------------------------+----------+----------+
+| TAP                    | 2.10Mpps | 1.99Mpps |
++------------------------+----------+----------+
+| TAP+vhost_net          | 6.05Mpps | 6.14Mpps |
++------------------------+----------+----------+
+| Note: Patched had no TX drops at all,        |
+| while stock suffered numerous drops.         |
++----------------------------------------------+
+
+This patch series includes TUN, TAP, and vhost_net because they share 
+logic. Adjusting only one of them would break the others. Therefore, the 
+patch series is structured as follows:
+1+2: New ptr_ring helpers for 3 & 4
+3: TUN & TAP: Stop netdev queue upon reaching a full ptr_ring
+4: TUN & TAP: Wake netdev queue after consuming an entry
+5+6+7: TUN & TAP: ptr_ring wrappers and other helpers to be called by 
+vhost_net
+8: vhost_net: Call the wrappers & helpers
+
+Possible future work:
+- Introduction of Byte Queue Limits as suggested by Stephen Hemminger
+- Adaption of the netdev queue flow control for ipvtap & macvtap
+
+[1] Link: 
+https://unix.stackexchange.com/questions/762935/traffic-shaping-ineffective-on-tun-device
+[2] Link: 
+https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+
+Links to previous versions:
+V4: 
+https://lore.kernel.org/netdev/20250902080957.47265-1-simon.schippers@tu-dortmund.de/T/#u
+V3: 
+https://lore.kernel.org/netdev/20250825211832.84901-1-simon.schippers@tu-dortmund.de/T/#u
+V2: 
+https://lore.kernel.org/netdev/20250811220430.14063-1-simon.schippers@tu-dortmund.de/T/#u
+V1: 
+https://lore.kernel.org/netdev/20250808153721.261334-1-simon.schippers@tu-dortmund.de/T/#u
+
+Changelog:
+V4 -> V5:
+- Stop the netdev queue prior to producing the final fitting ptr_ring entry
+-> Ensures the consumer has the latest netdev queue state, making it safe 
+to wake the queue
+-> Resolves an issue in vhost_net where the netdev queue could remain 
+stopped despite being empty
+-> For TUN/TAP, the netdev queue no longer needs to be woken in the 
+blocking loop
+-> Introduces new helpers __ptr_ring_full_next and 
+__ptr_ring_will_invalidate for this purpose
+
+- vhost_net now uses wrappers of TUN/TAP for ptr_ring consumption rather 
+than maintaining its own rx_ring pointer
+
+V3 -> V4:
+- Target net-next instead of net
+- Changed to patch series instead of single patch
+- Changed to new title from old title
+"TUN/TAP: Improving throughput and latency by avoiding SKB drops"
+- Wake netdev queue with new helpers wake_netdev_queue when there is any 
+spare capacity in the ptr_ring instead of waiting for it to be empty
+- Use tun_file instead of tun_struct in tun_ring_recv as a more consistent 
+logic
+- Use smp_wmb() and smp_rmb() barrier pair, which avoids any packet drops 
+that happened rarely before
+- Use safer logic for vhost_net using RCU read locks to access TUN/TAP data
+
+V2 -> V3: Added support for TAP and TAP+vhost_net.
+
+V1 -> V2: Removed NETDEV_TX_BUSY return case in tun_net_xmit and removed 
+unnecessary netif_tx_wake_queue in tun_ring_recv.
+
+Thanks,
+Simon :)
+
+Simon Schippers (8):
+  __ptr_ring_full_next: Returns if ring will be full after next
+    insertion
+  Move the decision of invalidation out of __ptr_ring_discard_one
+  TUN, TAP & vhost_net: Stop netdev queue before reaching a full
+    ptr_ring
+  TUN & TAP: Wake netdev queue after consuming an entry
+  TUN & TAP: Provide ptr_ring_consume_batched wrappers for vhost_net
+  TUN & TAP: Provide ptr_ring_unconsume wrappers for vhost_net
+  TUN & TAP: Methods to determine whether file is TUN/TAP for vhost_net
+  vhost_net: Replace rx_ring with calls of TUN/TAP wrappers
+
+ drivers/net/tap.c        | 115 +++++++++++++++++++++++++++++++--
+ drivers/net/tun.c        | 136 +++++++++++++++++++++++++++++++++++----
+ drivers/vhost/net.c      |  90 +++++++++++++++++---------
+ include/linux/if_tap.h   |  15 +++++
+ include/linux/if_tun.h   |  18 ++++++
+ include/linux/ptr_ring.h |  54 +++++++++++++---
+ 6 files changed, 367 insertions(+), 61 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  __ptr_ring_full_next: Returns if ring will be full after next insertion
+[PATCH net-next v5 1/8] __ptr_ring_full_next: Returns if ring will be full after next insertion
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+Useful if the caller would like to act before the ptr_ring gets full after
+the next __ptr_ring_produce call. Because __ptr_ring_produce has a
+smp_wmb(), taking action before ensures memory ordering.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ include/linux/ptr_ring.h | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Mark VMCB_PERM_MAP as dirty on nested VMRUN
+[PATCH 1/2] KVM: SVM: Mark VMCB_PERM_MAP as dirty on nested VMRUN
+Author: Jim Mattson <jmattson@google.com>
+
+Mark the VMCB_PERM_MAP bit as dirty in nested_vmcb02_prepare_control()
+on every nested VMRUN.
+
+If L1 changes MSR interception (INTERCEPT_MSR_PROT) between two VMRUN
+instructions on the same L1 vCPU, the msrpm_base_pa in the associated
+vmcb02 will change, and the VMCB_PERM_MAP clean bit should be cleared.
+
+Fixes: 4bb170a5430b ("KVM: nSVM: do not mark all VMCB02 fields dirty on nested vmexit")
+Reported-by: Matteo Rizzo <matteorizzo@google.com>
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/nested.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Aggressively clear vmcb02 clean bits
+[PATCH 0/2] KVM: SVM: Aggressively clear vmcb02 clean bits
+Author: Jim Mattson <jmattson@google.com>
+
+It is unlikely that L1 will toggle the MSR intercept bit in vmcb02,
+or that L1 will change its own IA32_PAT MSR. However, if it does,
+the affected fields in vmcb02 should not be marked clean.
+
+An alternative approach would be to implement a set of mutators for
+vmcb02 fields, and to clear the associated clean bit whenever a field
+is modified.
+
+Jim Mattson (2):
+  KVM: SVM: Mark VMCB_PERM_MAP as dirty on nested VMRUN
+  KVM: SVM: Mark VMCB_NPT as dirty on nested VMRUN
+
+ arch/x86/kvm/svm/nested.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
