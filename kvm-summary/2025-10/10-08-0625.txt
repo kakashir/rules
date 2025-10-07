@@ -1,0 +1,412 @@
+From 83929009f to ccd18b971
+KVM mailing list update from 83929009f to ccd18b971
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     11 google.com
+      6 arm.com
+      4 linaro.org
+      4 amd.com
+      1 baidu.com
+
+Top 15 contributors (Based on Email Body)
+
+      9  Sean Christopherson <seanjc@google.com>
+      6  Sascha Bischoff <Sascha.Bischoff@arm.com>
+      4  =?UTF-8?q?Philippe=20Mathieu-Daud=C3=A9?= <philmd@linaro.org>
+      4  Shivank Garg <shivankg@amd.com>
+      1  Li RongQing <lirongqing@baidu.com>
+      1  Brendan Jackman <jackmanb@google.com>
+      1  Ackerley Tng <ackerleytng@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: guest_memfd: Define a CLASS to get+put guest_memfd file
+[PATCH] KVM: guest_memfd: Define a CLASS to get+put guest_memfd file
+Author: Sean Christopherson <seanjc@google.com>
+
+Add a CLASS to handle getting and putting a guest_memfd file given a
+memslot to reduce the amount of related boilerplate, and more importantly
+to minimize the chances of forgetting to put the file (thankfully the bug
+that prompted this didn't escape initial testing).
+
+Define a CLASS instead of using __free(fput) as _free() comes with subtle
+caveats related to FILO ordering (objects are freed in the order in which
+they are declared), and the recommended solution/workaround (declare file
+pointers exactly when they are initialized) is visually jarring relative
+to KVM's (and the kernel's) overall strict adherence to not mixing
+declarations and code.  E.g. the use in kvm_gmem_populate() would be:
+
+	slot = gfn_to_memslot(kvm, start_gfn);
+	if (!kvm_slot_has_gmem(slot))
+		return -EINVAL;
+
+	struct file *file __free(fput) = kvm_gmem_get_file(slot;
+	if (!file)
+		return -EFAULT;
+
+	filemap_invalidate_lock(file->f_mapping);
+
+Note, using CLASS() still declares variables in the middle of code, but
+the syntactic sugar obfuscates the declaration, i.e. hides the anomaly to
+a large extent.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/guest_memfd.c | 22 ++++++++--------------
+ 1 file changed, 8 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Rename "struct kvm_gmem" to
+[PATCH v12 01/12] KVM: guest_memfd: Rename "struct kvm_gmem" to
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename the "kvm_gmem" structure to "gmem_file" in anticipation of using
+dedicated guest_memfd inodes instead of anonyomous inodes, at which point
+the "kvm_gmem" nomenclature becomes quite misleading.  In guest_memfd,
+inodes are effectively the raw underlying physical storage, and will be
+used to track properties of the physical memory, while each gmem file is
+effectively a single VM's view of that storage, and is used to track assets
+specific to its associated VM, e.g. memslots=>gmem bindings.
+
+Using "kvm_gmem" suggests that the per-VM/per-file structures are _the_
+guest_memfd instance, which almost the exact opposite of reality.
+
+Opportunistically rename local variables from "gmem" to "f", again to
+avoid confusion once guest_memfd specific inodes come along.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/guest_memfd.c | 100 ++++++++++++++++++++++-------------------
+ 1 file changed, 54 insertions(+), 46 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Add NUMA mempolicy support
+[PATCH v12 00/12] KVM: guest_memfd: Add NUMA mempolicy support
+Author: Sean Christopherson <seanjc@google.com>
+
+Shivank's series to add support for NUMA-aware memory placement in
+guest_memfd.  This is based on:
+
+  https://github.com/kvm-x86/linux.git gmem
+
+which is an unstable topic branch that contains the guest_memfd MMAP fixes
+destined for 6.18 (to avoid conflicts), and three non-KVM changes related to
+mempolicy that were in previous versions of this series (I want to keep this
+version KVM focused, and AFAICT there is nothing left to discuss in the prep
+paches).
+
+Once 6.18-rc1 is cut I'll turn "gmem" into a proper topic branch, rebase it,
+and freeze the hashes.
+
+v12:
+ - Add missing functionality to KVM selftests' existing numaif.h instead of
+   linking to libnuma (which appears to have caveats with -static).
+ - Add KVM_SYSCALL_DEFINE() infrastructure to reduce the boilerplate needed
+   to wrap syscalls and/or to assert that a syscall succeeds.
+ - Rename kvm_gmem to gmem_file, and use gmem_inode for the inode structure.
+ - Track flags in a gmem_inode field instead of using i_private.
+ - Add comments to call out subtleties in the mempolicy code (e.g. that
+   returning NULL for vm_operations_struct.get_policy() is important for ABI
+   reasons).
+ - Improve debugability of guest_memfd_test (I kept generating SIGBUS when
+   tweaking the tests).
+ - Test mbind() with private memory (sadly, verifying placement with
+   move_pages() doesn't work due to the dependency on valid page tables).
+
+- V11: Rebase on kvm-next, remove RFC tag, use Ackerley's latest patch
+       and fix a rcu race bug during kvm module unload.
+- V10: Rebase on top of Fuad's V17. Use latest guest_memfd inode patch
+       from Ackerley (with David's review comments). Use newer kmem_cache_create()
+       API variant with arg parameter (Vlastimil)
+- v9: Rebase on top of Fuad's V13 and incorporate review comments
+- v8: Rebase on top of Fuad's V12: Host mmaping for guest_memfd memory.
+- v7: Use inodes to store NUMA policy instead of file [0].
+- v4-v6: Current approach using shared_policy support and vm_ops (based on
+         suggestions from David [1] and guest_memfd bi-weekly upstream
+         call discussion [2]).
+- v3: Introduced fbind() syscall for VMM memory-placement configuration.
+- v1,v2: Extended the KVM_CREATE_GUEST_MEMFD IOCTL to pass mempolicy.
+
+[0] https://lore.kernel.org/all/diqzbjumm167.fsf@ackerleytng-ctop.c.googlers.com
+[1] https://lore.kernel.org/all/6fbef654-36e2-4be5-906e-2a648a845278@redhat.com
+[2] https://lore.kernel.org/all/2b77e055-98ac-43a1-a7ad-9f9065d7f38f@amd.com
+
+Ackerley Tng (1):
+  KVM: guest_memfd: Use guest mem inodes instead of anonymous inodes
+
+Sean Christopherson (7):
+  KVM: guest_memfd: Rename "struct kvm_gmem" to "struct gmem_file"
+  KVM: guest_memfd: Add macro to iterate over gmem_files for a
+    mapping/inode
+  KVM: selftests: Define wrappers for common syscalls to assert success
+  KVM: selftests: Report stacktraces SIGBUS, SIGSEGV, SIGILL, and SIGFPE
+    by default
+  KVM: selftests: Add additional equivalents to libnuma APIs in KVM's
+    numaif.h
+  KVM: selftests: Use proper uAPI headers to pick up mempolicy.h
+    definitions
+  KVM: guest_memfd: Add gmem_inode.flags field instead of using
+    i_private
+
+Shivank Garg (4):
+  KVM: guest_memfd: Add slab-allocated inode cache
+  KVM: guest_memfd: Enforce NUMA mempolicy using shared policy
+  KVM: selftests: Add helpers to probe for NUMA support, and multi-node
+    systems
+  KVM: selftests: Add guest_memfd tests for mmap and NUMA policy support
+
+ include/uapi/linux/magic.h                    |   1 +
+ tools/testing/selftests/kvm/arm64/vgic_irq.c  |   2 +-
+ .../testing/selftests/kvm/guest_memfd_test.c  |  98 +++++
+ .../selftests/kvm/include/kvm_syscalls.h      |  81 +++++
+ .../testing/selftests/kvm/include/kvm_util.h  |  29 +-
+ tools/testing/selftests/kvm/include/numaif.h  | 110 +++---
+ .../selftests/kvm/kvm_binary_stats_test.c     |   4 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  55 +--
+ .../kvm/x86/private_mem_conversions_test.c    |   9 +-
+ .../selftests/kvm/x86/xapic_ipi_test.c        |   5 +-
+ virt/kvm/guest_memfd.c                        | 344 ++++++++++++++----
+ virt/kvm/kvm_main.c                           |   7 +-
+ virt/kvm/kvm_mm.h                             |   9 +-
+ 13 files changed, 576 insertions(+), 178 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Don't fall over when only one CPU
+[PATCH] KVM: selftests: Don't fall over when only one CPU
+Author: Brendan Jackman <jackmanb@google.com>
+
+Running this test on a system with only one CPU is not a recipe for
+success. However, there's no clear-cut reason why it absolutely
+shouldn't work, so the test shouldn't completely reject such a platform.
+
+At present, the *3/4 calculation will return zero on these platforms and
+the test fails. So, instead just skip that calculation.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Brendan Jackman <jackmanb@google.com>
+---
+ tools/testing/selftests/kvm/mmu_stress_test.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: gic-v3: Only set ICH_HCR traps for v2-on-v3 or v3
+[PATCH] KVM: arm64: gic-v3: Only set ICH_HCR traps for v2-on-v3 or v3
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+The ICH_HCR_EL2 traps are used when running on GICv3 hardware, or when
+running a GICv3-based guest using FEAT_GCIE_LEGACY on GICv5
+hardware. When running a GICv2 guest on GICv3 hardware the traps are
+used to ensure that the guest never sees any part of GICv3 (only GICv2
+is visible to the guest), and when running a GICv3 guest they are used
+to trap in specific scenarios. They are not applicable for a
+GICv2-native guest, and won't be applicable for a(n upcoming) GICv5
+guest.
+
+The traps themselves are configured in the vGIC CPU IF state, which is
+stored as a union. Updating the wrong aperture of the union risks
+corrupting state, and therefore needs to be avoided at all costs.
+
+Bail early if we're not running a compatible guest (GICv2 on GICv3
+hardware, GICv3 native, GICv3 on GICv5 hardware). Trap everything
+unconditionally if we're running a GICv2 guest on GICv3
+hardware. Otherwise, conditionally set up GICv3-native trapping.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arch/arm64/kvm/vgic/vgic-v3.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Documentation: KVM: Update GICv3 docs for GICv5 hosts
+[PATCH] Documentation: KVM: Update GICv3 docs for GICv5 hosts
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+GICv5 hosts optionally include FEAT_GCIE_LEGACY, which allows them to
+execute GICv3-based VMs on GICv5 hardware. Update the GICv3
+documentation to reflect this now that GICv3 guests are supports on
+compatible GICv5 hosts.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ Documentation/virt/kvm/devices/arm-vgic-v3.rst | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  arm64/sysreg: Introduce Feat descriptor and generated
+[PATCH 0/3] arm64/sysreg: Introduce Feat descriptor and generated
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+This series introduces support for feature-specific field encodings in
+the sysreg description framework and migrates the vGIC-v3 code to use
+generated definitions for ICH_VMCR_EL2, in part as an example of how
+the Feat descriptor can be used.
+
+The first patch adds the Feat descriptor, allowing sysreg definitions
+to vary based on architectural features (e.g., GICv3 vs GICv5). The
+Feat/ElseFeat/EndFeat construct enables generation of feature-prefixed
+field encodings without affecting legacy definitions. This forms the
+basis for supporting feature-dependent register layouts.
+
+The second patch adds the generated description for ICH_VMCR_EL2,
+including both its GICv3 and GICv5 variants. This register was
+previously defined manually in the KVM GICv3 code; moving it into the
+sysreg framework ensures consistency and reduces duplication.
+
+Finally, the third patch updates the KVM vGIC-v3 implementation to use
+the generated ICH_VMCR_EL2 definitions. This replaces and removes the
+hand-written definitions, with no functional change to behaviour.
+
+Together, these patches complete the migration of ICH_VMCR_EL2 to the
+sysreg framework and establish the infrastructure needed to describe
+registers whose field layouts depend on architectural features.
+
+Thanks,
+Sascha
+
+Sascha Bischoff (3):
+  arm64/sysreg: Support feature-specific fields with 'Feat' descriptor
+  arm64/sysreg: Add ICH_VMCR_EL2
+  KVM: arm64: gic-v3: Switch vGIC-v3 to use generated ICH_VMCR_EL2
+
+ arch/arm64/include/asm/sysreg.h      |  21 ----
+ arch/arm64/kvm/hyp/vgic-v3-sr.c      |  64 +++++-------
+ arch/arm64/kvm/vgic/vgic-v3-nested.c |   8 +-
+ arch/arm64/kvm/vgic/vgic-v3.c        |  42 ++++----
+ arch/arm64/tools/gen-sysreg.awk      | 148 +++++++++++++++++++--------
+ arch/arm64/tools/sysreg              |  22 ++++
+ 6 files changed, 177 insertions(+), 128 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64/sysreg: Support feature-specific fields with 'Feat'
+[PATCH 1/3] arm64/sysreg: Support feature-specific fields with 'Feat'
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Some system register field encodings change based on the available and
+in-use architecture features. In order to support these different
+field encodings, introduce the Feat descriptor (Feat, ElseFeat,
+EndFeat) for describing such sysregs.
+
+The Feat descriptor can be used in the following way (Feat acts as
+both an if and an else-if):
+
+        Sysreg  EXAMPLE 0    1    2    3    4
+        Feat    FEAT_A
+	Field   63:0    Foo
+	Feat    FEAT_B
+	Field   63:1    Bar
+ 	Res0    0
+        ElseFeat
+        Field   63:0    Baz
+        EndFeat
+        EndSysreg
+
+This will generate a single set of system register encodings (REG_,
+SYS_, ...), and then generate three sets of field definitions for the
+system register called EXAMPLE. The first set is prefixed by FEAT_A,
+e.g. FEAT_A_EXAMPLE_Foo. The second set is prefixed by FEAT_B, e.g.,
+FEAT_B_EXAMPLE_Bar. The third set is not given a prefix at all,
+e.g. EXAMPLE_BAZ. For each set, a corresponding set of defines for
+Res0, Res1, and Unkn is generated.
+
+The intent for the final prefix-less ElseFeat is for describing
+default or legacy field encodings. This ensure that new
+feature-conditional encodings can be added to already-present sysregs
+without affecting existing legacy code.
+
+The Feat descriptor can be used within Sysreg or SysregFields
+blocks. Field, Res0, Res1, Unkn, Rax, SignedEnum, Enum can all be used
+within a Feat block. Fields and Mapping can not. Fields that vary with
+features must be described as part of a SysregFields block,
+instead. Mappings, which are just a code comment, make little sense in
+this context, and have hence not been included.
+
+There are no changes to the generated system register definitions as
+part of this change.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arch/arm64/tools/gen-sysreg.awk | 148 ++++++++++++++++++++++----------
+ 1 file changed, 104 insertions(+), 44 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: use call_rcu instead of synchronize_srcu_expedited() for MMIO unregistration
+[PATCH] KVM: use call_rcu instead of synchronize_srcu_expedited() for MMIO unregistration
+Author: lirongqing <lirongqing@baidu.com>
+
+
+During VM reboot/shutdown, device MMIO unregistration maybe occurs
+frequently. The current use of synchronize_srcu_expedited() introduces
+measurable latency in these operations. Replace with call_rcu to defer
+cleanup asynchronously, speed up VM reboot/shutdown.
+
+Add a 'dev' field to struct kvm_io_bus to hold the device being
+unregistered for the RCU callback. Adjust related code to ensure
+proper list management before unregistration.
+
+Signed-off-by: Li RongQing <lirongqing@baidu.com>
+---
+ include/linux/kvm_host.h  |  1 +
+ virt/kvm/coalesced_mmio.c |  2 +-
+ virt/kvm/eventfd.c        |  2 +-
+ virt/kvm/kvm_main.c       | 13 ++++++++-----
+ 4 files changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  accel/kvm: Do not expect more then KVM_PUT_FULL_STATE
+[PATCH 1/3] accel/kvm: Do not expect more then KVM_PUT_FULL_STATE
+Author: Philippe Mathieu-Daudé <philmd@linaro.org>
+
+KVM_PUT_FULL_STATE is the higher level defined so far in
+"system/kvm.h"; do not check for more.
+
+Signed-off-by: Philippe Mathieu-Daudé <philmd@linaro.org>
+---
+ target/loongarch/kvm/kvm.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  accel/kvm: Cleanups around kvm_arch_put_registers()
+[PATCH 0/3] accel/kvm: Cleanups around kvm_arch_put_registers()
+Author: Philippe Mathieu-Daudé <philmd@linaro.org>
+
+Extracted from a bigger series aiming to make accelerator
+synchronization of vcpu state slightly clearer. Here KVM
+patches around kvm_arch_put_registers():
+- Move KVM_PUT_[RESET|RUNTIME|FULL]_STATE to an enum
+- Factor common code out of kvm_cpu_synchronize_post_*()
+
+Philippe Mathieu-Daudé (3):
+  accel/kvm: Do not expect more then KVM_PUT_FULL_STATE
+  accel/kvm: Introduce KvmPutState enum
+  accel/kvm: Factor kvm_cpu_synchronize_put() out
+
+ include/system/kvm.h       | 16 +++++++------
+ accel/kvm/kvm-all.c        | 47 +++++++++++++++-----------------------
+ target/i386/kvm/kvm.c      |  6 ++---
+ target/loongarch/kvm/kvm.c |  8 +++----
+ target/mips/kvm.c          |  6 ++---
+ target/ppc/kvm.c           |  2 +-
+ target/riscv/kvm/kvm-cpu.c |  2 +-
+ target/s390x/kvm/kvm.c     |  2 +-
+ 8 files changed, 41 insertions(+), 48 deletions(-)
+
+----------------------------------------------------------------------
+
