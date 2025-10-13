@@ -1,0 +1,789 @@
+From ea3f71649 to 223745367
+KVM mailing list update from ea3f71649 to 223745367
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      8 google.com
+      7 nvidia.com
+      7 amd.com
+      5 kernel.org
+      4 fb.com
+      3 intel.com
+      1 redhat.com
+      1 gmail.com
+      1 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      7  Nikunj A Dadhania <nikunj@amd.com>
+      7  Leon Romanovsky <leonro@nvidia.com>
+      4  Marc Zyngier <maz@kernel.org>
+      4  Jiaqi Yan <jiaqiyan@google.com>
+      4  Alex Mastro <amastro@fb.com>
+      3  Brendan Jackman <jackmanb@google.com>
+      2  Vivek Kasireddy <vivek.kasireddy@intel.com>
+      1  Wathsala Vithanage <wathsala.vithanage@arm.com>
+      1  Leon Romanovsky <leon@kernel.org>
+      1  Kai Huang <kai.huang@intel.com>
+      1  fuqiang wang <fuqiang.wng@gmail.com>
+      1  Alex Williamson <alex.williamson@redhat.com>
+      1  Alexandra Sandulescu <aesa@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: VM exit to userspace to handle SEA
+[PATCH v4 1/3] KVM: arm64: VM exit to userspace to handle SEA
+Author: Jiaqi Yan <jiaqiyan@google.com>
+
+When APEI fails to handle a stage-2 synchronous external abort (SEA),
+today KVM injects an asynchronous SError to the VCPU then resumes it,
+which usually results in unpleasant guest kernel panic.
+
+One major situation of guest SEA is when vCPU consumes recoverable
+uncorrected memory error (UER). Although SError and guest kernel panic
+effectively stops the propagation of corrupted memory, guest may
+re-use the corrupted memory if auto-rebooted; in worse case, guest
+boot may run into poisoned memory. So there is room to recover from
+an UER in a more graceful manner.
+
+Alternatively KVM can redirect the synchronous SEA event to VMM to
+- Reduce blast radius if possible. VMM can inject a SEA to VCPU via
+  KVM's existing KVM_SET_VCPU_EVENTS API. If the memory poison
+  consumption or fault is not from guest kernel, blast radius can be
+  limited to the triggering thread in guest userspace, so VM can
+  keep running.
+- Allow VMM to protect from future memory poison consumption by
+  unmapping the page from stage-2, or to interrupt guest of the
+  poisoned page so guest kernel can unmap it from stage-1 page table.
+- Allow VMM to track SEA events that VM customers care about, to restart
+  VM when certain number of distinct poison events have happened,
+  to provide observability to customers in log management UI.
+
+Introduce an userspace-visible feature to enable VMM handle SEA:
+- KVM_CAP_ARM_SEA_TO_USER. As the alternative fallback behavior
+  when host APEI fails to claim a SEA, userspace can opt in this new
+  capability to let KVM exit to userspace during SEA if it is not
+  owned by host.
+- KVM_EXIT_ARM_SEA. A new exit reason is introduced for this.
+  KVM fills kvm_run.arm_sea with as much as possible information about
+  the SEA, enabling VMM to emulate SEA to guest by itself.
+  - Sanitized ESR_EL2. The general rule is to keep only the bits
+    useful for userspace and relevant to guest memory.
+  - Flags indicating if faulting guest physical address is valid.
+  - Faulting guest physical and virtual addresses if valid.
+
+Signed-off-by: Jiaqi Yan <jiaqiyan@google.com>
+Co-developed-by: Oliver Upton <oliver.upton@linux.dev>
+Signed-off-by: Oliver Upton <oliver.upton@linux.dev>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +
+ arch/arm64/kvm/arm.c              |  5 +++
+ arch/arm64/kvm/mmu.c              | 68 ++++++++++++++++++++++++++++++-
+ include/uapi/linux/kvm.h          | 10 +++++
+ 4 files changed, 84 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  VMM can handle guest SEA via KVM_EXIT_ARM_SEA
+[PATCH v4 0/3] VMM can handle guest SEA via KVM_EXIT_ARM_SEA
+Author: Jiaqi Yan <jiaqiyan@google.com>
+
+Problem
+=======
+
+When host APEI is unable to claim a synchronous external abort (SEA)
+during guest abort, today KVM directly injects an asynchronous SError
+into the VCPU then resumes it. The injected SError usually results in
+unpleasant guest kernel panic.
+
+One of the major situation of guest SEA is when VCPU consumes recoverable
+uncorrected memory error (UER), which is not uncommon at all in modern
+datacenter servers with large amounts of physical memory. Although SError
+and guest panic is sufficient to stop the propagation of corrupted memory,
+there is room to recover from an UER in a more graceful manner.
+
+Proposed Solution
+=================
+
+The idea is, we can replay the SEA to the faulting VCPU. If the memory
+error consumption or the fault that cause SEA is not from guest kernel,
+the blast radius can be limited to the poison-consuming guest process,
+while the VM can keep running.
+
+In addition, instead of doing under the hood without involving userspace,
+there are benefits to redirect the SEA to VMM:
+
+- VM customers care about the disruptions caused by memory errors, and
+  VMM usually has the responsibility to start the process of notifying
+  the customers of memory error events in their VMs. For example some
+  cloud provider emits a critical log in their observability UI [1], and
+  provides a playbook for customers on how to mitigate disruptions to
+  their workloads.
+
+- VMM can protect future memory error consumption by unmapping the poisoned
+  pages from stage-2 page table with KVM userfault [2], or by splitting the
+  memslot that contains the poisoned pages.
+
+- VMM can keep track of SEA events in the VM. When VMM thinks the status
+  on the host or the VM is bad enough, e.g. number of distinct SEAs
+  exceeds a threshold, it can restart the VM on another healthy host.
+
+- Behavior parity with x86 architecture. When machine check exception
+  (MCE) is caused by VCPU, kernel or KVM signals userspace SIGBUS to
+  let VMM either recover from the MCE, or terminate itself with VM.
+  The prior RFC proposes to implement SIGBUS on arm64 as well, but
+  Marc preferred KVM exit over signal [3]. However, implementation
+  aside, returning SEA to VMM is on par with returning MCE to VMM.
+
+Once SEA is redirected to VMM, among other actions, VMM is encouraged
+to inject external aborts into the faulting VCPU.
+
+New UAPIs
+=========
+
+This patchset introduces following userspace-visible changes to empower
+VMM to control what happens for SEA on guest memory:
+
+- KVM_CAP_ARM_SEA_TO_USER. While taking SEA, if userspace has enabled
+  this new capability at VM creation, and the SEA is not owned by kernel
+  allocated memory, instead of injecting SError, return KVM_EXIT_ARM_SEA
+  to userspace.
+
+- KVM_EXIT_ARM_SEA. This is the VM exit reason VMM gets. The details
+  about the SEA is provided in arm_sea as much as possible, including
+  sanitized ESR value at EL2, faulting guest virtual and physical
+  addresses if available.
+
+* From v3 [4]
+  - Rebased on commit 3a8660878839 ("Linux 6.18-rc1").
+  - In selftest, print a message if GVA or GPA expects to be valid.
+
+* From v2 [5]:
+  - Rebased on "[PATCH] KVM: arm64: nv: Handle SEAs due to VNCR redirection" [6]
+    and kvmarm/next commit 7b8346bd9fce6 ("KVM: arm64: Don't attempt vLPI
+    mappings when vPE allocation is disabled")
+  - Took the host_owns_sea implementation from Oliver [7, 8].
+  - Excluded the guest SEA injection patches.
+  - Updated selftest.
+
+* From v1 [9]:
+  - Rebased on commit 4d62121ce9b5 ("KVM: arm64: vgic-debug: Avoid
+    dereferencing NULL ITE pointer").
+  - Sanitize ESR_EL2 before reporting it to userspace.
+  - Do not do KVM_EXIT_ARM_SEA when SEA is caused by memory allocated to
+    stage-2 translation table.
+
+[1] https://cloud.google.com/solutions/sap/docs/manage-host-errors
+[2] https://lore.kernel.org/kvm/20250109204929.1106563-1-jthoughton@google.com
+[3] https://lore.kernel.org/kvm/86pljbqqh0.wl-maz@kernel.org
+[4] https://lore.kernel.org/kvmarm/20250731205844.1346839-1-jiaqiyan@google.com
+[5] https://lore.kernel.org/kvm/20250604050902.3944054-1-jiaqiyan@google.com
+[6] https://lore.kernel.org/kvmarm/20250729182342.3281742-1-oliver.upton@linux.dev
+[7] https://lore.kernel.org/kvm/aHFohmTb9qR_JG1E@linux.dev
+[8] https://lore.kernel.org/kvm/aHK-DPufhLy5Dtuk@linux.dev
+[9] https://lore.kernel.org/kvm/20250505161412.1926643-1-jiaqiyan@google.com
+
+Jiaqi Yan (3):
+  KVM: arm64: VM exit to userspace to handle SEA
+  KVM: selftests: Test for KVM_EXIT_ARM_SEA
+  Documentation: kvm: new UAPI for handling SEA
+
+ Documentation/virt/kvm/api.rst                |  61 ++++
+ arch/arm64/include/asm/kvm_host.h             |   2 +
+ arch/arm64/kvm/arm.c                          |   5 +
+ arch/arm64/kvm/mmu.c                          |  68 +++-
+ include/uapi/linux/kvm.h                      |  10 +
+ tools/arch/arm64/include/asm/esr.h            |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 331 ++++++++++++++++++
+ tools/testing/selftests/kvm/lib/kvm_util.c    |   1 +
+ 9 files changed, 480 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: add PCIe TPH device ioctl
+[PATCH 1/1] vfio/pci: add PCIe TPH device ioctl
+Author: Wathsala Vithanage <wathsala.vithanage@arm.com>
+
+TLP Processing Hints (TPH) let a requester provide steering hints that
+can enable direct cache injection on supported platforms and PCIe
+devices. The PCIe core already exposes TPH handling to kernel drivers.
+
+This change adds the VFIO_DEVICE_PCI_TPH ioctl and exposes TPH control
+to user space to reduce memory latency and improve throughput for
+polling drivers (e.g., DPDK poll-mode drivers). Through this interface,
+user-space drivers can:
+  - enable or disable TPH for the device function
+  - program steering tags in device-specific mode
+
+The ioctl is available only when the device advertises the TPH
+Capability. Invalid modes or tags are rejected. No functional change
+occurs unless the ioctl is used.
+
+Signed-off-by: Wathsala Vithanage <wathsala.vithanage@arm.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 74 ++++++++++++++++++++++++++++++++
+ include/uapi/linux/vfio.h        | 36 ++++++++++++++++
+ 2 files changed, 110 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  MAINTAINERS: Update Alex Williamson's email address
+[PATCH] MAINTAINERS: Update Alex Williamson's email address
+Author: Alex Williamson <alex.williamson@redhat.com>
+
+Switch to a personal email account as I'll be leaving Red Hat soon.
+
+Signed-off-by: Alex Williamson <alex@shazbot.org>
+Signed-off-by: Alex Williamson <alex.williamson@redhat.com>
+---
+
+I'll intend to send this via a signed tag pull request during
+v6.18-rc.  Thanks
+
+ .mailmap    | 1 +
+ MAINTAINERS | 4 ++--
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI/P2PDMA: Separate the mmap() support from the core logic
+[PATCH v5 1/9] PCI/P2PDMA: Separate the mmap() support from the core logic
+Author: Leon Romanovsky <leon@kernel.org>
+
+
+Currently the P2PDMA code requires a pgmap and a struct page to
+function. The was serving three important purposes:
+
+ - DMA API compatibility, where scatterlist required a struct page as
+   input
+
+ - Life cycle management, the percpu_ref is used to prevent UAF during
+   device hot unplug
+
+ - A way to get the P2P provider data through the pci_p2pdma_pagemap
+
+The DMA API now has a new flow, and has gained phys_addr_t support, so
+it no longer needs struct pages to perform P2P mapping.
+
+Lifecycle management can be delegated to the user, DMABUF for instance
+has a suitable invalidation protocol that does not require struct page.
+
+Finding the P2P provider data can also be managed by the caller
+without need to look it up from the phys_addr.
+
+Split the P2PDMA code into two layers. The optional upper layer,
+effectively, provides a way to mmap() P2P memory into a VMA by
+providing struct page, pgmap, a genalloc and sysfs.
+
+The lower layer provides the actual P2P infrastructure and is wrapped
+up in a new struct p2pdma_provider. Rework the mmap layer to use new
+p2pdma_provider based APIs.
+
+Drivers that do not want to put P2P memory into VMA's can allocate a
+struct p2pdma_provider after probe() starts and free it before
+remove() completes. When DMA mapping the driver must convey the struct
+p2pdma_provider to the DMA mapping code along with a phys_addr of the
+MMIO BAR slice to map. The driver must ensure that no DMA mapping
+outlives the lifetime of the struct p2pdma_provider.
+
+The intended target of this new API layer is DMABUF. There is usually
+only a single p2pdma_provider for a DMABUF exporter. Most drivers can
+establish the p2pdma_provider during probe, access the single instance
+during DMABUF attach and use that to drive the DMA mapping.
+
+DMABUF provides an invalidation mechanism that can guarantee all DMA
+is halted and the DMA mappings are undone prior to destroying the
+struct p2pdma_provider. This ensures there is no UAF through DMABUFs
+that are lingering past driver removal.
+
+The new p2pdma_provider layer cannot be used to create P2P memory that
+can be mapped into VMA's, be used with pin_user_pages(), O_DIRECT, and
+so on. These use cases must still use the mmap() layer. The
+p2pdma_provider layer is principally for DMABUF-like use cases where
+DMABUF natively manages the life cycle and access instead of
+vmas/pin_user_pages()/struct page.
+
+In addition, remove the bus_off field from pci_p2pdma_map_state since
+it duplicates information already available in the pgmap structure.
+The bus_offset is only used in one location (pci_p2pdma_bus_addr_map)
+and is always identical to pgmap->bus_offset.
+
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+---
+ drivers/pci/p2pdma.c       | 43 ++++++++++++++++++++------------------
+ include/linux/pci-p2pdma.h | 19 ++++++++++++-----
+ 2 files changed, 37 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Allow MMIO regions to be exported through dma-buf
+[PATCH v5 0/9] vfio/pci: Allow MMIO regions to be exported through dma-buf
+Author: Leon Romanovsky <leon@kernel.org>
+
+Changelog:
+v5:
+ * Rebased on top of v6.18-rc1.
+ * Added more validation logic to make sure that DMA-BUF length doesn't
+   overflow in various scenarios.
+ * Hide kernel config from the users.
+ * Fixed type conversion issue. DMA ranges are exposed with u64 length,
+   but DMA-BUF uses "unsigned int" as a length for SG entries.
+ * Added check to prevent from VFIO drivers which reports BAR size
+   different from PCI, do not use DMA-BUF functionality.
+v4: https://lore.kernel.org/all/cover.1759070796.git.leon@kernel.org
+ * Split pcim_p2pdma_provider() to two functions, one that initializes
+   array of providers and another to return right provider pointer.
+v3: https://lore.kernel.org/all/cover.1758804980.git.leon@kernel.org
+ * Changed pcim_p2pdma_enable() to be pcim_p2pdma_provider().
+ * Cache provider in vfio_pci_dma_buf struct instead of BAR index.
+ * Removed misleading comment from pcim_p2pdma_provider().
+ * Moved MMIO check to be in pcim_p2pdma_provider().
+v2: https://lore.kernel.org/all/cover.1757589589.git.leon@kernel.org/
+ * Added extra patch which adds new CONFIG, so next patches can reuse
+ * it.
+ * Squashed "PCI/P2PDMA: Remove redundant bus_offset from map state"
+   into the other patch.
+ * Fixed revoke calls to be aligned with true->false semantics.
+ * Extended p2pdma_providers to be per-BAR and not global to whole
+ * device.
+ * Fixed possible race between dmabuf states and revoke.
+ * Moved revoke to PCI BAR zap block.
+v1: https://lore.kernel.org/all/cover.1754311439.git.leon@kernel.org
+ * Changed commit messages.
+ * Reused DMA_ATTR_MMIO attribute.
+ * Returned support for multiple DMA ranges per-dMABUF.
+v0: https://lore.kernel.org/all/cover.1753274085.git.leonro@nvidia.com
+
+---------------------------------------------------------------------------
+Based on "[PATCH v6 00/16] dma-mapping: migrate to physical address-based API"
+https://lore.kernel.org/all/cover.1757423202.git.leonro@nvidia.com/ series.
+---------------------------------------------------------------------------
+
+This series extends the VFIO PCI subsystem to support exporting MMIO
+regions from PCI device BARs as dma-buf objects, enabling safe sharing of
+non-struct page memory with controlled lifetime management. This allows RDMA
+and other subsystems to import dma-buf FDs and build them into memory regions
+for PCI P2P operations.
+
+The series supports a use case for SPDK where a NVMe device will be
+owned by SPDK through VFIO but interacting with a RDMA device. The RDMA
+device may directly access the NVMe CMB or directly manipulate the NVMe
+device's doorbell using PCI P2P.
+
+However, as a general mechanism, it can support many other scenarios with
+VFIO. This dmabuf approach can be usable by iommufd as well for generic
+and safe P2P mappings.
+
+In addition to the SPDK use-case mentioned above, the capability added
+in this patch series can also be useful when a buffer (located in device
+memory such as VRAM) needs to be shared between any two dGPU devices or
+instances (assuming one of them is bound to VFIO PCI) as long as they
+are P2P DMA compatible.
+
+The implementation provides a revocable attachment mechanism using dma-buf
+move operations. MMIO regions are normally pinned as BARs don't change
+physical addresses, but access is revoked when the VFIO device is closed
+or a PCI reset is issued. This ensures kernel self-defense against
+potentially hostile userspace.
+
+The series includes significant refactoring of the PCI P2PDMA subsystem
+to separate core P2P functionality from memory allocation features,
+making it more modular and suitable for VFIO use cases that don't need
+struct page support.
+
+-----------------------------------------------------------------------
+The series is based originally on
+https://lore.kernel.org/all/20250307052248.405803-1-vivek.kasireddy@intel.com/
+but heavily rewritten to be based on DMA physical API.
+-----------------------------------------------------------------------
+The WIP branch can be found here:
+https://git.kernel.org/pub/scm/linux/kernel/git/leon/linux-rdma.git/log/?h=dmabuf-vfio-v5
+
+Thanks
+
+Leon Romanovsky (7):
+  PCI/P2PDMA: Separate the mmap() support from the core logic
+  PCI/P2PDMA: Simplify bus address mapping API
+  PCI/P2PDMA: Refactor to separate core P2P functionality from memory
+    allocation
+  PCI/P2PDMA: Export pci_p2pdma_map_type() function
+  types: move phys_vec definition to common header
+  vfio/pci: Enable peer-to-peer DMA transactions by default
+  vfio/pci: Add dma-buf export support for MMIO regions
+
+Vivek Kasireddy (2):
+  vfio: Export vfio device get and put registration helpers
+  vfio/pci: Share the core device pointer while invoking feature
+    functions
+
+ block/blk-mq-dma.c                 |   7 +-
+ drivers/iommu/dma-iommu.c          |   4 +-
+ drivers/pci/p2pdma.c               | 175 ++++++++---
+ drivers/vfio/pci/Kconfig           |   3 +
+ drivers/vfio/pci/Makefile          |   2 +
+ drivers/vfio/pci/vfio_pci_config.c |  22 +-
+ drivers/vfio/pci/vfio_pci_core.c   |  63 ++--
+ drivers/vfio/pci/vfio_pci_dmabuf.c | 446 +++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_priv.h   |  23 ++
+ drivers/vfio/vfio_main.c           |   2 +
+ include/linux/pci-p2pdma.h         | 120 +++++---
+ include/linux/types.h              |   5 +
+ include/linux/vfio.h               |   2 +
+ include/linux/vfio_pci_core.h      |   1 +
+ include/uapi/linux/vfio.h          |  25 ++
+ kernel/dma/direct.c                |   4 +-
+ mm/hmm.c                           |   2 +-
+ 17 files changed, 785 insertions(+), 121 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Unify L1TF flushing under per-CPU variable
+[PATCH] KVM: x86: Unify L1TF flushing under per-CPU variable
+Author: Brendan Jackman <jackmanb@google.com>
+
+Currently the tracking of the need to flush L1D for L1TF is tracked by
+two bits: one per-CPU and one per-vCPU.
+
+The per-vCPU bit is always set when the vCPU shows up on a core, so
+there is no interesting state that's truly per-vCPU. Indeed, this is a
+requirement, since L1D is a part of the physical CPU.
+
+So simplify this by combining the two bits.
+
+Since this requires a DECLARE_PER_CPU() which belongs in kvm_host.h,
+also move the remaining helper definitions there to live next to the
+declaration.
+
+Signed-off-by: Brendan Jackman <jackmanb@google.com>
+---
+ arch/x86/include/asm/hardirq.h  | 26 --------------------------
+ arch/x86/include/asm/idtentry.h |  1 +
+ arch/x86/include/asm/kvm_host.h | 21 ++++++++++++++++++---
+ arch/x86/kvm/mmu/mmu.c          |  2 +-
+ arch/x86/kvm/vmx/nested.c       |  2 +-
+ arch/x86/kvm/vmx/vmx.c          | 17 +++--------------
+ arch/x86/kvm/x86.c              | 12 +++++++++---
+ 7 files changed, 33 insertions(+), 48 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  selftests: fix installing nested TEST_GEN_MODS_DIR
+[PATCH 1/2] selftests: fix installing nested TEST_GEN_MODS_DIR
+Author: Brendan Jackman <jackmanb@google.com>
+
+Currently all users of TEST_GEN_MODS_DIR set it to a single-element path
+like "test_modules". This means that the $(notdir) call in specified to
+be a nop.
+
+However in a subsequent patch a user will be added that needs to nest
+the module directory under an arch-specific subdirectory, which means
+this $(notdir) breaks the modules installation. So remove it.
+
+Signed-off-by: Brendan Jackman <jackmanb@google.com>
+---
+ tools/testing/selftests/lib.mk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: selftests: add L1TF exploit test
+[PATCH 0/2] KVM: x86: selftests: add L1TF exploit test
+Author: Brendan Jackman <jackmanb@google.com>
+
+This has been tested on a Google Skylake platform. 
+
+One potential issue with this test is that it fails (that is, the
+exploit succeeds) when using the conditional L1D flush, because the
+gadget is injected into the hypercall path which doesn't appear to
+include a flush. If this is unacceptable, we should discuss how to amend
+the test so that it can be used to evaluate the conditional flush logic
+as well. This would basically mean simulating some more complicated
+gadget where the "attacker" has found another way to steer the host
+kernel towards the target data, instead of just a simple hypercall.
+
+The reason this limitation is tolerable to me is my ulterior motive,
+i.e. because I am specifically interested in an end-to-end test for
+Address Space Isolation [0], which is abstracted from these details of the
+exploit.
+
+Based on kvm/next.
+
+[0] https://lore.kernel.org/all/20250924-b4-asi-page-alloc-v1-0-2d861768041f@google.com/T/#t
+
+Signed-off-by: Brendan Jackman <jackmanb@google.com>
+---
+Alexandra Sandulescu (1):
+      KVM: x86: selftests: add an L1TF exploit test
+
+Brendan Jackman (1):
+      selftests: fix installing nested TEST_GEN_MODS_DIR
+
+ tools/testing/selftests/kvm/Makefile.kvm           |   7 +
+ tools/testing/selftests/kvm/x86/l1tf_test.c        | 633 +++++++++++++++++++++
+ tools/testing/selftests/kvm/x86/l1tf_test.sh       |  10 +
+ .../selftests/kvm/x86/test_modules/Makefile        |  10 +
+ .../kvm/x86/test_modules/l1tf_test_helper.c        |  92 +++
+ tools/testing/selftests/lib.mk                     |   2 +-
+ 6 files changed, 753 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Make ID_PFR1_EL1.GIC writable
+[PATCH 1/3] KVM: arm64: Make ID_PFR1_EL1.GIC writable
+Author: Marc Zyngier <maz@kernel.org>
+
+Similarly to ID_AA64PFR0_EL1.GIC, relax ID_PFR1_EL1.GIC to be writable.
+
+Fixes: 5cb57a1aff755 ("KVM: arm64: Zero ID_AA64PFR0_EL1.GIC when no GICv3 is presented to the guest")
+Reported-by: Peter Maydell <peter.maydell@linaro.org>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/sys_regs.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Fix handling of ID_PFR1_EL1.GIC
+[PATCH 0/3] KVM: arm64: Fix handling of ID_PFR1_EL1.GIC
+Author: Marc Zyngier <maz@kernel.org>
+
+Peter reported[1] that restoring a GICv2 VM fails badly, and correctly
+points out that ID_PFR1_EL1.GIC isn't writable, while its 64bit
+equivalent is. I broke that in 6.12.
+
+The other thing is that fixing the ID regs at runtime isn't great.
+specially when we could adjust them at the point where the GIC gets
+created.
+
+This small series aims at fixing these issues. I've only tagged the
+first one as a stable candidate. With these fixes, I can happily
+save/restore a GICv2 VM (both 32 and 64bit) on my trusty Synquacer.
+
+[1] https://lore.kernel.org/r/CAFEAcA8TpQduexT=8rdRYC=yxm_073COjzgWJAvc26_T+-F5vA@mail.gmail.com
+
+Marc Zyngier (3):
+  KVM: arm64: Make ID_PFR1_EL1.GIC writable
+  KVM: arm64: Set ID_{AA64PFR0,PFR1}_EL1.GIC when GICv3 is configured
+  KVM: arm64: Limit clearing of ID_{AA64PFR0,PFR1}_EL1.GIC to userspace
+    irqchip
+
+ arch/arm64/kvm/sys_regs.c       | 12 ++++++++----
+ arch/arm64/kvm/vgic/vgic-init.c | 10 ++++++++--
+ 2 files changed, 16 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Carve out PML flush routine
+[PATCH v4 1/7] KVM: x86: Carve out PML flush routine
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Move the PML (Page Modification Logging) buffer flushing logic from
+VMX-specific code to common x86 KVM code to enable reuse by SVM and avoid
+code duplication.
+
+The AMD SVM PML implementations share the same behavior as VMX PML:
+ 1) The PML buffer is a 4K page with 512 entries
+ 2) Hardware records dirty GPAs in reverse order (from index 511 to 0)
+ 3) Hardware clears bits 11:0 when recording GPAs
+
+The PML constants (PML_LOG_NR_ENTRIES and PML_HEAD_INDEX) are moved from
+vmx.h to x86.h to make them available to both VMX and SVM.
+
+No functional change intended for VMX, except tone down the WARN_ON() to
+WARN_ON_ONCE() for the page alignment check. If hardware exhibits this
+behavior once, it's likely to occur repeatedly, so use WARN_ON_ONCE() to
+avoid log flooding while still capturing the unexpected condition.
+
+The refactoring prepares for SVM to leverage the same PML flushing
+implementation.
+
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 26 ++------------------------
+ arch/x86/kvm/vmx/vmx.h |  5 -----
+ arch/x86/kvm/x86.c     | 31 +++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.h     |  8 ++++++++
+ 4 files changed, 41 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Add Page Modification Logging (PML) support
+[PATCH v4 0/7] KVM: SVM: Add Page Modification Logging (PML) support
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+This series implements Page Modification Logging (PML) for guests, bringing
+hardware-assisted dirty logging support. PML is designed to track guest
+modified memory pages. PML enables the hypervisor to identify which pages in a
+guest's memory have been modified since the last checkpoint or during live
+migration.
+
+The PML feature uses two new VMCB fields (PML_ADDR and PML_INDEX) and
+generates a VMEXIT when the 4KB log buffer becomes full.
+
+The feature is enabled by default when hardware support is detected and
+can be disabled via the 'pml' module parameter.
+
+Changelog:
+v4:
+* Add couple of patches to enable_pml and nested CPU dirty logging to
+  common code (Kai Huang)
+* Rebased to latest kvm/next
+
+v3:
+* Update comments with nested details (Kai Huang)
+* Added nested.update_vmcb01_cpu_dirty_logging to update L1 PML (Kai Huang)
+* Added patch to use BIT_ULL() instead of BIT() for 64-bit nested_ctl
+
+v2: https://lore.kernel.org/kvm/20250915085938.639049-1-nikunj@amd.com/
+* Rebased on latest kvm/next
+* Added patch to move pml_pg field from struct vcpu_vmx to struct kvm_vcpu_arch
+  to share the PML page. (Kai Huang)
+* Dropped the SNP safe allocation optimization patch, will submit it separately.
+* Update commit message adding explicit mention that AMD PML follows VMX behavior
+  (Kai Huang)
+* Updated SNP erratum comment to include PML buffer alongside VMCB, VMSA, and
+  AVIC pages. (Kai Huang)
+
+RFC: https://lore.kernel.org/kvm/20250825152009.3512-1-nikunj@amd.com/
+
+Kai Huang (1):
+  KVM: x86: Move nested CPU dirty logging logic to common code
+
+Nikunj A Dadhania (6):
+  KVM: x86: Carve out PML flush routine
+  KVM: x86: Move PML page to common vcpu arch structure
+  KVM: x86: Move enable_pml variable to common x86 code
+  x86/cpufeatures: Add Page modification logging
+  KVM: SVM: Use BIT_ULL for 64-bit nested_ctl bit definitions
+  KVM: SVM: Add Page modification logging support
+
+ arch/x86/include/asm/cpufeatures.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  6 ++-
+ arch/x86/include/asm/svm.h         | 12 +++--
+ arch/x86/include/uapi/asm/svm.h    |  2 +
+ arch/x86/kernel/cpu/scattered.c    |  1 +
+ arch/x86/kvm/kvm_cache_regs.h      |  7 +++
+ arch/x86/kvm/svm/nested.c          |  9 +++-
+ arch/x86/kvm/svm/sev.c             |  2 +-
+ arch/x86/kvm/svm/svm.c             | 84 +++++++++++++++++++++++++++++-
+ arch/x86/kvm/svm/svm.h             |  2 +
+ arch/x86/kvm/vmx/main.c            |  4 +-
+ arch/x86/kvm/vmx/nested.c          |  5 --
+ arch/x86/kvm/vmx/vmx.c             | 72 ++++++-------------------
+ arch/x86/kvm/vmx/vmx.h             | 10 +---
+ arch/x86/kvm/vmx/x86_ops.h         |  2 +-
+ arch/x86/kvm/x86.c                 | 56 +++++++++++++++++++-
+ arch/x86/kvm/x86.h                 |  8 +++
+ 17 files changed, 201 insertions(+), 82 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: handle DMA map/unmap up to the addressable
+[PATCH v4 0/3] vfio: handle DMA map/unmap up to the addressable
+Author: Alex Mastro <amastro@fb.com>
+
+This patch series aims to fix vfio_iommu_type.c to support 
+VFIO_IOMMU_MAP_DMA and VFIO_IOMMU_UNMAP_DMA operations targeting IOVA
+ranges which lie against the addressable limit. i.e. ranges where
+iova_start + iova_size would overflow to exactly zero.
+
+Today, the VFIO UAPI has an inconsistency: The
+VFIO_IOMMU_TYPE1_INFO_CAP_IOVA_RANGE capability of VFIO_IOMMU_GET_INFO
+reports that ranges up to the end of the address space are available
+for use, but are not really due to bugs in handling boundary conditions.
+
+For example:
+
+vfio_find_dma_first_node is called to find the first dma node to unmap
+given an unmap range of [iova..iova+size). The check at the end of the
+function intends to test if the dma result lies beyond the end of the
+unmap range. The condition is incorrectly satisfied when iova+size
+overflows to zero, causing the function to return NULL.
+
+The same issue happens inside vfio_dma_do_unmap's while loop.
+
+This bug was also reported by Alejandro Jimenez in [1][2].
+
+Of primary concern are locations in the current code which perform
+comparisons against (iova + size) expressions, where overflow to zero
+is possible.
+
+The initial list of candidate locations to audit was taken from the
+following:
+
+$ rg 'iova.*\+.*size' -n drivers/vfio/vfio_iommu_type1.c | rg -v '\- 1'
+173:            else if (start >= dma->iova + dma->size)
+192:            if (start < dma->iova + dma->size) {
+216:            if (new->iova + new->size <= dma->iova)
+1060:   dma_addr_t iova = dma->iova, end = dma->iova + dma->size;
+1233:   if (dma && dma->iova + dma->size != iova + size)
+1380:           if (dma && dma->iova + dma->size != iova + size)
+1501:           ret = vfio_iommu_map(iommu, iova + dma->size, pfn, npage,
+1504:                   vfio_unpin_pages_remote(dma, iova + dma->size, pfn,
+1721:           while (iova < dma->iova + dma->size) {
+1743:                           i = iova + size;
+1744:                           while (i < dma->iova + dma->size &&
+1754:                           size_t n = dma->iova + dma->size - iova;
+1785:                   iova += size;
+1810:           while (iova < dma->iova + dma->size) {
+1823:                   i = iova + size;
+1824:                   while (i < dma->iova + dma->size &&
+2919:           if (range.iova + range.size < range.iova)
+
+This series spend the first couple commits making mechanical preparations
+before the fix lands in the last commit.
+
+[1] https://lore.kernel.org/qemu-devel/20250919213515.917111-1-alejandro.j.jimenez@oracle.com/
+[2] https://lore.kernel.org/all/68e18f2c-79ad-45ec-99b9-99ff68ba5438@oracle.com/
+
+Signed-off-by: Alex Mastro <amastro@fb.com>
+---
+Changes in v4:
+- Fix type assigned to iova_end
+- Clarify overflow checking, add checks to vfio_iommu_type1_dirty_pages
+- Consider npage==0 an error for vfio_iommu_type1_pin_pages
+- Link to v3: https://lore.kernel.org/r/20251010-fix-unmap-v3-0-306c724d6998@fb.com
+
+Changes in v3:
+- Fix handling of unmap_all in vfio_dma_do_unmap
+- Fix !range.size to return -EINVAL for VFIO_IOMMU_DIRTY_PAGES_FLAG_GET_BITMAP
+  - Dedup !range.size checking
+- Return -EOVERFLOW on check_*_overflow
+- Link to v2: https://lore.kernel.org/r/20251007-fix-unmap-v2-0-759bceb9792e@fb.com
+
+Changes in v2:
+- Change to patch series rather than single commit
+- Expand scope to fix more than just the unmap discovery path
+- Link to v1: https://lore.kernel.org/r/20251005-fix-unmap-v1-1-6687732ed44e@fb.com
+
+---
+Alex Mastro (3):
+      vfio/type1: sanitize for overflow using check_*_overflow
+      vfio/type1: move iova increment to unmap_unpin_* caller
+      vfio/type1: handle DMA map/unmap up to the addressable limit
+
+ drivers/vfio/vfio_iommu_type1.c | 173 +++++++++++++++++++++++++---------------
+ 1 file changed, 110 insertions(+), 63 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/type1: sanitize for overflow using
+[PATCH v4 1/3] vfio/type1: sanitize for overflow using
+Author: Alex Mastro <amastro@fb.com>
+
+Adopt check_*_overflow functions to clearly express overflow check
+intent.
+
+Signed-off-by: Alex Mastro <amastro@fb.com>
+---
+ drivers/vfio/vfio_iommu_type1.c | 86 ++++++++++++++++++++++++++++++-----------
+ 1 file changed, 63 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
