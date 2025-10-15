@@ -1,0 +1,260 @@
+From 3f2959cdb to 5d546b830
+KVM mailing list update from 3f2959cdb to 5d546b830
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      5 google.com
+      4 redhat.com
+      2 inspur.com
+      1 loongson.cn
+
+Top 15 contributors (Based on Email Body)
+
+      4  Maxim Levitsky <mlevitsk@redhat.com>
+      3  Lisa Wang <wyihan@google.com>
+      2  Chu Guangqing <chuguangqing@inspur.com>
+      1  Song Gao <gaosong@loongson.cn>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Brendan Jackman <jackmanb@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  mm: Fix MF_DELAYED handling on memory failure
+[RFC PATCH RESEND 0/3] mm: Fix MF_DELAYED handling on memory failure
+Author: Lisa Wang <wyihan@google.com>
+
+[resend to correct the mailing list address]
+
+Hello,
+
+This patch series addresses an issue in the memory failure handling path
+where MF_DELAYED is incorrectly treated as an error. This issue was
+revealed because guest_memfd=E2=80=99s .error_remove_folio() callback retur=
+ns
+MF_DELAYED.
+
+Currently, when the .error_remove_folio() callback for guest_memfd returns
+MF_DELAYED, there are a few issues.
+
+1. truncate_error_folio() maps this to MF_FAILED. This causes
+   memory_failure() to return -EBUSY, which unconditionally triggers a
+   SIGBUS. The process=E2=80=99 configured memory corruption kill policy is=
+ ignored
+   - even if PR_MCE_KILL_LATE is set, the process will still get a SIGBUS
+   on deferred memory failures.
+
+2. =E2=80=9CFailed to punch page=E2=80=9D is printed, even though MF_DELAYE=
+D indicates that
+   it was intentionally not punched.
+
+The first patch corrects this by updating truncate_error_folio() to
+propagate MF_DELAYED to its caller. This allows memory_failure() to return
+0, indicating success, and lets the delayed handling proceed as designed.
+This patch also updates me_pagecache_clean() to account for the folio's
+refcount, which remains elevated during delayed handling, aligning its
+logic with me_swapcache_dirty().
+
+The subsequent two patches add KVM selftests to validate the fix and the
+expected behavior of guest_memfd memory failure:
+
+The first test patch verifies that memory_failure() now returns 0 in the
+delayed case and confirms that SIGBUS signaling logic remains correct for
+other scenarios (e.g., madvise injection or PR_MCE_KILL_EARLY).
+
+The second test patch confirms that after a memory failure, the poisoned
+page is correctly unmapped from the KVM guest's stage 2 page tables and
+that a subsequent access by the guest correctly notifies the userspace VMM
+with EHWPOISON.
+
+This patch series is built upon kvm/next. In addition, to align with the
+change of INIT_SHARED and to use the macro wrapper in guest_memfd
+selftests, we put these patches behind Sean=E2=80=99s patches [1].
+
+For ease of testing, this series is also available, stitched together, at
+https://github.com/googleprodkernel/linux-cc/tree/memory-failure-mf-delayed=
+-fix-rfc-v1=20
+
+[1]: https://lore.kernel.org/all/20251003232606.4070510-1-seanjc@google.com=
+/T/
+
+Thank you,
+
+
+Lisa Wang (3):
+  mm: memory_failure: Fix MF_DELAYED handling on truncation during
+    failure
+  KVM: selftests: Add memory failure tests in guest_memfd_test
+  KVM: selftests: Test guest_memfd behavior with respect to stage 2 page
+    tables
+
+ mm/memory-failure.c                           |  24 +-
+ .../testing/selftests/kvm/guest_memfd_test.c  | 233 ++++++++++++++++++
+ 2 files changed, 248 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Warn if KVM tries to deliver an #APF completion when APF is not enabled
+[PATCH v2 1/3] KVM: x86: Warn if KVM tries to deliver an #APF completion when APF is not enabled
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+KVM flushes the APF queue completely when the asynchronous pagefault is
+disabled, therefore this case should not occur.
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ arch/x86/kvm/x86.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Fix a lost async pagefault notification when the guest is using SMM
+[PATCH v2 0/3] Fix a lost async pagefault notification when the guest is using SMM
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+Recently we debugged a customer case in which the guest VM was showing=0D
+tasks permanently stuck in the kvm_async_pf_task_wait_schedule.=0D
+=0D
+This was traced to the incorrect flushing of the async pagefault queue,=0D
+which was done during the real mode entry by the kvm_post_set_cr0.=0D
+=0D
+This code, the kvm_clear_async_pf_completion_queue does wait for all #APF=0D
+tasks to complete but then it proceeds to wipe the 'done' queue without=0D
+notifying the guest.=0D
+=0D
+Such approach is acceptable if the guest is being rebooted or if=0D
+it decided to disable APF, but it leads to failures if the entry to real=0D
+mode was caused by SMM, because in this case the guest intends to continue=
+=0D
+using APF after returning from the SMM handler.=0D
+=0D
+Amusingly, and on top of this, the SMM entry code doesn't call=0D
+the kvm_set_cr0 (and subsequently neither it calls kvm_post_set_cr0),=0D
+but rather only the SMM mode exit code does.=0D
+=0D
+During SMM entry, the SMM code calls .set_cr0 instead, with an intention=0D
+to bypass various architectural checks that can otherwise fail.=0D
+=0D
+One example of such check is a #GP check on an attempt to disable paging=0D
+while the long mode is active.=0D
+To do this, the user must first exit to the compatibility mode and only the=
+n=0D
+disable paging.=0D
+=0D
+The question of the possiblity of eliminating this bypass, is a side topic=
+=0D
+that is probably worth discussing separately.=0D
+=0D
+Back to the topic, the kvm_set_cr0 is still called during SMM handling,=0D
+more particularly during the exit from SMM, by emulator_leave_smm:=0D
+=0D
+It is called once with CR0.PE =3D=3D off, to setup a baseline real-mode=0D
+environment, and then a second time, with the original CR0 value.=0D
+=0D
+Even more amusingly, usually both mentioned calls result in APF queue being=
+=0D
+flushed, because the code in kvm_post_set_cr0 doesn't distinguish between=0D
+entry and exit from protected mode, and SMM mode usually enables protection=
+=0D
+and paging, and exits itself without bothering first to exit back to=0D
+the real mode.=0D
+=0D
+To fix this problem, I think the best solution is to drop the call to=0D
+kvm_clear_async_pf_completion_queue in kvm_post_set_cr0 code altogether,=0D
+and instead raise the KVM_REQ_APF_READY, when the protected mode=0D
+is re-established.=0D
+=0D
+Existing APF requests should have no problem to complete while the guest is=
+=0D
+in SMM and the APF completion event injection should work too,=0D
+because SMM handler *ought* to not enable interrupts because otherwise=0D
+things would go south very quickly.=0D
+=0D
+This change also brings the logic to be up to date with logic that KVM=0D
+follows when the guest disables APIC.=0D
+KVM also raises KVM_REQ_APF_READY when the APIC is re-enabled.=0D
+=0D
+In addition to this, I also included few fixes for few semi-theortical=0D
+bugs I found while debugging this.=0D
+=0D
+V2: incorporated review feedback from Paolo Bonzini and Sean Christopherson=
+.=0D
+=0D
+Best regards,=0D
+        Maxim Levitsky=0D
+=0D
+Maxim Levitsky (3):=0D
+  KVM: x86: Warn if KVM tries to deliver an #APF completion when APF is=0D
+    not enabled=0D
+  KVM: x86: Fix a semi theoretical bug in=0D
+    kvm_arch_async_page_present_queued=0D
+  KVM: x86: Fix the interaction between SMM and the asynchronous=0D
+    pagefault=0D
+=0D
+ arch/x86/kvm/x86.c | 37 +++++++++++++++++++++++--------------=0D
+ 1 file changed, 23 insertions(+), 14 deletions(-)=0D
+
+----------------------------------------------------------------------
+
+New:  vfio/mtty: Fix spelling typo in samples/vfio-mdev
+[PATCH v3 1/1] vfio/mtty: Fix spelling typo in samples/vfio-mdev
+Author: Chu Guangqing <chuguangqing@inspur.com>
+
+mtty.c
+The comment incorrectly used "atleast" instead of "at least".
+
+Signed-off-by: Chu Guangqing <chuguangqing@inspur.com>
+---
+ samples/vfio-mdev/mtty.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v3 1/1] vfio/mtty: Fix spelling typo in samples/vfio-mdev
+ Skip: [PATCH v3 0/1] Fix spelling typo in samples/vfio-mdev
+New:  KVM: VMX: Inject #UD if guest tries to execute SEAMCALL or TDCALL
+[PATCH] KVM: VMX: Inject #UD if guest tries to execute SEAMCALL or TDCALL
+Author: Sean Christopherson <seanjc@google.com>
+
+Add VMX exit handlers for SEAMCALL and TDCALL, and a SEAMCALL handler for
+TDX, to inject a #UD if a non-TD guest attempts to execute SEAMCALL or
+TDCALL, or if a TD guest attempst to execute SEAMCALL.  Neither SEAMCALL
+nor TDCALL is gated by any software enablement other than VMXON, and so
+will generate a VM-Exit instead of e.g. a native #UD when executed from
+the guest kernel.
+
+Note!  No unprivilege DoS of the L1 kernel is possible as TDCALL and
+SEAMCALL #GP at CPL > 0, and the CPL check is performed prior to the VMX
+non-root (VM-Exit) check, i.e. userspace can't crash the VM. And for a
+nested guest, KVM forwards unknown exits to L1, i.e. an L2 kernel can
+crash itself, but not L1.
+
+Note #2!  The Intel=C2=AE Trust Domain CPU Architectural Extensions spec's
+pseudocode shows the CPL > 0 check for SEAMCALL coming _after_ the VM-Exit,
+but that appears to be a documentation bug (likely because the CPL > 0
+check was incorrectly bundled with other lower-priority #GP checks).
+Testing on SPR and EMR shows that the CPL > 0 check is performed before
+the VMX non-root check, i.e. SEAMCALL #GPs when executed in usermode.
+
+Note #3!  The aforementioned Trust Domain spec uses confusing pseudocde
+that says that SEAMCALL will #UD if executed "inSEAM", but "inSEAM"
+specifically means in SEAM Root Mode, i.e. in the TDX-Module.  The long-
+form description explicitly states that SEAMCALL generates an exit when
+executed in "SEAM VMX non-root operation".
+
+Cc: stable@vger.kernel.org
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/uapi/asm/vmx.h | 1 +
+ arch/x86/kvm/vmx/nested.c       | 8 ++++++++
+ arch/x86/kvm/vmx/tdx.c          | 3 +++
+ arch/x86/kvm/vmx/vmx.c          | 8 ++++++++
+ 4 files changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
