@@ -1,0 +1,596 @@
+From b78474f80 to 0a64475eb
+KVM mailing list update from b78474f80 to 0a64475eb
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     34 kernel.org
+     18 oracle.com
+      9 arm.com
+      1 linux.ibm.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     34  Marc Zyngier <maz@kernel.org>
+     17  Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+      9  Yeoreum Yun <yeoreum.yun@arm.com>
+      1  Gautam Menghani <gautam@linux.ibm.com>
+      1  Dong Yang <dayss1224@gmail.com>
+      1  Dongli Zhang <dongli.zhang@oracle.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: VMX: configure SVI during runtime APICv activation
+[PATCH 1/1] KVM: VMX: configure SVI during runtime APICv activation
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+The APICv (apic->apicv_active) can be activated or deactivated at runtime,
+for instance, because of APICv inhibit reasons. Intel VMX employs different
+mechanisms to virtualize LAPIC based on whether APICv is active.
+
+When APICv is activated at runtime, GUEST_INTR_STATUS is used to configure
+and report the current pending IRR and ISR states. Unless a specific vector
+is explicitly included in EOI_EXIT_BITMAP, its EOI will not be trapped to
+KVM. Intel VMX automatically clears the corresponding ISR bit based on the
+GUEST_INTR_STATUS.SVI field.
+
+When APICv is deactivated at runtime, the VM_ENTRY_INTR_INFO_FIELD is used
+to specify the next interrupt vector to invoke upon VM-entry. The
+VMX IDT_VECTORING_INFO_FIELD is used to report un-invoked vectors on
+VM-exit. EOIs are always trapped to KVM, so the software can manually clear
+pending ISR bits.
+
+There are scenarios where, with APICv activated at runtime, a guest-issued
+EOI may not be able to clear the pending ISR bit.
+
+Taking vector 236 as an example, here is one scenario.
+
+1. Suppose APICv is inactive. Vector 236 is pending in the IRR.
+2. To handle KVM_REQ_EVENT, KVM moves vector 236 from the IRR to the ISR,
+and configures the VM_ENTRY_INTR_INFO_FIELD via vmx_inject_irq().
+3. After VM-entry, vector 236 is invoked through the guest IDT. At this
+point, the data in VM_ENTRY_INTR_INFO_FIELD is no longer valid. The guest
+interrupt handler for vector 236 is invoked.
+4. Suppose a VM exit occurs very early in the guest interrupt handler,
+before the EOI is issued.
+5. Nothing is reported through the IDT_VECTORING_INFO_FIELD because
+vector 236 has already been invoked in the guest.
+6. Now, suppose APICv is activated. Before the next VM-entry, KVM calls
+kvm_vcpu_update_apicv() to activate APICv.
+7. Unfortunately, GUEST_INTR_STATUS.SVI is not configured, although
+vector 236 is still pending in the ISR.
+8. After VM-entry, the guest finally issues the EOI for vector 236.
+However, because SVI is not configured, vector 236 is not cleared.
+9. ISR is stalled forever on vector 236.
+
+Here is another scenario.
+
+1. Suppose APICv is inactive. Vector 236 is pending in the IRR.
+2. To handle KVM_REQ_EVENT, KVM moves vector 236 from the IRR to the ISR,
+and configures the VM_ENTRY_INTR_INFO_FIELD via vmx_inject_irq().
+3. VM-exit occurs immediately after the next VM-entry. The vector 236 is
+not invoked through the guest IDT. Instead, it is saved to the
+IDT_VECTORING_INFO_FIELD during the VM-exit.
+4. KVM calls kvm_queue_interrupt() to re-queue the un-invoked vector 236
+into vcpu->arch.interrupt. A KVM_REQ_EVENT is requested.
+5. Now, suppose APICv is activated. Before the next VM-entry, KVM calls
+kvm_vcpu_update_apicv() to activate APICv.
+6. Although APICv is now active, KVM still uses the legacy
+VM_ENTRY_INTR_INFO_FIELD to re-inject vector 236. GUEST_INTR_STATUS.SVI is
+not configured.
+7. After the next VM-entry, vector 236 is invoked through the guest IDT.
+Finally, an EOI occurs. However, due to the lack of GUEST_INTR_STATUS.SVI
+configuration, vector 236 is not cleared from the ISR.
+8. ISR is stalled forever on vector 236.
+
+Using QEMU as an example, vector 236 is stuck in ISR forever.
+
+(qemu) info lapic 1
+dumping local APIC state for CPU 1
+
+LVT0	 0x00010700 active-hi edge  masked                      ExtINT (vec 0)
+LVT1	 0x00010400 active-hi edge  masked                      NMI
+LVTPC	 0x00000400 active-hi edge                              NMI
+LVTERR	 0x000000fe active-hi edge                              Fixed  (vec 254)
+LVTTHMR	 0x00010000 active-hi edge  masked                      Fixed  (vec 0)
+LVTT	 0x000400ec active-hi edge                 tsc-deadline Fixed  (vec 236)
+Timer	 DCR=0x0 (divide by 2) initial_count = 0 current_count = 0
+SPIV	 0x000001ff APIC enabled, focus=off, spurious vec 255
+ICR	 0x000000fd physical edge de-assert no-shorthand
+ICR2	 0x00000000 cpu 0 (X2APIC ID)
+ESR	 0x00000000
+ISR	 236
+IRR	 37(level) 236
+
+The issue is not applicable to AMD SVM which employs a different LAPIC
+virtualization mechanism. In addition, APICV_INHIBIT_REASON_IRQWIN ensures
+AMD SVM APICv is not activated until the last interrupt is EOI.
+
+Fix the bug by configuring Intel VMX GUEST_INTR_STATUS.SVI if APICv is
+activated at runtime.
+
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+ arch/x86/kvm/x86.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add LR overflow infrastructure
+[PATCH 00/33] KVM: arm64: Add LR overflow infrastructure
+Author: Marc Zyngier <maz@kernel.org>
+
+Despite being an awfully complex piece of software, the KVM vgic
+implementation is not doing what it should in a number of cases:
+
+- It behaves very badly when the number of in-flight interrupts
+  targeting a specific CPU exceed the number of list registers
+  (LRs). This is catastrophic with NV (Volodymyr triggered that one
+  with a Xen guest), but can easily be triggered without it. You just
+  have to activate more interrupts than the number of LRs to end-up
+  with a guest live-lock.
+
+- Similar issues exist when making high-priority interrupts targeting
+  a group that isn't enabled.
+
+Overall, this stems from the vgic implementation not sorting the
+interrupts presented to the guest in the correct order (i.e. the one
+expected by the architecture), and allow deactivation outside of the
+window exposed by the LRs.
+
+Unfortunately, the cure for this is pretty involved, and involves
+adding a significant amount of complexity:
+
+- Order the list as the architecture requires it, by starting with
+  placing the HPPIs at the forefront of the ap_list
+
+- Handle deactivation for EOImode being 0 or 1, which is specially
+  annoying as we cannot easily find out which mode we're in, and we
+  need to handle both concurrently
+
+- Deal with individual interrupt groups being enabled/disabled
+
+- Deal with SPIs being acked on one CPU and deactivated on another
+
+Implementation wise, this is about extracting the relevant primitive
+from the existing code, making guest state available to the emulation
+more eagerly, dealing with a lot more MI sources, and be creative
+about trapping stuff. Oh, and of course dealing with broken HW,
+because nothing would be fun if we didn't.
+
+The eagle eyed reviewer will notice that this series doesn't provide
+any selftest. That's on purpose: I'm still working on those, and I
+could do with some reviewing while I'm finishing them, and plan to
+post them with v2.
+
+Marc Zyngier (33):
+  irqchip/gic: Add missing GICH_HCR control bits
+  irqchip/gic: Expose CPU interface VA to KVM
+  irqchip/apple-aic: Spit out ICH_MIDR_EL2 value on spurious vGIC MI
+  KVM: arm64: Turn vgic-v3 errata traps into a patched-in constant
+  KVM: arm64: GICv3: Detect and work around the lack of ICV_DIR_EL1
+    trapping
+  KVM: arm64: Repack struct vgic_irq fields
+  KVM: arm64: Add tracking of vgic_irq being present in a LR
+  KVM: arm64: Add LR overflow handling documentation
+  KVM: arm64: GICv3: Drop LPI active state when folding LRs
+  KVM: arm64: GICv3: Preserve EOIcount on exit
+  KVM: arm64: GICv3: Decouple ICH_HCR_EL2 programming from LRs
+  KVM: arm64: GICv3: Extract LR folding primitive
+  KVM: arm64: GICv3: Extract LR computing primitive
+  KVM: arm64: GICv2: Preserve EOIcount on exit
+  KVM: arm64: GICv2: Decouple GICH_HCR programming from LRs being loaded
+  KVM: arm64: GICv2: Extract LR folding primitive
+  KVM: arm64: GICv2: Extract LR computing primitive
+  KVM: arm64: Compute vgic state irrespective of the number of
+    interrupts
+  KVM: arm64: Eagerly save VMCR on exit
+  KVM: arm64: Revamp vgic maintenance interrupt configuration
+  KVM: arm64: Make vgic_target_oracle() globally available
+  KVM: arm64: Invert ap_list sorting to push active interrupts out
+  KVM: arm64: Move undeliverable interrupts to the end of ap_list
+  KVM: arm64: Use MI to detect groups being enabled/disabled
+  KVM: arm64: Add AP-list overflow split/splice
+  KVM: arm64: GICv3: Handle LR overflow when EOImode==0
+  KVM: arm64: GICv3: Handle deactivation via ICV_DIR_EL1 traps
+  KVM: arm64: GICv3: Add GICv2 SGI handling to deactivation primitive
+  KVM: arm64: GICv3: Set ICH_HCR_EL2.TDIR when interrupts overflow LR
+    capacity
+  KVM: arm64: GICv2: Handle LR overflow when EOImode==0
+  KVM: arm64: GICv2: Handle deactivation via GICV_DIR traps
+  KVM: arm64: GICv2: Always trap GICV_DIR register
+  KVM: arm64: GICv3: Add SPI tracking to handle asymmetric deactivation
+
+ arch/arm64/include/asm/kvm_asm.h         |   2 +-
+ arch/arm64/include/asm/kvm_host.h        |   1 +
+ arch/arm64/include/asm/kvm_hyp.h         |   2 +-
+ arch/arm64/include/asm/virt.h            |   7 +-
+ arch/arm64/kernel/cpufeature.c           |  34 ++
+ arch/arm64/kernel/hyp-stub.S             |   5 +
+ arch/arm64/kernel/image-vars.h           |   1 +
+ arch/arm64/kvm/arm.c                     |   7 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c       |   7 +-
+ arch/arm64/kvm/hyp/vgic-v2-cpuif-proxy.c |   4 +
+ arch/arm64/kvm/hyp/vgic-v3-sr.c          |  55 +--
+ arch/arm64/kvm/sys_regs.c                |  19 +-
+ arch/arm64/kvm/vgic/vgic-init.c          |   3 +
+ arch/arm64/kvm/vgic/vgic-mmio-v2.c       |  24 ++
+ arch/arm64/kvm/vgic/vgic-mmio.h          |   1 +
+ arch/arm64/kvm/vgic/vgic-v2.c            | 311 +++++++++++++----
+ arch/arm64/kvm/vgic/vgic-v3-nested.c     |  11 +-
+ arch/arm64/kvm/vgic/vgic-v3.c            | 419 ++++++++++++++++++-----
+ arch/arm64/kvm/vgic/vgic-v4.c            |   5 +-
+ arch/arm64/kvm/vgic/vgic.c               | 328 ++++++++++++------
+ arch/arm64/kvm/vgic/vgic.h               |  44 ++-
+ arch/arm64/tools/cpucaps                 |   1 +
+ drivers/irqchip/irq-apple-aic.c          |   7 +-
+ drivers/irqchip/irq-gic.c                |   3 +
+ include/kvm/arm_vgic.h                   |  35 +-
+ include/linux/irqchip/arm-gic.h          |   6 +
+ include/linux/irqchip/arm-vgic-info.h    |   2 +
+ 27 files changed, 1012 insertions(+), 332 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  irqchip/gic: Add missing GICH_HCR control bits
+[PATCH 01/33] irqchip/gic: Add missing GICH_HCR control bits
+Author: Marc Zyngier <maz@kernel.org>
+
+The GICH_HCR description is missing a bunch of additional control
+bits for the maintenance interrupt. Add them.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ include/linux/irqchip/arm-gic.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  support FEAT_LSUI
+[PATCH v10 0/9] support FEAT_LSUI
+Author: Yeoreum Yun <yeoreum.yun@arm.com>
+
+Since Armv9.6, FEAT_LSUI supplies the load/store instructions for
+previleged level to access to access user memory without clearing
+PSTATE.PAN bit.
+
+This patchset support FEAT_LSUI and applies in futex atomic operation
+and user_swpX emulation where can replace from ldxr/st{l}xr
+pair implmentation with clearing PSTATE.PAN bit to correspondant
+load/store unprevileged atomic operation without clearing PSTATE.PAN bit.
+
+
+Patch Sequences
+================
+
+Patch #1 adds cpufeature for FEAT_LSUI
+
+Patch #2-#3 expose FEAT_LSUI to guest
+
+Patch #4 adds Kconfig for FEAT_LSUI
+
+Patch #5-#6 support futex atomic-op with FEAT_LSUI
+
+Patch #7-#9 support user_swpX emulation with FEAT_LSUI
+
+
+Patch History
+==============
+from v9 to v10:
+  - apply FEAT_LSUI to user_swpX emulation.
+  - add test coverage for LSUI bit in ID_AA64ISAR3_EL1
+  - rebase to v6.18-rc4
+  - https://lore.kernel.org/all/20250922102244.2068414-1-yeoreum.yun@arm.com/
+
+from v8 to v9:
+  - refotoring __lsui_cmpxchg64()
+  - rebase to v6.17-rc7
+  - https://lore.kernel.org/all/20250917110838.917281-1-yeoreum.yun@arm.com/
+
+from v7 to v8:
+  - implements futex_atomic_eor() and futex_atomic_cmpxchg() with casalt
+    with C helper.
+  - Drop the small optimisation on ll/sc futex_atomic_set operation.
+  - modify some commit message.
+  - https://lore.kernel.org/all/20250816151929.197589-1-yeoreum.yun@arm.com/
+
+from v6 to v7:
+  - wrap FEAT_LSUI with CONFIG_AS_HAS_LSUI in cpufeature
+  - remove unnecessary addition of indentation.
+  - remove unnecessary mte_tco_enable()/disable() on LSUI operation.
+  - https://lore.kernel.org/all/20250811163635.1562145-1-yeoreum.yun@arm.com/
+
+from v5 to v6:
+  - rebase to v6.17-rc1
+  - https://lore.kernel.org/all/20250722121956.1509403-1-yeoreum.yun@arm.com/
+
+from v4 to v5:
+  - remove futex_ll_sc.h futext_lsui and lsui.h and move them to futex.h
+  - reorganize the patches.
+  - https://lore.kernel.org/all/20250721083618.2743569-1-yeoreum.yun@arm.com/
+
+from v3 to v4:
+  - rebase to v6.16-rc7
+  - modify some patch's title.
+  - https://lore.kernel.org/all/20250617183635.1266015-1-yeoreum.yun@arm.com/
+
+from v2 to v3:
+  - expose FEAT_LUSI to guest
+  - add help section for LUSI Kconfig
+  - https://lore.kernel.org/all/20250611151154.46362-1-yeoreum.yun@arm.com/
+
+from v1 to v2:
+  - remove empty v9.6 menu entry
+  - locate HAS_LUSI in cpucaps in order
+  - https://lore.kernel.org/all/20250611104916.10636-1-yeoreum.yun@arm.com/
+
+
+Yeoreum Yun (9):
+  arm64: cpufeature: add FEAT_LSUI
+  KVM: arm64: expose FEAT_LSUI to guest
+  KVM: arm64: kselftest: set_id_regs: add test for FEAT_LSUI
+  arm64: Kconfig: Detect toolchain support for LSUI
+  arm64: futex: refactor futex atomic operation
+  arm64: futex: support futex with FEAT_LSUI
+  arm64: separate common LSUI definitions into lsui.h
+  arm64: armv8_deprecated: convert user_swpX to inline function
+  arm64: armv8_deprecated: apply FEAT_LSUI for swpX emulation.
+
+ arch/arm64/Kconfig                            |   5 +
+ arch/arm64/include/asm/futex.h                | 291 +++++++++++++++---
+ arch/arm64/include/asm/lsui.h                 |  25 ++
+ arch/arm64/kernel/armv8_deprecated.c          |  86 +++++-
+ arch/arm64/kernel/cpufeature.c                |  10 +
+ arch/arm64/kvm/sys_regs.c                     |   3 +-
+ arch/arm64/tools/cpucaps                      |   1 +
+ .../testing/selftests/kvm/arm64/set_id_regs.c |   1 +
+ 8 files changed, 360 insertions(+), 62 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: correctly handle UFFD PTE markers
+[PATCH 01/16] mm: correctly handle UFFD PTE markers
+Author: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+
+PTE markers were previously only concerned with UFFD-specific logic - that
+is, PTE entries with the UFFD WP marker set or those marked via
+UFFDIO_POISON.
+
+However since the introduction of guard markers in commit
+ 7c53dfbdb024 ("mm: add PTE_MARKER_GUARD PTE marker"), this has no longer
+ been the case.
+
+Issues have been avoided as guard regions are not permitted in conjunction
+with UFFD, but it still leaves very confusing logic in place, most notably
+the misleading and poorly named pte_none_mostly() and
+huge_pte_none_mostly().
+
+This predicate returns true for PTE entries that ought to be treated as
+none, but only in certain circumstances, and on the assumption we are
+dealing with H/W poison markers or UFFD WP markers.
+
+This patch removes these functions and makes each invocation of these
+functions instead explicitly check what it needs to check.
+
+As part of this effort it introduces is_uffd_pte_marker() to explicitly
+determine if a marker in fact is used as part of UFFD or not.
+
+In the HMM logic we note that the only time we would need to check for a
+fault is in the case of a UFFD WP marker, otherwise we simply encounter a
+fault error (VM_FAULT_HWPOISON for H/W poisoned marker, VM_FAULT_SIGSEGV
+for a guard marker), so only check for the UFFD WP case.
+
+While we're here we also refactor code to make it easier to understand.
+
+Signed-off-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+---
+ fs/userfaultfd.c              | 83 +++++++++++++++++++----------------
+ include/asm-generic/hugetlb.h |  8 ----
+ include/linux/swapops.h       | 18 --------
+ include/linux/userfaultfd_k.h | 21 +++++++++
+ mm/hmm.c                      |  2 +-
+ mm/hugetlb.c                  | 47 ++++++++++----------
+ mm/mincore.c                  | 17 +++++--
+ mm/userfaultfd.c              | 27 +++++++-----
+ 8 files changed, 123 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+New: () + non-swap entries, introduce leaf entries
+[PATCH 00/16] mm: remove is_swap_[pte, pmd]() + non-swap entries, introduce leaf entries
+Author: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+
+There's an established convention in the kernel that we treat leaf page
+tables (so far at the PTE, PMD level) as containing 'swap entries' should
+they be neither empty (i.e. p**_none() evaluating true) nor present
+(i.e. p**_present() evaluating true).
+
+However, at the same time we also have helper predicates - is_swap_pte(),
+is_swap_pmd() - which are inconsistently used.
+
+This is problematic, as it is logical to assume that should somebody wish
+to operate upon a page table swap entry they should first check to see if
+it is in fact one.
+
+It also implies that perhaps, in future, we might introduce a non-present,
+none page table entry that is not a swap entry.
+
+This series resolves this issue by systematically eliminating all use of
+the is_swap_pte() and is swap_pmd() predicates so we retain only the
+convention that should a leaf page table entry be neither none nor present
+it is a swap entry.
+
+We also have the further issue that 'swap entry' is unfortunately a really
+rather overloaded term and in fact refers to both entries for swap and for
+other information such as migration entries, page table markers, and device
+private entries.
+
+We therefore have the rather 'unique' concept of a 'non-swap' swap entry.
+
+This series therefore introduces the concept of 'leaf entries' to eliminate
+this confusion.
+
+A leaf entry in this sense is any page table entry which is non-present,
+and represented by the leaf_entry_t type.
+
+This includes 'none' or empty entries, which are simply represented by an
+zero leaf entry value.
+
+In order to maintain compatibility as we transition the kernel to this new
+type, we simply typedef swp_entry_t to leaf_entry_t.
+
+We introduce a number of predicates and helpers to interact with leaf
+entries in include/linux/leafops.h which, as it imports swapops.h, can be
+treated as a drop-in replacement for swapops.h wherever leaf entry helpers
+are used.
+
+Since leafent_from_[pte, pmd]() treats present entries as they were
+empty/none leaf entries, this allows for a great deal of simplification of
+code throughout the code base, which this series utilises a great deal.
+
+We additionally change from swap entry to leaf entry handling where it
+makes sense to and eliminate functions from swapops.h where leaf entries
+obviate the need for the functions.
+
+
+non-RFC v1:
+* As part of efforts to eliminate swp_entry_t usage, remove
+  pte_none_mostly() and correct UFFD PTE marker handling.
+* Introduce leaf_entry_t - credit to Gregory for naming, and to Jason for
+  the concept of simply using a leafent_*() set of functions to interact
+  with these entities.
+* Replace pte_to_swp_entry_or_zero() with leafent_from_pte() and simply
+  categorise pte_none() cases as an empty leaf entry, as per Jason.
+* Eliminate get_pte_swap_entry() - as we can simply do this with
+  leafent_from_pte() also, as discussed with Jason.
+* Put pmd_trans_huge_lock() acquisition/release in pagemap_pmd_range()
+  rather than pmd_trans_huge_lock_thp() as per Gregory.
+* Eliminate pmd_to_swp_entry() and related and introduce leafent_from_pmd()
+  to replace it and further propagate leaf entry usage.
+* Remove the confusing and unnecessary is_hugetlb_entry_[migration,
+  hwpoison]() functions.
+* Replace is_pfn_swap_entry(), pfn_swap_entry_to_page(),
+  is_writable_device_private_entry(), is_device_exclusive_entry(),
+  is_migration_entry(), is_writable_migration_entry(),
+  is_readable_migration_entry(), is_readable_exclusive_migration_entry()
+  and pfn_swap_entry_folio() with leafent equivalents.
+* Wrapped up the 'safe' behaviour discussed with Jason in
+  leafent_from_[pte, pmd]() so these can be used unconditionally which
+  simplifies things a lot.
+* Further changes that are a consequence of the introduction of leaf
+  entries.
+
+RFC:
+https://lore.kernel.org/all/cover.1761288179.git.lorenzo.stoakes@oracle.com/
+
+Lorenzo Stoakes (16):
+  mm: correctly handle UFFD PTE markers
+  mm: introduce leaf entry type and use to simplify leaf entry logic
+  mm: avoid unnecessary uses of is_swap_pte()
+  mm: eliminate uses of is_swap_pte() when leafent_from_pte() suffices
+  mm: use leaf entries in debug pgtable + remove is_swap_pte()
+  fs/proc/task_mmu: refactor pagemap_pmd_range()
+  mm: avoid unnecessary use of is_swap_pmd()
+  mm/huge_memory: refactor copy_huge_pmd() non-present logic
+  mm/huge_memory: refactor change_huge_pmd() non-present logic
+  mm: replace pmd_to_swp_entry() with leafent_from_pmd()
+  mm: introduce pmd_is_huge() and use where appropriate
+  mm: remove remaining is_swap_pmd() users and is_swap_pmd()
+  mm: remove non_swap_entry() and use leaf entry helpers instead
+  mm: remove is_hugetlb_entry_[migration, hwpoisoned]()
+  mm: eliminate further swapops predicates
+  mm: replace remaining pte_to_swp_entry() with leafent_from_pte()
+
+ MAINTAINERS                   |   1 +
+ arch/s390/mm/gmap_helpers.c   |  18 +-
+ arch/s390/mm/pgtable.c        |  12 +-
+ fs/proc/task_mmu.c            | 294 +++++++++-------
+ fs/userfaultfd.c              |  85 ++---
+ include/asm-generic/hugetlb.h |   8 -
+ include/linux/huge_mm.h       |  48 ++-
+ include/linux/hugetlb.h       |   2 -
+ include/linux/leafops.h       | 622 ++++++++++++++++++++++++++++++++++
+ include/linux/migrate.h       |   3 +-
+ include/linux/mm_inline.h     |   6 +-
+ include/linux/swapops.h       | 273 +--------------
+ include/linux/userfaultfd_k.h |  33 +-
+ mm/damon/ops-common.c         |   6 +-
+ mm/debug_vm_pgtable.c         |  86 +++--
+ mm/filemap.c                  |   8 +-
+ mm/hmm.c                      |  36 +-
+ mm/huge_memory.c              | 263 +++++++-------
+ mm/hugetlb.c                  | 165 ++++-----
+ mm/internal.h                 |  20 +-
+ mm/khugepaged.c               |  33 +-
+ mm/ksm.c                      |   6 +-
+ mm/madvise.c                  |  28 +-
+ mm/memory-failure.c           |   8 +-
+ mm/memory.c                   | 150 ++++----
+ mm/mempolicy.c                |  25 +-
+ mm/migrate.c                  |  45 +--
+ mm/migrate_device.c           |  24 +-
+ mm/mincore.c                  |  25 +-
+ mm/mprotect.c                 |  59 ++--
+ mm/mremap.c                   |  13 +-
+ mm/page_table_check.c         |  33 +-
+ mm/page_vma_mapped.c          |  65 ++--
+ mm/pagewalk.c                 |  15 +-
+ mm/rmap.c                     |  17 +-
+ mm/shmem.c                    |   7 +-
+ mm/swap_state.c               |  12 +-
+ mm/swapfile.c                 |  14 +-
+ mm/userfaultfd.c              |  53 +--
+ 39 files changed, 1537 insertions(+), 1084 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  MAINTAINERS : Add myself as reviewer for PPC KVM
+[PATCH] MAINTAINERS : Add myself as reviewer for PPC KVM
+Author: Gautam Menghani <gautam@linux.ibm.com>
+
+I have been contributing to PPC KVM for sometime now and would like to get
+notified of incoming changes to help with code reviews as well.
+
+Signed-off-by: Gautam Menghani <gautam@linux.ibm.com>
+---
+ MAINTAINERS | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Support enabling dirty log gradually in small chunks
+[PATCH] KVM: riscv: Support enabling dirty log gradually in small chunks
+Author: dayss1224 <dayss1224@gmail.com>
+
+
+There is already support of enabling dirty log gradually in small chunks
+for x86 in commit 3c9bd4006bfc ("KVM: x86: enable dirty log gradually in
+small chunks") and c862626 ("KVM: arm64: Support enabling dirty log
+gradually in small chunks"). This adds support for riscv.
+
+x86 and arm64 writes protect both huge pages and normal pages now, so
+riscv protect also protects both huge pages and normal pages.
+
+On a nested virtualization setup (RISC-V KVM running inside a QEMU VM
+on an [Intel® Core™ i5-12500H] host), I did some tests with a 2G Linux
+VM using different backing page sizes. The time taken for
+memory_global_dirty_log_start in the L2 QEMU is listed below:
+
+Page Size      Before    After Optimization
+  4K            4490.23ms         31.94ms
+  2M             48.97ms          45.46ms
+  1G             28.40ms          30.93ms
+
+Signed-off-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Dong Yang <dayss1224@gmail.com>
+---
+ Documentation/virt/kvm/api.rst    | 2 +-
+ arch/riscv/include/asm/kvm_host.h | 3 +++
+ arch/riscv/kvm/mmu.c              | 5 ++++-
+ 3 files changed, 8 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
