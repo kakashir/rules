@@ -1,0 +1,426 @@
+From 0a64475eb to d854e91fa
+KVM mailing list update from 0a64475eb to d854e91fa
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     12 linux.dev
+      8 loongson.cn
+      6 google.com
+      3 linux.intel.com
+      1 redhat.com
+      1 fb.com
+
+Top 15 contributors (Based on Email Body)
+
+     12  Yosry Ahmed <yosry.ahmed@linux.dev>
+      8  Bibo Mao <maobibo@loongson.cn>
+      5  Raghavendra Rao Ananta <rananta@google.com>
+      3  Dave Hansen <dave.hansen@linux.intel.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Omar Sandoval <osandov@fb.com>
+      1  Masatake YAMATO <yamato@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  Nested SVM fixes, cleanups, and hardening
+[PATCH 00/11] Nested SVM fixes, cleanups, and hardening
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+A group of semi-related fixes, cleanups, and hardening patches for nSVM.
+
+Patches 1-3 fix or add missing consistency checks.
+
+Patches 4-5 are renames to clarify some VMCB fields.
+
+Patches 6-10 add hardening to reading the VMCB12, caching all used
+fields in the save area to prevent theoritical TOC-TOU bugs, sanitizing
+used fields in the control area, and restricting accesses to the VMCB12
+through guest memory.
+
+Patch 11 further restricts fields copied from VMCB01 to VMCB12.
+
+Yosry Ahmed (11):
+  KVM: nSVM: Fix consistency checks for NP_ENABLE
+  KVM: nSVM: Add missing consistency check for EFER, CR0, CR4, and CS
+  KVM: nSVM: Add missing consistency check for event_inj
+  KVM: SVM: Rename vmcb->nested_ctl to vmcb->misc_ctl
+  KVM: SVM: Rename vmcb->virt_ext to vmcb->misc_ctl2
+  KVM: SVM: switch svm_copy_lbrs() to a macro
+  KVM: nSVM: Cache all used fields from VMCB12
+  KVM: nSVM: Restrict mapping VMCB12 on nested VMRUN
+  KVM: nSVM: Simplify nested_svm_vmrun()
+  KVM: nSVM: Sanitize control fields copied from VMCB12
+  KVM: nSVM: Only copy NP_ENABLE from VMCB01's nested_ctl
+
+ arch/x86/include/asm/svm.h                    |  31 +-
+ arch/x86/kvm/svm/nested.c                     | 335 +++++++++++-------
+ arch/x86/kvm/svm/sev.c                        |   4 +-
+ arch/x86/kvm/svm/svm.c                        |  51 ++-
+ arch/x86/kvm/svm/svm.h                        |  46 ++-
+ tools/testing/selftests/kvm/include/x86/svm.h |  14 +-
+ 6 files changed, 302 insertions(+), 179 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nSVM: Fix consistency checks for NP_ENABLE
+[PATCH 01/11] KVM: nSVM: Fix consistency checks for NP_ENABLE
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+KVM currenty fails a nested VMRUN and injects VMEXIT_INVALID (aka
+SVM_EXIT_ERR) if L1 sets NP_ENABLE and the host does not support NPTs.
+On first glance, it seems like the check should actually be for
+guest_cpu_cap_has(X86_FEATURE_NPT) instead, as it is possible for the
+host to support NPTs but the guest CPUID to not advertise it.
+
+However, the consistency check is not architectural to begin with. The
+APM does not mention VMEXIT_INVALID if NP_ENABLE is set on a processor
+that does not have X86_FEATURE_NPT. Hence, NP_ENABLE should be ignored
+if X86_FEATURE_NPT is not available for L1. Apart from the consistency
+check, this is currently the case because NP_ENABLE is actually copied
+from VMCB01 to VMCB02, not from VMCB12.
+
+On the other hand, the APM does mention two other consistency checks for
+NP_ENABLE, both of which are missing (paraphrased):
+
+In Volume #2, 15.25.3 (24593—Rev. 3.42—March 2024):
+
+  If VMRUN is executed with hCR0.PG cleared to zero and NP_ENABLE set to
+  1, VMRUN terminates with #VMEXIT(VMEXIT_INVALID)
+
+In Volume #2, 15.25.4 (24593—Rev. 3.42—March 2024):
+
+  When VMRUN is executed with nested paging enabled (NP_ENABLE = 1), the
+  following conditions are considered illegal state combinations, in
+  addition to those mentioned in “Canonicalization and Consistency
+  Checks”:
+    • Any MBZ bit of nCR3 is set.
+    • Any G_PAT.PA field has an unsupported type encoding or any
+    reserved field in G_PAT has a nonzero value.
+
+Replace the existing consistency check with consistency checks on
+hCR0.PG and nCR3. The G_PAT consistency check will be addressed
+separately.
+
+Pass L1's CR0 to __nested_vmcb_check_controls(). In
+nested_vmcb_check_controls(), L1's CR0 is available through
+kvm_read_cr0(), as vcpu->arch.cr0 is not updated to L2's CR0 until later
+through nested_vmcb02_prepare_save() -> svm_set_cr0().
+
+In svm_set_nested_state(), L1's CR0 is available in the captured save
+area, as svm_get_nested_state() captures L1's save area when running L2,
+and L1's CR0 is stashed in VMCB01 on nested VMRUN (in
+nested_svm_vmrun()).
+
+Fixes: 4b16184c1cca ("KVM: SVM: Initialize Nested Nested MMU context on VMRUN")
+Cc: stable@vger.kernel.org
+
+Signed-off-by: Yosry Ahmed <yosry.ahmed@linux.dev>
+---
+ arch/x86/kvm/svm/nested.c | 21 ++++++++++++++++-----
+ arch/x86/kvm/svm/svm.h    |  3 ++-
+ 2 files changed, 18 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Add delay until timer interrupt injected
+[PATCH] LoongArch: KVM: Add delay until timer interrupt injected
+Author: Bibo Mao <maobibo@loongson.cn>
+
+When timer is fired in oneshot mode, CSR TVAL will stop with value -1
+rather than 0. However when register CSR TVAL is restored, it will
+continue to count down rather than stop there.
+
+Now the method is to write 0 to CSR TVAL, wait to count down for 1
+cycle at least, which is 10ns with timer freq 100MHZ, and retore timer
+interrupt status. Here add 2 cycles delay to assure that timer interrupt
+is injected.
+
+With this patch, timer selftest case passes to run always.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/timer.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: LoongArch: selftests: Add system registers save and restore on exception
+[PATCH v2 1/7] KVM: LoongArch: selftests: Add system registers save and restore on exception
+Author: Bibo Mao <maobibo@loongson.cn>
+
+When system returns from exception with ertn instruction, PC comes
+from LOONGARCH_CSR_ERA, and CSR_CRMD comes LOONGARCH_CSR_PRMD.
+
+Here save CSR register CSR_ERA and CSR_PRMD in stack, and restore them
+from stack. So it can be modified by exception handler in future.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ tools/testing/selftests/kvm/include/loongarch/processor.h | 5 ++++-
+ tools/testing/selftests/kvm/lib/loongarch/exception.S     | 6 ++++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  tools/kvm_stat: add missing <delay> param to -s option
+[PATCH] tools/kvm_stat: add missing <delay> param to -s option
+Author: Masatake YAMATO <yamato@redhat.com>
+
+The parameter for the -s/--set-delay option was missing from
+kvm_stat.txt.
+
+Signed-off-by: Masatake YAMATO <yamato@redhat.com>
+---
+ tools/kvm/kvm_stat/kvm_stat.txt | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Remove bindings on memslot deletion when
+[PATCH] KVM: guest_memfd: Remove bindings on memslot deletion when
+Author: Sean Christopherson <seanjc@google.com>
+
+When unbinding a memslot from a guest_memfd instance, remove the bindings
+even if the guest_memfd file is dying, i.e. even if its file refcount has
+gone to zero.  If the memslot is freed before the file is fully released,
+nullifying the memslot side of the binding in kvm_gmem_release() will
+write to freed memory, as detected by syzbot+KASAN:
+
+  ==================================================================
+  BUG: KASAN: slab-use-after-free in kvm_gmem_release+0x176/0x440 virt/kvm/guest_memfd.c:353
+  Write of size 8 at addr ffff88807befa508 by task syz.0.17/6022
+
+  CPU: 0 UID: 0 PID: 6022 Comm: syz.0.17 Not tainted syzkaller #0 PREEMPT(full)
+  Hardware name: Google Google Compute Engine/Google Compute Engine, BIOS Google 10/02/2025
+  Call Trace:
+   <TASK>
+   dump_stack_lvl+0x189/0x250 lib/dump_stack.c:120
+   print_address_description mm/kasan/report.c:378 [inline]
+   print_report+0xca/0x240 mm/kasan/report.c:482
+   kasan_report+0x118/0x150 mm/kasan/report.c:595
+   kvm_gmem_release+0x176/0x440 virt/kvm/guest_memfd.c:353
+   __fput+0x44c/0xa70 fs/file_table.c:468
+   task_work_run+0x1d4/0x260 kernel/task_work.c:227
+   resume_user_mode_work include/linux/resume_user_mode.h:50 [inline]
+   exit_to_user_mode_loop+0xe9/0x130 kernel/entry/common.c:43
+   exit_to_user_mode_prepare include/linux/irq-entry-common.h:225 [inline]
+   syscall_exit_to_user_mode_work include/linux/entry-common.h:175 [inline]
+   syscall_exit_to_user_mode include/linux/entry-common.h:210 [inline]
+   do_syscall_64+0x2bd/0xfa0 arch/x86/entry/syscall_64.c:100
+   entry_SYSCALL_64_after_hwframe+0x77/0x7f
+  RIP: 0033:0x7fbeeff8efc9
+   </TASK>
+
+  Allocated by task 6023:
+   kasan_save_stack mm/kasan/common.c:56 [inline]
+   kasan_save_track+0x3e/0x80 mm/kasan/common.c:77
+   poison_kmalloc_redzone mm/kasan/common.c:397 [inline]
+   __kasan_kmalloc+0x93/0xb0 mm/kasan/common.c:414
+   kasan_kmalloc include/linux/kasan.h:262 [inline]
+   __kmalloc_cache_noprof+0x3e2/0x700 mm/slub.c:5758
+   kmalloc_noprof include/linux/slab.h:957 [inline]
+   kzalloc_noprof include/linux/slab.h:1094 [inline]
+   kvm_set_memory_region+0x747/0xb90 virt/kvm/kvm_main.c:2104
+   kvm_vm_ioctl_set_memory_region+0x6f/0xd0 virt/kvm/kvm_main.c:2154
+   kvm_vm_ioctl+0x957/0xc60 virt/kvm/kvm_main.c:5201
+   vfs_ioctl fs/ioctl.c:51 [inline]
+   __do_sys_ioctl fs/ioctl.c:597 [inline]
+   __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:583
+   do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+   do_syscall_64+0xfa/0xfa0 arch/x86/entry/syscall_64.c:94
+   entry_SYSCALL_64_after_hwframe+0x77/0x7f
+
+  Freed by task 6023:
+   kasan_save_stack mm/kasan/common.c:56 [inline]
+   kasan_save_track+0x3e/0x80 mm/kasan/common.c:77
+   kasan_save_free_info+0x46/0x50 mm/kasan/generic.c:584
+   poison_slab_object mm/kasan/common.c:252 [inline]
+   __kasan_slab_free+0x5c/0x80 mm/kasan/common.c:284
+   kasan_slab_free include/linux/kasan.h:234 [inline]
+   slab_free_hook mm/slub.c:2533 [inline]
+   slab_free mm/slub.c:6622 [inline]
+   kfree+0x19a/0x6d0 mm/slub.c:6829
+   kvm_set_memory_region+0x9c4/0xb90 virt/kvm/kvm_main.c:2130
+   kvm_vm_ioctl_set_memory_region+0x6f/0xd0 virt/kvm/kvm_main.c:2154
+   kvm_vm_ioctl+0x957/0xc60 virt/kvm/kvm_main.c:5201
+   vfs_ioctl fs/ioctl.c:51 [inline]
+   __do_sys_ioctl fs/ioctl.c:597 [inline]
+   __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:583
+   do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+   do_syscall_64+0xfa/0xfa0 arch/x86/entry/syscall_64.c:94
+   entry_SYSCALL_64_after_hwframe+0x77/0x7f
+
+Deliberately don't acquire filemap invalid lock when the file is dying as
+the lifecycle of f_mapping is outside the purview of KVM.  Dereferencing
+the mapping is *probably* fine, but there's no need to invalidate anything
+as memslot deletion is responsible for zapping SPTEs, and the only code
+that can access the dying file is kvm_gmem_release(), whose core code is
+mutually exclusive with unbinding.
+
+Note, the mutual exclusivity is also what makes it self to access the
+bindings on a dying gmem instance.  Unbinding either runs with slots_lock
+held, or after the last reference to the owning "struct kvm" is put, and
+kvm_gmem_release() nullifies the slot pointer under slots_lock, and puts
+its reference to the VM after that is done.
+
+Reported-by: syzbot+2479e53d0db9b32ae2aa@syzkaller.appspotmail.com
+Closes: https://lore.kernel.org/all/68fa7a22.a70a0220.3bf6c6.008b.GAE@google.com
+Tested-by: syzbot+2479e53d0db9b32ae2aa@syzkaller.appspotmail.com
+Fixes: a7800aa80ea4 ("KVM: Add KVM_CREATE_GUEST_MEMFD ioctl() for guest-specific backing memory")
+Cc: stable@vger.kernel.org
+Cc: Hillf Danton <hdanton@sina.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/guest_memfd.c | 46 +++++++++++++++++++++++++++++-------------
+ 1 file changed, 32 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: selftests: Add support for passing vf_token in
+[PATCH 1/4] vfio: selftests: Add support for passing vf_token in
+Author: Raghavendra Rao Ananta <rananta@google.com>
+
+A UUID is normally set as a vf_token to correspond the VFs with the
+PFs, if they are both bound by the vfio-pci driver. This is true for
+iommufd-based approach and container-based approach. The token can be
+set either during device creation (VFIO_GROUP_GET_DEVICE_FD) in
+container-based approach or during iommu bind (VFIO_DEVICE_BIND_IOMMUFD)
+in the iommu-fd case. Hence, extend the vfio_pci_device_init() helper to
+accept vf_token during device setup.
+
+The tests depending on vfio_pci_device_init() are adjusted accordingly
+and no functional changes are expected. A later patch will add tests
+that passes actual token to test the UAPI.
+
+Signed-off-by: Raghavendra Rao Ananta <rananta@google.com>
+---
+ .../selftests/vfio/lib/include/vfio_util.h    |  4 +-
+ tools/testing/selftests/vfio/lib/libvfio.mk   |  4 +-
+ .../selftests/vfio/lib/vfio_pci_device.c      | 60 ++++++++++++++++---
+ .../selftests/vfio/vfio_dma_mapping_test.c    |  2 +-
+ .../selftests/vfio/vfio_pci_device_test.c     |  4 +-
+ .../selftests/vfio/vfio_pci_driver_test.c     |  4 +-
+ 6 files changed, 62 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: selftest: Add SR-IOV UAPI test
+[PATCH 0/4] vfio: selftest: Add SR-IOV UAPI test
+Author: Raghavendra Rao Ananta <rananta@google.com>
+
+Hello,
+
+This series adds a vfio selftest, vfio_pci_sriov_uapi_test.c, to get some
+coverage on SR-IOV UAPI handling. Specifically, it includes the
+following cases that iterates over all the iommu modes:
+ - Setting correct/incorrect/NULL tokens during device init.
+ - Close the PF device immediately after setting the token.
+ - Change/override the PF's token after device init.
+
+The test takes care of creating/setting up the VF device, and hence, it
+can be executed like any other test, simply by passing the PF's BDF to
+run.sh. For example,
+
+./run.sh -d 0000:16:00.1 -- ./vfio_pci_sriov_uapi_test
++ echo "0" > /sys/bus/pci/devices/0000:16:00.1/sriov_numvfsdddd
++ echo "vfio-pci" > /sys/bus/pci/devices/0000:16:00.1/driver_override
++ echo "0000:16:00.1" > /sys/bus/pci/drivers/vfio-pci/bind
+
+TAP version 13
+1..45
+Starting 45 tests from 15 test cases.
+  RUN  vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.init_token_match
+    OK vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.init_token_match
+ok 1 vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.init_token_match
+  RUN vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.pf_early_close
+   OK vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.pf_early_close
+ok 2 vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.pf_early_close
+  RUN vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.override_token
+   OK vfio_pci_sriov_uapi_test.vfio_type1_iommu_same_uuid.override_token
+[...]
+  RUN vfio_pci_sriov_uapi_test.iommufd_null_uuid.override_token ...
+   OK vfio_pci_sriov_uapi_test.iommufd_null_uuid.override_token
+ok 45 vfio_pci_sriov_uapi_test.iommufd_null_uuid.override_token
+PASSED: 45 / 45 tests passed.
+
+The series this dependent on another series that provides fixes in the
+IOMMUFD's vf_token handling [1].
+
+Thank you.
+Raghavendra
+
+[1]: https://lore.kernel.org/all/20251031170603.2260022-1-rananta@google.com/
+
+Raghavendra Rao Ananta (4):
+  vfio: selftests: Add support for passing vf_token in device init
+  vfio: selftests: Export vfio_pci_device functions
+  vfio: selftests: Add helper to set/override a vf_token
+  vfio: selftests: Add tests to validate SR-IOV UAPI
+
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../selftests/vfio/lib/include/vfio_util.h    |  19 +-
+ tools/testing/selftests/vfio/lib/libvfio.mk   |   4 +-
+ .../selftests/vfio/lib/vfio_pci_device.c      | 151 ++++++++++--
+ .../selftests/vfio/vfio_dma_mapping_test.c    |   2 +-
+ .../selftests/vfio/vfio_pci_device_test.c     |   4 +-
+ .../selftests/vfio/vfio_pci_driver_test.c     |   4 +-
+ .../selftests/vfio/vfio_pci_sriov_uapi_test.c | 220 ++++++++++++++++++
+ 8 files changed, 377 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/virt/tdx: Remove __user annotation from kernel pointer
+[v2][PATCH 1/2] x86/virt/tdx: Remove __user annotation from kernel pointer
+Author: Dave Hansen <dave.hansen@linux.intel.com>
+
+
+
+Separate __user pointer variable declaration from kernel one.
+
+There are two 'kvm_cpuid2' pointers involved here. There's an "input"
+side: 'td_cpuid' which is a normal kernel pointer and an 'output'
+side. The output here is userspace and there is an attempt at properly
+annotating the variable with __user:
+
+	struct kvm_cpuid2 __user *output, *td_cpuid;
+
+But, alas, this is wrong. The __user in the definition applies to both
+'output' and 'td_cpuid'. Sparse notices the address space mismatch and
+will complain about it.
+
+Fix it up by completely separating the two definitions so that it is
+obviously correct without even having to know what the C syntax rules
+even are.
+
+Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+Fixes: 488808e682e7 ("KVM: x86: Introduce KVM_TDX_GET_CPUID")
+Reviewed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Thomas Gleixner <tglx@linutronix.de>
+Cc: Ingo Molnar <mingo@redhat.com>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: x86@kernel.org
+Cc: "H. Peter Anvin" <hpa@zytor.com>
+Cc: "Kirill A. Shutemov" <kas@kernel.org>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+---
+
+ b/arch/x86/kvm/vmx/tdx.c |    3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86/virt/tdx: Minor sparse fixups
+[v2][PATCH 0/2] x86/virt/tdx: Minor sparse fixups
+Author: Dave Hansen <dave.hansen@linux.intel.com>
+
+
+----------------------------------------------------------------------
+
