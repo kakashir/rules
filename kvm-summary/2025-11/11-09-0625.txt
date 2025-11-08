@@ -1,0 +1,364 @@
+From c2269959d to e7aa546f3
+KVM mailing list update from c2269959d to e7aa546f3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     17 oracle.com
+      7 linux.dev
+      1 nvidia.com
+      1 intel.com
+
+Top 15 contributors (Based on Email Body)
+
+     17  Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+      7  Yosry Ahmed <yosry.ahmed@linux.dev>
+      1  Chao Gao <chao.gao@intel.com>
+      1  Alex Williamson <alex.williamson@nvidia.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vfio: selftests: Incorporate IOVA range info
+[PATCH] vfio: selftests: Incorporate IOVA range info
+Author: Alex Williamson <alex@shazbot.org>
+
+
+Not all IOMMUs support the same virtual address width as the processor,
+for instance older Intel consumer platforms only support 39-bits of
+IOMMU address space.  On such platforms, using the virtual address as
+the IOVA and mappings at the top of the address space both fail.
+
+VFIO and IOMMUFD have facilities for retrieving valid IOVA ranges,
+VFIO_IOMMU_TYPE1_INFO_CAP_IOVA_RANGE and IOMMU_IOAS_IOVA_RANGES,
+respectively.  These provide compatible arrays of ranges from which
+we can construct a simple allocator and record the maximum supported
+IOVA address.
+
+Use this new allocator in place of reusing the virtual address, and
+incorporate the maximum supported IOVA into the limit testing.  This
+latter change doesn't test quite the same absolute end-of-address space
+behavior but still seems to have some value.  Testing for overflow is
+skipped when a reduced address space is supported as the desired errno
+is not generated.
+
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+
+This happened upon another interesting vfio-compat difference for
+IOMMUFD, native type1 returns the correct set of IOVA ranges after
+VFIO_SET_IOMMU, vfio-compat requires the next step of calling
+VFIO_GROUP_GET_DEVICE_FD to attach the device to the IOAS.  If
+checked prior to this, the IOVA range is reported as the full
+64-bit address space.  ISTR this is known, but it's sufficiently
+subtle to make note of again.
+
+ .../selftests/vfio/lib/include/vfio_util.h    |  10 ++
+ .../selftests/vfio/lib/vfio_pci_device.c      | 134 ++++++++++++++++++
+ .../selftests/vfio/vfio_dma_mapping_test.c    |   7 +-
+ .../selftests/vfio/vfio_pci_driver_test.c     |   2 +-
+ 4 files changed, 150 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: correctly handle UFFD PTE markers
+[PATCH v2 01/16] mm: correctly handle UFFD PTE markers
+Author: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+
+PTE markers were previously only concerned with UFFD-specific logic - that
+is, PTE entries with the UFFD WP marker set or those marked via
+UFFDIO_POISON.
+
+However since the introduction of guard markers in commit
+ 7c53dfbdb024 ("mm: add PTE_MARKER_GUARD PTE marker"), this has no longer
+ been the case.
+
+Issues have been avoided as guard regions are not permitted in conjunction
+with UFFD, but it still leaves very confusing logic in place, most notably
+the misleading and poorly named pte_none_mostly() and
+huge_pte_none_mostly().
+
+This predicate returns true for PTE entries that ought to be treated as
+none, but only in certain circumstances, and on the assumption we are
+dealing with H/W poison markers or UFFD WP markers.
+
+This patch removes these functions and makes each invocation of these
+functions instead explicitly check what it needs to check.
+
+As part of this effort it introduces is_uffd_pte_marker() to explicitly
+determine if a marker in fact is used as part of UFFD or not.
+
+In the HMM logic we note that the only time we would need to check for a
+fault is in the case of a UFFD WP marker, otherwise we simply encounter a
+fault error (VM_FAULT_HWPOISON for H/W poisoned marker, VM_FAULT_SIGSEGV
+for a guard marker), so only check for the UFFD WP case.
+
+While we're here we also refactor code to make it easier to understand.
+
+Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
+Signed-off-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+---
+ fs/userfaultfd.c              | 83 +++++++++++++++++++----------------
+ include/asm-generic/hugetlb.h |  8 ----
+ include/linux/swapops.h       | 18 --------
+ include/linux/userfaultfd_k.h | 21 +++++++++
+ mm/hmm.c                      |  2 +-
+ mm/hugetlb.c                  | 47 ++++++++++----------
+ mm/mincore.c                  | 17 +++++--
+ mm/userfaultfd.c              | 27 +++++++-----
+ 8 files changed, 123 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+New: () + non-swap entries, introduce leaf entries
+[PATCH v2 00/16] mm: remove is_swap_[pte, pmd]() + non-swap entries, introduce leaf entries
+Author: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+
+There's an established convention in the kernel that we treat leaf page
+tables (so far at the PTE, PMD level) as containing 'swap entries' should
+they be neither empty (i.e. p**_none() evaluating true) nor present
+(i.e. p**_present() evaluating true).
+
+However, at the same time we also have helper predicates - is_swap_pte(),
+is_swap_pmd() - which are inconsistently used.
+
+This is problematic, as it is logical to assume that should somebody wish
+to operate upon a page table swap entry they should first check to see if
+it is in fact one.
+
+It also implies that perhaps, in future, we might introduce a non-present,
+none page table entry that is not a swap entry.
+
+This series resolves this issue by systematically eliminating all use of
+the is_swap_pte() and is swap_pmd() predicates so we retain only the
+convention that should a leaf page table entry be neither none nor present
+it is a swap entry.
+
+We also have the further issue that 'swap entry' is unfortunately a really
+rather overloaded term and in fact refers to both entries for swap and for
+other information such as migration entries, page table markers, and device
+private entries.
+
+We therefore have the rather 'unique' concept of a 'non-swap' swap entry.
+
+This series therefore introduces the concept of 'software leaf entries', of
+type softleaf_t, to eliminate this confusion.
+
+A software leaf entry in this sense is any page table entry which is
+non-present, and represented by the softleaf_t type. That is - page table
+leaf entries which are software-controlled by the kernel.
+
+This includes 'none' or empty entries, which are simply represented by an
+zero leaf entry value.
+
+In order to maintain compatibility as we transition the kernel to this new
+type, we simply typedef swp_entry_t to softleaf_t.
+
+We introduce a number of predicates and helpers to interact with software
+leaf entries in include/linux/leafops.h which, as it imports swapops.h, can
+be treated as a drop-in replacement for swapops.h wherever leaf entry
+helpers are used.
+
+Since softleaf_from_[pte, pmd]() treats present entries as they were
+empty/none leaf entries, this allows for a great deal of simplification of
+code throughout the code base, which this series utilises a great deal.
+
+We additionally change from swap entry to software leaf entry handling
+where it makes sense to and eliminate functions from swapops.h where
+software leaf entries obviate the need for the functions.
+
+
+v2:
+* Folded all fixpatches into patches they fix.
+* Added Vlasta's tag to patch 1 (thanks!)
+* Renamed leaf_entry_t to softleaf_t and leafent_xxx() to softleaf_xxx() as
+  a result of discussion between Matthew, Jason, David, Gregory & myself to
+  make clearer that we abstract the concept of a software page table leaf
+  entry.
+* Updated all commit messages to reference softleaves.
+* Updated the kdoc comment describing softleaf_t to provide more detail.
+* Added a description of softleaves to the top of leafops.h.
+
+non-RFC v1:
+* As part of efforts to eliminate swp_entry_t usage, remove
+  pte_none_mostly() and correct UFFD PTE marker handling.
+* Introduce leaf_entry_t - credit to Gregory for naming, and to Jason for
+  the concept of simply using a leafent_*() set of functions to interact
+  with these entities.
+* Replace pte_to_swp_entry_or_zero() with leafent_from_pte() and simply
+  categorise pte_none() cases as an empty leaf entry, as per Jason.
+* Eliminate get_pte_swap_entry() - as we can simply do this with
+  leafent_from_pte() also, as discussed with Jason.
+* Put pmd_trans_huge_lock() acquisition/release in pagemap_pmd_range()
+  rather than pmd_trans_huge_lock_thp() as per Gregory.
+* Eliminate pmd_to_swp_entry() and related and introduce leafent_from_pmd()
+  to replace it and further propagate leaf entry usage.
+* Remove the confusing and unnecessary is_hugetlb_entry_[migration,
+  hwpoison]() functions.
+* Replace is_pfn_swap_entry(), pfn_swap_entry_to_page(),
+  is_writable_device_private_entry(), is_device_exclusive_entry(),
+  is_migration_entry(), is_writable_migration_entry(),
+  is_readable_migration_entry(), is_readable_exclusive_migration_entry()
+  and pfn_swap_entry_folio() with leafent equivalents.
+* Wrapped up the 'safe' behaviour discussed with Jason in
+  leafent_from_[pte, pmd]() so these can be used unconditionally which
+  simplifies things a lot.
+* Further changes that are a consequence of the introduction of leaf
+  entries.
+https://lore.kernel.org/all/cover.1762171281.git.lorenzo.stoakes@oracle.com/
+
+RFC:
+https://lore.kernel.org/all/cover.1761288179.git.lorenzo.stoakes@oracle.com/
+
+Lorenzo Stoakes (16):
+  mm: correctly handle UFFD PTE markers
+  mm: introduce leaf entry type and use to simplify leaf entry logic
+  mm: avoid unnecessary uses of is_swap_pte()
+  mm: eliminate is_swap_pte() when softleaf_from_pte() suffices
+  mm: use leaf entries in debug pgtable + remove is_swap_pte()
+  fs/proc/task_mmu: refactor pagemap_pmd_range()
+  mm: avoid unnecessary use of is_swap_pmd()
+  mm/huge_memory: refactor copy_huge_pmd() non-present logic
+  mm/huge_memory: refactor change_huge_pmd() non-present logic
+  mm: replace pmd_to_swp_entry() with softleaf_from_pmd()
+  mm: introduce pmd_is_huge() and use where appropriate
+  mm: remove remaining is_swap_pmd() users and is_swap_pmd()
+  mm: remove non_swap_entry() and use softleaf helpers instead
+  mm: remove is_hugetlb_entry_[migration, hwpoisoned]()
+  mm: eliminate further swapops predicates
+  mm: replace remaining pte_to_swp_entry() with softleaf_from_pte()
+
+ MAINTAINERS                   |   1 +
+ arch/s390/mm/gmap_helpers.c   |  20 +-
+ arch/s390/mm/pgtable.c        |  12 +-
+ fs/proc/task_mmu.c            | 294 +++++++++-------
+ fs/userfaultfd.c              |  85 ++---
+ include/asm-generic/hugetlb.h |   8 -
+ include/linux/huge_mm.h       |  48 ++-
+ include/linux/hugetlb.h       |   2 -
+ include/linux/leafops.h       | 620 ++++++++++++++++++++++++++++++++++
+ include/linux/migrate.h       |   2 +-
+ include/linux/mm_inline.h     |   6 +-
+ include/linux/mm_types.h      |  25 ++
+ include/linux/swapops.h       | 273 +--------------
+ include/linux/userfaultfd_k.h |  33 +-
+ mm/damon/ops-common.c         |   6 +-
+ mm/debug_vm_pgtable.c         |  86 +++--
+ mm/filemap.c                  |   8 +-
+ mm/hmm.c                      |  36 +-
+ mm/huge_memory.c              | 263 +++++++-------
+ mm/hugetlb.c                  | 165 ++++-----
+ mm/internal.h                 |  20 +-
+ mm/khugepaged.c               |  33 +-
+ mm/ksm.c                      |   6 +-
+ mm/madvise.c                  |  28 +-
+ mm/memory-failure.c           |   8 +-
+ mm/memory.c                   | 150 ++++----
+ mm/mempolicy.c                |  25 +-
+ mm/migrate.c                  |  45 +--
+ mm/migrate_device.c           |  24 +-
+ mm/mincore.c                  |  25 +-
+ mm/mprotect.c                 |  59 ++--
+ mm/mremap.c                   |  13 +-
+ mm/page_table_check.c         |  33 +-
+ mm/page_vma_mapped.c          |  65 ++--
+ mm/pagewalk.c                 |  15 +-
+ mm/rmap.c                     |  17 +-
+ mm/shmem.c                    |   7 +-
+ mm/swap_state.c               |  12 +-
+ mm/swapfile.c                 |  14 +-
+ mm/userfaultfd.c              |  53 +--
+ 40 files changed, 1560 insertions(+), 1085 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Allocate/free user_return_msrs at kvm.ko
+[PATCH] KVM: x86: Allocate/free user_return_msrs at kvm.ko
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Move user_return_msrs allocation/free from vendor modules (kvm-intel.ko and
+kvm-amd.ko) (un)loading time to kvm.ko's to make it less risky to access
+user_return_msrs in kvm.ko. Tying the lifetime of user_return_msrs to
+vendor modules makes every access to user_return_msrs prone to
+use-after-free issues as vendor modules may be unloaded at any time.
+
+Opportunistically turn the per-CPU variable into full structs, as there's
+no practical difference between statically allocating the memory and
+allocating it unconditionally during module_init().
+
+Zero out kvm_nr_uret_msrs on vendor module exit to further minimize the
+chances of consuming stale data, and WARN on vendor module load if KVM
+thinks there are existing user-return MSRs.
+
+Note!  The user-return MSRs also need to be "destroyed" if
+ops->hardware_setup() fails, as both SVM and VMX expect common KVM to
+clean up (because common code, not vendor code, is responsible for
+kvm_nr_uret_msrs).
+
+Signed-off-by: Chao Gao <chao.gao@intel.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 46 ++++++++++++++++------------------------------
+ 1 file changed, 16 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Mark VMCB_LBR dirty when MSR_IA32_DEBUGCTLMSR is updated
+[PATCH 1/6] KVM: SVM: Mark VMCB_LBR dirty when MSR_IA32_DEBUGCTLMSR is updated
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+Clear the VMCB_LBR clean bit when MSR_IA32_DEBUGCTLMSR is updated, as
+the only valid bit is DEBUGCTLMSR_LBR.
+
+The history is complicated, it was correctly cleared for L1 before
+commit 1d5a1b5860ed ("KVM: x86: nSVM: correctly virtualize LBR msrs when
+L2 is running"), then the latter relied on svm_update_lbrv() to clear
+it, but it only did so for L2. Go back to clearing it directly in
+svm_set_msr().
+
+Fixes: 1d5a1b5860ed ("KVM: x86: nSVM: correctly virtualize LBR msrs when L2 is running")
+Reported-by: Matteo Rizzo <matteorizzo@google.com>
+Reported-by: evn@google.com
+Co-developed-by: Jim Mattson <jmattson@google.com>
+Signed-off-by: Jim Mattson <jmattson@google.com>
+Signed-off-by: Yosry Ahmed <yosry.ahmed@linux.dev>
+---
+ arch/x86/kvm/svm/svm.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: LBR virtualization fixes
+[PATCH 0/6] KVM: SVM: LBR virtualization fixes
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+This series fixes multiple problems with LBR virtualization, including a
+fun problem that leads to L1 reading the host's LBR MSRs. It also
+considerably simplifies the code.
+
+The series has a selftest in the end that verifies that save/restore
+work correctly. I will send a couple of new kvm-unit-tests separately
+that exercise the bugs fixed by patches 2 & 3.
+
+Yosry Ahmed (6):
+  KVM: SVM: Mark VMCB_LBR dirty when MSR_IA32_DEBUGCTLMSR is updated
+  KVM: nSVM: Always recalculate LBR MSR intercepts in svm_update_lbrv()
+  KVM: nSVM: Fix and simplify LBR virtualization handling with nested
+  KVM: SVM: Switch svm_copy_lbrs() to a macro
+  KVM: SVM: Add missing save/restore handling of LBR MSRs
+  KVM: selftests: Add a test for LBR save/restore (ft. nested)
+
+ arch/x86/kvm/svm/nested.c                     |  31 ++--
+ arch/x86/kvm/svm/svm.c                        |  98 ++++++-----
+ arch/x86/kvm/svm/svm.h                        |  10 +-
+ arch/x86/kvm/x86.c                            |   3 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   5 +
+ .../selftests/kvm/x86/svm_lbr_nested_state.c  | 155 ++++++++++++++++++
+ 7 files changed, 236 insertions(+), 67 deletions(-)
+
+----------------------------------------------------------------------
+
