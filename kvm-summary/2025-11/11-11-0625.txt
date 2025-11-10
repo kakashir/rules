@@ -1,0 +1,1150 @@
+From 61dfa285e to cd4e05eef
+KVM mailing list update from 61dfa285e to cd4e05eef
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     21 intel.com
+     18 oracle.com
+     12 linux.ibm.com
+     11 tencent.com
+      5 fb.com
+      1 linux.intel.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     20  "Chang S. Bae" <chang.seok.bae@intel.com>
+     17  Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+     12  Christoph Schlameuss <schlameuss@linux.ibm.com>
+     11  Wanpeng Li <wanpengli@tencent.com>
+      5  Alex Mastro <amastro@fb.com>
+      1  Peter Fang <peter.fang@intel.com>
+      1  Marc Zyngier <maz@kernel.org>
+      1  Dongli Zhang <dongli.zhang@oracle.com>
+      1  Binbin Wu <binbin.wu@linux.intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  mm: correctly handle UFFD PTE markers
+[PATCH v3 01/16] mm: correctly handle UFFD PTE markers
+Author: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+
+PTE markers were previously only concerned with UFFD-specific logic - that
+is, PTE entries with the UFFD WP marker set or those marked via
+UFFDIO_POISON.
+
+However since the introduction of guard markers in commit
+ 7c53dfbdb024 ("mm: add PTE_MARKER_GUARD PTE marker"), this has no longer
+ been the case.
+
+Issues have been avoided as guard regions are not permitted in conjunction
+with UFFD, but it still leaves very confusing logic in place, most notably
+the misleading and poorly named pte_none_mostly() and
+huge_pte_none_mostly().
+
+This predicate returns true for PTE entries that ought to be treated as
+none, but only in certain circumstances, and on the assumption we are
+dealing with H/W poison markers or UFFD WP markers.
+
+This patch removes these functions and makes each invocation of these
+functions instead explicitly check what it needs to check.
+
+As part of this effort it introduces is_uffd_pte_marker() to explicitly
+determine if a marker in fact is used as part of UFFD or not.
+
+In the HMM logic we note that the only time we would need to check for a
+fault is in the case of a UFFD WP marker, otherwise we simply encounter a
+fault error (VM_FAULT_HWPOISON for H/W poisoned marker, VM_FAULT_SIGSEGV
+for a guard marker), so only check for the UFFD WP case.
+
+While we're here we also refactor code to make it easier to understand.
+
+Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
+Signed-off-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+---
+ fs/userfaultfd.c              | 93 +++++++++++++++++++++--------------
+ include/asm-generic/hugetlb.h |  8 ---
+ include/linux/swapops.h       | 18 -------
+ include/linux/userfaultfd_k.h | 21 ++++++++
+ mm/hmm.c                      |  7 ++-
+ mm/hugetlb.c                  | 47 +++++++++---------
+ mm/mincore.c                  | 17 +++++--
+ mm/userfaultfd.c              | 27 ++++++----
+ 8 files changed, 138 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+New: () + non-swap entries, introduce leaf entries
+[PATCH v2 00/16] mm: remove is_swap_[pte, pmd]() + non-swap entries, introduce leaf entries
+Author: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+
+There's an established convention in the kernel that we treat leaf page
+tables (so far at the PTE, PMD level) as containing 'swap entries' should
+they be neither empty (i.e. p**_none() evaluating true) nor present
+(i.e. p**_present() evaluating true).
+
+However, at the same time we also have helper predicates - is_swap_pte(),
+is_swap_pmd() - which are inconsistently used.
+
+This is problematic, as it is logical to assume that should somebody wish
+to operate upon a page table swap entry they should first check to see if
+it is in fact one.
+
+It also implies that perhaps, in future, we might introduce a non-present,
+none page table entry that is not a swap entry.
+
+This series resolves this issue by systematically eliminating all use of
+the is_swap_pte() and is swap_pmd() predicates so we retain only the
+convention that should a leaf page table entry be neither none nor present
+it is a swap entry.
+
+We also have the further issue that 'swap entry' is unfortunately a really
+rather overloaded term and in fact refers to both entries for swap and for
+other information such as migration entries, page table markers, and device
+private entries.
+
+We therefore have the rather 'unique' concept of a 'non-swap' swap entry.
+
+This series therefore introduces the concept of 'software leaf entries', of
+type softleaf_t, to eliminate this confusion.
+
+A software leaf entry in this sense is any page table entry which is
+non-present, and represented by the softleaf_t type. That is - page table
+leaf entries which are software-controlled by the kernel.
+
+This includes 'none' or empty entries, which are simply represented by an
+zero leaf entry value.
+
+In order to maintain compatibility as we transition the kernel to this new
+type, we simply typedef swp_entry_t to softleaf_t.
+
+We introduce a number of predicates and helpers to interact with software
+leaf entries in include/linux/leafops.h which, as it imports swapops.h, can
+be treated as a drop-in replacement for swapops.h wherever leaf entry
+helpers are used.
+
+Since softleaf_from_[pte, pmd]() treats present entries as they were
+empty/none leaf entries, this allows for a great deal of simplification of
+code throughout the code base, which this series utilises a great deal.
+
+We additionally change from swap entry to software leaf entry handling
+where it makes sense to and eliminate functions from swapops.h where
+software leaf entries obviate the need for the functions.
+
+v3:
+* Propagated tag (thanks SJ! :)
+* Fixed up comments as per Mike.
+* Fixed is_marker issue as per Lance.
+* Fixed issue with softleaf_from_pte() as per Kairiu.
+* Fixed comments as per Lance.
+* Fixed comments as per Kairiu.
+* Fixed missing softleaf_is_device_exclusive() kdoc in patch 2.
+* Updated softleaf_from_pmd() to correct the none case like the PTE case.
+* Fixed the rather unusual generic_max_swapfile_size() function which, at
+  least on x86-64, generates an entirely invalid PTE entry (an empty one)
+  then treats it as if it were a swap entry. We resolve this by generating
+  this value manually.
+
+v2:
+* Folded all fixpatches into patches they fix.
+* Added Vlasta's tag to patch 1 (thanks!)
+* Renamed leaf_entry_t to softleaf_t and leafent_xxx() to softleaf_xxx() as
+  a result of discussion between Matthew, Jason, David, Gregory & myself to
+  make clearer that we abstract the concept of a software page table leaf
+  entry.
+* Updated all commit messages to reference softleaves.
+* Updated the kdoc comment describing softleaf_t to provide more detail.
+* Added a description of softleaves to the top of leafops.h.
+https://lore.kernel.org/all/cover.1762621567.git.lorenzo.stoakes@oracle.com/
+
+non-RFC v1:
+* As part of efforts to eliminate swp_entry_t usage, remove
+  pte_none_mostly() and correct UFFD PTE marker handling.
+* Introduce leaf_entry_t - credit to Gregory for naming, and to Jason for
+  the concept of simply using a leafent_*() set of functions to interact
+  with these entities.
+* Replace pte_to_swp_entry_or_zero() with leafent_from_pte() and simply
+  categorise pte_none() cases as an empty leaf entry, as per Jason.
+* Eliminate get_pte_swap_entry() - as we can simply do this with
+  leafent_from_pte() also, as discussed with Jason.
+* Put pmd_trans_huge_lock() acquisition/release in pagemap_pmd_range()
+  rather than pmd_trans_huge_lock_thp() as per Gregory.
+* Eliminate pmd_to_swp_entry() and related and introduce leafent_from_pmd()
+  to replace it and further propagate leaf entry usage.
+* Remove the confusing and unnecessary is_hugetlb_entry_[migration,
+  hwpoison]() functions.
+* Replace is_pfn_swap_entry(), pfn_swap_entry_to_page(),
+  is_writable_device_private_entry(), is_device_exclusive_entry(),
+  is_migration_entry(), is_writable_migration_entry(),
+  is_readable_migration_entry(), is_readable_exclusive_migration_entry()
+  and pfn_swap_entry_folio() with leafent equivalents.
+* Wrapped up the 'safe' behaviour discussed with Jason in
+  leafent_from_[pte, pmd]() so these can be used unconditionally which
+  simplifies things a lot.
+* Further changes that are a consequence of the introduction of leaf
+  entries.
+https://lore.kernel.org/all/cover.1762171281.git.lorenzo.stoakes@oracle.com/
+
+RFC:
+https://lore.kernel.org/all/cover.1761288179.git.lorenzo.stoakes@oracle.com/
+
+Lorenzo Stoakes (16):
+  mm: correctly handle UFFD PTE markers
+  mm: introduce leaf entry type and use to simplify leaf entry logic
+  mm: avoid unnecessary uses of is_swap_pte()
+  mm: eliminate is_swap_pte() when softleaf_from_pte() suffices
+  mm: use leaf entries in debug pgtable + remove is_swap_pte()
+  fs/proc/task_mmu: refactor pagemap_pmd_range()
+  mm: avoid unnecessary use of is_swap_pmd()
+  mm/huge_memory: refactor copy_huge_pmd() non-present logic
+  mm/huge_memory: refactor change_huge_pmd() non-present logic
+  mm: replace pmd_to_swp_entry() with softleaf_from_pmd()
+  mm: introduce pmd_is_huge() and use where appropriate
+  mm: remove remaining is_swap_pmd() users and is_swap_pmd()
+  mm: remove non_swap_entry() and use softleaf helpers instead
+  mm: remove is_hugetlb_entry_[migration, hwpoisoned]()
+  mm: eliminate further swapops predicates
+  mm: replace remaining pte_to_swp_entry() with softleaf_from_pte()
+
+ MAINTAINERS                   |   1 +
+ arch/s390/mm/gmap_helpers.c   |  20 +-
+ arch/s390/mm/pgtable.c        |  12 +-
+ fs/proc/task_mmu.c            | 294 +++++++++-------
+ fs/userfaultfd.c              |  95 +++---
+ include/asm-generic/hugetlb.h |   8 -
+ include/linux/huge_mm.h       |  48 ++-
+ include/linux/hugetlb.h       |   2 -
+ include/linux/leafops.h       | 619 ++++++++++++++++++++++++++++++++++
+ include/linux/migrate.h       |   2 +-
+ include/linux/mm_inline.h     |   6 +-
+ include/linux/mm_types.h      |  25 ++
+ include/linux/swapops.h       | 273 +--------------
+ include/linux/userfaultfd_k.h |  33 +-
+ mm/damon/ops-common.c         |   6 +-
+ mm/debug_vm_pgtable.c         |  86 +++--
+ mm/filemap.c                  |   8 +-
+ mm/hmm.c                      |  41 ++-
+ mm/huge_memory.c              | 263 ++++++++-------
+ mm/hugetlb.c                  | 165 ++++-----
+ mm/internal.h                 |  20 +-
+ mm/khugepaged.c               |  33 +-
+ mm/ksm.c                      |   6 +-
+ mm/madvise.c                  |  28 +-
+ mm/memory-failure.c           |   8 +-
+ mm/memory.c                   | 150 ++++----
+ mm/mempolicy.c                |  25 +-
+ mm/migrate.c                  |  45 +--
+ mm/migrate_device.c           |  24 +-
+ mm/mincore.c                  |  25 +-
+ mm/mprotect.c                 |  59 ++--
+ mm/mremap.c                   |  13 +-
+ mm/page_table_check.c         |  33 +-
+ mm/page_vma_mapped.c          |  65 ++--
+ mm/pagewalk.c                 |  15 +-
+ mm/rmap.c                     |  17 +-
+ mm/shmem.c                    |   7 +-
+ mm/swap_state.c               |  12 +-
+ mm/swapfile.c                 |  22 +-
+ mm/userfaultfd.c              |  53 +--
+ 40 files changed, 1582 insertions(+), 1085 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: selftests: add iova range query helpers
+[PATCH 1/4] vfio: selftests: add iova range query helpers
+Author: Alex Mastro <amastro@fb.com>
+
+VFIO selftests need to map IOVAs from legally accessible ranges, which
+could vary between hardware. Tests in vfio_dma_mapping_test.c are making
+excessively strong assumptions about which IOVAs can be mapped.
+
+Add vfio_iommu_iova_ranges(), which queries IOVA ranges from the
+IOMMUFD or VFIO container associated with the device. The queried ranges
+are normalized to IOMMUFD's iommu_iova_range representation so that
+handling of IOVA ranges up the stack can be implementation-agnostic.
+iommu_iova_range and vfio_iova_range are equivalent, so bias to using the
+new interface's struct.
+
+Query IOMMUFD's ranges with IOMMU_IOAS_IOVA_RANGES.
+Query VFIO container's ranges with VFIO_IOMMU_GET_INFO and
+VFIO_IOMMU_TYPE1_INFO_CAP_IOVA_RANGE.
+
+The underlying vfio_iommu_type1_info buffer-related functionality has
+been kept generic so the same helpers can be used to query other
+capability chain information, if needed.
+
+Signed-off-by: Alex Mastro <amastro@fb.com>
+---
+ .../testing/selftests/vfio/lib/include/vfio_util.h |   8 +-
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c | 161 +++++++++++++++++++++
+ 2 files changed, 168 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: selftests: update DMA mapping tests to use
+[PATCH 0/4] vfio: selftests: update DMA mapping tests to use
+Author: Alex Mastro <amastro@fb.com>
+
+Not all IOMMUs support the same virtual address width as the processor,
+for instance older Intel consumer platforms only support 39-bits of
+IOMMU address space.  On such platforms, using the virtual address as
+the IOVA and mappings at the top of the address space both fail.
+
+VFIO and IOMMUFD have facilities for retrieving valid IOVA ranges,
+VFIO_IOMMU_TYPE1_INFO_CAP_IOVA_RANGE and IOMMU_IOAS_IOVA_RANGES,
+respectively.  These provide compatible arrays of ranges from which
+we can construct a simple allocator and record the maximum supported
+IOVA address.
+
+Use this new allocator in place of reusing the virtual address, and
+incorporate the maximum supported IOVA into the limit testing.  This
+latter change doesn't test quite the same absolute end-of-address space
+behavior but still seems to have some value.  Testing for overflow is
+skipped when a reduced address space is supported as the desired errno
+is not generated.
+
+This series is based on Alex Williamson's "Incorporate IOVA range info"
+[1] along with feedback from the discussion in David Matlack's "Skip
+vfio_dma_map_limit_test if mapping returns -EINVAL" [2].
+
+Given David's plans to split IOMMU concerns from devices as described in
+[3], this series' home for `struct iova_allocator` is likely to be short
+lived, since it resides in vfio_pci_device.c. I assume that the rework
+can move this functionality to a more appropriate location next to other
+IOMMU-focused code, once such a place exists.
+
+[1] https://lore.kernel.org/all/20251108212954.26477-1-alex@shazbot.org/#t
+[2] https://lore.kernel.org/all/20251107222058.2009244-1-dmatlack@google.com/
+[3] https://lore.kernel.org/all/aRIoKJk0uwLD-yGr@google.com/
+
+Signed-off-by: Alex Mastro <amastro@fb.com>
+---
+Alex Mastro (4):
+      vfio: selftests: add iova range query helpers
+      vfio: selftests: fix map limit tests to use last available iova
+      vfio: selftests: add iova allocator
+      vfio: selftests: update vfio_dma_mapping_test to allocate iovas
+
+ .../testing/selftests/vfio/lib/include/vfio_util.h |  22 +-
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c | 226 ++++++++++++++++++++-
+ .../testing/selftests/vfio/vfio_dma_mapping_test.c |  25 ++-
+ 3 files changed, 268 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Rename register accessors to be GPR-specific
+[PATCH RFC v1 01/20] KVM: x86: Rename register accessors to be GPR-specific
+Author: Chang S. Bae <chang.seok.bae@intel.com>
+
+Refactor the VCPU register state accessors to make them explicitly
+GPR-only.
+
+The existing register accessors operate on the cached VCPU register
+state. That cache holds GPRs and RIP. RIP has its own interface already.
+This renaming clarifies GPR access only.
+
+No functional changes intended.
+
+Signed-off-by: Chang S. Bae <chang.seok.bae@intel.com>
+---
+ arch/x86/kvm/svm/svm.c    |  8 ++++----
+ arch/x86/kvm/vmx/nested.c | 20 ++++++++++----------
+ arch/x86/kvm/vmx/vmx.c    | 12 ++++++------
+ arch/x86/kvm/x86.c        | 10 +++++-----
+ arch/x86/kvm/x86.h        |  5 ++---
+ arch/x86/kvm/xen.c        |  2 +-
+ 6 files changed, 28 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Support APX feature for guests
+[PATCH RFC v1 00/20] KVM: x86: Support APX feature for guests
+Author: Chang S. Bae <chang.seok.bae@intel.com>
+
+Hi all,
+
+This series is intended to initiate the enablement of APX support in KVM.
+The goal is to start discussions and, ideally, reach consensus on key
+decisions for the enabling path.
+
+== Introduction ==
+
+Intel introduces Advanced Performance Extensions (APX), which add 16
+additional 64-bit general-purpose registers (EGPRs: R16–R31).
+
+APX also introduces new instruction prefixes that extend register indices
+to 5 bits, providing additional encoding space. The feature specification
+[1] describes these extensions in detail.
+
+The specification deliberately scopes out some areas. For example,
+Sections 3.1.4.4.2–7 note that initialization and reset behaviors follow
+existing XSTATE conventions.
+
+That said, there are still some essential elements to consider at first.
+
+== Ingredients to Consider ==
+
+With guest exposure, the new registers will affect how KVM handles VM
+exits and manages guest state. So the extended register indices need to
+be properly interpreted.
+
+There are three relevant contexts where KVM must handle the new 5-bit
+register index:
+
+ * Instruction Information in VMCS
+
+   VMX provides instruction information through a dedicated field in the
+   VMCS. However, the legacy format supports only 4-bit register indices,
+   so a new 64-bit field was introduced to support 5-bit indices for
+   EGPRs (see Table 3.11 in the spec).
+
+ * Exit Qualification in VMCS
+
+   This field also carries register index information. Fortunately, the
+   current layout is not fully packed, so it appears feasible to extend
+   index fields to 5 bits without structural conflict.
+
+ * Instruction Emulator
+
+   When exits are handled through instruction emulation, the emulator
+   must decode REX2-prefixed instructions, which carry the additional
+   bits encoding the extended indices and other new modifiers.
+
+Once handlers can identify EGPR-related indices, the next question is how
+to access and maintain their state.
+
+ * Extended GPR State Management
+
+   Current KVM behavior for legacy GPRs can be summarized as follows:
+   (a) All legacy GPRs are saved on every VM exit and written back on
+       re-entry. Most access operations go through KVM register cache.
+   (b) The instruction emulator also maintains a temporary GPR cache
+       during emulation, backed by the same KVM-managed accessor
+       interface.
+
+   For the new EGPRs, there are a few important differences:
+   (a) They are general-purpose registers, but their state is
+       XSAVE-managed, which makes them distinct from legacy GPRs.
+   (b) The kernel itself currently does not use them, so there is no
+       requirement to save EGPRs on every VM exit -- they can remain in
+       hardware registers.
+
+The mechanism to read and write EGPR state will therefore be commonly
+needed by both VMX handlers and the instruction emulator.
+
+== Approaches to Support ==
+
+Given the above aspects, the first step is to build out a generalized GPR
+accessor framework. This constitutes the first part (PART1: PATCH1–3) of
+the series, laying the foundational infrastructure.
+
+ * New EGPR Accessors (PATCH3)
+
+   Since EGPRs are not yet clobbered by the host, they can be accessed
+   directly through hardware, using the existing helpers kvm_fpu_get()
+   and kvm_fpu_put().
+
+   This model follows the same approach used for legacy FP state
+   handling.
+
+   The design choice is based on the following considerations:
+   (a) Caching EGPR state on every VM exit would be unnecessary cost.
+   (b) If EGPRs are updated during VM exit handling or instruction
+       emulation, synchronizing them with the guest fpstate would require
+       new interfaces to interact with x86 core logic, adding complexity.
+
+ * Common GPR Access Interface --Unifying Legacy and Extended Accessors
+   (PATCH2)
+
+   Although legacy GPRs and EGPRs differ in how their state is accessed,
+   that distinction does not justify maintaining separate interfaces. A
+   unified accessor abstraction allows both legacy and extended registers
+   to be accessed uniformly, simplifying usage for both exit handlers and
+   the emulator.
+
+Returning to the remaining key ingredients -- VMX handlers and the
+instruction emulator -- the necessary updates break down into the
+following.
+
+ * Extended Instruction Information Extraction (PART2: PATCH4–8)
+
+   Currently, instruction-related VMCS fields are stored as 32-bit raw
+   data and interpreted on site. Adding separate variable in this manner
+   would increase code complexity.
+
+   Thus, refactoring this logic into a proper data structure with clear
+   semantics appears to be a sensible direction.
+
+ * Instruction Emulator (PART3: PATCH9–16)
+
+   As noted in Paolo’s earlier feedback [2], support for REX2-prefixed
+   instruction emulation is required.
+
+   While REX2 largely mirrors legacy opcode behavior, a few exceptions
+   and new instructions introduce additional decoding and handling
+   requirements.
+
+Conceptually, the changes are straightforward, though details are better
+handled directly in the patches.
+
+Finally, actual feature exposure and XCR0 management form the last stage
+of enabling (PART4: PATCH17-20), relatively small but with a few key
+constraints:
+
+ * XCR0 updates and CPUID feature exposure must occur together (PATCH18).
+ * The current enabling scope applies only to VMX (PATCH17-18).
+
+== Patchset ==
+
+As mentioned earlier, while the number of patches is relatively large,
+the series is organized into four logical parts for clarity and
+reviewability:
+
+ * PART1, PATCH 01–03: GPR accessor refactoring (foundational)
+ * PART2, PATCH 04–08: VMX support for EGPR index handling
+ * PART3, PATCH 09–16: Instruction emulator support for REX2
+ * PART4, PATCH 17–20: APX exposure and minor selftest updates
+
+Each patch includes an RFC note to provide context for reviewers.
+
+This series is based on the next branch of the KVM x86 tree [3] and is
+available at:
+
+  git://github.com/intel/apx.git apx-kvm_rfc-v1
+
+== Testing ==
+
+Testing so far has focused on unit and synthetic coverage of relevant
+code paths using KVM selftests, both on legacy and APX systems.
+
+For decoder-related changes, additional testing was performed by invoking
+x86_decode_insn() from a pseudo driver with some test inputs to exercise
+REX2 and legacy decoding logic.
+
+== References ==
+
+[1] https://cdrdv2.intel.com/v1/dl/getContent/784266
+[2] https://lore.kernel.org/kvm/CABgObfaHp9bH783Kdwm_tMBHZk5zWCxD7R+RroB_Q_o5NWBVZg@mail.gmail.com/
+[3] https://github.com/kvm-x86/linux
+
+
+I would also give thanks to Chao and Zhao for helping me out in this
+KVM series.
+
+Thanks for a look on this.
+Chang
+
+Chang S. Bae (19):
+  KVM: x86: Rename register accessors to be GPR-specific
+  KVM: x86: Refactor GPR accessors to differentiate register access
+    types
+  KVM: x86: Implement accessors for extended GPRs
+  KVM: VMX: Introduce unified instruction info structure
+  KVM: VMX: Refactor instruction information retrieval
+  KVM: VMX: Refactor GPR index retrieval from exit qualification
+  KVM: nVMX: Support the extended instruction info field
+  KVM: VMX: Support extended register index in exit handling
+  KVM: x86: Support EGPR accessing and tracking for instruction
+    emulation
+  KVM: x86: Refactor REX prefix handling in instruction emulation
+  KVM: x86: Refactor opcode table lookup in instruction emulation
+  KVM: x86: Support REX2-extended register index in the decoder
+  KVM: x86: Add REX2 opcode tables to the instruction decoder
+  KVM: x86: Emulate REX2-prefixed 64-bit absolute jump
+  KVM: x86: Reject EVEX-prefix instructions in the emulator
+  KVM: x86: Decode REX2 prefix in the emulator
+  KVM: x86: Prepare APX state setting in XCR0
+  KVM: x86: Expose APX sub-features to guests
+  KVM: selftests: Add APX state handling and XCR0 sanity checks
+
+Peter Fang (1):
+  KVM: x86: Expose APX foundational feature bit to guests
+
+ arch/x86/include/asm/kvm_host.h               |  19 ++
+ arch/x86/include/asm/kvm_vcpu_regs.h          |  16 ++
+ arch/x86/include/asm/vmx.h                    |   2 +
+ arch/x86/kvm/cpuid.c                          |  14 +-
+ arch/x86/kvm/emulate.c                        | 177 +++++++++++++++---
+ arch/x86/kvm/fpu.h                            |  82 ++++++++
+ arch/x86/kvm/kvm_cache_regs.h                 |   1 +
+ arch/x86/kvm/kvm_emulate.h                    |  44 ++++-
+ arch/x86/kvm/reverse_cpuid.h                  |   6 +
+ arch/x86/kvm/svm/svm.c                        |  23 ++-
+ arch/x86/kvm/vmx/nested.c                     |  83 ++++----
+ arch/x86/kvm/vmx/nested.h                     |   2 +-
+ arch/x86/kvm/vmx/vmcs12.c                     |   1 +
+ arch/x86/kvm/vmx/vmcs12.h                     |   3 +-
+ arch/x86/kvm/vmx/vmx.c                        |  26 +--
+ arch/x86/kvm/vmx/vmx.h                        | 106 ++++++++++-
+ arch/x86/kvm/x86.c                            |  29 ++-
+ arch/x86/kvm/x86.h                            |  49 ++++-
+ arch/x86/kvm/xen.c                            |   2 +-
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/x86/state_test.c  |   6 +
+ .../selftests/kvm/x86/xcr0_cpuid_test.c       |  20 ++
+ 22 files changed, 592 insertions(+), 120 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Finalize ID registers only once per VM
+[PATCH] KVM: arm64: Finalize ID registers only once per VM
+Author: Marc Zyngier <maz@kernel.org>
+
+Owing to the ID registers being global to the VM, there is no point
+in computing them more than once.  However, recent changes making
+use of kvm_set_vm_id_reg() outlined that we repeatedly hammer
+the ID registers when we shouldn't.
+
+Gate the ID reg update on the VM having never run.
+
+Fixes: 50e7cce81b9b2 ("KVM: arm64: Limit clearing of ID_{AA64PFR0,PFR1}_EL1.GIC to userspace irqchip")
+Fixes: 5cb57a1aff755 ("KVM: arm64: Zero ID_AA64PFR0_EL1.GIC when no GICv3 is presented to the guest")
+Closes: https://lore.kernel.org/r/aRHf6x5umkTYhYJ3@finisterre.sirena.org.uk
+Reported-by: Mark Brown <broonie@kernel.org>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/sys_regs.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Add SCAO read and write helpers
+[PATCH RFC v2 01/11] KVM: s390: Add SCAO read and write helpers
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+Introduce some small helper functions to get and set the system control
+area origin address from the SIE control block.
+
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+ arch/s390/kvm/vsie.c | 29 +++++++++++++++++++++--------
+ 1 file changed, 21 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Add VSIE SIGP Interpretation
+[PATCH RFC v2 00/11] KVM: s390: Add VSIE SIGP Interpretation
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+In the upcoming IBM Z machine generation (gen17) the s390x architecture
+adds a new VSIE Interpretation Extension Facility (vsie_sigpif) to
+improve guest-3 guest performance.
+
+To exploit the new machine support the guest-1 KVM needs to create and
+maintain shadow structures pointing to the original state descriptions
+and system control areas of currently running guest-3 configurations.
+These pointers are followed by the machines firmware and modifications
+of the original SCA for guest-3 (located in guest-2) are monitored and
+handled by firmware. This results in fewer VSIE exits.
+
+---
+There are still some problems with the current state but I think it is
+in a good state to gather some feedback.
+
+Known Functional Problems:
+- reuse of sca allocation with sigpif enabled does hang
+
+Known Non-Functional Problems:
+- Performance of the initial configuration shadowing can be streamlined
+- Performance for reentry can likely be improved
+- Locking can be improved to allow for more concurrency
+
+---
+Christoph Schlameuss (11):
+      KVM: s390: Add SCAO read and write helpers
+      KVM: s390: Remove double 64bscao feature check
+      KVM: s390: Move scao validation into a function
+      KVM: s390: Add vsie_sigpif detection
+      KVM: s390: Add ssca_block and ssca_entry structs for vsie_ie
+      KVM: s390: Add helper to pin multiple guest pages
+      KVM: s390: Shadow VSIE SCA in guest-1
+      KVM: s390: Allow guest-3 cpu add and remove with vsie sigpif
+      KVM: s390: Allow guest-3 switch to extended sca with vsie sigpif
+      KVM: s390: Add VSIE shadow configuration
+      KVM: s390: Add VSIE shadow stat counters
+
+ arch/s390/include/asm/kvm_host.h               |  16 +-
+ arch/s390/include/asm/kvm_host_types.h         |  24 +-
+ arch/s390/include/asm/sclp.h                   |   1 +
+ arch/s390/kvm/kvm-s390.c                       |  14 +-
+ arch/s390/kvm/kvm-s390.h                       |   2 +-
+ arch/s390/kvm/vsie.c                           | 852 +++++++++++++++++++++----
+ drivers/s390/char/sclp_early.c                 |   1 +
+ tools/testing/selftests/kvm/include/s390/sie.h |   2 +-
+ 8 files changed, 773 insertions(+), 139 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: configure SVI during runtime APICv activation
+[PATCH v2 1/1] KVM: VMX: configure SVI during runtime APICv activation
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+The APICv (apic->apicv_active) can be activated or deactivated at runtime,
+for instance, because of APICv inhibit reasons. Intel VMX employs different
+mechanisms to virtualize LAPIC based on whether APICv is active.
+
+When APICv is activated at runtime, GUEST_INTR_STATUS is used to configure
+and report the current pending IRR and ISR states. Unless a specific vector
+is explicitly included in EOI_EXIT_BITMAP, its EOI will not be trapped to
+KVM. Intel VMX automatically clears the corresponding ISR bit based on the
+GUEST_INTR_STATUS.SVI field.
+
+When APICv is deactivated at runtime, the VM_ENTRY_INTR_INFO_FIELD is used
+to specify the next interrupt vector to invoke upon VM-entry. The
+VMX IDT_VECTORING_INFO_FIELD is used to report un-invoked vectors on
+VM-exit. EOIs are always trapped to KVM, so the software can manually clear
+pending ISR bits.
+
+There are scenarios where, with APICv activated at runtime, a guest-issued
+EOI may not be able to clear the pending ISR bit.
+
+Taking vector 236 as an example, here is one scenario.
+
+1. Suppose APICv is inactive. Vector 236 is pending in the IRR.
+2. To handle KVM_REQ_EVENT, KVM moves vector 236 from the IRR to the ISR,
+and configures the VM_ENTRY_INTR_INFO_FIELD via vmx_inject_irq().
+3. After VM-entry, vector 236 is invoked through the guest IDT. At this
+point, the data in VM_ENTRY_INTR_INFO_FIELD is no longer valid. The guest
+interrupt handler for vector 236 is invoked.
+4. Suppose a VM exit occurs very early in the guest interrupt handler,
+before the EOI is issued.
+5. Nothing is reported through the IDT_VECTORING_INFO_FIELD because
+vector 236 has already been invoked in the guest.
+6. Now, suppose APICv is activated. Before the next VM-entry, KVM calls
+kvm_vcpu_update_apicv() to activate APICv.
+7. Unfortunately, GUEST_INTR_STATUS.SVI is not configured, although
+vector 236 is still pending in the ISR.
+8. After VM-entry, the guest finally issues the EOI for vector 236.
+However, because SVI is not configured, vector 236 is not cleared.
+9. ISR is stalled forever on vector 236.
+
+Here is another scenario.
+
+1. Suppose APICv is inactive. Vector 236 is pending in the IRR.
+2. To handle KVM_REQ_EVENT, KVM moves vector 236 from the IRR to the ISR,
+and configures the VM_ENTRY_INTR_INFO_FIELD via vmx_inject_irq().
+3. VM-exit occurs immediately after the next VM-entry. The vector 236 is
+not invoked through the guest IDT. Instead, it is saved to the
+IDT_VECTORING_INFO_FIELD during the VM-exit.
+4. KVM calls kvm_queue_interrupt() to re-queue the un-invoked vector 236
+into vcpu->arch.interrupt. A KVM_REQ_EVENT is requested.
+5. Now, suppose APICv is activated. Before the next VM-entry, KVM calls
+kvm_vcpu_update_apicv() to activate APICv.
+6. Although APICv is now active, KVM still uses the legacy
+VM_ENTRY_INTR_INFO_FIELD to re-inject vector 236. GUEST_INTR_STATUS.SVI is
+not configured.
+7. After the next VM-entry, vector 236 is invoked through the guest IDT.
+Finally, an EOI occurs. However, due to the lack of GUEST_INTR_STATUS.SVI
+configuration, vector 236 is not cleared from the ISR.
+8. ISR is stalled forever on vector 236.
+
+Using QEMU as an example, vector 236 is stuck in ISR forever.
+
+(qemu) info lapic 1
+dumping local APIC state for CPU 1
+
+LVT0	 0x00010700 active-hi edge  masked                      ExtINT (vec 0)
+LVT1	 0x00010400 active-hi edge  masked                      NMI
+LVTPC	 0x00000400 active-hi edge                              NMI
+LVTERR	 0x000000fe active-hi edge                              Fixed  (vec 254)
+LVTTHMR	 0x00010000 active-hi edge  masked                      Fixed  (vec 0)
+LVTT	 0x000400ec active-hi edge                 tsc-deadline Fixed  (vec 236)
+Timer	 DCR=0x0 (divide by 2) initial_count = 0 current_count = 0
+SPIV	 0x000001ff APIC enabled, focus=off, spurious vec 255
+ICR	 0x000000fd physical edge de-assert no-shorthand
+ICR2	 0x00000000 cpu 0 (X2APIC ID)
+ESR	 0x00000000
+ISR	 236
+IRR	 37(level) 236
+
+The issue is not applicable to AMD SVM which employs a different LAPIC
+virtualization mechanism. In addition, APICV_INHIBIT_REASON_IRQWIN ensures
+AMD SVM AVIC is not activated until the last interrupt is EOI.
+
+Fix the bug by configuring Intel VMX GUEST_INTR_STATUS.SVI if APICv is
+activated at runtime.
+
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+Changed since v2:
+  - Add support for guest mode (suggested by Chao Gao).
+  - Add comments in the code (suggested by Chao Gao).
+  - Remove WARN_ON_ONCE from vmx_hwapic_isr_update().
+  - Edit commit message "AMD SVM APICv" to "AMD SVM AVIC"
+    (suggested by Alejandro Jimenez).
+
+ arch/x86/kvm/vmx/vmx.c | 9 ---------
+ arch/x86/kvm/x86.c     | 7 +++++++
+ 2 files changed, 7 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  sched: Add vCPU debooster infrastructure
+[PATCH 01/10] sched: Add vCPU debooster infrastructure
+Author: Wanpeng Li <kernellwp@gmail.com>
+
+
+
+Introduce foundational infrastructure for the vCPU debooster mechanism
+to improve yield_to() effectiveness in virtualization workloads.
+
+Add per-rq tracking fields for rate limiting (yield_deboost_last_time_ns)
+and debouncing (yield_deboost_last_src/dst_pid, last_pair_time_ns).
+Introduce global sysctl knob sysctl_sched_vcpu_debooster_enabled for
+runtime control, defaulting to enabled. Add debugfs interface for
+observability and initialization in sched_init().
+
+The infrastructure is inert at this stage as no deboost logic is
+implemented yet, allowing independent verification that existing
+behavior remains unchanged.
+
+Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+---
+ kernel/sched/core.c  | 7 +++++--
+ kernel/sched/debug.c | 3 +++
+ kernel/sched/fair.c  | 5 +++++
+ kernel/sched/sched.h | 9 +++++++++
+ 4 files changed, 22 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  sched/kvm: Semantics-aware vCPU scheduling for oversubscribed KVM
+[PATCH 00/10] sched/kvm: Semantics-aware vCPU scheduling for oversubscribed KVM
+Author: Wanpeng Li <kernellwp@gmail.com>
+
+
+This series addresses long-standing yield_to() inefficiencies in
+virtualized environments through two complementary mechanisms: a vCPU
+debooster in the scheduler and IPI-aware directed yield in KVM.
+
+Problem Statement
+-----------------
+
+In overcommitted virtualization scenarios, vCPUs frequently spin on locks
+held by other vCPUs that are not currently running. The kernel's
+paravirtual spinlock support detects these situations and calls yield_to()
+to boost the lock holder, allowing it to run and release the lock.
+
+However, the current implementation has two critical limitations:
+
+1. Scheduler-side limitation:
+
+   yield_to_task_fair() relies solely on set_next_buddy() to provide
+   preference to the target vCPU. This buddy mechanism only offers
+   immediate, transient preference. Once the buddy hint expires (typically
+   after one scheduling decision), the yielding vCPU may preempt the target
+   again, especially in nested cgroup hierarchies where vruntime domains
+   differ.
+
+   This creates a ping-pong effect: the lock holder runs briefly, gets
+   preempted before completing critical sections, and the yielding vCPU
+   spins again, triggering another futile yield_to() cycle. The overhead
+   accumulates rapidly in workloads with high lock contention.
+
+2. KVM-side limitation:
+
+   kvm_vcpu_on_spin() attempts to identify which vCPU to yield to through
+   directed yield candidate selection. However, it lacks awareness of IPI
+   communication patterns. When a vCPU sends an IPI and spins waiting for
+   a response (common in inter-processor synchronization), the current
+   heuristics often fail to identify the IPI receiver as the yield target.
+
+   Instead, the code may boost an unrelated vCPU based on coarse-grained
+   preemption state, missing opportunities to accelerate actual IPI
+   response handling. This is particularly problematic when the IPI receiver
+   is runnable but not scheduled, as lock-holder-detection logic doesn't
+   capture the IPI dependency relationship.
+
+Combined, these issues cause excessive lock hold times, cache thrashing,
+and degraded throughput in overcommitted environments, particularly
+affecting workloads with fine-grained synchronization patterns.
+
+Solution Overview
+-----------------
+
+The series introduces two orthogonal improvements that work synergistically:
+
+Part 1: Scheduler vCPU Debooster (patches 1-5)
+
+Augment yield_to_task_fair() with bounded vruntime penalties to provide
+sustained preference beyond the buddy mechanism. When a vCPU yields to a
+target, apply a carefully tuned vruntime penalty to the yielding vCPU,
+ensuring the target maintains scheduling advantage for longer periods.
+
+The mechanism is EEVDF-aware and cgroup-hierarchy-aware:
+
+- Locate the lowest common ancestor (LCA) in the cgroup hierarchy where
+  both the yielding and target tasks coexist. This ensures vruntime
+  adjustments occur at the correct hierarchy level, maintaining fairness
+  across cgroup boundaries.
+
+- Update EEVDF scheduler fields (vruntime, deadline, vlag) atomically to
+  keep the scheduler state consistent. The penalty shifts the yielding
+  task's virtual deadline forward, allowing the target to run.
+
+- Apply queue-size-adaptive penalties that scale from 6.0× scheduling
+  granularity for 2-task scenarios (strong preference) down to 1.0× for
+  large queues (>12 tasks), balancing preference against starvation risks.
+
+- Implement reverse-pair debouncing: when task A yields to B, then B yields
+  to A within a short window (~600us), downscale the penalty to prevent
+  ping-pong oscillation.
+
+- Rate-limit penalty application to 6ms intervals to prevent pathological
+  overhead when yields occur at very high frequency.
+
+The debooster works *with* the buddy mechanism rather than replacing it:
+set_next_buddy() provides immediate preference for the next scheduling
+decision, while the vruntime penalty sustains that preference over
+subsequent decisions. This dual approach proves especially effective in
+nested cgroup scenarios where buddy hints alone are insufficient.
+
+Part 2: KVM IPI-Aware Directed Yield (patches 6-10)
+
+Enhance kvm_vcpu_on_spin() with lightweight IPI tracking to improve
+directed yield candidate selection. Track sender/receiver relationships
+when IPIs are delivered and use this information to prioritize yield
+targets.
+
+The tracking mechanism:
+
+- Hooks into kvm_irq_delivery_to_apic() to detect unicast fixed IPIs (the
+  common case for inter-processor synchronization). When exactly one
+  destination vCPU receives an IPI, record the sender→receiver relationship
+  with a monotonic timestamp.
+
+  In high VM density scenarios, software-based IPI tracking through interrupt
+  delivery interception becomes particularly valuable. It captures precise
+  sender/receiver relationships that can be leveraged for intelligent
+  scheduling decisions, providing performance benefits that complement or
+  even exceed hardware-accelerated interrupt delivery in overcommitted
+  environments.
+
+- Uses lockless READ_ONCE/WRITE_ONCE accessors for minimal overhead. The
+  per-vCPU ipi_context structure is carefully designed to avoid cache line
+  bouncing.
+
+- Implements a short recency window (50ms default) to avoid stale IPI
+  information inflating boost priority on throughput-sensitive workloads.
+  Old IPI relationships are naturally aged out.
+
+- Clears IPI context on EOI with two-stage precision: unconditionally clear
+  the receiver's context (it processed the interrupt), but only clear the
+  sender's pending flag if the receiver matches and the IPI is recent. This
+  prevents unrelated EOIs from prematurely clearing valid IPI state.
+
+The candidate selection follows a priority hierarchy:
+
+  Priority 1: Confirmed IPI receiver
+    If the spinning vCPU recently sent an IPI to another vCPU and that IPI
+    is still pending (within the recency window), unconditionally boost the
+    receiver. This directly addresses the "spinning on IPI response" case.
+
+  Priority 2: Fast pending interrupt
+    Leverage arch-specific kvm_arch_dy_has_pending_interrupt() for
+    compatibility with existing optimizations.
+
+  Priority 3: Preempted in kernel mode
+    Fall back to traditional preemption-based logic when yield_to_kernel_mode
+    is requested, ensuring compatibility with existing workloads.
+
+A two-round fallback mechanism provides a safety net: if the first round
+with strict IPI-aware selection finds no eligible candidate (e.g., due to
+missed IPI context or transient runnable set changes), a second round
+applies relaxed selection gated only by preemption state. This is
+controlled by the enable_relaxed_boost module parameter (default on).
+
+Implementation Details
+----------------------
+
+Both mechanisms are designed for minimal overhead and runtime control:
+
+- All locking occurs under existing rq->lock or per-vCPU locks; no new
+  lock contention is introduced.
+
+- Penalty calculations use integer arithmetic with overflow protection.
+
+- IPI tracking uses monotonic timestamps (ktime_get_mono_fast_ns()) for
+  efficient, race-free recency checks.
+
+Advantages over paravirtualization approaches:
+
+- No guest OS modification required: This solution operates entirely within
+  the host kernel, providing transparent optimization without guest kernel
+  changes or recompilation.
+
+- Guest OS agnostic: Works uniformly across Linux, Windows, and other guest
+  operating systems, unlike PV TLB shootdown which requires guest-side
+  paravirtual driver support.
+
+- Broader applicability: Captures IPI patterns from all synchronization
+  primitives (spinlocks, RCU, smp_call_function, etc.), not limited to
+  specific paravirtualized operations like TLB shootdown.
+
+- Deployment simplicity: Existing VM images benefit immediately without
+  guest kernel updates, critical for production environments with diverse
+  guest OS versions and configurations.
+
+- Runtime controls allow disabling features if needed:
+  * /sys/kernel/debug/sched/sched_vcpu_debooster_enabled
+  * /sys/module/kvm/parameters/ipi_tracking_enabled
+  * /sys/module/kvm/parameters/enable_relaxed_boost
+
+- The infrastructure is incrementally introduced: early patches add inert
+  scaffolding that can be verified for zero performance impact before
+  activation.
+
+Performance Results
+-------------------
+
+Test environment: Intel Xeon, 16 physical cores, 16 vCPUs per VM
+
+Dbench 16 clients per VM (filesystem metadata operations):
+  2 VMs: +14.4% throughput (lock contention reduction)
+  3 VMs:  +9.8% throughput
+  4 VMs:  +6.7% throughput
+
+PARSEC Dedup benchmark, simlarge input (memory-intensive):
+  2 VMs: +47.1% throughput (IPI-heavy synchronization)
+  3 VMs: +28.1% throughput
+  4 VMs:  +1.7% throughput
+
+PARSEC VIPS benchmark, simlarge input (compute-intensive):
+  2 VMs: +26.2% throughput (balanced sync and compute)
+  3 VMs: +12.7% throughput
+  4 VMs:  +6.0% throughput
+
+Analysis:
+
+- Gains are most pronounced at moderate overcommit (2-3 VMs). At this level,
+  contention is significant enough to benefit from better yield behavior,
+  but context switch overhead remains manageable.
+
+- Dedup shows the strongest improvement (+47.1% at 2 VMs) due to its
+  IPI-heavy synchronization patterns. The IPI-aware directed yield
+  precisely targets the bottleneck.
+
+- At 4 VMs (heavier overcommit), gains diminish as general CPU contention
+  dominates. However, performance never regresses, indicating the mechanisms
+  gracefully degrade.
+
+- In certain high-density, resource overcommitted deployment scenarios, the 
+  performance benefits of APICv can be constrained by scheduling and contention 
+  patterns. In such cases, software-based IPI tracking serves as a complementary 
+  optimization path, offering targeted scheduling hints without relying on disabling 
+  APICv. The practical choice should be evaluated and balanced against workload 
+  characteristics and platform configuration.
+
+- Dbench benefits primarily from the scheduler-side debooster, as its lock
+  patterns involve less IPI spinning and more direct lock holder boosting.
+
+The performance gains stem from three factors:
+
+1. Lock holders receive sustained CPU time to complete critical sections,
+   reducing overall lock hold duration and cascading contention.
+
+2. IPI receivers are promptly scheduled when senders spin, minimizing IPI
+   response latency and reducing wasted spin cycles.
+
+3. Better cache utilization results from reduced context switching between
+   lock waiters and holders.
+
+Patch Organization
+------------------
+
+The series is organized for incremental review and bisectability:
+
+Patches 1-5: Scheduler vCPU debooster
+
+  Patch 1: Add infrastructure (per-rq tracking, sysctl, debugfs entry)
+           Infrastructure is inert; no functional change.
+
+  Patch 2: Add rate-limiting and validation helpers
+           Static functions with comprehensive safety checks.
+
+  Patch 3: Add cgroup LCA finder for hierarchical yield
+           Implements CONFIG_FAIR_GROUP_SCHED-aware LCA location.
+
+  Patch 4: Add penalty calculation and application logic
+           Core algorithms with queue-size adaptation and debouncing.
+
+  Patch 5: Wire up yield deboost in yield_to_task_fair()
+           Activation patch. Includes Dbench performance data.
+
+Patches 6-10: KVM IPI-aware directed yield
+
+  Patch 6: Fix last_boosted_vcpu index assignment bug
+           Standalone bugfix for existing code.
+
+  Patch 7: Add IPI tracking infrastructure
+           Per-vCPU context, module parameters, helper functions.
+           Infrastructure is inert until activated.
+
+  Patch 8: Integrate IPI tracking with LAPIC interrupt delivery
+           Hook into kvm_irq_delivery_to_apic() and EOI handling.
+
+  Patch 9: Implement IPI-aware directed yield candidate selection
+           Replace candidate selection logic with priority-based approach.
+           Includes PARSEC performance data.
+
+  Patch 10: Add relaxed boost as safety net
+            Two-round fallback mechanism for robustness.
+
+Each patch compiles and boots independently. Performance data is presented
+where the relevant mechanism becomes active (patches 5 and 9).
+
+Testing
+-------
+
+Workloads tested:
+
+- Dbench (filesystem metadata stress)
+- PARSEC benchmarks (Dedup, VIPS, Ferret, Blackscholes)
+- Kernel compilation (make -j16 in each VM)
+
+No regressions observed on any configuration. The mechanisms show neutral
+to positive impact across diverse workloads.
+
+Future Work
+-----------
+
+Potential extensions beyond this series:
+
+- Adaptive recency window: dynamically adjust ipi_window_ns based on
+  observed workload patterns.
+
+- Extended tracking: consider multi-round IPI patterns (A→B→C→A).
+
+- Cross-NUMA awareness: penalty scaling based on NUMA distances.
+
+These are intentionally deferred to keep this series focused and reviewable.
+
+Wanpeng Li (10):
+  sched: Add vCPU debooster infrastructure
+  sched/fair: Add rate-limiting and validation helpers
+  sched/fair: Add cgroup LCA finder for hierarchical yield
+  sched/fair: Add penalty calculation and application logic
+  sched/fair: Wire up yield deboost in yield_to_task_fair()
+  KVM: Fix last_boosted_vcpu index assignment bug
+  KVM: x86: Add IPI tracking infrastructure
+  KVM: x86/lapic: Integrate IPI tracking with interrupt delivery
+  KVM: Implement IPI-aware directed yield candidate selection
+  KVM: Relaxed boost as safety net
+
+ arch/x86/include/asm/kvm_host.h |   8 +
+ arch/x86/kvm/lapic.c            | 172 +++++++++++++++-
+ arch/x86/kvm/x86.c              |   6 +
+ arch/x86/kvm/x86.h              |   4 +
+ include/linux/kvm_host.h        |   1 +
+ kernel/sched/core.c             |   7 +-
+ kernel/sched/debug.c            |   3 +
+ kernel/sched/fair.c             | 336 ++++++++++++++++++++++++++++++++
+ kernel/sched/sched.h            |   9 +
+ virt/kvm/kvm_main.c             |  81 +++++++-
+ 10 files changed, 611 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
