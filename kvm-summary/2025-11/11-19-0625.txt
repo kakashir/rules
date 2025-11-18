@@ -1,0 +1,1080 @@
+From 72ec34245 to 03b4e966c
+KVM mailing list update from 72ec34245 to 03b4e966c
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     28 intel.com
+     11 meta.com
+     11 amazon.co.uk
+      7 nvidia.com
+      7 google.com
+      6 amd.com
+      4 loongson.cn
+      2 zytor.com
+      1 jaguarmicro.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     18  Zhao Liu <zhao1.liu@intel.com>
+     11  Fred Griffoul <fgriffo@amazon.co.uk>
+     11  Bobby Eshleman <bobbyeshleman@meta.com>
+      7  Ankit Agrawal <ankita@nvidia.com>
+      5  Yang Weijiang <weijiang.yang@intel.com>
+      5  Sean Christopherson <seanjc@google.com>
+      4  Sairaj Kodilkar <sarunkod@amd.com>
+      4  Bibo Mao <maobibo@loongson.cn>
+      3  Zide Chen <zide.chen@intel.com>
+      2  "Xin Li (Intel)" <xin@zytor.com>
+      2  Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+      2  Kevin Cheng <chengkev@google.com>
+      1  Liming Wu <liming.wu@jaguarmicro.com>
+      1  Chenyi Qiang <chenyi.qiang@intel.com>
+      1  Chao Gao <chao.gao@intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: SVM: Handle #MCs in guest outside of fastpath
+[PATCH v2 1/4] KVM: SVM: Handle #MCs in guest outside of fastpath
+Author: Sean Christopherson <seanjc@google.com>
+
+Handle Machine Checks (#MC) that happen in the guest (by forwarding them
+to the host) outside of KVM's fastpath so that as much host state as
+possible is re-loaded before invoking the kernel's #MC handler.  The only
+requirement is that KVM invokes the #MC handler before enabling IRQs (and
+even that could _probably_ be relaxed to handling #MCs before enabling
+preemption).
+
+Waiting to handle #MCs until "more" host state is loaded hardens KVM
+against flaws in the #MC handler, which has historically been quite
+brittle. E.g. prior to commit 5567d11c21a1 ("x86/mce: Send #MC singal from
+task work"), the #MC code could trigger a schedule() with IRQs and
+preemption disabled.  That led to a KVM hack-a-fix in commit 1811d979c716
+("x86/kvm: move kvm_load/put_guest_xcr0 into atomic context").
+
+Note, except for #MCs on VM-Enter, VMX already handles #MCs outside of the
+fastpath.
+
+Reviewed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Jon Kohler <jon@nutanix.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/svm.c | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Cleanup #MC and XCR0/XSS/PKRU handling
+[PATCH v2 0/4] KVM: x86: Cleanup #MC and XCR0/XSS/PKRU handling
+Author: Sean Christopherson <seanjc@google.com>
+
+Optimize XCR0/XSS loads that are currently done on every VM-Enter and VM-Exit,
+by handling them outside of KVM's fastpath inner loop.
+
+Context switching at entry/exit is unnecessary behavior inherited from a
+hack-a-fix that papered over an egregious #MC handling bug where the kernel #MC
+handler would call schedule() from atomic contexts.  The resulting #GP due to
+trying to swap FPU state with a guest XCR0/XSS was "fixed" by loading the host
+values before handling #MCs from the guest.
+
+Thankfully, the #MC mess has long since been cleaned up, so it's once again
+safe to swap XCR0/XSS outside of the fastpath (but with IRQs still disabled!).
+
+Note, Binbin's kvm_load_xfeatures() still applies cleanly on top, so I
+deliberately didn't include it here (but am still planning on applying it).
+
+v2:
+ - Collect reviews. [Jon, Rick]
+ - Fix TDX (suprisingly, not servicing host IRQs is problematic, /s). [Tony]
+
+v1: https://lore.kernel.org/all/20251030224246.3456492-1-seanjc@google.com
+
+Sean Christopherson (4):
+  KVM: SVM: Handle #MCs in guest outside of fastpath
+  KVM: VMX: Handle #MCs on VM-Enter/TD-Enter outside of the fastpath
+  KVM: x86: Load guest/host XCR0 and XSS outside of the fastpath run
+    loop
+  KVM: x86: Load guest/host PKRU outside of the fastpath run loop
+
+ arch/x86/kvm/svm/svm.c | 20 ++++++++---------
+ arch/x86/kvm/vmx/tdx.c |  3 ---
+ arch/x86/kvm/vmx/vmx.c | 20 +++++++++--------
+ arch/x86/kvm/x86.c     | 51 +++++++++++++++++++++++++++++-------------
+ arch/x86/kvm/x86.h     |  2 --
+ 5 files changed, 55 insertions(+), 41 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Improve performance for unmanaged guest memory
+[PATCH v2 00/10] KVM: nVMX: Improve performance for unmanaged guest memory
+Author: griffoul <griffoul@gmail.com>
+
+
+This patch series addresses both performance and correctness issues in
+nested VMX when handling guest memory.
+
+During nested VMX operations, L0 (KVM) accesses specific L1 guest pages
+to manage L2 execution. These pages fall into two categories: pages
+accessed only by L0 (such as the L1 MSR bitmap page or the eVMCS page),
+and pages passed to the L2 guest via vmcs02 (such as APIC access,
+virtual APIC, and posted interrupt descriptor pages).
+
+The current implementation uses kvm_vcpu_map/unmap, which causes two
+issues.
+
+First, the current approach is missing proper invalidation handling in
+critical scenarios. Enlightened VMCS (eVMCS) pages can become stale when
+memslots are modified, as there is no mechanism to invalidate the cached
+mappings. Similarly, APIC access and virtual APIC pages can be migrated
+by the host, but without proper notification through mmu_notifier
+callbacks, the mappings become invalid and can lead to incorrect
+behavior.
+
+Second, for unmanaged guest memory (memory not directly mapped by the
+kernel, such as memory passed with the mem= parameter or guest_memfd for
+non-CoCo VMs), this workflow invokes expensive memremap/memunmap
+operations on every L2 VM entry/exit cycle. This creates significant
+overhead that impacts nested virtualization performance.
+
+This series replaces kvm_host_map with gfn_to_pfn_cache in nested VMX.
+The pfncache infrastructure maintains persistent mappings as long as the
+page GPA does not change, eliminating the memremap/memunmap overhead on
+every VM entry/exit cycle. Additionally, pfncache provides proper
+invalidation handling via mmu_notifier callbacks and memslots generation
+check, ensuring that mappings are correctly updated during both memslot
+updates and page migration events.
+
+As an example, a microbenchmark using memslot_perf_test with 8192
+memslots demonstrates huge improvements in nested VMX operations with
+unmanaged guest memory:
+
+                        Before          After           Improvement
+  map:                  26.12s          1.54s           ~17x faster
+  unmap:                40.00s          0.017s          ~2353x faster
+  unmap chunked:        10.07s          0.005s          ~2014x faster
+
+The series is organized as follows:
+
+Patches 1-5 handle the L1 MSR bitmap page and system pages (APIC access,
+virtual APIC, and posted interrupt descriptor). Patch 1 converts the MSR
+bitmap to use gfn_to_pfn_cache. Patches 2-3 restore and complete
+"guest-uses-pfn" support in pfncache. Patch 4 converts the system pages
+to use gfn_to_pfn_cache. Patch 5 adds a selftest for cache invalidation
+and memslot updates.
+
+Patches 6-7 add enlightened VMCS support. Patch 6 avoids accessing eVMCS
+fields after they are copied into the cached vmcs12 structure. Patch 7
+converts eVMCS page mapping to use gfn_to_pfn_cache.
+
+Patches 8-10 implement persistent nested context to handle L2 vCPU
+multiplexing and migration between L1 vCPUs. Patch 8 introduces the
+nested context management infrastructure. Patch 9 integrates pfncache
+with persistent nested context. Patch 10 adds a selftest for this L2
+vCPU context switching.
+
+v2:
+  - Extended series to support enlightened VMCS (eVMCS).
+  - Added persistent nested context for improved L2 vCPU handling.
+  - Added additional selftests.
+
+Suggested-by: dwmw@amazon.co.uk
+
+
+Fred Griffoul (10):
+  KVM: nVMX: Implement cache for L1 MSR bitmap
+  KVM: pfncache: Restore guest-uses-pfn support
+  KVM: x86: Add nested state validation for pfncache support
+  KVM: nVMX: Implement cache for L1 APIC pages
+  KVM: selftests: Add nested VMX APIC cache invalidation test
+  KVM: nVMX: Cache evmcs fields to ensure consistency during VM-entry
+  KVM: nVMX: Replace evmcs kvm_host_map with pfncache
+  KVM: x86: Add nested context management
+  KVM: nVMX: Use nested context for pfncache persistence
+  KVM: selftests: Add L2 vcpu context switch test
+
+ arch/x86/include/asm/kvm_host.h               |  32 ++
+ arch/x86/include/uapi/asm/kvm.h               |   2 +
+ arch/x86/kvm/Makefile                         |   2 +-
+ arch/x86/kvm/nested.c                         | 199 ++++++++
+ arch/x86/kvm/vmx/hyperv.c                     |   5 +-
+ arch/x86/kvm/vmx/hyperv.h                     |  33 +-
+ arch/x86/kvm/vmx/nested.c                     | 463 ++++++++++++++----
+ arch/x86/kvm/vmx/vmx.c                        |   8 +
+ arch/x86/kvm/vmx/vmx.h                        |  16 +-
+ arch/x86/kvm/x86.c                            |  19 +-
+ include/linux/kvm_host.h                      |  34 +-
+ include/linux/kvm_types.h                     |   1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../selftests/kvm/x86/vmx_apic_update_test.c  | 302 ++++++++++++
+ .../selftests/kvm/x86/vmx_l2_switch_test.c    | 416 ++++++++++++++++
+ virt/kvm/kvm_main.c                           |   3 +-
+ virt/kvm/kvm_mm.h                             |   6 +-
+ virt/kvm/pfncache.c                           |  43 +-
+ 18 files changed, 1467 insertions(+), 119 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Implement cache for L1 MSR bitmap
+[PATCH v2 01/10] KVM: nVMX: Implement cache for L1 MSR bitmap
+Author: griffoul <griffoul@gmail.com>
+
+
+Introduce a gfn_to_pfn_cache to optimize L1 MSR bitmap access by
+replacing map/unmap operations. This optimization reduces overhead
+during L2 VM-entry where nested_vmx_prepare_msr_bitmap() merges L1's MSR
+intercepts with L0's requirements.
+
+Current implementation using kvm_vcpu_map_readonly() and
+kvm_vcpu_unmap() creates significant performance impact, mostly with
+unmanaged guest memory.
+
+The cache is initialized when entering VMX operation and deactivated
+when VMX operation ends.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/x86/kvm/vmx/nested.c | 42 +++++++++++++++++++++++++++++++++++----
+ arch/x86/kvm/vmx/vmx.h    |  2 ++
+ 2 files changed, 40 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  linux-headers: Introduce struct iommu_hw_info_amd
+[RFC PATCH RESEND 1/5] [DO NOT MERGE] linux-headers: Introduce struct iommu_hw_info_amd
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+
+Signed-off-by: Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+Signed-off-by: Sairaj Kodilkar <sarunkod@amd.com>
+---
+ linux-headers/linux/iommufd.h | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  amd_iommu: support up to 2048 MSI vectors per IRT
+[RFC PATCH RESEND 0/5] amd_iommu: support up to 2048 MSI vectors per IRT
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+Resending this series with KVM and IOMMU maintainers in CC.
+
+AMD IOMMU can route upto 2048 MSI vectors through a single
+Interrupt Remapping Table (IRT) entry. This series brings the same
+capability to the emulated AMD IOMMU in QEMU.
+
+Highlights
+----------
+* Sets bits [9:8] in Extended-Feature-Register-2 to advertise 2K MSI
+  support to the guest.
+* Uses bits [10:0] of the MSI data to select the IRTE when the guest
+  programs MSIs in logical-destination mode.
+* Introduces a new IOMMU device property:
+        -device amd-iommu,...,numint2k=on
+
+  The feature is **opt-in**; guests keep the 512-MSI behaviour unless
+  `numint2k=on` is supplied.
+
+Passthrough devices
+-------------------
+When a PCI function is passed through via iommufd the code checks the
+host’s vendor capabilities.  If the host IOMMU has not enabled
+2K-MSI support (bits [44:43] set in the control register) the guest
+feature is disabled even if `numint2k=on` was requested.
+
+The detection logic relies on the iommufd interface; with the legacy
+VFIO container the guest always falls back to 512 MSIs.
+
+Example
+-------
+qemu-system-x86_64 \
+-enable-kvm -m 10G -smp cpus=8 \
+-kernel /boot/vmlinuz \
+-initrd /boot/initrd.img \
+-append "console=ttyS0 earlyprintk=serial root=<DEVICE>" 
+-device amd-iommu,dma-remap=on,numint2k=on \
+-object iommufd,id=iommufd0 \
+-device vfio-pci,host=<DEVID>,iommufd=iommufd0 \
+-global kvm-pit.lost_tick_policy=discard \
+-cpu host \
+-machine q35,kernel_irqchip=split \
+-nographic \
+-smbios type=0,version=2.8 \
+-blockdev node-name=drive0,driver=qcow2,file.driver=file,file.filename=<IMAGE> \
+-device virtio-blk-pci,drive=drive0
+
+Limitations
+-----------
+This approach works well for features queried after IOMMUFD
+initialization but cannot handle features needed during early QEMU
+setup, before IOMMUFD is available.
+
+A key example is EFR2[HTRangeIgnore]. When this bit is set, the physical
+IOMMU treats HyperTransport (HT) address ranges as regular memory
+accesses rather than reserved regions. This has important implications
+for memory layout:
+
+* Without HTRangeIgnore: QEMU must relocate RAM above 4G to above 1T on
+  AMD platforms to avoid HT conflicts
+* With HTRangeIgnore: QEMU can safely place RAM immediately above 4G,
+  improving memory utilization
+
+Since RAM layout must be determined before IOMMUFD initialization, QEMU
+cannot use hwinfo to query EFR2[HTRangeIgnore] feature bit.
+
+Another limitation with using the control register is that, if BIOS enables
+particular feature (e.g. ControlRegister[GCR3TRPMode) without kernel support
+QEMU incorrectly assumes that host kernel supports that feature potentially
+causing guest failure. 
+
+Alternative considered
+----------------------
+We also explored alternate approach which uses KVM capability
+"KVM_CAP_AMD_NUM_INT_2K_SUP", which user can query to know if host
+kernel supports 2K MSIs. Similarly, this enables qemu to detect the
+presence of EFR2[HTRangeIgnore] during RAM initialization.
+
+Although current implementation allows 2K MSI support only with
+iommufd, it keeps the logic inside the vfio/iommufd and avoids
+modifying KVM ABI. I am happy to discuss advantages and drawbacks of
+both approaches.
+
+------------------------------------------------------------------------
+
+The patches are based on top of bc831f37398b (qemu master). Additionally
+it requires linux kernel with patches[1] which expose control register
+via IOMMU_GET_HW_INFO ioctl.
+
+[1] https://lore.kernel.org/linux-iommu/20251029095846.4486-1-sarunkod@amd.com/
+
+------------------------------------------------------------------------
+
+Sairaj Kodilkar (3):
+  vfio/iommufd: Add amd specific hardware info struct to vendor
+    capability
+  amd_iommu: Add support for extended feature register 2
+  amd_iommu: Add support for upto 2048 interrupts per IRT
+
+Suravee Suthikulpanit (2):
+  [DO NOT MERGE] linux-headers: Introduce struct iommu_hw_info_amd
+  amd-iommu: Add support for set/unset IOMMU for VFIO PCI devices
+
+ hw/i386/acpi-build.c               |   4 +-
+ hw/i386/amd_iommu-stub.c           |   5 +
+ hw/i386/amd_iommu.c                | 163 +++++++++++++++++++++++++++--
+ hw/i386/amd_iommu.h                |  24 +++++
+ include/system/host_iommu_device.h |   1 +
+ linux-headers/linux/iommufd.h      |  20 ++++
+ 6 files changed, 207 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  virtio_net: enhance wake/stop tx queue statistics accounting
+[PATCH] virtio_net: enhance wake/stop tx queue statistics accounting
+Author: liming.wu <liming.wu@jaguarmicro.com>
+
+
+This patch refines and strengthens the statistics collection of TX queue
+wake/stop events introduced by a previous patch.
+
+Previously, the driver only recorded partial wake/stop statistics
+for TX queues. Some wake events triggered by 'skb_xmit_done()' or resume
+operations were not counted, which made the per-queue metrics incomplete.
+
+Signed-off-by: Liming Wu <liming.wu@jaguarmicro.com>
+---
+ drivers/net/virtio_net.c | 49 ++++++++++++++++++++++------------------
+ 1 file changed, 27 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Add preempt hint feature in hypervisor side
+[PATCH 1/3] LoongArch: KVM: Add preempt hint feature in hypervisor side
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Feature KVM_FEATURE_PREEMPT_HINT is added to show whether vCPU is
+preempted or not. It is to help guest OS scheduling or lock checking
+etc. Here add KVM_FEATURE_PREEMPT_HINT feature and use one byte as
+preempted flag in steal time structure.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/include/asm/kvm_host.h      |  2 +
+ arch/loongarch/include/asm/kvm_para.h      |  5 +-
+ arch/loongarch/include/uapi/asm/kvm.h      |  1 +
+ arch/loongarch/include/uapi/asm/kvm_para.h |  1 +
+ arch/loongarch/kvm/vcpu.c                  | 54 +++++++++++++++++++++-
+ arch/loongarch/kvm/vm.c                    |  5 +-
+ 6 files changed, 65 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Add paravirt preempt hint support
+[PATCH 0/3] LoongArch: KVM: Add paravirt preempt hint support
+Author: Bibo Mao <maobibo@loongson.cn>
+
+vCPU preempt hint is useful with sched and lock on some platforms, here
+new feature KVM_FEATURE_PREEMPT_HINT is added and VMM can selectively
+enable it.
+
+Test case kcbench is used to compile Linux kernel code, the test result
+shows that it is useful on 3D6000 Dual-way machine with 64 cores and 128
+hyperthreads, however no improvemet on 3C5000 Dual-way machine with 32
+cores. With perf top command when running test case, the main difference
+between over-commited VM and host is osq_lock(), it can avoid
+unnecessary busy-loop waiting and enter sleep state quickly if lock-hold
+vCPU is preempted.
+
+Here is test result with kcbench, time unit is second to compile kernel
+with defconfig, performance is better with smaller value.
+3D6000 Dual-way 64 Core 128 Threads
+ One VM with 128 vCPUs, no overcommit, NUMA
+             Orginal       With-patch       Improvement
+  VM         91.72         92.4             < -1%
+  Host       89.7          89.75            < -0.1%
+ Two VMs overcommit with 128 vCPUs, UMA
+             Orginal       With-patch       Improvement
+  VM1        306.9         197.5            36%
+  VM2        303.7         197.8            35%
+  Host       89.7          89.75             < -0.1%
+ Two VMs overcommit with 128 vCPUs, NUMA
+             Orginal       With-patch       Improvement
+  VM1        317.1         159              50%
+  VM2        317.5         158              50%
+  Host       89.7          89.75            < -0.1%
+3C5000  Dual-way 32 Core
+ One VM with 32 vCPUs, NUMA
+             Orginal       With-patch       Improvement
+  VM         208           207              < 0.5%
+  Host       184           185              < -0.5%
+ Two VMs overcommit with 32 vCPUs, UMA
+             Orginal       With-patch       Improvement
+  VM1        439           444              -1%
+  VM2        437           438              < -0.2%
+  Host       184           185              < -0.5%
+ Two VMs overcommit with 32 vCPUs, NUMA
+             Orginal       With-patch       Improvement
+  VM1        422           425              < -1%
+  VM2        418           415              < -1%
+  Host       184           185              < -0.5%
+
+Bibo Mao (3):
+  LoongArch: KVM: Add preempt hint feature in hypervisor side
+  LoongArch: Add paravirt support with vcpu_is_preempted()
+  LoongArch: Add paravirt preempt hint print prompt
+
+ arch/loongarch/include/asm/kvm_host.h      |  2 +
+ arch/loongarch/include/asm/kvm_para.h      |  5 +-
+ arch/loongarch/include/asm/smp.h           |  1 +
+ arch/loongarch/include/asm/spinlock.h      |  5 ++
+ arch/loongarch/include/uapi/asm/kvm.h      |  1 +
+ arch/loongarch/include/uapi/asm/kvm_para.h |  1 +
+ arch/loongarch/kernel/paravirt.c           | 24 +++++++++-
+ arch/loongarch/kernel/smp.c                |  6 +++
+ arch/loongarch/kvm/vcpu.c                  | 54 +++++++++++++++++++++-
+ arch/loongarch/kvm/vm.c                    |  5 +-
+ 10 files changed, 100 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/nvgrace-gpu: Use faults to map device memory
+[PATCH v2 1/6] vfio/nvgrace-gpu: Use faults to map device memory
+Author: ankita <ankita@nvidia.com>
+
+
+To make use of the huge pfnmap support and to support zap/remap
+sequence, fault/huge_fault ops based mapping mechanism needs to
+be implemented.
+
+Currently nvgrace-gpu module relies on remap_pfn_range to do
+the mapping during VM bootup. Replace it to instead rely on fault
+and use vmf_insert_pfn to setup the mapping.
+
+Signed-off-by: Ankit Agrawal <ankita@nvidia.com>
+---
+ drivers/vfio/pci/nvgrace-gpu/main.c | 50 ++++++++++++++++++-----------
+ 1 file changed, 31 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/nvgrace-gpu: Support huge PFNMAP and wait for GPU ready post reset
+[PATCH v2 0/6] vfio/nvgrace-gpu: Support huge PFNMAP and wait for GPU ready post reset
+Author: ankita <ankita@nvidia.com>
+
+
+NVIDIA's Grace based system have large GPU device memory. The device
+memory is mapped as VM_PFNMAP in the VMM VMA. The nvgrace-gpu
+module could make use of the huge PFNMAP support added in mm [1].
+
+To achieve this, nvgrace-gpu module is updated to implement huge_fault ops.
+The implementation establishes mapping according to the order request.
+Note that if the PFN or the VMA address is unaligned to the order, the
+mapping fallbacks to the PTE level.
+
+Secondly, it is expected that the mapping not be re-established until
+the GPU is ready post reset. Presence of the mappings during that time
+could potentially leads to harmless corrected RAS events to be logged if
+the CPU attempts to do speculative reads on the GPU memory.
+
+Wait for the GPU to be ready on the first fault. The GPU readiness can
+be checked through BAR0 registers as is already being done at the device
+probe.
+
+Patch 1 updates the mapping mechanism to be done through faults.
+
+Patch 2 splits the code to map at the various levels.
+
+Patch 3 implements support for huge pfnmap.
+
+Path 4-6 intercepts reset request and ensures that the GP is ready
+before re-establishing the mapping after reset.
+
+Applied over 6.18-rc6.
+
+Link: https://lore.kernel.org/all/20240826204353.2228736-1-peterx@redhat.com/ [1]
+
+Changelog:
+v2:
+- Fixed build kernel warning
+- subject text changes
+- Rebased to 6.18-rc6.
+Link: https://lore.kernel.org/all/20251117124159.3560-1-ankita@nvidia.com/ [v1]
+
+Signed-off-by: Ankit Agrawal <ankita@nvidia.com>
+
+Ankit Agrawal (6):
+  vfio/nvgrace-gpu: Use faults to map device memory
+  vfio: export function to map the VMA
+  vfio/nvgrace-gpu: Add support for huge pfnmap
+  vfio: export vfio_find_cap_start
+  vfio/nvgrace-gpu: split the code to wait for GPU ready
+  vfio/nvgrace-gpu: wait for the GPU mem to be ready
+
+ drivers/vfio/pci/nvgrace-gpu/main.c | 171 ++++++++++++++++++++++------
+ drivers/vfio/pci/vfio_pci_config.c  |   3 +-
+ drivers/vfio/pci/vfio_pci_core.c    |  46 +++++---
+ include/linux/vfio_pci_core.h       |   3 +
+ 4 files changed, 169 insertions(+), 54 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  i386/cpu: Add APX EGPRs into xsave area
+[PATCH 1/5] i386/cpu: Add APX EGPRs into xsave area
+Author: Zhao Liu <zhao1.liu@intel.com>
+
+
+APX feature bit is in CPUID_7_1_EDX[21], and APX has EGPR component with
+index 19 in xstate area, EGPR component has 16 64bit regs. Add EGRP
+component into xstate area.
+
+Note, APX re-uses the 128-byte XSAVE area that had been previously
+allocated by MPX which has been deprecated on Intel processors, so check
+whether APX and MPX are set at the same for Guest, if this case happens,
+mask off them both to avoid conflict for xsave area.
+
+Tested-by: Xudong Hao <xudong.hao@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Co-developed-by: Zhao Liu <zhao1.liu@intel.com>
+Signed-off-by: Zhao Liu <zhao1.liu@intel.com>
+---
+ target/i386/cpu.c | 25 +++++++++++++++++++++++++
+ target/i386/cpu.h | 17 +++++++++++++++--
+ 2 files changed, 40 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  i386/cpu: Support APX for KVM
+[PATCH 0/5] i386/cpu: Support APX for KVM
+Author: Zhao Liu <zhao1.liu@intel.com>
+
+Hi,
+
+This series adds APX (Advanced Performance Extensions) support in QEMU
+to enable APX in Guest based on KVM.
+
+This series is based on CET v4:
+
+https://lore.kernel.org/qemu-devel/20251118034231.704240-1-zhao1.liu@intel.com/
+
+And you can also find the code here:
+
+https://gitlab.com/zhao.liu/qemu/-/commits/i386-all-for-dmr-v1.1-11-17-2025
+
+The patches for KVM side can be found at:
+
+https://lore.kernel.org/kvm/20251110180131.28264-1-chang.seok.bae@intel.com/
+
+
+Thanks for your review!
+
+
+Overview
+========
+
+Intel Advanced Performance Extensions (Intel APX) expands the Intel 64
+instruction set architecture with access to more registers (16
+additional general-purpose registers (GPRs) R16–R31) and adds various
+new features that improve general-purpose performance. The extensions
+are designed to provide efficient performance gains across a variety of
+workloads without significantly increasing silicon area or power
+consumption of the core. 
+
+APX spec link (rev.07) is:
+https://cdrdv2.intel.com/v1/dl/getContent/861610
+
+At QEMU side, the enabling work mainly includes two parts:
+
+1. save/restore/migrate the xstate of APX.
+   * APX xstate is a user xstate, but it reuses MPX xstate area in
+     un-compacted XSAVE buffer.
+   * To address this, QEMU will reject both APX and MPX if their CPUID
+     feature bits are set at the same (in Patch 1).
+
+2. add related CPUIDs support in feature words.
+
+Thanks and Best Regards,
+Zhao
+---
+Zhao Liu (2):
+  i386/cpu: Support APX CPUIDs
+  i386/cpu: Mark apx xstate as migratable
+
+Zide Chen (3):
+  i386/cpu: Add APX EGPRs into xsave area
+  i386/cpu: Cache EGPRs in CPUX86State
+  i386/cpu: Add APX migration support
+
+ target/i386/cpu.c          | 68 ++++++++++++++++++++++++++++++++++++--
+ target/i386/cpu.h          | 26 +++++++++++++--
+ target/i386/machine.c      | 24 ++++++++++++++
+ target/i386/xsave_helper.c | 14 ++++++++
+ 4 files changed, 128 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: 
+[PATCH v2 1/4] KVM: SVM: Handle #MCs in guest outside of fastpath
+[PATCH v2 0/4] KVM: x86: Cleanup #MC and XCR0/XSS/PKRU handling
+[PATCH v2 00/10] KVM: nVMX: Improve performance for unmanaged guest memory
+[PATCH v2 01/10] KVM: nVMX: Implement cache for L1 MSR bitmap
+[RFC PATCH RESEND 1/5] [DO NOT MERGE] linux-headers: Introduce struct iommu_hw_info_amd
+[RFC PATCH RESEND 0/5] amd_iommu: support up to 2048 MSI vectors per IRT
+[PATCH] virtio_net: enhance wake/stop tx queue statistics accounting
+[PATCH 1/3] LoongArch: KVM: Add preempt hint feature in hypervisor side
+[PATCH 0/3] LoongArch: KVM: Add paravirt preempt hint support
+[PATCH v2 1/6] vfio/nvgrace-gpu: Use faults to map device memory
+[PATCH v2 0/6] vfio/nvgrace-gpu: Support huge PFNMAP and wait for GPU ready post reset
+[PATCH 1/5] i386/cpu: Add APX EGPRs into xsave area
+[PATCH 0/5] i386/cpu: Support APX for KVM
+ Skip: [PATCH v4 01/23] i386/cpu: Clean up indent style of x86_ext_save_areas[]
+New:  i386: Support CET for KVM
+[PATCH v4 00/23] i386: Support CET for KVM
+Author: Zhao Liu <zhao1.liu@intel.com>
+
+Hi,
+
+This the v4 series to support CET (CET-SHSTK & CET-IBT) in QEMU, which
+is based on the master branch at the commit 9febfa94b69b ("Merge tag
+'for-upstream' of https://repo.or.cz/qemu/kevin into staging"). And you
+can also find the code here:
+
+https://gitlab.com/zhao.liu/qemu/-/tree/i386-all-for-dmr-v1.1-11-17-2025
+
+Compared to v3 [1], v4 mainly considers pl0 SSP MSR for FRED, and fixes
+migratable_flags for FEAT_XSAVE_XSS_LO. More details, pls refer Change
+Log in the following.
+
+Thanks for your review!
+
+Overview
+========
+
+Control-flow enforcement technology includes 2 x86-architectural
+features:
+ - CET shadow stack (CET-SHSTK or CET-SS).
+ - CET indirect branch tracking (CET-IBT).
+
+Intel has implemented both 2 features since Sapphire Rapids (P-core) &
+Sierra Forest (E-core).
+
+AMD also implemented shadow stack since Zen3 [2] - this series has
+considerred only-shstk case and is supposed to work on AMD platform, but
+I hasn't tested this on AMD.
+
+The basic CET support (patch 12-20) includes:
+ * CET-S & CET-U supervisor xstates support.
+ * CET CPUIDs enumeration.
+ * CET MSRs save & load.
+ * CET guest SSP register (KVM treats this as a special internal
+   register - KVM_REG_GUEST_SSP) save & load.
+ * Vmstates for MSRs & guest SSP.
+
+But before CET support, there's a lot of cleanup work needed for
+supervisor xstate.
+
+Before CET-S/CET-U, QEMU has already supports arch lbr as the 1st
+supervisor xstate. Although arch LBR has not yet been merged into KVM
+(still planned), this series cleans up supervisor state-related support
+and avoids breaking the current arch LBR in QEMU - that's what patch
+2-11 are doing.
+
+Additionally, besides KVM, this series also supports CET for TDX.
+
+Change Log
+==========
+
+Changes Since v3:
+ - Fill CPUID 0xD subleaves from KVM CPUID instead of host CPUID for
+   non-dynamic xstates (i.e., except AMX xstates for now).
+ - Save/restore/migrate MSR_IA32_PL0_SSP for FRED.
+ - Fix migratable_flags for FEAT_XSAVE_XSS_LO.
+ - Refine commit message for CET TDX support.
+
+[1]: https://lore.kernel.org/qemu-devel/20251024065632.1448606-1-zhao1.liu@intel.com/
+[2]: https://lore.kernel.org/all/20250908201750.98824-1-john.allen@amd.com/
+
+Thanks and Best Regards,
+Zhao
+---
+Chao Gao (1):
+  i386/cpu: Fix supervisor xstate initialization
+
+Chenyi Qiang (1):
+  i386/tdx: Add CET SHSTK/IBT into the supported CPUID by XFAM
+
+Xin Li (Intel) (2):
+  i386/cpu: Save/restore SSP0 MSR for FRED
+  i386/cpu: Migrate MSR_IA32_PL0_SSP for FRED and CET-SHSTK
+
+Yang Weijiang (5):
+  i386/cpu: Enable xsave support for CET states
+  i386/kvm: Add save/restore support for CET MSRs
+  i386/kvm: Add save/restore support for KVM_REG_GUEST_SSP
+  i386/machine: Add vmstate for cet-shstk and cet-ibt
+  i386/cpu: Advertise CET related flags in feature words
+
+Zhao Liu (14):
+  i386/cpu: Clean up indent style of x86_ext_save_areas[]
+  i386/cpu: Clean up arch lbr xsave struct and comment
+  i386/cpu: Reorganize arch lbr structure definitions
+  i386/cpu: Make ExtSaveArea store an array of dependencies
+  i386/cpu: Add avx10 dependency for Opmask/ZMM_Hi256/Hi16_ZMM
+  i386/kvm: Initialize x86_ext_save_areas[] based on KVM support
+  i386/cpu: Use x86_ext_save_areas[] for CPUID.0XD subleaves
+  i386/cpu: Reorganize dependency check for arch lbr state
+  i386/cpu: Drop pmu check in CPUID 0x1C encoding
+  i386/cpu: Add missing migratable xsave features
+  i386/cpu: Add CET support in CR4
+  i386/cpu: Mark cet-u & cet-s xstates as migratable
+  i386/cpu: Enable cet-ss & cet-ibt for supported CPU models
+  i386/tdx: Fix missing spaces in tdx_xfam_deps[]
+
+ target/i386/cpu.c         | 256 +++++++++++++++++++++++++++-----------
+ target/i386/cpu.h         | 110 ++++++++++++----
+ target/i386/helper.c      |  12 ++
+ target/i386/kvm/kvm-cpu.c |  23 +++-
+ target/i386/kvm/kvm.c     | 117 +++++++++++++++++
+ target/i386/kvm/tdx.c     |  20 +--
+ target/i386/machine.c     |  78 ++++++++++++
+ 7 files changed, 501 insertions(+), 115 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock: a per-net vsock NS mode state
+[PATCH net-next v10 01/11] vsock: a per-net vsock NS mode state
+Author: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+
+Add the per-net vsock NS mode state. This only adds the structure for
+holding the mode and some of the functions for setting/getting and
+checking the mode, but does not integrate the functionality yet.
+
+A "net_mode" field is added to vsock_sock to store the mode of the
+namespace when the vsock_sock was created. In order to evaluate
+namespace mode rules we need to know both a) which namespace the
+endpoints are in, and b) what mode that namespace had when the endpoints
+were created. This allows us to handle the changing of modes from global
+to local *after* a socket has been created by remembering that the mode
+was global when the socket was created. If we were to use the current
+net's mode instead, then the lookup would fail and the socket would
+break.
+
+Signed-off-by: Bobby Eshleman <bobbyeshleman@meta.com>
+---
+Changes in v10:
+- change mode_locked to int (Stefano)
+
+Changes in v9:
+- use xchg(), WRITE_ONCE(), READ_ONCE() for mode and mode_locked (Stefano)
+- clarify mode0/mode1 meaning in vsock_net_check_mode() comment
+- remove spin lock in net->vsock (not used anymore)
+- change mode from u8 to enum vsock_net_mode in vsock_net_write_mode()
+
+Changes in v7:
+- clarify vsock_net_check_mode() comments
+- change to `orig_net_mode == VSOCK_NET_MODE_GLOBAL && orig_net_mode == vsk->orig_net_mode`
+- remove extraneous explanation of `orig_net_mode`
+- rename `written` to `mode_locked`
+- rename `vsock_hdr` to `sysctl_hdr`
+- change `orig_net_mode` to `net_mode`
+- make vsock_net_check_mode() more generic by taking just net pointers
+  and modes, instead of a vsock_sock ptr, for reuse by transports
+  (e.g., vhost_vsock)
+
+Changes in v6:
+- add orig_net_mode to store mode at creation time which will be used to
+  avoid breakage when namespace changes mode during socket/VM lifespan
+
+Changes in v5:
+- use /proc/sys/net/vsock/ns_mode instead of /proc/net/vsock_ns_mode
+- change from net->vsock.ns_mode to net->vsock.mode
+- change vsock_net_set_mode() to vsock_net_write_mode()
+- vsock_net_write_mode() returns bool for write success to avoid
+  need to use vsock_net_mode_can_set()
+- remove vsock_net_mode_can_set()
+---
+ MAINTAINERS                 |  1 +
+ include/net/af_vsock.h      | 44 ++++++++++++++++++++++++++++++++++++++++++++
+ include/net/net_namespace.h |  4 ++++
+ include/net/netns/vsock.h   | 17 +++++++++++++++++
+ 4 files changed, 66 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vsock: add namespace support to
+[PATCH net-next v10 00/11] vsock: add namespace support to
+Author: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+This series adds namespace support to vhost-vsock and loopback. It does
+not add namespaces to any of the other guest transports (virtio-vsock,
+hyperv, or vmci).
+
+The current revision supports two modes: local and global. Local
+mode is complete isolation of namespaces, while global mode is complete
+sharing between namespaces of CIDs (the original behavior).
+
+The mode is set using /proc/sys/net/vsock/ns_mode.
+
+Modes are per-netns and write-once. This allows a system to configure
+namespaces independently (some may share CIDs, others are completely
+isolated). This also supports future possible mixed use cases, where
+there may be namespaces in global mode spinning up VMs while there are
+mixed mode namespaces that provide services to the VMs, but are not
+allowed to allocate from the global CID pool (this mode is not
+implemented in this series).
+
+If a socket or VM is created when a namespace is global but the
+namespace changes to local, the socket or VM will continue working
+normally. That is, the socket or VM assumes the mode behavior of the
+namespace at the time the socket/VM was created. The original mode is
+captured in vsock_create() and so occurs at the time of socket(2) and
+accept(2) for sockets and open(2) on /dev/vhost-vsock for VMs. This
+prevents a socket/VM connection from suddenly breaking due to a
+namespace mode change. Any new sockets/VMs created after the mode change
+will adopt the new mode's behavior.
+
+Additionally, added tests for the new namespace features:
+
+tools/testing/selftests/vsock/vmtest.sh
+1..29
+ok 1 vm_server_host_client
+ok 2 vm_client_host_server
+ok 3 vm_loopback
+ok 4 ns_guest_local_mode_rejected
+ok 5 ns_host_vsock_ns_mode_ok
+ok 6 ns_host_vsock_ns_mode_write_once_ok
+ok 7 ns_global_same_cid_fails
+ok 8 ns_local_same_cid_ok
+ok 9 ns_global_local_same_cid_ok
+ok 10 ns_local_global_same_cid_ok
+ok 11 ns_diff_global_host_connect_to_global_vm_ok
+ok 12 ns_diff_global_host_connect_to_local_vm_fails
+ok 13 ns_diff_global_vm_connect_to_global_host_ok
+ok 14 ns_diff_global_vm_connect_to_local_host_fails
+ok 15 ns_diff_local_host_connect_to_local_vm_fails
+ok 16 ns_diff_local_vm_connect_to_local_host_fails
+ok 17 ns_diff_global_to_local_loopback_local_fails
+ok 18 ns_diff_local_to_global_loopback_fails
+ok 19 ns_diff_local_to_local_loopback_fails
+ok 20 ns_diff_global_to_global_loopback_ok
+ok 21 ns_same_local_loopback_ok
+ok 22 ns_same_local_host_connect_to_local_vm_ok
+ok 23 ns_same_local_vm_connect_to_local_host_ok
+ok 24 ns_mode_change_connection_continue_vm_ok
+ok 25 ns_mode_change_connection_continue_host_ok
+ok 26 ns_mode_change_connection_continue_both_ok
+ok 27 ns_delete_vm_ok
+ok 28 ns_delete_host_ok
+ok 29 ns_delete_both_ok
+SUMMARY: PASS=29 SKIP=0 FAIL=0
+
+Dependent on series:
+https://lore.kernel.org/all/20251108-vsock-selftests-fixes-and-improvements-v4-0-d5e8d6c87289@meta.com/
+
+Thanks again for everyone's help and reviews!
+
+Suggested-by: Sargun Dhillon <sargun@sargun.me>
+Signed-off-by: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+To: Stefano Garzarella <sgarzare@redhat.com>
+To: Shuah Khan <shuah@kernel.org>
+To: David S. Miller <davem@davemloft.net>
+To: Eric Dumazet <edumazet@google.com>
+To: Jakub Kicinski <kuba@kernel.org>
+To: Paolo Abeni <pabeni@redhat.com>
+To: Simon Horman <horms@kernel.org>
+To: Stefan Hajnoczi <stefanha@redhat.com>
+To: Michael S. Tsirkin <mst@redhat.com>
+To: Jason Wang <jasowang@redhat.com>
+To: Xuan Zhuo <xuanzhuo@linux.alibaba.com>
+To: Eugenio Pérez <eperezma@redhat.com>
+To: K. Y. Srinivasan <kys@microsoft.com>
+To: Haiyang Zhang <haiyangz@microsoft.com>
+To: Wei Liu <wei.liu@kernel.org>
+To: Dexuan Cui <decui@microsoft.com>
+To: Bryan Tan <bryan-bt.tan@broadcom.com>
+To: Vishnu Dasa <vishnu.dasa@broadcom.com>
+To: Broadcom internal kernel review list <bcm-kernel-feedback-list@broadcom.com>
+Cc: virtualization@lists.linux.dev
+Cc: netdev@vger.kernel.org
+Cc: linux-kselftest@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Cc: kvm@vger.kernel.org
+Cc: linux-hyperv@vger.kernel.org
+Cc: berrange@redhat.com
+Cc: Sargun Dhillon <sargun@sargun.me>
+
+Changes in v10:
+- Combine virtio common patches into one (Stefano)
+- Resolve vsock_loopback virtio_transport_reset_no_sock() issue
+  with info->vsk setting. This eliminates the need for skb->cb,
+  so remove skb->cb patches.
+- many line width 80 fixes
+- Link to v9: https://lore.kernel.org/all/20251111-vsock-vmtest-v9-0-852787a37bed@meta.com
+
+Changes in v9:
+- reorder loopback patch after patch for virtio transport common code
+- remove module ordering tests patch because loopback no longer depends
+  on pernet ops
+- major simplifications in vsock_loopback
+- added a new patch for blocking local mode for guests, added test case
+  to check
+- add net ref tracking to vsock_loopback patch
+- Link to v8: https://lore.kernel.org/r/20251023-vsock-vmtest-v8-0-dea984d02bb0@meta.com
+
+Changes in v8:
+- Break generic cleanup/refactoring patches into standalone series,
+  remove those from this series
+- Link to dependency: https://lore.kernel.org/all/20251022-vsock-selftests-fixes-and-improvements-v1-0-edeb179d6463@meta.com/
+- Link to v7: https://lore.kernel.org/r/20251021-vsock-vmtest-v7-0-0661b7b6f081@meta.com
+
+Changes in v7:
+- fix hv_sock build
+- break out vmtest patches into distinct, more well-scoped patches
+- change `orig_net_mode` to `net_mode`
+- many fixes and style changes in per-patch change sets (see individual
+  patches for specific changes)
+- optimize `virtio_vsock_skb_cb` layout
+- update commit messages with more useful descriptions
+- vsock_loopback: use orig_net_mode instead of current net mode
+- add tests for edge cases (ns deletion, mode changing, loopback module
+  load ordering)
+- Link to v6: https://lore.kernel.org/r/20250916-vsock-vmtest-v6-0-064d2eb0c89d@meta.com
+
+Changes in v6:
+- define behavior when mode changes to local while socket/VM is alive
+- af_vsock: clarify description of CID behavior
+- af_vsock: use stronger langauge around CID rules (dont use "may")
+- af_vsock: improve naming of buf/buffer
+- af_vsock: improve string length checking on proc writes
+- vsock_loopback: add space in struct to clarify lock protection
+- vsock_loopback: do proper cleanup/unregister on vsock_loopback_exit()
+- vsock_loopback: use virtio_vsock_skb_net() instead of sock_net()
+- vsock_loopback: set loopback to NULL after kfree()
+- vsock_loopback: use pernet_operations and remove callback mechanism
+- vsock_loopback: add macros for "global" and "local"
+- vsock_loopback: fix length checking
+- vmtest.sh: check for namespace support in vmtest.sh
+- Link to v5: https://lore.kernel.org/r/20250827-vsock-vmtest-v5-0-0ba580bede5b@meta.com
+
+Changes in v5:
+- /proc/net/vsock_ns_mode -> /proc/sys/net/vsock/ns_mode
+- vsock_global_net -> vsock_global_dummy_net
+- fix netns lookup in vhost_vsock to respect pid namespaces
+- add callbacks for vsock_loopback to avoid circular dependency
+- vmtest.sh loads vsock_loopback module
+- remove vsock_net_mode_can_set()
+- change vsock_net_write_mode() to return true/false based on success
+- make vsock_net_mode enum instead of u8
+- Link to v4: https://lore.kernel.org/r/20250805-vsock-vmtest-v4-0-059ec51ab111@meta.com
+
+Changes in v4:
+- removed RFC tag
+- implemented loopback support
+- renamed new tests to better reflect behavior
+- completed suite of tests with permutations of ns modes and vsock_test
+  as guest/host
+- simplified socat bridging with unix socket instead of tcp + veth
+- only use vsock_test for success case, socat for failure case (context
+  in commit message)
+- lots of cleanup
+
+Changes in v3:
+- add notion of "modes"
+- add procfs /proc/net/vsock_ns_mode
+- local and global modes only
+- no /dev/vhost-vsock-netns
+- vmtest.sh already merged, so new patch just adds new tests for NS
+- Link to v2:
+  https://lore.kernel.org/kvm/20250312-vsock-netns-v2-0-84bffa1aa97a@gmail.com
+
+Changes in v2:
+- only support vhost-vsock namespaces
+- all g2h namespaces retain old behavior, only common API changes
+  impacted by vhost-vsock changes
+- add /dev/vhost-vsock-netns for "opt-in"
+- leave /dev/vhost-vsock to old behavior
+- removed netns module param
+- Link to v1:
+  https://lore.kernel.org/r/20200116172428.311437-1-sgarzare@redhat.com
+
+Changes in v1:
+- added 'netns' module param to vsock.ko to enable the
+  network namespace support (disabled by default)
+- added 'vsock_net_eq()' to check the "net" assigned to a socket
+  only when 'netns' support is enabled
+- Link to RFC: https://patchwork.ozlabs.org/cover/1202235/
+
+---
+Bobby Eshleman (11):
+      vsock: a per-net vsock NS mode state
+      vsock: add netns to vsock core
+      vsock: reject bad VSOCK_NET_MODE_LOCAL configuration for G2H
+      vsock: add netns support to virtio transports
+      virtio: set skb owner of virtio_transport_reset_no_sock() reply
+      selftests/vsock: add namespace helpers to vmtest.sh
+      selftests/vsock: prepare vm management helpers for namespaces
+      selftests/vsock: add tests for proc sys vsock ns_mode
+      selftests/vsock: add namespace tests for CID collisions
+      selftests/vsock: add tests for host <-> vm connectivity with namespaces
+      selftests/vsock: add tests for namespace deletion and mode changes
+
+ MAINTAINERS                             |    1 +
+ drivers/vhost/vsock.c                   |   57 +-
+ include/linux/virtio_vsock.h            |    8 +-
+ include/net/af_vsock.h                  |   58 +-
+ include/net/net_namespace.h             |    4 +
+ include/net/netns/vsock.h               |   17 +
+ net/vmw_vsock/af_vsock.c                |  294 ++++++++-
+ net/vmw_vsock/hyperv_transport.c        |    6 +
+ net/vmw_vsock/virtio_transport.c        |   29 +-
+ net/vmw_vsock/virtio_transport_common.c |   69 +-
+ net/vmw_vsock/vmci_transport.c          |    7 +
+ net/vmw_vsock/vsock_loopback.c          |   20 +-
+ tools/testing/selftests/vsock/vmtest.sh | 1037 +++++++++++++++++++++++++++++--
+ 13 files changed, 1514 insertions(+), 93 deletions(-)
+
+----------------------------------------------------------------------
+
