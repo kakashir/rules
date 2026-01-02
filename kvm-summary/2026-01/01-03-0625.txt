@@ -1,0 +1,188 @@
+From 256317799 to 197f7f123
+KVM mailing list update from 256317799 to 197f7f123
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     11 amazon.co.uk
+      1 marvell.com
+      1 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+     11  Fred Griffoul <fgriffo@amazon.co.uk>
+      1  Yosry Ahmed <yosry.ahmed@linux.dev>
+      1  Kommula Shiva Shankar <kshankar@marvell.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: nVMX: Implement cache for L1 MSR bitmap
+[PATCH v4 01/10] KVM: nVMX: Implement cache for L1 MSR bitmap
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Introduce a gfn_to_pfn_cache to optimize L1 MSR bitmap access by
+replacing map/unmap operations. This optimization reduces overhead
+during L2 VM-entry where nested_vmx_prepare_msr_bitmap() merges L1's MSR
+intercepts with L0's requirements.
+
+Current implementation using kvm_vcpu_map_readonly() and
+kvm_vcpu_unmap() creates significant performance impact, mostly with
+unmanaged guest memory.
+
+The cache is initialized when entering VMX operation and deactivated
+when VMX operation ends.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/x86/kvm/vmx/nested.c | 42 +++++++++++++++++++++++++++++++++++----
+ arch/x86/kvm/vmx/vmx.h    |  2 ++
+ 2 files changed, 40 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Improve performance for unmanaged guest memory
+[PATCH v4 00/10] KVM: nVMX: Improve performance for unmanaged guest memory
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+This patch series addresses both performance and correctness issues in
+nested VMX when handling guest memory.
+
+During nested VMX operations, L0 (KVM) accesses specific L1 guest pages
+to manage L2 execution. These pages fall into two categories: pages
+accessed only by L0 (such as the L1 MSR bitmap page or the eVMCS page),
+and pages passed to the L2 guest via vmcs02 (such as APIC access,
+virtual APIC, and posted interrupt descriptor pages).
+
+The current implementation uses kvm_vcpu_map/unmap, which causes two
+issues.
+
+First, the current approach is missing proper invalidation handling in
+critical scenarios. Enlightened VMCS (eVMCS) pages can become stale when
+memslots are modified, as there is no mechanism to invalidate the cached
+mappings. Similarly, APIC access and virtual APIC pages can be migrated
+by the host, but without proper notification through mmu_notifier
+callbacks, the mappings become invalid and can lead to incorrect
+behavior.
+
+Second, for unmanaged guest memory (memory not directly mapped by the
+kernel, such as memory passed with the mem= parameter or guest_memfd for
+non-CoCo VMs), this workflow invokes expensive memremap/memunmap
+operations on every L2 VM entry/exit cycle. This creates significant
+overhead that impacts nested virtualization performance.
+
+This series replaces kvm_host_map with gfn_to_pfn_cache in nested VMX.
+The pfncache infrastructure maintains persistent mappings as long as the
+page GPA does not change, eliminating the memremap/memunmap overhead on
+every VM entry/exit cycle. Additionally, pfncache provides proper
+invalidation handling via mmu_notifier callbacks and memslots generation
+check, ensuring that mappings are correctly updated during both memslot
+updates and page migration events.
+
+As an example, a microbenchmark using memslot_perf_test with 8192
+memslots demonstrates huge improvements in nested VMX operations with
+unmanaged guest memory (this is a synthetic benchmark run on
+AWS EC2 Nitro instances, and the results are not representative of
+typical nested virtualization workloads):
+
+                        Before          After           Improvement
+  map:                  26.12s          1.54s           ~17x faster
+  unmap:                40.00s          0.017s          ~2353x faster
+  unmap chunked:        10.07s          0.005s          ~2014x faster
+
+The series is organized as follows:
+
+Patches 1-5 handle the L1 MSR bitmap page and system pages (APIC access,
+virtual APIC, and posted interrupt descriptor). Patch 1 converts the MSR
+bitmap to use gfn_to_pfn_cache. Patches 2-3 restore and complete
+"guest-uses-pfn" support in pfncache. Patch 4 converts the system pages
+to use gfn_to_pfn_cache. Patch 5 adds a selftest for cache invalidation
+and memslot updates.
+
+Patches 6-7 add enlightened VMCS support. Patch 6 avoids accessing eVMCS
+fields after they are copied into the cached vmcs12 structure. Patch 7
+converts eVMCS page mapping to use gfn_to_pfn_cache.
+
+Patches 8-10 implement persistent nested context to handle L2 vCPU
+multiplexing and migration between L1 vCPUs. Patch 8 introduces the
+nested context management infrastructure. Patch 9 integrates pfncache
+with persistent nested context. Patch 10 adds a selftest for this L2
+vCPU context switching.
+
+v4:
+ - Rebase on kvm/next required additional vapic handling in patch 4
+   and a tiny fix in patch 5.
+ - Fix patch 9 to re-assign vcpu to pfncache if the nested
+   context has been recycled, and to clear the vcpu context in
+   free_nested().
+
+v3:
+  - fixed warnings reported by kernel test robot in patches 7 and 8.
+
+v2:
+  - Extended series to support enlightened VMCS (eVMCS).
+  - Added persistent nested context for improved L2 vCPU handling.
+  - Added additional selftests.
+
+Suggested-by: dwmw@amazon.co.uk
+
+
+Fred Griffoul (10):
+  KVM: nVMX: Implement cache for L1 MSR bitmap
+  KVM: pfncache: Restore guest-uses-pfn support
+  KVM: x86: Add nested state validation for pfncache support
+  KVM: nVMX: Implement cache for L1 APIC pages
+  KVM: selftests: Add nested VMX APIC cache invalidation test
+  KVM: nVMX: Cache evmcs fields to ensure consistency during VM-entry
+  KVM: nVMX: Replace evmcs kvm_host_map with pfncache
+  KVM: x86: Add nested context management
+  KVM: nVMX: Use nested context for pfncache persistence
+  KVM: selftests: Add L2 vcpu context switch test
+
+ arch/x86/include/asm/kvm_host.h               |  32 ++
+ arch/x86/include/uapi/asm/kvm.h               |   2 +
+ arch/x86/kvm/Makefile                         |   2 +-
+ arch/x86/kvm/nested.c                         | 199 +++++++
+ arch/x86/kvm/vmx/hyperv.c                     |   5 +-
+ arch/x86/kvm/vmx/hyperv.h                     |  33 +-
+ arch/x86/kvm/vmx/nested.c                     | 499 ++++++++++++++----
+ arch/x86/kvm/vmx/vmx.c                        |   8 +
+ arch/x86/kvm/vmx/vmx.h                        |  16 +-
+ arch/x86/kvm/x86.c                            |  19 +-
+ include/linux/kvm_host.h                      |  34 +-
+ include/linux/kvm_types.h                     |   1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../selftests/kvm/x86/vmx_apic_update_test.c  | 302 +++++++++++
+ .../selftests/kvm/x86/vmx_l2_switch_test.c    | 416 +++++++++++++++
+ virt/kvm/kvm_main.c                           |   3 +-
+ virt/kvm/kvm_mm.h                             |   6 +-
+ virt/kvm/pfncache.c                           |  43 +-
+ 18 files changed, 1496 insertions(+), 126 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost: fix caching attributes of MMIO regions by setting them explicitly
+[PATCH] vhost: fix caching attributes of MMIO regions by setting them explicitly
+Author: Kommula Shiva Shankar <kshankar@marvell.com>
+
+Explicitly set non-cached caching attributes for MMIO regions.
+Default write-back mode can cause CPU to cache device memory,
+causing invalid reads and unpredictable behavior.
+
+Invalid read and write issues were observed on ARM64 when mapping the
+notification area to userspace via mmap.
+
+Signed-off-by: Kommula Shiva Shankar <kshankar@marvell.com>
+Acked-by: Jason Wang <jasowang@redhat.com>
+---
+Originally sent to net-next, now redirected to vhost tree
+per Jason Wang's suggestion. 
+
+ drivers/vhost/vdpa.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
