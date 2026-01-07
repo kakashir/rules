@@ -1,0 +1,397 @@
+From 2da7ebe7a to 00cbde86e
+KVM mailing list update from 2da7ebe7a to 00cbde86e
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     10 tu-dortmund.de
+      5 google.com
+      2 linaro.org
+      1 oss.qualcomm.com
+      1 fb.com
+
+Top 15 contributors (Based on Email Body)
+
+     10  Simon Schippers <simon.schippers@tu-dortmund.de>
+      4  Samiullah Khawaja <skhawaja@google.com>
+      2  =?UTF-8?q?Philippe=20Mathieu-Daud=C3=A9?= <philmd@linaro.org>
+      1  Xin Liu <xin.liu@oss.qualcomm.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Alex Mastro <amastro@fb.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vfio: selftests: Add vfio_dma_mapping_mmio_test
+[PATCH] vfio: selftests: Add vfio_dma_mapping_mmio_test
+Author: Alex Mastro <amastro@fb.com>
+
+Test MMIO-backed DMA mappings by iommu_map()-ing mmap'ed BAR regions.
+Also update vfio_pci_bar_map() to align BAR mmaps for efficient huge
+page mappings.
+
+Only vfio_type1 variants are tested; iommufd variants can be added
+once kernel support lands. The manual mmap alignment can be removed
+once mmap(!MAP_FIXED) on vfio device fds improves to automatically
+return well-aligned addresses.
+
+Signed-off-by: Alex Mastro <amastro@fb.com>
+---
+Sanity test run:
+
+$ ./vfio_dma_mapping_mmio_test 0000:05:00.0
+TAP version 13
+1..4
+# Starting 4 tests from 2 test cases.
+#  RUN           vfio_dma_mapping_mmio_test.vfio_type1_iommu.map_full_bar ...
+Mapping BAR4: vaddr=0x7fad40000000 size=0x2000000000 iova=0x2000000000
+#            OK  vfio_dma_mapping_mmio_test.vfio_type1_iommu.map_full_bar
+ok 1 vfio_dma_mapping_mmio_test.vfio_type1_iommu.map_full_bar
+#  RUN           vfio_dma_mapping_mmio_test.vfio_type1_iommu.map_partial_bar ...
+Mapping BAR4 (partial): vaddr=0x7fad40000000 size=0x1000 iova=0x0
+#            OK  vfio_dma_mapping_mmio_test.vfio_type1_iommu.map_partial_bar
+ok 2 vfio_dma_mapping_mmio_test.vfio_type1_iommu.map_partial_bar
+#  RUN           vfio_dma_mapping_mmio_test.vfio_type1v2_iommu.map_full_bar ...
+Mapping BAR4: vaddr=0x7fad40000000 size=0x2000000000 iova=0x2000000000
+#            OK  vfio_dma_mapping_mmio_test.vfio_type1v2_iommu.map_full_bar
+ok 3 vfio_dma_mapping_mmio_test.vfio_type1v2_iommu.map_full_bar
+#  RUN           vfio_dma_mapping_mmio_test.vfio_type1v2_iommu.map_partial_bar ...
+Mapping BAR4 (partial): vaddr=0x7fad40000000 size=0x1000 iova=0x0
+#            OK  vfio_dma_mapping_mmio_test.vfio_type1v2_iommu.map_partial_bar
+ok 4 vfio_dma_mapping_mmio_test.vfio_type1v2_iommu.map_partial_bar
+# PASSED: 4 / 4 tests passed.
+# Totals: pass:4 fail:0 xfail:0 xpass:0 skip:0 error:0
+---
+ tools/testing/selftests/vfio/Makefile              |   1 +
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c |  28 ++++-
+ .../selftests/vfio/vfio_dma_mapping_mmio_test.c    | 132 +++++++++++++++++++++
+ 3 files changed, 160 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+[PATCH net-next v7 0/9] tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch series deals with tun/tap and vhost-net which drop incoming 
+SKBs whenever their internal ptr_ring buffer is full. Instead, with this 
+patch series, the associated netdev queue is stopped before this happens - 
+but only when a qdisc is attached. If no qdisc is present the existing 
+behavior is preserved.
+
+By applying proper backpressure, this change allows the connected qdisc to 
+operate correctly, as reported in [1], and significantly improves 
+performance in real-world scenarios, as demonstrated in our paper [2]. For 
+example, we observed a 36% TCP throughput improvement for an OpenVPN 
+connection between Germany and the USA.
+
+At the same time, synthetic benchmarks (details below) show only minor 
+theoretical performance impact:
+(1) With the noqueue qdisc, the patched behavior matches the stock 
+    implementation, as expected. In both configurations, a significant
+    number of packets are dropped.
+(2) pktgen benchmarks show a ~5-10% throughput reduction for TAP alone, 
+    while no performance impact is observed for TAP + vhost-net. In both 
+    cases, zero packet drops are observed.
+(3) TCP benchmarks using iperf3 show no performance degradation for either 
+    TAP or TAP combined with vhost-net.
+
+This patch series touches tun/tap and vhost-net, as they share common 
+logic and must be updated together. Modifying only one of them would break 
+the others. The series is therefore structured as follows:
+(1-2) ptr_ring:  Introduce new helpers, which are used by patches (3)
+                 and (9).
+(3)   tun/tap:   add a ptr_ring consume helper with netdev queue wakeup.
+(4-8) vhost-net: introduce and switch to the new tun/tap ptr_ring 
+                 wrappers with netdev queue wakeup.
+(9)   tun/tap:   avoid ptr_ring tail-drop when a qdisc is present by 
+                 stopping the netdev queue.
+
++-------------------------+-----------+---------------+----------------+
+| pktgen benchmarks to    | Stock     | Patched with  | Patched with   |
+| Debian VM, i5 6300HQ,   |           | noqueue qdisc | fq_codel qdisc |
+| 10M packets             |           |               |                |
++-----------+-------------+-----------+---------------+----------------+
+| TAP       | Transmitted | 196 Kpps  | 195 Kpps      | 185 Kpps       |
+|           +-------------+-----------+---------------+----------------+
+|           | Lost        | 1618 Kpps | 1556 Kpps     | 0              |
++-----------+-------------+-----------+---------------+----------------+
+| TAP       | Transmitted | 577 Kpps  | 582 Kpps      | 578 Kpps       |
+|  +        +-------------+-----------+---------------+----------------+
+| vhost-net | Lost        | 1170 Kpps | 1109 Kpps     | 0              |
++-----------+-------------+-----------+---------------+----------------+
+
++-------------------------+-----------+---------------+----------------+
+| pktgen benchmarks to    | Stock     | Patched with  | Patched with   |
+| Debian VM, i5 6300HQ,   |           | noqueue qdisc | fq_codel qdisc |
+| 10M packets,            |           |               |                |
+| *4 threads*             |           |               |                |
++-----------+-------------+-----------+---------------+----------------+
+| TAP       | Transmitted | 26 Kpps   | 26 Kpps       | 23 Kpps        |
+|           +-------------+-----------+---------------+----------------+
+|           | Lost        | 1535 Kpps | 1551 Kpps     | 0              |
++-----------+-------------+-----------+---------------+----------------+
+| TAP       | Transmitted | 64 Kpps   | 63 Kpps       | 66 Kpps        |
+|  +        +-------------+-----------+---------------+----------------+
+| vhost-net | Lost        | 1550 Kpps | 1506 Kpps     | 0              |
++-----------+-------------+-----------+---------------+----------------+
+
++-----------------------+-------------+---------------+----------------+
+| iperf3 TCP benchmarks | Stock       | Patched with  | Patched with   |
+| to Debian VM          |             | noqueue qdisc | fq_codel qdisc |
+| i5 6300HQ, 120s       |             |               |                |
++-----------------------+-------------+---------------+----------------+
+| TAP                   | 1.71 Gbit/s | 1.71 Gbit/s   | 1.71 Gbit/s    |
++-----------------------+-------------+---------------+----------------+
+| TAP + vhost-net       | 22.1 Gbit/s | 22.0 Gbit/s   | 22.0 Gbit/s    |
++-----------------------+-------------+---------------+----------------+
+
+[1] Link: https://unix.stackexchange.com/questions/762935/traffic-shaping-ineffective-on-tun-device
+[2] Link: https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+[3] Link: https://lore.kernel.org/r/174549940981.608169.4363875844729313831.stgit@firesoul
+[4] Link: https://lore.kernel.org/r/176295323282.307447.14790015927673763094.stgit@firesoul
+
+---
+Changelog:
+V7:
+- Switch to an approach similar to veth [3] (excluding the recently fixed 
+variant [4]), as suggested by MST, with minor adjustments discussed in V6
+- Rename the cover-letter title
+- Add multithreaded pktgen and iperf3 benchmarks, as suggested by Jason 
+Wang
+- Rework __ptr_ring_consume_created_space() so it can also be used after 
+batched consume
+
+V6: https://lore.kernel.org/netdev/20251120152914.1127975-1-simon.schippers@tu-dortmund.de/
+General:
+- Major adjustments to the descriptions. Special thanks to Jon Kohler!
+- Fix git bisect by moving most logic into dedicated functions and only 
+start using them in patch 7.
+- Moved the main logic of the coupled producer and consumer into a single 
+patch to avoid a chicken-and-egg dependency between commits :-)
+- Rebased to 6.18-rc5 and ran benchmarks again that now also include lost 
+packets (previously I missed a 0, so all benchmark results were higher by 
+factor 10...).
+- Also include the benchmark in patch 7.
+
+Producer:
+- Move logic into the new helper tun_ring_produce()
+- Added a smp_rmb() paired with the consumer, ensuring freed space of the 
+consumer is visible
+- Assume that ptr_ring is not full when __ptr_ring_full_next() is called
+
+Consumer:
+- Use an unpaired smp_rmb() instead of barrier() to ensure that the 
+netdev_tx_queue_stopped() call completes before discarding
+- Also wake the netdev queue if it was stopped before discarding and then 
+becomes empty
+-> Fixes race with producer as identified by MST in V5
+-> Waking the netdev queues upon resize is not required anymore
+- Use __ptr_ring_consume_created_space() instead of messing with ptr_ring 
+internals
+-> Batched consume now just calls 
+__tun_ring_consume()/__tap_ring_consume() in a loop
+- Added an smp_wmb() before waking the netdev queue which is paired with 
+the smp_rmb() discussed above
+
+V5: https://lore.kernel.org/netdev/20250922221553.47802-1-simon.schippers@tu-dortmund.de/T/#u
+- Stop the netdev queue prior to producing the final fitting ptr_ring entry
+-> Ensures the consumer has the latest netdev queue state, making it safe 
+to wake the queue
+-> Resolves an issue in vhost-net where the netdev queue could remain 
+stopped despite being empty
+-> For TUN/TAP, the netdev queue no longer needs to be woken in the 
+blocking loop
+-> Introduces new helpers __ptr_ring_full_next and 
+__ptr_ring_will_invalidate for this purpose
+- vhost-net now uses wrappers of TUN/TAP for ptr_ring consumption rather 
+than maintaining its own rx_ring pointer
+
+V4: https://lore.kernel.org/netdev/20250902080957.47265-1-simon.schippers@tu-dortmund.de/T/#u
+- Target net-next instead of net
+- Changed to patch series instead of single patch
+- Changed to new title from old title
+"TUN/TAP: Improving throughput and latency by avoiding SKB drops"
+- Wake netdev queue with new helpers wake_netdev_queue when there is any 
+spare capacity in the ptr_ring instead of waiting for it to be empty
+- Use tun_file instead of tun_struct in tun_ring_recv as a more consistent 
+logic
+- Use smp_wmb() and smp_rmb() barrier pair, which avoids any packet drops 
+that happened rarely before
+- Use safer logic for vhost-net using RCU read locks to access TUN/TAP data
+
+V3: https://lore.kernel.org/netdev/20250825211832.84901-1-simon.schippers@tu-dortmund.de/T/#u
+- Added support for TAP and TAP+vhost-net.
+
+V2: https://lore.kernel.org/netdev/20250811220430.14063-1-simon.schippers@tu-dortmund.de/T/#u
+- Removed NETDEV_TX_BUSY return case in tun_net_xmit and removed 
+unnecessary netif_tx_wake_queue in tun_ring_recv.
+
+V1: https://lore.kernel.org/netdev/20250808153721.261334-1-simon.schippers@tu-dortmund.de/T/#u
+---
+
+Simon Schippers (9):
+  ptr_ring: move free-space check into separate helper
+  ptr_ring: add helper to detect newly freed space on consume
+  tun/tap: add ptr_ring consume helper with netdev queue wakeup
+  tun/tap: add batched ptr_ring consume functions with netdev queue
+    wakeup
+  tun/tap: add unconsume function for returning entries to ptr_ring
+  tun/tap: add helper functions to check file type
+  vhost-net: vhost-net: replace rx_ring with tun/tap ring wrappers
+  tun/tap: drop get ring exports
+  tun/tap & vhost-net: avoid ptr_ring tail-drop when qdisc is present
+
+ drivers/net/tap.c        | 66 ++++++++++++++++++++++++---
+ drivers/net/tun.c        | 99 ++++++++++++++++++++++++++++++++++++----
+ drivers/vhost/net.c      | 92 ++++++++++++++++++++++++-------------
+ include/linux/if_tap.h   | 16 +++++--
+ include/linux/if_tun.h   | 18 ++++++--
+ include/linux/ptr_ring.h | 27 ++++++++++-
+ 6 files changed, 263 insertions(+), 55 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  ptr_ring: move free-space check into separate helper
+[PATCH net-next v7 1/9] ptr_ring: move free-space check into separate helper
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch moves the check for available free space for a new entry into
+a separate function. As a result, __ptr_ring_produce() remains logically
+unchanged, while the new helper allows callers to determine in advance
+whether subsequent __ptr_ring_produce() calls will succeed. This
+information can, for example, be used to temporarily stop producing until
+__ptr_ring_peek() indicates that space is available again.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ include/linux/ptr_ring.h | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Fix an off-by-one typo in the comment for enabling
+[PATCH] KVM: SVM: Fix an off-by-one typo in the comment for enabling
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix a goof in the comment that documents KVM's logic for enabling AVIC by
+default to reference Zen5+ as family 0x1A (Zen5), not family 0x19 (Zen4).
+The code is correct (checks for _greater_ than 0x19), only the comment is
+flawed.
+
+Fixes: ca2967de5a5b ("KVM: SVM: Enable AVIC by default for Zen4+ if x2AVIC is support")
+Cc: Naveen N Rao (AMD) <naveen@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/avic.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  iommu/vt-d: Allow replacing no_pasid iommu_domain
+[PATCH 1/3] iommu/vt-d: Allow replacing no_pasid iommu_domain
+Author: Samiullah Khawaja <skhawaja@google.com>
+
+Intel IOMMU driver already supports replacing IOMMU domains attachments
+with PASIDs. Add support for replacing a domain attached with no_pasid.
+This includes replacing domains in legacy mode.
+
+Signed-off-by: Samiullah Khawaja <skhawaja@google.com>
+---
+ drivers/iommu/intel/iommu.c | 107 ++++++++++++++++++++++++++----------
+ 1 file changed, 77 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  iommu/vt-d: Add support to hitless replace IOMMU domain
+[PATCH 0/3] iommu/vt-d: Add support to hitless replace IOMMU domain
+Author: Samiullah Khawaja <skhawaja@google.com>
+
+Intel IOMMU Driver already supports replacing IOMMU domain hitlessly in
+scalable mode. The support is not available in legacy mode and for
+NO_PASID in scalable mode. This patch series adds the support for legacy
+mode and NO_PASID scalable mode.
+
+This is needed for the Live update IOMMU persistence to hotswap the
+iommu domain after liveupdate:
+https://lore.kernel.org/all/20251202230303.1017519-1-skhawaja@google.com/
+
+The patch adds the support for scalable mode NO_PASID mode by using the
+existing replace semantics. This works since in scalable mode the
+context entries are not updated and only the pasid entries are updated.
+
+The patch series also contains a vfio selftests for the iommu domain
+replace using iommufd hwpt replace functionality.
+
+Tested on a Host with scalable mode and on Qemu with legacy mode:
+
+tools/testing/selftests/vfio/scripts/setup.sh <dsa_device_bdf>
+tools/testing/selftests/vfio/vfio_iommufd_hwpt_replace_test <dsa_device_bdf>
+
+TAP version 13
+1..2
+# Starting 2 tests from 2 test cases.
+#  RUN           vfio_iommufd_replace_hwpt_test.domain_replace.memcpy ...
+#            OK  vfio_iommufd_replace_hwpt_test.domain_replace.memcpy
+ok 1 vfio_iommufd_replace_hwpt_test.domain_replace.memcpy
+#  RUN           vfio_iommufd_replace_hwpt_test.noreplace.memcpy ...
+#            OK  vfio_iommufd_replace_hwpt_test.noreplace.memcpy
+ok 2 vfio_iommufd_replace_hwpt_test.noreplace.memcpy
+# PASSED: 2 / 2 tests passed.
+# Totals: pass:2 fail:0 xfail:0 xpass:0 skip:0 error:0
+
+Samiullah Khawaja (3):
+  iommu/vt-d: Allow replacing no_pasid iommu_domain
+  vfio: selftests: Add support of creating iommus from iommufd
+  vfio: selftests: Add iommufd hwpt replace test
+
+ drivers/iommu/intel/iommu.c                   | 107 +++++++++----
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../vfio/lib/include/libvfio/iommu.h          |   2 +
+ .../lib/include/libvfio/vfio_pci_device.h     |   2 +
+ tools/testing/selftests/vfio/lib/iommu.c      |  60 ++++++-
+ .../selftests/vfio/lib/vfio_pci_device.c      |  16 +-
+ .../vfio/vfio_iommufd_hwpt_replace_test.c     | 151 ++++++++++++++++++
+ 7 files changed, 303 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  target/i386: Include missing 'svm.h' header in 'sev.h'
+[PATCH 1/2] target/i386: Include missing 'svm.h' header in 'sev.h'
+Author: Philippe Mathieu-Daudé <philmd@linaro.org>
+
+"target/i386/sev.h" uses the vmcb_seg structure type, which
+is defined in "target/i386/svm.h". Include the latter, otherwise
+the following patch triggers:
+
+  ../target/i386/sev.h:62:21: error: field has incomplete type 'struct vmcb_seg'
+     62 |     struct vmcb_seg es;
+        |                     ^
+
+Signed-off-by: Philippe Mathieu-Daudé <philmd@linaro.org>
+---
+ target/i386/sev.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  selftests: kvm: add boundary tests for kvm_create_max_vcpus
+[PATCH] selftests: kvm: add boundary tests for kvm_create_max_vcpus
+Author: Xin Liu <xin.liu@oss.qualcomm.com>
+
+1.Allocate extra vCPUs beyond max count, assert creation failure.
+2.Create vCPU with ID over max ID, assert creation failure.
+
+These tests cover function boundary scenarios, ensuring correct
+behavior on vCPU count/ID overlimit.
+
+Signed-off-by: Xin Liu <xin.liu@oss.qualcomm.com>
+---
+ .../testing/selftests/kvm/kvm_create_max_vcpus.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
