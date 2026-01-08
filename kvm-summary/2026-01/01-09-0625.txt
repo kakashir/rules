@@ -1,0 +1,906 @@
+From 00cbde86e to bc47c93cf
+KVM mailing list update from 00cbde86e to bc47c93cf
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     22 linaro.org
+     12 linux.dev
+     10 kernel.org
+      9 intel.com
+      6 amd.com
+      4 tu-dortmund.de
+      4 arm.com
+      3 rbox.co
+      3 nvidia.com
+      2 aktech.ai
+      1 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     22  Philippe Mathieu-Daudé <philmd@linaro.org>
+     12  Oliver Upton <oliver.upton@linux.dev>
+     10  Marc Zyngier <maz@kernel.org>
+      6  Michael Roth <michael.roth@amd.com>
+      5  Zhao Liu <zhao1.liu@intel.com>
+      4  Suzuki K Poulose <suzuki.poulose@arm.com>
+      4  Simon Schippers <simon.schippers@tu-dortmund.de>
+      3  Michal Luczaj <mhal@rbox.co>
+      3  Ankit Agrawal <ankita@nvidia.com>
+      2  Vishal Verma <vishal.l.verma@intel.com>
+      2  Aidan Khoury <aidan@aktech.ai>
+      1  Yan Zhao <yan.y.zhao@intel.com>
+      1  Igor Mammedov <imammedo@redhat.com>
+      1  Chao Gao <chao.gao@intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: SVM: Fix a missing kunmap_local() in sev_gmem_post_populate()
+[PATCH v3 1/6] KVM: SVM: Fix a missing kunmap_local() in sev_gmem_post_populate()
+Author: Michael Roth <michael.roth@amd.com>
+
+
+sev_gmem_post_populate() needs to unmap the target vaddr after
+copy_from_user() to the vaddr fails.
+
+Fixes: dee5a47cc7a4 ("KVM: SEV: Add KVM_SEV_SNP_LAUNCH_UPDATE command")
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ arch/x86/kvm/svm/sev.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Rework preparation/population flows in prep for in-place conversion
+[PATCH v3 0/6] KVM: guest_memfd: Rework preparation/population flows in prep for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+This patchset is also available at:
+
+  https://github.com/AMDESE/linux/tree/gmem-populate-rework-v3
+
+and is based on top of kvm/next (0499add8efd7)
+
+
+Overview
+--------
+
+Yan previously posted a series[1] that reworked kvm_gmem_populate() to deal
+with potential locking issues that might arise once in-place conversion
+support[2] is added for guest_memfd. To quote Yan's original summary of the
+issues:
+
+  (1)
+  In Michael's series "KVM: gmem: 2MB THP support and preparedness tracking
+  changes" [4], kvm_gmem_get_pfn() was modified to rely on the filemap
+  invalidation lock for protecting its preparedness tracking. Similarly, the
+  in-place conversion version of guest_memfd series by Ackerly also requires
+  kvm_gmem_get_pfn() to acquire filemap invalidation lock [5].
+  
+  kvm_gmem_get_pfn
+      filemap_invalidate_lock_shared(file_inode(file)->i_mapping);
+  
+  However, since kvm_gmem_get_pfn() is called by kvm_tdp_map_page(), which is
+  in turn invoked within kvm_gmem_populate() in TDX, a deadlock occurs on the
+  filemap invalidation lock.
+  
+  (2)
+  Moreover, in step 2, get_user_pages_fast() may acquire mm->mmap_lock,
+  resulting in the following lock sequence in tdx_vcpu_init_mem_region():
+  - filemap invalidation lock --> mm->mmap_lock
+  
+  However, in future code, the shared filemap invalidation lock will be held
+  in kvm_gmem_fault_shared() (see [6]), leading to the lock sequence:
+  - mm->mmap_lock --> filemap invalidation lock
+  
+  This creates an AB-BA deadlock issue.
+
+Sean has since then addressed (1) with his series[3] that avoids relying on
+calling kvm_gmem_get_pfn() within the TDX post-populate callback to re-fetch
+the PFN that was passed to it.
+
+This series aims to address (2), which is still outstanding, and does so based
+heavily on Sean's suggested approach[4] of hoisting the get_user_pages_fast()
+out of the TDX post-populate callback so that it can be called prior to taking
+the filemap invalidate lock so that the ABBA deadlock is no longer possible.
+As preperation for this change, all the partial enablement for hugepages in
+the kvm_gmem_populate() path is stripped out so that it can be better
+considered once hugepage support is actually in place and code/design can be
+kept simpler in the meantime.
+
+It additionally removes 'preparation' tracking from guest_memfd, which would
+similarly complicate locking considerations in the context of in-place
+conversion (and even moreso in the context of hugepage support). This has
+been discussed during both the guest_memfd calls and PUCK calls, and so far
+no strong objections have been given, so hopefully that particular change
+isn't too controversial.
+
+
+Some items worth noting/discussing
+----------------------------------
+
+(A) While one of the aims of this rework is to implement things such that
+    a separate source address can still be passed to kvm_gmem_populate()
+    even though the gmem pages can be populated in-place from userspace
+    beforehand, issues still arise if the source address itself has the
+    KVM_MEMORY_ATTRIBUTE_PRIVATE attribute set, e.g. if source/target
+    addresses are the same page. One line of reasoning would be to
+    conclude that KVM_MEMORY_ATTRIBUTE_PRIVATE implies that it cannot
+    be used as the source of a GUP/copy_from_user(), and thus cases like
+    source==target are naturally disallowed. Thus userspace has no choice
+    but to populate pages in-place *prior* to setting the
+    KVM_MEMORY_ATTRIBUTE_PRIVATE attribute (as kvm_gmem_populate()
+    requires), and passing in NULL for the source such that the GUP can
+    be skipped (otherwise, it will trigger the shared memory fault path,
+    which will then SIGBUS because it will see that it is faulting in
+    pages for which KVM_MEMORY_ATTRIBUTE_PRIVATE is set).
+
+    While workable, this would at the very least involve documentation
+    updates to KVM_TDX_INIT_MEM_REGION/KVM_SEV_SNP_LAUNCH_UPDATE to cover
+    these soon-to-be-possible scenarios. Ira posted a patch separately
+    that demonstrates how a NULL source could be safely handled within
+    the TDX post-populate callback[5].
+
+
+Changes since v2
+----------------
+
+- add a separate pre-patch from Yan to fix a missing kunmap_local() in SNP
+  post-populate callback prior to refactoring the code rather than silently
+  fixing as part of the refactoring (Yan)
+- add a check that to error if src_page is NULL in TDX post-populate
+  callback (Yan)
+- use kmap_local_page() instead of kmap_local_pfn() when a struct page is
+  already available (Kai)
+- fixup commit msg for PATCH #6 (Kai)
+- collect various Reviewed-by/Tested-by's and rebase to latest kvm/next
+
+
+Changes since RFC v1
+--------------------
+
+- add a prep patch to remove partial hugepage enablement in
+  kvm_gmem_populate() to simplify things until a hugepage implementation
+  can actually make use of it (Yan, Ira, Vishal, Sean)
+- begin retroactively enforcing that source pages must be page-aligned
+  so that kvm_gmem_populate() callbacks can be simplified. add a patch
+  to update SNP user-facing documentation to mention this.
+- drop handling for GUP'ing multiple pages before issuing callbacks.
+  This will only be needed for potentially for hugepages, and it must
+  simpler to handle per-page in the meantime. (Yan, Vishal)
+- make sure TDX actually builds (Ira, Yan)
+
+
+Thanks,
+
+Mike
+
+
+[1] https://lore.kernel.org/kvm/20250703062641.3247-1-yan.y.zhao@intel.com/
+[2] https://lore.kernel.org/kvm/cover.1760731772.git.ackerleytng@google.com/
+[3] https://lore.kernel.org/kvm/20251030200951.3402865-1-seanjc@google.com/
+[4] https://lore.kernel.org/kvm/aHEwT4X0RcfZzHlt@google.com/
+[5] https://lore.kernel.org/kvm/20251105-tdx-init-in-place-v1-1-1196b67d0423@intel.com/
+
+
+----------------------------------------------------------------
+Michael Roth (5):
+      KVM: guest_memfd: Remove partial hugepage handling from kvm_gmem_populate()
+      KVM: guest_memfd: Remove preparation tracking
+      KVM: SEV: Document/enforce page-alignment for KVM_SEV_SNP_LAUNCH_UPDATE
+      KVM: TDX: Document alignment requirements for KVM_TDX_INIT_MEM_REGION
+      KVM: guest_memfd: GUP source pages prior to populating guest memory
+
+Yan Zhao (1):
+      KVM: SVM: Fix a missing kunmap_local() in sev_gmem_post_populate()
+
+ .../virt/kvm/x86/amd-memory-encryption.rst         |   2 +-
+ Documentation/virt/kvm/x86/intel-tdx.rst           |   2 +-
+ arch/x86/kvm/svm/sev.c                             | 108 +++++++---------
+ arch/x86/kvm/vmx/tdx.c                             |  16 +--
+ include/linux/kvm_host.h                           |   4 +-
+ virt/kvm/guest_memfd.c                             | 140 +++++++++++----------
+ 6 files changed, 131 insertions(+), 141 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Allow pausing the VM from vcpu thread
+[kvmtool PATCH v5 01/15] Allow pausing the VM from vcpu thread
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Pausing the VM from a vCPU thread doesn't work today, as it waits indefinitely
+for a signal that never comes. By using the "current_kvm_cpu", enlighten the
+kvm__pause() to skip the current CPU and do it inline. This also brings in a
+restriction that a following kvm__continue() must be called from the same vCPU
+thread.
+
+Cc: Will Deacon <will@kernel.org>
+Cc: Oliver Upton <oliver.upton@linux.dev>
+Link: https://lore.kernel.org/all/20230918104028.GA17744@willie-the-truck/
+Reviewed-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since: v4
+ - Drop duplicate assignment of pause_req_cpu (Marc)
+---
+ kvm.c | 34 ++++++++++++++++++++++++++++++----
+ 1 file changed, 30 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Handle PSCI calls in userspace
+[kvmtool PATCH v5 00/15] arm64: Handle PSCI calls in userspace
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This is version 5 of the patch series, originally posted by Oliver [0].
+
+Use SMCCC filtering capability in to handle PSCI calls in the userspace.
+
+Changes since v4:
+Link: https://lkml.kernel.org/r/20250930103130.197534-1-suzuki.poulose@arm.com
+
+ - Update headers to v6.18
+ - Remove duplicate assignment of pause_req_cpu (Marc)
+ - Flip the command line to opt in for PSCI in userspace, retaining default
+   in kernel handling. (Marc)
+ - Collect Review from Marc, thanks!
+
+Changes since v3:
+ - Address Will's comment on the race between pause/resume - Patch 1
+ - Rebase on to v6.17-rc7
+ - Drop importing cputype.h, which was not used by the series
+
+[0] https://lore.kernel.org/all/20230802234255.466782-1-oliver.upton@linux.dev/
+
+
+
+Oliver Upton (12):
+  Import arm-smccc.h from Linux v6.18
+  arm64: Stash kvm_vcpu_init for later use
+  arm64: Use KVM_SET_MP_STATE ioctl to power off non-boot vCPUs
+  arm64: Expose ARM64_CORE_REG() for general use
+  arm64: Add support for finding vCPU for given MPIDR
+  arm64: Add skeleton implementation for PSCI
+  arm64: psci: Implement CPU_SUSPEND
+  arm64: psci: Implement CPU_ON
+  arm64: psci: Implement AFFINITY_INFO
+  arm64: psci: Implement MIGRATE_INFO_TYPE
+  arm64: psci: Implement SYSTEM_{OFF,RESET}
+  arm64: smccc: Start sending PSCI to userspace
+
+Suzuki K Poulose (3):
+  Allow pausing the VM from vcpu thread
+  update_headers: arm64: Track psci.h for PSCI definitions
+  update headers: Linux v6.18
+
+ Makefile                            |   2 +
+ arm64/include/asm/kvm.h             |  23 ++-
+ arm64/include/asm/smccc.h           |  65 ++++++
+ arm64/include/kvm/kvm-arch.h        |   2 +
+ arm64/include/kvm/kvm-config-arch.h |   8 +-
+ arm64/include/kvm/kvm-cpu-arch.h    |  30 ++-
+ arm64/kvm-cpu.c                     |  51 +++--
+ arm64/kvm.c                         |  20 ++
+ arm64/psci.c                        | 207 +++++++++++++++++++
+ arm64/smccc.c                       |  81 ++++++++
+ include/linux/arm-smccc.h           | 305 ++++++++++++++++++++++++++++
+ include/linux/kvm.h                 |  36 ++++
+ include/linux/psci.h                |  52 +++++
+ include/linux/virtio_ids.h          |   1 +
+ include/linux/virtio_net.h          |  49 ++++-
+ include/linux/virtio_pci.h          |   1 +
+ kvm-cpu.c                           |  13 ++
+ kvm.c                               |  34 +++-
+ powerpc/include/asm/kvm.h           |  13 --
+ riscv/include/asm/kvm.h             |  26 ++-
+ util/update_headers.sh              |  17 +-
+ x86/include/asm/kvm.h               | 115 +++++++++++
+ 22 files changed, 1091 insertions(+), 60 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add support for FEAT_IDST
+[PATCH v4 0/9] KVM: arm64: Add support for FEAT_IDST
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_IDST appeared in ARMv8.4, and allows ID registers to be trapped
+if they are not implemented. This only concerns 3 registers (GMID_EL1,
+CCSIDR2_EL1 and SMIDR_EL1), which are part of features that may not be
+exposed to the guest even if present on the host.
+
+For these registers, the HW should report them with EC=0x18, even if
+the feature isn't implemented.
+
+Add support for this feature by handling these registers in a specific
+way and implementing GMID_EL1 support in the process. A very basic
+selftest checks that these registers behave as expected.
+
+* From v3: [3]
+
+  - Added ID_AA64MMFR2_EL1.IDS == EL3 (Ben)
+
+  - Introduced in_feat_id_space() helper (Yao)
+
+  - Collected RBs, with thanks
+
+* From v2: [2]
+
+  - Repainted ID_AA64MMFR2_EL1.IDS description (Oliver)
+
+  - Made the IDST handling more generic in the core KVM code, which
+    resulted in the series being restructured a bit
+
+  - Added handling to pKVM (in a slightly different way, as pKVM
+    insist on seeing a full enumeration of the trapped registers)
+
+  - Some cleanups
+
+  - Collected RBs, with thanks
+
+* From v1: [1]
+
+  - Fixed commit message in patch #4 (Ben)
+
+  - Collected RB, with thanks (Joey)
+
+[1] https://lore.kernel.org/r/20251120133202.2037803-1-maz@kernel.org
+[2] https://lore.kernel.org/r/20251126155951.1146317-1-maz@kernel.org
+[3] https://lore.kernel.org/r/20251204094806.3846619-1-maz@kernel.org
+
+Marc Zyngier (9):
+  arm64: Repaint ID_AA64MMFR2_EL1.IDS description
+  KVM: arm64: Add trap routing for GMID_EL1
+  KVM: arm64: Add a generic synchronous exception injection primitive
+  KVM: arm64: Handle FEAT_IDST for sysregs without specific handlers
+  KVM: arm64: Handle CSSIDR2_EL1 and SMIDR_EL1 in a generic way
+  KVM: arm64: Force trap of GMID_EL1 when the guest doesn't have MTE
+  KVM: arm64: pkvm: Add a generic synchronous exception injection
+    primitive
+  KVM: arm64: pkvm: Report optional ID register traps with a 0x18
+    syndrome
+  KVM: arm64: selftests: Add a test for FEAT_IDST
+
+ arch/arm64/include/asm/kvm_emulate.h          |   1 +
+ arch/arm64/kvm/emulate-nested.c               |  21 ++++
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c            |  39 ++++--
+ arch/arm64/kvm/inject_fault.c                 |  10 +-
+ arch/arm64/kvm/sys_regs.c                     |   4 +-
+ arch/arm64/kvm/sys_regs.h                     |  10 ++
+ arch/arm64/tools/sysreg                       |   7 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/arm64/idreg-idst.c  | 117 ++++++++++++++++++
+ 9 files changed, 194 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Repaint ID_AA64MMFR2_EL1.IDS description
+[PATCH v4 1/9] arm64: Repaint ID_AA64MMFR2_EL1.IDS description
+Author: Marc Zyngier <maz@kernel.org>
+
+ID_AA64MMFR2_EL1.IDS, as described in the sysreg file, is pretty horrible
+as it diesctly give the ESR value. Repaint it using the usual NI/IMP
+identifiers to describe the absence/presence of FEAT_IDST.
+
+Also add the new EL3 routing feature, even if we really don't care about it.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c | 2 +-
+ arch/arm64/tools/sysreg            | 7 ++++---
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: add stubs for PFNMAP memory failure registration functions
+[PATCH v1 1/2] mm: add stubs for PFNMAP memory failure registration functions
+Author: ankita <ankita@nvidia.com>
+
+
+Add stubs to address CONFIG_MEMORY_FAILURE disabled.
+
+Suggested-by: Alex Williamson <alex@shazbot.org>
+Signed-off-by: Ankit Agrawal <ankita@nvidia.com>
+---
+ include/linux/memory-failure.h | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Register device memory for poison handling
+[PATCH v1 0/2] Register device memory for poison handling
+Author: ankita <ankita@nvidia.com>
+
+
+Linux MM provides interfaces to allow a driver to [un]register device
+memory not backed by struct page for poison handling through
+memory_failure.
+
+The device memory on NVIDIA Grace based systems are not added to the
+kernel and are not backed by struct pages. So nvgrace-gpu module
+which manages the device memory can make use of these interfaces to
+get the benefit of poison handling. Make nvgrace-gpu register the device
+memory with the MM on open.
+
+Moreover, the stubs are added to accommodate for CONFIG_MEMORY_FAILURE
+being disabled.
+
+Patch 1/2 introduces stubs for CONFIG_MEMORY_FAILURE disabled.
+Patch 2/2 registers the device memory at the time of open instead of mmap.
+
+Note that this is a reposting of an earlier series [1] which is partly
+(patch 1/3) merged to v6.19-rc4. This one addresses the leftover patching.
+Many thanks to Jason Gunthorpe (jgg@nvidia.com) and Alex Williamson
+(alex@shazbot.org) for valuable suggestions.
+
+Link: https://lore.kernel.org/all/20251213044708.3610-1-ankita@nvidia.com/ [1]
+
+Ankit Agrawal (2):
+  mm: add stubs for PFNMAP memory failure registration functions
+  vfio/nvgrace-gpu: register device memory for poison handling
+
+ drivers/vfio/pci/nvgrace-gpu/main.c | 116 +++++++++++++++++++++++++++-
+ include/linux/memory-failure.h      |  13 +++-
+ 2 files changed, 123 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: Coalesce only linear skb
+[PATCH 1/2] vsock/virtio: Coalesce only linear skb
+Author: Michal Luczaj <mhal@rbox.co>
+
+Vsock/virtio common tries to coalesce buffers in rx queue: if a linear skb
+(with a spare tail room) is followed by a small skb (length limited by
+GOOD_COPY_LEN = 128), an attempt is made to join them.
+
+Since the introduction of MSG_ZEROCOPY support, assumption that a small skb
+will always be linear is incorrect (see loopback transport). In the
+zerocopy case, data is lost and the linear skb is appended with
+uninitialized kernel memory.
+
+Ensure only linear skbs are coalesced. Note that skb_tailroom(last_skb) > 0
+guarantees last_skb is linear.
+
+Fixes: 581512a6dc93 ("vsock/virtio: MSG_ZEROCOPY flag support")
+Signed-off-by: Michal Luczaj <mhal@rbox.co>
+---
+ net/vmw_vsock/virtio_transport_common.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: Fix data loss/disclosure due to joining
+[PATCH 0/2] vsock/virtio: Fix data loss/disclosure due to joining
+Author: Michal Luczaj <mhal@rbox.co>
+
+Loopback transport coalesces some skbs too eagerly. Handling a zerocopy
+(non-linear) skb as a linear one leads to skb data loss and kernel memory
+disclosure.
+
+Plug the loss/leak by allowing only linear skb join. Provide a test.
+
+Signed-off-by: Michal Luczaj <mhal@rbox.co>
+---
+Michal Luczaj (2):
+      vsock/virtio: Coalesce only linear skb
+      vsock/test: Add test for a linear and non-linear skb getting coalesced
+
+ net/vmw_vsock/virtio_transport_common.c   |  3 +-
+ tools/testing/vsock/vsock_test.c          |  5 +++
+ tools/testing/vsock/vsock_test_zerocopy.c | 67 +++++++++++++++++++++++++++++++
+ tools/testing/vsock/vsock_test_zerocopy.h |  3 ++
+ 4 files changed, 77 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  hw/i386/pc: Remove deprecated pc-q35-2.6 and pc-i440fx-2.6 machines
+[PATCH v6 01/27] hw/i386/pc: Remove deprecated pc-q35-2.6 and pc-i440fx-2.6 machines
+Author: Zhao Liu <zhao1.liu@intel.com>
+
+
+These machines has been supported for a period of more than 6 years.
+According to our versioned machine support policy (see commit
+ce80c4fa6ff "docs: document special exception for machine type
+deprecation & removal") they can now be removed.
+
+Reviewed-by: Mark Cave-Ayland <mark.caveayland@nutanix.com>
+Reviewed-by: Thomas Huth <thuth@redhat.com>
+Reviewed-by: Zhao Liu <zhao1.liu@intel.com>
+Reviewed-by: Igor Mammedov <imammedo@redhat.com>
+Signed-off-by: Philippe Mathieu-Daudé <philmd@linaro.org>
+Signed-off-by: Zhao Liu <zhao1.liu@intel.com>
+---
+ hw/i386/pc_piix.c | 14 --------------
+ hw/i386/pc_q35.c  | 14 --------------
+ 2 files changed, 28 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  hw/i386/pc: Remove deprecated 2.6 and 2.7 PC machines
+[PATCH v6 00/27] hw/i386/pc: Remove deprecated 2.6 and 2.7 PC machines
+Author: Zhao Liu <zhao1.liu@intel.com>
+
+Hi,
+
+This v6 is based on the master branch at the commit 0fc482b73d8e
+("Merge tag 'pull-aspeed-20260105' of https://github.com/legoater/qemu
+into staging").
+
+Since there's the discussion around fw_cfg_init_io_nodma() [*], v6
+doesn't include that cleanups. Therefore, comparing v5, v6 has *very*
+minimal changes and most of patches have been reviewed (except patch 15
+- I think it needs an additianl review :-) ).
+
+Thanks for your patience and review!
+
+
+Introduction
+============
+
+A brief introduction from Philippe's v4:
+
+The versioned 'pc' and 'q35' machines up to 2.12 been marked
+as deprecated three releases ago, and are older than 6 years,
+so according to our support policy we can remove them.
+
+This series only includes the 2.6 and 2.7 machines removal,
+as it is a big enough number of LoC removed. Rest will
+follow.
+
+
+Change Log
+==========
+
+(Main) changes since v5:
+ * Merge pc & q35 changes for testing DSDT tables into one patch and
+   simplify the commit message.
+ * Reorganize S-o-b and collect review tags from Igor. 
+
+(Main) changes since v4:
+ * Completely remove the legacy CPU hotplug approach.
+   - New patch 2-8.
+   - Test CPU hot-plug & hot-unplug via qmp.
+
+ * Keep "dma_enabled" property in fw_cfg_io_properties[] since Sun4u &
+   Sun4v are still using it.
+   - About more details, please see commit message of patch 15.
+
+ * Temporarily keep these properties: "cpuid-0xb" (of X86CPU),
+   "fill-mtrr-mask" (of X86CPU), "version" (of IOAPICCommonState).
+   - These properties will be deprecated first before removal, in
+     another series.
+
+ * Keep "l3-cache" (of X86CPU) and "page-per-vq" (of VirtIOPCIProxy),
+   since they are still in use (e.g., libvirt).
+
+
+Reference
+=========
+
+[*]: https://lore.kernel.org/qemu-devel/20251203060942.57851-1-philmd@linaro.org/
+
+Best Regards,
+Zhao
+---
+Igor Mammedov (1):
+  tests/acpi: Allow DSDT table change for x86 machines
+
+Philippe Mathieu-Daudé (22):
+  hw/i386/pc: Remove deprecated pc-q35-2.6 and pc-i440fx-2.6 machines
+  hw/i386/pc: Remove PCMachineClass::legacy_cpu_hotplug field
+  hw/nvram/fw_cfg: Rename fw_cfg_init_mem() with '_nodma' suffix
+  hw/mips/loongson3_virt: Prefer using fw_cfg_init_mem_nodma()
+  hw/nvram/fw_cfg: Factor fw_cfg_init_mem_internal() out
+  hw/nvram/fw_cfg: Rename fw_cfg_init_mem_wide() ->
+    fw_cfg_init_mem_dma()
+  hw/i386/x86: Remove X86MachineClass::fwcfg_dma_enabled field
+  hw/i386/pc: Remove multiboot.bin
+  hw/i386: Assume fw_cfg DMA is always enabled
+  hw/i386: Remove linuxboot.bin
+  hw/i386/pc: Remove pc_compat_2_6[] array
+  hw/intc/apic: Remove APICCommonState::legacy_instance_id field
+  hw/core/machine: Remove hw_compat_2_6[] array
+  hw/virtio/virtio-mmio: Remove
+    VirtIOMMIOProxy::format_transport_address field
+  hw/i386/pc: Remove deprecated pc-q35-2.7 and pc-i440fx-2.7 machines
+  hw/i386/pc: Remove pc_compat_2_7[] array
+  target/i386/cpu: Remove CPUX86State::full_cpuid_auto_level field
+  hw/audio/pcspk: Remove PCSpkState::migrate field
+  hw/core/machine: Remove hw_compat_2_7[] array
+  hw/i386/intel_iommu: Remove IntelIOMMUState::buggy_eim field
+  hw/virtio/virtio-pci: Remove VirtIOPCIProxy::ignore_backend_features
+    field
+  hw/char/virtio-serial: Do not expose the 'emergency-write' property
+
+Zhao Liu (4):
+  pc: Start with modern CPU hotplug interface by default
+  acpi: Remove legacy cpu hotplug utilities
+  docs/specs/acpi_cpu_hotplug: Remove legacy cpu hotplug descriptions
+  tests/acpi: Update DSDT tables for pc & q35 machines
+
+ docs/specs/acpi_cpu_hotplug.rst               |  28 +-
+ hw/acpi/acpi-cpu-hotplug-stub.c               |  19 +-
+ hw/acpi/cpu.c                                 |  10 -
+ hw/acpi/cpu_hotplug.c                         | 348 ------------------
+ hw/acpi/generic_event_device.c                |   1 +
+ hw/acpi/ich9.c                                |  61 +--
+ hw/acpi/meson.build                           |   2 +-
+ hw/acpi/piix4.c                               |  61 +--
+ hw/arm/virt.c                                 |   2 +-
+ hw/audio/pcspk.c                              |  10 -
+ hw/char/virtio-serial-bus.c                   |   9 +-
+ hw/core/machine.c                             |  17 -
+ hw/hppa/machine.c                             |   2 +-
+ hw/i386/acpi-build.c                          |   7 +-
+ hw/i386/fw_cfg.c                              |  16 +-
+ hw/i386/intel_iommu.c                         |   5 +-
+ hw/i386/microvm.c                             |   3 -
+ hw/i386/multiboot.c                           |   7 +-
+ hw/i386/pc.c                                  |  25 +-
+ hw/i386/pc_piix.c                             |  23 --
+ hw/i386/pc_q35.c                              |  24 --
+ hw/i386/x86-common.c                          |   8 +-
+ hw/i386/x86.c                                 |   2 -
+ hw/intc/apic_common.c                         |   5 -
+ hw/loongarch/fw_cfg.c                         |   4 +-
+ hw/loongarch/virt-acpi-build.c                |   1 -
+ hw/mips/loongson3_virt.c                      |   2 +-
+ hw/nvram/fw_cfg.c                             |  22 +-
+ hw/riscv/virt.c                               |   4 +-
+ hw/virtio/virtio-mmio.c                       |  15 -
+ hw/virtio/virtio-pci.c                        |   5 +-
+ include/hw/acpi/cpu.h                         |   1 -
+ include/hw/acpi/ich9.h                        |   4 +-
+ include/hw/acpi/piix4.h                       |   4 +-
+ include/hw/core/boards.h                      |   6 -
+ include/hw/i386/apic_internal.h               |   1 -
+ include/hw/i386/intel_iommu.h                 |   1 -
+ include/hw/i386/pc.h                          |   9 -
+ include/hw/i386/x86.h                         |   2 -
+ include/hw/nvram/fw_cfg.h                     |   9 +-
+ include/hw/virtio/virtio-mmio.h               |   1 -
+ include/hw/virtio/virtio-pci.h                |   1 -
+ include/hw/virtio/virtio-serial.h             |   2 -
+ pc-bios/meson.build                           |   2 -
+ pc-bios/multiboot.bin                         | Bin 1024 -> 0 bytes
+ pc-bios/optionrom/Makefile                    |   2 +-
+ pc-bios/optionrom/linuxboot.S                 | 195 ----------
+ pc-bios/optionrom/multiboot.S                 | 232 ------------
+ pc-bios/optionrom/multiboot_dma.S             | 234 +++++++++++-
+ pc-bios/optionrom/optionrom.h                 |   4 -
+ target/i386/cpu.c                             | 119 +++---
+ target/i386/cpu.h                             |   3 -
+ tests/data/acpi/x86/pc/DSDT                   | Bin 8611 -> 8598 bytes
+ tests/data/acpi/x86/pc/DSDT.acpierst          | Bin 8522 -> 8509 bytes
+ tests/data/acpi/x86/pc/DSDT.acpihmat          | Bin 9936 -> 9923 bytes
+ tests/data/acpi/x86/pc/DSDT.bridge            | Bin 15482 -> 15469 bytes
+ tests/data/acpi/x86/pc/DSDT.cphp              | Bin 9075 -> 9062 bytes
+ tests/data/acpi/x86/pc/DSDT.dimmpxm           | Bin 10265 -> 10252 bytes
+ tests/data/acpi/x86/pc/DSDT.hpbridge          | Bin 8562 -> 8549 bytes
+ tests/data/acpi/x86/pc/DSDT.hpbrroot          | Bin 5100 -> 5087 bytes
+ tests/data/acpi/x86/pc/DSDT.ipmikcs           | Bin 8683 -> 8670 bytes
+ tests/data/acpi/x86/pc/DSDT.memhp             | Bin 9970 -> 9957 bytes
+ tests/data/acpi/x86/pc/DSDT.nohpet            | Bin 8469 -> 8456 bytes
+ tests/data/acpi/x86/pc/DSDT.numamem           | Bin 8617 -> 8604 bytes
+ tests/data/acpi/x86/pc/DSDT.roothp            | Bin 12404 -> 12391 bytes
+ tests/data/acpi/x86/q35/DSDT                  | Bin 8440 -> 8427 bytes
+ tests/data/acpi/x86/q35/DSDT.acpierst         | Bin 8457 -> 8444 bytes
+ tests/data/acpi/x86/q35/DSDT.acpihmat         | Bin 9765 -> 9752 bytes
+ .../data/acpi/x86/q35/DSDT.acpihmat-generic-x | Bin 12650 -> 12637 bytes
+ .../acpi/x86/q35/DSDT.acpihmat-noinitiator    | Bin 8719 -> 8706 bytes
+ tests/data/acpi/x86/q35/DSDT.applesmc         | Bin 8486 -> 8473 bytes
+ tests/data/acpi/x86/q35/DSDT.bridge           | Bin 12053 -> 12040 bytes
+ tests/data/acpi/x86/q35/DSDT.core-count       | Bin 12998 -> 12985 bytes
+ tests/data/acpi/x86/q35/DSDT.core-count2      | Bin 33855 -> 33842 bytes
+ tests/data/acpi/x86/q35/DSDT.cphp             | Bin 8904 -> 8891 bytes
+ tests/data/acpi/x86/q35/DSDT.cxl              | Bin 13231 -> 13218 bytes
+ tests/data/acpi/x86/q35/DSDT.dimmpxm          | Bin 10094 -> 10081 bytes
+ tests/data/acpi/x86/q35/DSDT.ipmibt           | Bin 8515 -> 8502 bytes
+ tests/data/acpi/x86/q35/DSDT.ipmismbus        | Bin 8528 -> 8515 bytes
+ tests/data/acpi/x86/q35/DSDT.ivrs             | Bin 8457 -> 8444 bytes
+ tests/data/acpi/x86/q35/DSDT.memhp            | Bin 9799 -> 9786 bytes
+ tests/data/acpi/x86/q35/DSDT.mmio64           | Bin 9570 -> 9557 bytes
+ tests/data/acpi/x86/q35/DSDT.multi-bridge     | Bin 13293 -> 13280 bytes
+ tests/data/acpi/x86/q35/DSDT.noacpihp         | Bin 8302 -> 8289 bytes
+ tests/data/acpi/x86/q35/DSDT.nohpet           | Bin 8298 -> 8285 bytes
+ tests/data/acpi/x86/q35/DSDT.numamem          | Bin 8446 -> 8433 bytes
+ tests/data/acpi/x86/q35/DSDT.pvpanic-isa      | Bin 8541 -> 8528 bytes
+ tests/data/acpi/x86/q35/DSDT.thread-count     | Bin 12998 -> 12985 bytes
+ tests/data/acpi/x86/q35/DSDT.thread-count2    | Bin 33855 -> 33842 bytes
+ tests/data/acpi/x86/q35/DSDT.tis.tpm12        | Bin 9046 -> 9033 bytes
+ tests/data/acpi/x86/q35/DSDT.tis.tpm2         | Bin 9072 -> 9059 bytes
+ tests/data/acpi/x86/q35/DSDT.type4-count      | Bin 18674 -> 18661 bytes
+ tests/data/acpi/x86/q35/DSDT.viot             | Bin 14697 -> 14684 bytes
+ tests/data/acpi/x86/q35/DSDT.xapic            | Bin 35803 -> 35790 bytes
+ tests/qtest/test-x86-cpuid-compat.c           |  11 -
+ 95 files changed, 363 insertions(+), 1228 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/virt/tdx: Retrieve TDX module version
+[PATCH 1/2] x86/virt/tdx: Retrieve TDX module version
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+
+Each TDX module has several bits of metadata about which specific TDX
+module it is. The primary bit of info is the version, which has an x.y.z
+format, where x represents the major version, y the minor version, and z
+the update version. Knowing the running TDX Module version is valuable
+for bug reporting and debugging. Note that the module does expose other
+pieces of version-related metadata, such as build number and date. Those
+aren't retrieved for now, that can be added if needed in the future.
+
+Retrieve the TDX Module version using the existing metadata reading
+interface. Later changes will expose this information. The metadata
+reading interfaces have existed for quite some time, so this will work
+with older versions of the TDX module as well - i.e. this isn't a new
+interface.
+
+As a side note, the global metadata reading code was originally set up
+to be auto-generated from a JSON definition [1]. However, later [2] this
+was found to be unsustainable, and the autogeneration approach was
+dropped in favor of just manually adding fields as needed (e.g. as in
+this patch).
+
+Signed-off-by: Chao Gao <chao.gao@intel.com>
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Dan Williams <dan.j.williams@intel.com>
+Link: https://lore.kernel.org/kvm/CABgObfYXUxqQV_FoxKjC8U3t5DnyM45nz5DpTxYZv2x_uFK_Kw@mail.gmail.com/ # [1]
+Link: https://lore.kernel.org/all/1e7bcbad-eb26-44b7-97ca-88ab53467212@intel.com/ # [2]
+---
+ arch/x86/include/asm/tdx_global_metadata.h  |  7 +++++++
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c | 16 ++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  x86/virt/tdx: Print TDX module version to dmesg
+[PATCH 0/2] x86/virt/tdx: Print TDX module version to dmesg
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+=== Problem & Solution ===
+
+Currently, there is neither an ABI, nor any other way to determine from
+the host system, what version of the TDX module is running. A sysfs ABI
+for this has been proposed in [1], but it may need additional discussion.
+
+Many/most TDX developers already carry patches like this in their
+development branches. It can be tricky to know which TDX module is
+actually loaded on a system, and so this functionality has been needed
+regularly for development and processing bug reports. Hence, it is
+prudent to break out the patches to retrieve and print the TDX module
+version, as those parts are very straightforward, and get some level of
+debugability and traceability for TDX host systems.
+
+=== Dependencies ===
+
+None. This is based on v6.19-rc4, and applies cleanly to tip.git.
+
+=== Patch details ===
+
+Patch 1 is a prerequisite that adds the infrastructure to retrieve the
+TDX module version from its global metadata. This was originally posted in [2].
+
+Patch 2 is based on a patch from Kai Huang [3], and prints the version to
+dmesg during init.
+
+=== Testing ===
+
+This has passed the usual suite of tests, including successful 0day
+builds, KVM Unit tests, KVM selftests, a TD creation smoke test, and
+selected KVM tests from the Avocado test suite.
+
+[1]: https://lore.kernel.org/all/20260105074350.98564-1-chao.gao@intel.com/
+[2]: https://lore.kernel.org/all/20260105074350.98564-2-chao.gao@intel.com/
+[3]: https://lore.kernel.org/all/57eaa1b17429315f8b5207774307f3c1dd40cf37.1730118186.git.kai.huang@intel.com/
+
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+---
+Chao Gao (1):
+      x86/virt/tdx: Retrieve TDX module version
+
+Vishal Verma (1):
+      x86/virt/tdx: Print TDX module version during init
+
+ arch/x86/include/asm/tdx_global_metadata.h  |  7 +++++++
+ arch/x86/virt/vmx/tdx/tdx.c                 |  5 +++++
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c | 16 ++++++++++++++++
+ 3 files changed, 28 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Merge pending debug causes when vectoring #DB
+[PATCH v1 0/1] KVM: x86: Merge pending debug causes when vectoring #DB
+Author: Aidan Khoury <aidan@aktech.ai>
+
+This is a single patch that fixes incorrect guest DR6 contents when KVM
+vectors #DB on Intel VMX in the presence of deferred debug causes recorded
+in VMCS.GUEST_PENDING_DBG_EXCEPTIONS.
+
+See Intel SDM Vol. 3C, 27.3.1.5 Checks on Guest Non-Register State
+and Intel SDM Vol. 3C, 27.7.3 Delivery of Pending Debug Exceptions after VM Entry
+
+Intel VMX defers certain debug exception causes in the VMCS field
+GUEST_PENDING_DBG_EXCEPTIONS (B0-B3, enabled breakpoint, BS, RTM). This
+state is used when debug exceptions are suppressed due to interrupt
+shadow (e.g. MOV SS/POP SS or STI), and the deferred causes are later
+combined with other debug reasons when #DB is ultimately delivered.
+
+KVM may vector an in-kernel #DB after a VM-exit and/or instruction
+emulation. A concrete example is a guest that:
+
+  - programs a data breakpoint (B0) on an operand used by MOV SS
+  - enables single-step (RFLAGS.TF)
+  - executes MOV SS (data breakpoint triggers, #DB is suppressed)
+  - executes an instruction that VM-exits and is emulated (e.g. CPUID),
+    or executes ICEBP/INT1 which is intercepted as #DB
+
+On bare metal, guest DR6 reports the combined reasons (e.g. BS+B0). In
+KVM/VMX, the deferred breakpoint cause is recorded in
+GUEST_PENDING_DBG_EXCEPTIONS while KVM generates a #DB for single-step,
+but the queued #DB payload delivered to guest DR6 can omit the pending
+causes. This results in guest DR6 missing B0-B3 even though the CPU
+would report them.
+
+Fix this by merging pending causes from GUEST_PENDING_DBG_EXCEPTIONS into
+the #DB payload when delivering the exception payload to guest state.
+The merge is performed in kvm_deliver_exception_payload() so it applies
+to both the normal injection path and the !guest_mode path where the
+payload may be consumed immediately by kvm_multiple_exception().
+
+To keep x86 core code vendor-agnostic, add an optional x86 op
+get_pending_dbg_exceptions() that returns the relevant pending-debug
+bits for the active vendor. VMX implements the hook by reading
+VMCS.GUEST_PENDING_DBG_EXCEPTIONS and masking to architecturally defined
+bits; other vendors return 0.
+
+After this change, guests observe all accumulated #DB causes in DR6 when
+#DB is vectored, matching bare-metal behavior.
+
+Tested on Intel host with KVM/VMX enabled by running the tiny repro asm below
+inside a Windows guest. On bare metal, DR6 reports both BS and B0. Under KVM/VMX
+without this patch, DR6 may report BS but miss B0.
+
+A minimal reproducer in the guest:
+  - use ptrace (or veh+SetThreadContext on windows) for handling #DB traps and managing DRs
+  - Prime DR0 and DR7 to a memory operand used by MOV SS (data breakpoint, enabled)
+  - execute MOV SS from that memory operand (breakpoint met, delivery suppressed)
+  - execute CPUID (emulated) or ICEBP/INT1 (intercepted)
+  - In the #DB handler, read DR6 to observe the reported causes
+
+```
+__asm__ __volatile__(
+	"pushq %%rbx\n"
+	"pushfq\n"
+	"orl $0x100, (%%rsp)\n"    /* set TF in saved RFLAGS on stack */
+	"popfq\n"
+	"movw (%0), %%ss\n"        /* load SS from probe page */
+	"cpuid\n"                  /* trigger intercepting instruction (cpuid in this case) */
+	"popq %%rbx\n"             /* #DB fires here with DR6 missing B0 under KVM/VMX pre-patch */
+	: : "r"(&ss_probe) : "rax", "rcx", "rdx", "memory"
+);
+```
+
+Reproducer PoC: https://github.com/ajkhoury/kvm-guest-anomalies
+
+Aidan Khoury (1):
+  KVM: x86: Merge pending debug causes when vectoring #DB
+
+ arch/x86/include/asm/kvm-x86-ops.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  1 +
+ arch/x86/kvm/vmx/main.c            |  9 +++++++++
+ arch/x86/kvm/vmx/vmx.c             | 16 +++++++++++-----
+ arch/x86/kvm/vmx/x86_ops.h         |  1 +
+ arch/x86/kvm/x86.c                 | 12 ++++++++++++
+ 6 files changed, 35 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v1 0/1] KVM: x86: Merge pending debug causes when vectoring #DB
+ Skip: [PATCH v1 1/1] KVM: x86: Merge pending debug causes when vectoring #DB
