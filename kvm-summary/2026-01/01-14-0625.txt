@@ -1,0 +1,1045 @@
+From add82e97b to 60aeec667
+KVM mailing list update from add82e97b to 60aeec667
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     26 google.com
+     17 intel.com
+     12 meta.com
+      3 rbox.co
+      2 nokia.com
+      2 linux.dev
+      1 linux.intel.com
+      1 gmail.com
+      1 antgroup.com
+
+Top 15 contributors (Based on Email Body)
+
+     16  "Chang S. Bae" <chang.seok.bae@intel.com>
+     12  Bobby Eshleman <bobbyeshleman@meta.com>
+     11  Kevin Cheng <chengkev@google.com>
+     11  Jim Mattson <jmattson@google.com>
+      4  Sean Christopherson <seanjc@google.com>
+      3  Michal Luczaj <mhal@rbox.co>
+      2  Yosry Ahmed <yosry.ahmed@linux.dev>
+      2  "Anthony Pighin (Nokia)" <anthony.pighin@nokia.com>
+      1  Peter Fang <peter.fang@intel.com>
+      1  Hou Wenlong <houwenlong.hwl@antgroup.com>
+      1  Bobby Eshleman <bobbyeshleman@gmail.com>
+      1  Binbin Wu <binbin.wu@linux.intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vfio/pci: Lock upstream bridge for vfio_pci_core_disable()
+[PATCH] vfio/pci: Lock upstream bridge for vfio_pci_core_disable()
+Author: Anthony Pighin (Nokia) <anthony.pighin@nokia.com>
+
+Fix the following on VFIO detach:=0A=
+[  242.271584] pcieport 0000:00:00.0: unlocked secondary bus reset via:=0A=
+               pci_reset_bus_function+0x188/0x1b8=0A=
+=0A=
+Commit 920f6468924f ("Warn on missing cfg_access_lock during secondary=0A=
+bus reset") added a warning if the PCI configuration space was not=0A=
+locked during a secondary bus reset request. That was in response to=0A=
+commit 7e89efc6e9e4 ("Lock upstream bridge for pci_reset_function()")=0A=
+such that remaining paths would be made more visible.=0A=
+=0A=
+Address the vfio_pci_core_disable() path.=0A=
+=0A=
+Signed-off-by: Anthony Pighin <anthony.pighin@nokia.com>=0A=
+---=0A=
+ drivers/vfio/pci/vfio_pci_core.c | 17 +++++++++++++----=0A=
+ 1 file changed, 13 insertions(+), 4 deletions(-)=0A=
+
+----------------------------------------------------------------------
+
+New:  PCI: Lock upstream bridge for pci_try_reset_function()
+[PATCH] PCI: Lock upstream bridge for pci_try_reset_function()
+Author: Anthony Pighin (Nokia) <anthony.pighin@nokia.com>
+
+Address this issue:=0A=
+[  125.942583] pcieport 0000:00:00.0: unlocked secondary bus reset via:=0A=
+               pci_reset_bus_function+0x188/0x1b8=0A=
+=0A=
+which flows from a VFIO_GROUP_GET_DEVICE_FD ioctl when a PCI device is=0A=
+being added to a VFIO group.=0A=
+=0A=
+Commit 920f6468924f ("Warn on missing cfg_access_lock during secondary=0A=
+bus reset") added a warning if the PCI configuration space was not=0A=
+locked during a secondary bus reset request. That was in response to=0A=
+commit 7e89efc6e9e4 ("Lock upstream bridge for pci_reset_function()")=0A=
+such that remaining paths would be made more visible.=0A=
+=0A=
+Address the pci_try_reset_function() path.=0A=
+=0A=
+Signed-off-by: Anthony Pighin <anthony.pighin@nokia.com>=0A=
+---=0A=
+ drivers/pci/pci.c | 17 ++++++++++++++++-=0A=
+ 1 file changed, 16 insertions(+), 1 deletion(-)=0A=
+
+----------------------------------------------------------------------
+
+New:  KVM: Don't clobber irqfd routing type when deassigning irqfd
+[PATCH 1/2] KVM: Don't clobber irqfd routing type when deassigning irqfd
+Author: Sean Christopherson <seanjc@google.com>
+
+When deassigning a KVM_IRQFD, don't clobber the irqfd's copy of the IRQ's
+routing entry as doing so breaks kvm_arch_irq_bypass_del_producer() on x86
+and arm64, which explicitly look for KVM_IRQ_ROUTING_MSI.  Instead, to
+handle a concurrent routing update, verify that the irqfd is still active
+before consuming the routing information.  As evidenced by the x86 and
+arm64 bugs, and another bug in kvm_arch_update_irqfd_routing() (see below),
+clobbering the entry type without notifying arch code is surprising and
+error prone.
+
+As a bonus, checking that the irqfd is active provides a convenient
+location for documenting _why_ KVM must not consume the routing entry for
+an irqfd that is in the process of being deassigned: once the irqfd is
+deleted from the list (which happens *before* the eventfd is detached), it
+will no longer receive updates via kvm_irq_routing_update(), and so KVM
+could deliver an event using stale routing information (relative to
+KVM_SET_GSI_ROUTING returning to userspace).
+
+As an even better bonus, explicitly checking for the irqfd being active
+fixes a similar bug to the one the clobbering is trying to prevent: if an
+irqfd is deactivated, and then its routing is changed,
+kvm_irq_routing_update() won't invoke kvm_arch_update_irqfd_routing()
+(because the irqfd isn't in the list).  And so if the irqfd is in bypass
+mode, IRQs will continue to be posted using the old routing information.
+
+As for kvm_arch_irq_bypass_del_producer(), clobbering the routing type
+results in KVM incorrectly keeping the IRQ in bypass mode, which is
+especially problematic on AMD as KVM tracks IRQs that are being posted to
+a vCPU in a list whose lifetime is tied to the irqfd.
+
+Without the help of KASAN to detect use-after-free, the most common
+sympton on AMD is a NULL pointer deref in amd_iommu_update_ga() due to
+the memory for irqfd structure being re-allocated and zeroed, resulting
+in irqfd->irq_bypass_data being NULL when read by
+avic_update_iommu_vcpu_affinity():
+
+  BUG: kernel NULL pointer dereference, address: 0000000000000018
+  #PF: supervisor read access in kernel mode
+  #PF: error_code(0x0000) - not-present page
+  PGD 40cf2b9067 P4D 40cf2b9067 PUD 408362a067 PMD 0
+  Oops: Oops: 0000 [#1] SMP
+  CPU: 6 UID: 0 PID: 40383 Comm: vfio_irq_test
+  Tainted: G     U  W  O        6.19.0-smp--5dddc257e6b2-irqfd #31 NONE
+  Tainted: [U]=USER, [W]=WARN, [O]=OOT_MODULE
+  Hardware name: Google, Inc. Arcadia_IT_80/Arcadia_IT_80, BIOS 34.78.2-0 09/05/2025
+  RIP: 0010:amd_iommu_update_ga+0x19/0xe0
+  Call Trace:
+   <TASK>
+   avic_update_iommu_vcpu_affinity+0x3d/0x90 [kvm_amd]
+   __avic_vcpu_load+0xf4/0x130 [kvm_amd]
+   kvm_arch_vcpu_load+0x89/0x210 [kvm]
+   vcpu_load+0x30/0x40 [kvm]
+   kvm_arch_vcpu_ioctl_run+0x45/0x620 [kvm]
+   kvm_vcpu_ioctl+0x571/0x6a0 [kvm]
+   __se_sys_ioctl+0x6d/0xb0
+   do_syscall_64+0x6f/0x9d0
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+  RIP: 0033:0x46893b
+    </TASK>
+  ---[ end trace 0000000000000000 ]---
+
+If AVIC is inhibited when the irfd is deassigned, the bug will manifest as
+list corruption, e.g. on the next irqfd assignment.
+
+  list_add corruption. next->prev should be prev (ffff8d474d5cd588),
+                       but was 0000000000000000. (next=ffff8d8658f86530).
+  ------------[ cut here ]------------
+  kernel BUG at lib/list_debug.c:31!
+  Oops: invalid opcode: 0000 [#1] SMP
+  CPU: 128 UID: 0 PID: 80818 Comm: vfio_irq_test
+  Tainted: G     U  W  O        6.19.0-smp--f19dc4d680ba-irqfd #28 NONE
+  Tainted: [U]=USER, [W]=WARN, [O]=OOT_MODULE
+  Hardware name: Google, Inc. Arcadia_IT_80/Arcadia_IT_80, BIOS 34.78.2-0 09/05/2025
+  RIP: 0010:__list_add_valid_or_report+0x97/0xc0
+  Call Trace:
+   <TASK>
+   avic_pi_update_irte+0x28e/0x2b0 [kvm_amd]
+   kvm_pi_update_irte+0xbf/0x190 [kvm]
+   kvm_arch_irq_bypass_add_producer+0x72/0x90 [kvm]
+   irq_bypass_register_consumer+0xcd/0x170 [irqbypass]
+   kvm_irqfd+0x4c6/0x540 [kvm]
+   kvm_vm_ioctl+0x118/0x5d0 [kvm]
+   __se_sys_ioctl+0x6d/0xb0
+   do_syscall_64+0x6f/0x9d0
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+   </TASK>
+  ---[ end trace 0000000000000000 ]---
+
+On Intel and arm64, the bug is less noisy, as the end result is that the
+device keeps posting IRQs to the vCPU even after it's been deassigned.
+
+Note, the worst of the breakage can be traced back to commit cb210737675e
+("KVM: Pass new routing entries and irqfd when updating IRTEs"), as before
+that commit KVM would pull the routing information from the per-VM routing
+table.  But as above, similar bugs have existed since support for IRQ
+bypass was added.  E.g. if a routing change finished before irq_shutdown()
+invoked kvm_arch_irq_bypass_del_producer(), VMX and SVM would see stale
+routing information and potentially leave the irqfd in bypass mode.
+
+Alternatively, x86 could be fixed by explicitly checking irq_bypass_vcpu
+instead of irq_entry.type in kvm_arch_irq_bypass_del_producer(), and arm64
+could be modified to utilize irq_bypass_vcpu in a similar manner.  But (a)
+that wouldn't fix the routing updates bug, and (b) fixing core code doesn't
+preclude x86 (or arm64) from adding such code as a sanity check (spoiler
+alert).
+
+Fixes: f70c20aaf141 ("KVM: Add an arch specific hooks in 'struct kvm_kernel_irqfd'")
+Fixes: cb210737675e ("KVM: Pass new routing entries and irqfd when updating IRTEs")
+Fixes: a0d7e2fc61ab ("KVM: arm64: vgic-v4: Only attempt vLPI mapping for actual MSIs")
+Cc: stable@vger.kernel.org
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/eventfd.c | 44 ++++++++++++++++++++++++--------------------
+ 1 file changed, 24 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Fix dangling IRQ bypass on x86 and arm64
+[PATCH 0/2] KVM: Fix dangling IRQ bypass on x86 and arm64
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix three bugs in one, where KVM can incorrectly leave an IRQ configured
+for bypass after the associated irqfd is deassigned from the VM (if the VMM
+deassigns the irqfd while it's in bypass mode).
+
+Two of the bugs are recent-ish, one each in x86 and arm64.  The x86 bug is
+the most visible/noisy as it leads to kernel panics on AMD due to SVM's use
+of a per-CPU list to track IRQs/irqfds that are being posted to the vCPU.
+
+The third bug has existed since IRQ bypass was added ~10 years ago.  That
+bug is much less likely as it requires hitting a race with a small window,
+and likely requires the VMM to do some rather weird stuff on top.
+
+The underlying issue of the x86 and arm64 bugs is that KVM clobbers the
+irqfd's copy of the routing information prior to fully deassigning the irqfd,
+which results in false negatives when kvm_arch_irq_bypass_del_producer()
+checks for "irqfd->irq_entry.type == KVM_IRQ_ROUTING_MSI".
+
+While the x86/arm64 bugs are fixable in arch code, e.g. by explicitly tracking
+if an irqfd is in bypass mode (x86 already does this), leaving the routing
+information in the irqfd as-is and instead checking if the irqfd is still
+active prior to consuming its copy of the routing information fixes both the
+arch bugs as well as the latent third bug.
+
+The second patches hardens x86 against similar bugs in the future, by
+essentially implementing the arch fix describes above, but wrapped in a WARN
+so that bugs elsewhere are detected but less likely to be fatal.
+
+The SVM bug was originally hit with Google's VMM, and confirmed via selftest
+(which is also how I verified the fix).  I'm not entirely sure why this hasn't
+been hit with QEMU.  My best guess is that QEMU always updates IRQ routing
+when deassigning a VFIO IRQFD?
+
+Sean Christopherson (2):
+  KVM: Don't clobber irqfd routing type when deassigning irqfd
+  KVM: x86: Assert that non-MSI doesn't have bypass vCPU when deleting
+    producer
+
+ arch/x86/kvm/irq.c |  3 ++-
+ virt/kvm/eventfd.c | 44 ++++++++++++++++++++++++--------------------
+ 2 files changed, 26 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nSVM: Drop redundant/wrong comment in nested_vmcb02_prepare_save()
+[PATCH] KVM: nSVM: Drop redundant/wrong comment in nested_vmcb02_prepare_save()
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+The comment above DR6 and DR7 initializations is redundant, because the
+entire function follows the same pattern of only initializing the fields
+in vmcb02 if the vmcb12 changed or the fields are dirty, which handles
+the first execution case.
+
+Also, the comment refers to new_vmcb12 as new_vmcs12. Just drop the
+comment.
+
+No functional change intended.
+
+Change-Id: Ib924765541fe3d8753b84b7ead8b47d8a24f0c8d
+Signed-off-by: Yosry Ahmed <yosry.ahmed@linux.dev>
+---
+ arch/x86/kvm/svm/nested.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Slightly simplify memstress_setup_nested()
+[PATCH] KVM: selftests: Slightly simplify memstress_setup_nested()
+Author: Yosry Ahmed <yosry.ahmed@linux.dev>
+
+Instead of calling memstress_setup_ept_mappings() only in the first
+iteration in the loop, move it before the loop.
+
+The call needed to happen within the loop before commit e40e72fec0de
+("KVM: selftests: Stop passing VMX metadata to TDP mapping functions"),
+as memstress_setup_ept_mappings() used to take in a pointer to vmx_pages
+and pass it into tdp_identity_map_1g() (to get the EPT root GPA). This
+is no longer the case, as tdp_identity_map_1g() gets the EPT root
+through stage2 MMU.
+
+Signed-off-by: Yosry Ahmed <yosry.ahmed@linux.dev>
+---
+ tools/testing/selftests/kvm/lib/x86/memstress.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: Coalesce only linear skb
+[PATCH net v2 1/2] vsock/virtio: Coalesce only linear skb
+Author: Michal Luczaj <mhal@rbox.co>
+
+vsock/virtio common tries to coalesce buffers in rx queue: if a linear skb
+(with a spare tail room) is followed by a small skb (length limited by
+GOOD_COPY_LEN = 128), an attempt is made to join them.
+
+Since the introduction of MSG_ZEROCOPY support, assumption that a small skb
+will always be linear is incorrect. In the zerocopy case, data is lost and
+the linear skb is appended with uninitialized kernel memory.
+
+Of all 3 supported virtio-based transports, only loopback-transport is
+affected. G2H virtio-transport rx queue operates on explicitly linear skbs;
+see virtio_vsock_alloc_linear_skb() in virtio_vsock_rx_fill(). H2G
+vhost-transport may allocate non-linear skbs, but only for sizes that are
+not considered for coalescence; see PAGE_ALLOC_COSTLY_ORDER in
+virtio_vsock_alloc_skb().
+
+Ensure only linear skbs are coalesced. Note that skb_tailroom(last_skb) > 0
+guarantees last_skb is linear.
+
+Fixes: 581512a6dc93 ("vsock/virtio: MSG_ZEROCOPY flag support")
+Signed-off-by: Michal Luczaj <mhal@rbox.co>
+---
+ net/vmw_vsock/virtio_transport_common.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: Fix data loss/disclosure due to
+[PATCH net v2 0/2] vsock/virtio: Fix data loss/disclosure due to
+Author: Michal Luczaj <mhal@rbox.co>
+
+Loopback transport coalesces some skbs too eagerly. Handling a zerocopy
+(non-linear) skb as a linear one leads to skb data loss and kernel memory
+disclosure.
+
+Plug the loss/leak by allowing only linear skb join. Provide a test.
+
+Signed-off-by: Michal Luczaj <mhal@rbox.co>
+---
+Changes in v2:
+- Point out virtio transports affected/unaffected [Stefano]
+- Move and comment skb_is_nonlinear() check [Stefano]
+- Describe test logic in detail, mention "virtio" in the name [Stefano]
+- Test: call poll() with a proper timeout, drop recv_verify()
+- Link to v1: https://lore.kernel.org/r/20260108-vsock-recv-coalescence-v1-0-26f97bb9a99b@rbox.co
+
+---
+Michal Luczaj (2):
+      vsock/virtio: Coalesce only linear skb
+      vsock/test: Add test for a linear and non-linear skb getting coalesced
+
+ net/vmw_vsock/virtio_transport_common.c   |  6 ++-
+ tools/testing/vsock/vsock_test.c          |  5 +++
+ tools/testing/vsock/vsock_test_zerocopy.c | 74 +++++++++++++++++++++++++++++++
+ tools/testing/vsock/vsock_test_zerocopy.h |  3 ++
+ 4 files changed, 86 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Don't register posted interrupt wakeup handler if alloc_kvm_area() fails
+[PATCH] KVM: VMX: Don't register posted interrupt wakeup handler if alloc_kvm_area() fails
+Author: Hou Wenlong <houwenlong.hwl@antgroup.com>
+
+Unregistering the posted interrupt wakeup handler only happens during
+hardware unsetup. Therefore, if alloc_kvm_area() fails and continue to
+register the posted interrupt wakeup handler, this will leave the global
+posted interrupt wakeup handler pointer in an incorrect state. Although
+it should not be an issue, it's still better to change it.
+
+Signed-off-by: Hou Wenlong <houwenlong.hwl@antgroup.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 7 +++++--
+ 1 file changed, 5 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Remove declaration of nested_mark_vmcs12_pages_dirty()
+[PATCH] KVM: VMX: Remove declaration of nested_mark_vmcs12_pages_dirty()
+Author: Binbin Wu <binbin.wu@linux.intel.com>
+
+Remove the declaration of nested_mark_vmcs12_pages_dirty() from the
+header file since it has been moved and renamed to
+nested_vmx_mark_all_vmcs12_pages_dirty(), which is a static function.
+
+Signed-off-by: Binbin Wu <binbin.wu@linux.intel.com>
+---
+ arch/x86/kvm/vmx/nested.h | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vsock: add netns to vsock core
+[PATCH net-next v14 01/12] vsock: add netns to vsock core
+Author: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+
+Add netns logic to vsock core. Additionally, modify transport hook
+prototypes to be used by later transport-specific patches (e.g.,
+*_seqpacket_allow()).
+
+Namespaces are supported primarily by changing socket lookup functions
+(e.g., vsock_find_connected_socket()) to take into account the socket
+namespace and the namespace mode before considering a candidate socket a
+"match".
+
+This patch also introduces the sysctl /proc/sys/net/vsock/ns_mode to
+report the mode and /proc/sys/net/vsock/child_ns_mode to set the mode
+for new namespaces.
+
+Add netns functionality (initialization, passing to transports, procfs,
+etc...) to the af_vsock socket layer. Later patches that add netns
+support to transports depend on this patch.
+
+dgram_allow(), stream_allow(), and seqpacket_allow() callbacks are
+modified to take a vsk in order to perform logic on namespace modes. In
+future patches, the net will also be used for socket
+lookups in these functions.
+
+Signed-off-by: Bobby Eshleman <bobbyeshleman@meta.com>
+---
+Changes in v14:
+- include linux/sysctl.h in af_vsock.c
+- squash patch 'vsock: add per-net vsock NS mode state' into this patch
+  (prior version can be found here):
+  https://lore.kernel.org/all/20251223-vsock-vmtest-v13-1-9d6db8e7c80b@meta.com/)
+
+Changes in v13:
+- remove net_mode and replace with direct accesses to net->vsock.mode,
+  since this is now immutable.
+- update comments about mode behavior and mutability, and sysctl API
+- only pass NULL for net when wanting global, instead of net_mode ==
+  VSOCK_NET_MODE_GLOBAL. This reflects the new logic
+  of vsock_net_check_mode() that only requires net pointers (not
+  net_mode).
+- refactor sysctl string code into a re-usable function, because
+  child_ns_mode and ns_mode both handle the same strings.
+- remove redundant vsock_net_init(&init_net) call in module init because
+  pernet registration calls the callback on the init_net too
+
+Changes in v12:
+- return true in dgram_allow(), stream_allow(), and seqpacket_allow()
+  only if net_mode == VSOCK_NET_MODE_GLOBAL (Stefano)
+- document bind(VMADDR_CID_ANY) case in af_vsock.c (Stefano)
+- change order of stream_allow() call in vmci so we can pass vsk
+  to it
+
+Changes in v10:
+- add file-level comment about what happens to sockets/devices
+  when the namespace mode changes (Stefano)
+- change the 'if (write)' boolean in vsock_net_mode_string() to
+  if (!write), this simplifies a later patch which adds "goto"
+  for mutex unlocking on function exit.
+
+Changes in v9:
+- remove virtio_vsock_alloc_rx_skb() (Stefano)
+- remove vsock_global_dummy_net, not needed as net=NULL +
+  net_mode=VSOCK_NET_MODE_GLOBAL achieves identical result
+
+Changes in v7:
+- hv_sock: fix hyperv build error
+- explain why vhost does not use the dummy
+- explain usage of __vsock_global_dummy_net
+- explain why VSOCK_NET_MODE_STR_MAX is 8 characters
+- use switch-case in vsock_net_mode_string()
+- avoid changing transports as much as possible
+- add vsock_find_{bound,connected}_socket_net()
+- rename `vsock_hdr` to `sysctl_hdr`
+- add virtio_vsock_alloc_linear_skb() wrapper for setting dummy net and
+  global mode for virtio-vsock, move skb->cb zero-ing into wrapper
+- explain seqpacket_allow() change
+- move net setting to __vsock_create() instead of vsock_create() so
+  that child sockets also have their net assigned upon accept()
+
+Changes in v6:
+- unregister sysctl ops in vsock_exit()
+- af_vsock: clarify description of CID behavior
+- af_vsock: fix buf vs buffer naming, and length checking
+- af_vsock: fix length checking w/ correct ctl_table->maxlen
+
+Changes in v5:
+- vsock_global_net() -> vsock_global_dummy_net()
+- update comments for new uAPI
+- use /proc/sys/net/vsock/ns_mode instead of /proc/net/vsock_ns_mode
+- add prototype changes so patch remains compilable
+---
+ MAINTAINERS                             |   1 +
+ drivers/vhost/vsock.c                   |   6 +-
+ include/linux/virtio_vsock.h            |   4 +-
+ include/net/af_vsock.h                  |  53 +++++-
+ include/net/net_namespace.h             |   4 +
+ include/net/netns/vsock.h               |  17 ++
+ net/vmw_vsock/af_vsock.c                | 297 +++++++++++++++++++++++++++++---
+ net/vmw_vsock/hyperv_transport.c        |   7 +-
+ net/vmw_vsock/virtio_transport.c        |   9 +-
+ net/vmw_vsock/virtio_transport_common.c |   6 +-
+ net/vmw_vsock/vmci_transport.c          |  26 ++-
+ net/vmw_vsock/vsock_loopback.c          |   8 +-
+ 12 files changed, 394 insertions(+), 44 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock: add namespace support to
+[PATCH net-next v14 00/12] vsock: add namespace support to
+Author: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+This series adds namespace support to vhost-vsock and loopback. It does
+not add namespaces to any of the other guest transports (virtio-vsock,
+hyperv, or vmci).
+
+The current revision supports two modes: local and global. Local
+mode is complete isolation of namespaces, while global mode is complete
+sharing between namespaces of CIDs (the original behavior).
+
+The mode is set using the parent namespace's
+/proc/sys/net/vsock/child_ns_mode and inherited when a new namespace is
+created. The mode of the current namespace can be queried by reading
+/proc/sys/net/vsock/ns_mode. The mode can not change after the namespace
+has been created.
+
+Modes are per-netns. This allows a system to configure namespaces
+independently (some may share CIDs, others are completely isolated).
+This also supports future possible mixed use cases, where there may be
+namespaces in global mode spinning up VMs while there are mixed mode
+namespaces that provide services to the VMs, but are not allowed to
+allocate from the global CID pool (this mode is not implemented in this
+series).
+
+Additionally, added tests for the new namespace features:
+
+tools/testing/selftests/vsock/vmtest.sh
+1..25
+ok 1 vm_server_host_client
+ok 2 vm_client_host_server
+ok 3 vm_loopback
+ok 4 ns_host_vsock_ns_mode_ok
+ok 5 ns_host_vsock_child_ns_mode_ok
+ok 6 ns_global_same_cid_fails
+ok 7 ns_local_same_cid_ok
+ok 8 ns_global_local_same_cid_ok
+ok 9 ns_local_global_same_cid_ok
+ok 10 ns_diff_global_host_connect_to_global_vm_ok
+ok 11 ns_diff_global_host_connect_to_local_vm_fails
+ok 12 ns_diff_global_vm_connect_to_global_host_ok
+ok 13 ns_diff_global_vm_connect_to_local_host_fails
+ok 14 ns_diff_local_host_connect_to_local_vm_fails
+ok 15 ns_diff_local_vm_connect_to_local_host_fails
+ok 16 ns_diff_global_to_local_loopback_local_fails
+ok 17 ns_diff_local_to_global_loopback_fails
+ok 18 ns_diff_local_to_local_loopback_fails
+ok 19 ns_diff_global_to_global_loopback_ok
+ok 20 ns_same_local_loopback_ok
+ok 21 ns_same_local_host_connect_to_local_vm_ok
+ok 22 ns_same_local_vm_connect_to_local_host_ok
+ok 23 ns_delete_vm_ok
+ok 24 ns_delete_host_ok
+ok 25 ns_delete_both_ok
+SUMMARY: PASS=25 SKIP=0 FAIL=0
+
+Thanks again for everyone's help and reviews!
+
+Suggested-by: Sargun Dhillon <sargun@sargun.me>
+Signed-off-by: Bobby Eshleman <bobbyeshleman@gmail.com>
+
+Changes in v14:
+- squashed 'vsock: add per-net vsock NS mode state' into 'vsock: add
+  netns to vsock core' (MST)
+- remove RFC tag
+- fixed base-commit (still had b4 configured to depend on old vmtest.sh
+  series)
+- Link to v13: https://lore.kernel.org/all/20251223-vsock-vmtest-v13-0-9d6db8e7c80b@meta.com/
+
+Changes in v13:
+- add support for immutable sysfs ns_mode and inheritance from sysfs child_ns_mode
+- remove passing around of net_mode, can be accessed now via
+  vsock_net_mode(net) since it is immutable
+- update tests for new uAPI
+- add one patch to extend the kselftest timeout (it was starting to
+  fail with the new tests added)
+- Link to v12: https://lore.kernel.org/r/20251126-vsock-vmtest-v12-0-257ee21cd5de@meta.com
+
+Changes in v12:
+- add ns mode checking to _allow() callbacks to reject local mode for
+  incompatible transports (Stefano)
+- flip vhost/loopback to return true for stream_allow() and
+  seqpacket_allow() in "vsock: add netns support to virtio transports"
+  (Stefano)
+- add VMADDR_CID_ANY + local mode documentation in af_vsock.c (Stefano)
+- change "selftests/vsock: add tests for host <-> vm connectivity with
+  namespaces" to skip test 29 in vsock_test for namespace local
+  vsock_test calls in a host local-mode namespace. There is a
+  false-positive edge case for that test encountered with the
+  ->stream_allow() approach. More details in that patch.
+- updated cover letter with new test output
+- Link to v11: https://lore.kernel.org/r/20251120-vsock-vmtest-v11-0-55cbc80249a7@meta.com
+
+Changes in v11:
+- vmtest: add a patch to use ss in wait_for_listener functions and
+  support vsock, tcp, and unix. Change all patches to use the new
+  functions.
+- vmtest: add a patch to re-use vm dmesg / warn counting functions
+- Link to v10: https://lore.kernel.org/r/20251117-vsock-vmtest-v10-0-df08f165bf3e@meta.com
+
+Changes in v10:
+- Combine virtio common patches into one (Stefano)
+- Resolve vsock_loopback virtio_transport_reset_no_sock() issue
+  with info->vsk setting. This eliminates the need for skb->cb,
+  so remove skb->cb patches.
+- many line width 80 fixes
+- Link to v9: https://lore.kernel.org/all/20251111-vsock-vmtest-v9-0-852787a37bed@meta.com
+
+Changes in v9:
+- reorder loopback patch after patch for virtio transport common code
+- remove module ordering tests patch because loopback no longer depends
+  on pernet ops
+- major simplifications in vsock_loopback
+- added a new patch for blocking local mode for guests, added test case
+  to check
+- add net ref tracking to vsock_loopback patch
+- Link to v8: https://lore.kernel.org/r/20251023-vsock-vmtest-v8-0-dea984d02bb0@meta.com
+
+Changes in v8:
+- Break generic cleanup/refactoring patches into standalone series,
+  remove those from this series
+- Link to dependency: https://lore.kernel.org/all/20251022-vsock-selftests-fixes-and-improvements-v1-0-edeb179d6463@meta.com/
+- Link to v7: https://lore.kernel.org/r/20251021-vsock-vmtest-v7-0-0661b7b6f081@meta.com
+
+Changes in v7:
+- fix hv_sock build
+- break out vmtest patches into distinct, more well-scoped patches
+- change `orig_net_mode` to `net_mode`
+- many fixes and style changes in per-patch change sets (see individual
+  patches for specific changes)
+- optimize `virtio_vsock_skb_cb` layout
+- update commit messages with more useful descriptions
+- vsock_loopback: use orig_net_mode instead of current net mode
+- add tests for edge cases (ns deletion, mode changing, loopback module
+  load ordering)
+- Link to v6: https://lore.kernel.org/r/20250916-vsock-vmtest-v6-0-064d2eb0c89d@meta.com
+
+Changes in v6:
+- define behavior when mode changes to local while socket/VM is alive
+- af_vsock: clarify description of CID behavior
+- af_vsock: use stronger langauge around CID rules (dont use "may")
+- af_vsock: improve naming of buf/buffer
+- af_vsock: improve string length checking on proc writes
+- vsock_loopback: add space in struct to clarify lock protection
+- vsock_loopback: do proper cleanup/unregister on vsock_loopback_exit()
+- vsock_loopback: use virtio_vsock_skb_net() instead of sock_net()
+- vsock_loopback: set loopback to NULL after kfree()
+- vsock_loopback: use pernet_operations and remove callback mechanism
+- vsock_loopback: add macros for "global" and "local"
+- vsock_loopback: fix length checking
+- vmtest.sh: check for namespace support in vmtest.sh
+- Link to v5: https://lore.kernel.org/r/20250827-vsock-vmtest-v5-0-0ba580bede5b@meta.com
+
+Changes in v5:
+- /proc/net/vsock_ns_mode -> /proc/sys/net/vsock/ns_mode
+- vsock_global_net -> vsock_global_dummy_net
+- fix netns lookup in vhost_vsock to respect pid namespaces
+- add callbacks for vsock_loopback to avoid circular dependency
+- vmtest.sh loads vsock_loopback module
+- remove vsock_net_mode_can_set()
+- change vsock_net_write_mode() to return true/false based on success
+- make vsock_net_mode enum instead of u8
+- Link to v4: https://lore.kernel.org/r/20250805-vsock-vmtest-v4-0-059ec51ab111@meta.com
+
+Changes in v4:
+- removed RFC tag
+- implemented loopback support
+- renamed new tests to better reflect behavior
+- completed suite of tests with permutations of ns modes and vsock_test
+  as guest/host
+- simplified socat bridging with unix socket instead of tcp + veth
+- only use vsock_test for success case, socat for failure case (context
+  in commit message)
+- lots of cleanup
+
+Changes in v3:
+- add notion of "modes"
+- add procfs /proc/net/vsock_ns_mode
+- local and global modes only
+- no /dev/vhost-vsock-netns
+- vmtest.sh already merged, so new patch just adds new tests for NS
+- Link to v2:
+  https://lore.kernel.org/kvm/20250312-vsock-netns-v2-0-84bffa1aa97a@gmail.com
+
+Changes in v2:
+- only support vhost-vsock namespaces
+- all g2h namespaces retain old behavior, only common API changes
+  impacted by vhost-vsock changes
+- add /dev/vhost-vsock-netns for "opt-in"
+- leave /dev/vhost-vsock to old behavior
+- removed netns module param
+- Link to v1:
+  https://lore.kernel.org/r/20200116172428.311437-1-sgarzare@redhat.com
+
+Changes in v1:
+- added 'netns' module param to vsock.ko to enable the
+  network namespace support (disabled by default)
+- added 'vsock_net_eq()' to check the "net" assigned to a socket
+  only when 'netns' support is enabled
+- Link to RFC: https://patchwork.ozlabs.org/cover/1202235/
+
+---
+Bobby Eshleman (12):
+      vsock: add netns to vsock core
+      virtio: set skb owner of virtio_transport_reset_no_sock() reply
+      vsock: add netns support to virtio transports
+      selftests/vsock: increase timeout to 1200
+      selftests/vsock: add namespace helpers to vmtest.sh
+      selftests/vsock: prepare vm management helpers for namespaces
+      selftests/vsock: add vm_dmesg_{warn,oops}_count() helpers
+      selftests/vsock: use ss to wait for listeners instead of /proc/net
+      selftests/vsock: add tests for proc sys vsock ns_mode
+      selftests/vsock: add namespace tests for CID collisions
+      selftests/vsock: add tests for host <-> vm connectivity with namespaces
+      selftests/vsock: add tests for namespace deletion
+
+ MAINTAINERS                             |    1 +
+ drivers/vhost/vsock.c                   |   44 +-
+ include/linux/virtio_vsock.h            |    9 +-
+ include/net/af_vsock.h                  |   53 +-
+ include/net/net_namespace.h             |    4 +
+ include/net/netns/vsock.h               |   17 +
+ net/vmw_vsock/af_vsock.c                |  297 ++++++++-
+ net/vmw_vsock/hyperv_transport.c        |    7 +-
+ net/vmw_vsock/virtio_transport.c        |   22 +-
+ net/vmw_vsock/virtio_transport_common.c |   62 +-
+ net/vmw_vsock/vmci_transport.c          |   26 +-
+ net/vmw_vsock/vsock_loopback.c          |   22 +-
+ tools/testing/selftests/vsock/settings  |    2 +-
+ tools/testing/selftests/vsock/vmtest.sh | 1055 +++++++++++++++++++++++++++++--
+ 14 files changed, 1488 insertions(+), 133 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/svm: Fix virq_inject SVM test failure
+[kvm-unit-tests PATCH V2 01/10] x86/svm: Fix virq_inject SVM test failure
+Author: Kevin Cheng <chengkev@google.com>
+
+Currently, the virq_inject test advances guest RIP regardless of what
+instruction caused the nested VM exit. This is an issue when
+INTERCEPT_VINTR is set and the sti_nop_cli() is called in L2 with a
+pending interrupt. The vmcb save rip will point to the nop instruction
+on exit due to a one instruction interrupt shadow. The unconditional
+advance of the guest rip will move it three bytes, which is past the
+entire sti_nop_cli() call. This produces some unintended/inconsitent
+behavior including test failures.
+
+Only advance the guest rip if the exiting instruction was vmmcall().
+
+Signed-off-by: Kevin Cheng <chengkev@google.com>
+---
+ x86/svm_tests.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Improve test parity between SVM and VMX
+[kvm-unit-tests PATCH V2 00/10] Improve test parity between SVM and VMX
+Author: Kevin Cheng <chengkev@google.com>
+
+This series introduces numerous tests for features that VMX testing
+covers but current SVM testing lacks.
+
+I went through all VMX tests and identified which ones could have an
+equivalent test written for SVM.
+
+This series also includes some canonicalization and consistency check
+tests as defined by the APM.
+
+v1 -> v2:
+  - Renamed check_npt_ad_pte() to found_bad_npt_ad().
+  - Renamed test_event_injection() to svm_event_injection() and removed
+    the test from the svm suite to run separately.
+  - For the svm_event_injection test, injecting the CP vector now relies
+    on shadow stack capabilities as suggested by Yosry.
+  - Added a new test for verifying that certain instructions generate a
+    #UD when EFER.SVME=0. This is a regression test in response to a fix
+    that is currently under review [1]
+
+[1] https://lore.kernel.org/all/20260112174535.3132800-5-chengkev@google.com/
+
+v1: https://lore.kernel.org/all/20251219225908.334766-1-chengkev@google.com/
+
+Kevin Cheng (10):
+  x86/svm: Fix virq_inject SVM test failure
+  x86/nSVM: Add test for NPT A/D bits
+  x86/svm: Add tests for APIC passthrough
+  x86/nSVM: Add tests for instruction interrupts
+  x86/svm: Add tests for PF exception testing
+  x86/svm: Extend NPT test coverage for different page table levels
+  x86/svm: Add NPT ignored bits test
+  x86/svm: Add testing for NPT permissions on guest page tables
+  x86/svm: Add event injection check tests
+  x86/svm: Add test for #UD when EFER.SVME=0
+
+ lib/x86/processor.h |  11 +
+ lib/x86/vm.c        |   2 +-
+ lib/x86/vm.h        |   2 +
+ x86/Makefile.common |   2 +
+ x86/access.c        |   7 -
+ x86/access.h        |  11 +
+ x86/svm.c           |  16 +-
+ x86/svm.h           |   9 +
+ x86/svm_npt.c       | 801 ++++++++++++++++++++++++++++++++++++++++----
+ x86/svm_tests.c     | 702 ++++++++++++++++++++++++++++++++++----
+ x86/unittests.cfg   |  62 +++-
+ x86/vmx_tests.c     |   5 -
+ 12 files changed, 1486 insertions(+), 144 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: nSVM: Add g_pat to fields copied by svm_copy_vmrun_state()
+[PATCH 01/10] KVM: x86: nSVM: Add g_pat to fields copied by svm_copy_vmrun_state()
+Author: Jim Mattson <jmattson@google.com>
+
+The vmcb01 g_pat field holds the value of L1's IA32_PAT MSR. To
+preserve this value through virtual SMM and serialization, add g_pat
+to the fields copied by svm_copy_vmrun_state().
+
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/nested.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: nSVM: Improve PAT virtualization
+[PATCH 00/10] KVM: x86: nSVM: Improve PAT virtualization
+Author: Jim Mattson <jmattson@google.com>
+
+KVM's implementation of nested SVM treats PAT the same way whether or
+not nested NPT is enabled: L1 and L2 share a PAT.
+
+This is correct when nested NPT is disabled, but incorrect when nested
+NPT is enabled. When nested NPT is enabled, L1 and L2 have independent
+PATs.
+
+The architectural specification for this separation is unusual. There
+is a "guest PAT register" that is accessed by references to the PAT
+MSR in guest mode, but it is different from the (host) PAT MSR. Other
+resources that have distinct host and guest values have a shared
+storage location, and the values are swapped on VM-entry/VM-exit.
+
+In
+https://lore.kernel.org/kvm/20251107201151.3303170-1-jmattson@google.com/,
+I proposed an implementation that adhered to the architectural
+specification. It had a few warts. The worst was the necessity of
+"fixing up" KVM_SET_MSRS when executing KVM_SET_NESTED_STATE if L2 was
+active and nested NPT was enabled when a snapshot was taken. Aside
+from Yosry's clarification, no one has responded. I will take silence
+to imply rejection. That's okay; I wasn't fond of that implementation
+myself.
+
+The current series treats PAT just like any other resource with
+distinct host and guest values. There is a single shared storage
+location (vcpu->arch.pat), and the values are swapped on
+VM-entry/VM-exit. Though this implementation doesn't precisely follow
+the architectural specification, the guest visible behavior is the
+same as architected.
+
+The first three patches ensure that the vmcb01.g_pat value at VMRUN is
+preserved through virtual SMM and serialization. When NPT is enabled,
+this field holds the host (L1) hPAT value from emulated VMRUN to
+emulated #VMEXIT.
+
+The fourth patch restores (L1) hPAT value from vmcb01.g_pat at
+emulated #VMEXIT. Note that this is not architected, but it is
+required for this implementation, because hPAT and gPAT occupy the
+same storage location.
+
+The next three patches handle loading vmcb12.g_pat into the (L2) guest
+PAT register at VMRUN. Most of this behavior is architected, but the
+architectural specification states that the value is loaded into the
+guest PAT register, leaving the hPAT register unchanged.
+
+The eighth patch stores the (L2) guest PAT register into vmcb12_g_pat
+on emulated #VMEXIT, as architected.
+
+The ninth patch fixes the emulation of WRMSR(IA32_PAT) when nested NPT
+is enabled.
+
+The tenth patch introduces a new KVM selftest to validate virtualized
+PAT behavior.
+
+Jim Mattson (10):
+  KVM: x86: nSVM: Add g_pat to fields copied by svm_copy_vmrun_state()
+  KVM: x86: nSVM: Add VALID_GPAT flag to kvm_svm_nested_state_hdr
+  KVM: x86: nSVM: Handle legacy SVM nested state in SET_NESTED_STATE
+  KVM: x86: nSVM: Restore L1's PAT on emulated #VMEXIT from L2 to L1
+  KVM: x86: nSVM: Cache g_pat in vmcb_save_area_cached
+  KVM: x86: nSVM: Add validity check for VMCB12 g_pat
+  KVM: x86: nSVM: Set vmcb02.g_pat correctly for nested NPT
+  KVM: x86: nSVM: Save gPAT to vmcb12.g_pat on emulated #VMEXIT from L2
+    to L1
+  KVM: x86: nSVM: Fix assignment to IA32_PAT from L2
+  KVM: selftests: nSVM: Add svm_nested_pat test
+
+ arch/x86/include/uapi/asm/kvm.h               |   3 +
+ arch/x86/kvm/svm/nested.c                     |  74 +++-
+ arch/x86/kvm/svm/svm.c                        |  14 +-
+ arch/x86/kvm/svm/svm.h                        |   2 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/svm_nested_pat_test.c   | 357 ++++++++++++++++++
+ 6 files changed, 432 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Rename register accessors to be GPR-specific
+[PATCH v2 01/16] KVM: x86: Rename register accessors to be GPR-specific
+Author: Chang S. Bae <chang.seok.bae@intel.com>
+
+Refactor the VCPU register state accessors to make them explicitly
+GPR-only.
+
+The existing register accessors operate on the cached VCPU register
+state. That cache holds GPRs and RIP. RIP has its own interface already.
+This renaming clarifies GPR access only.
+
+No functional changes intended.
+
+Signed-off-by: Chang S. Bae <chang.seok.bae@intel.com>
+---
+ arch/x86/kvm/svm/svm.c    |  8 ++++----
+ arch/x86/kvm/vmx/nested.c | 20 ++++++++++----------
+ arch/x86/kvm/vmx/vmx.c    | 12 ++++++------
+ arch/x86/kvm/x86.c        | 10 +++++-----
+ arch/x86/kvm/x86.h        |  5 ++---
+ arch/x86/kvm/xen.c        |  2 +-
+ 6 files changed, 28 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Enable APX for guests
+[PATCH v2 00/16] KVM: x86: Enable APX for guests
+Author: Chang S. Bae <chang.seok.bae@intel.com>
+
+Hi all,
+
+Here is a summary of changes since the last posting [1]:
+
+  * PATCH 2/3: Move EGPR accessor code to x86.c (Paolo)
+  * PATCH 11:  Rename NoRex to NoRex2 (Paolo)
+  * PATCH 05:  Remove an unused function parameter (Chao)
+  * PATCH 7/8: Reorder nVMX changes after VMX patches (Chao)
+
+With this posting, I would like to see if I can collect some review tags.
+
+For anyone looking at this series for the first time, please refer to the
+initial RFC posting cover and the related discussions [3], while a brief
+overview is here:
+
+  APX [2] extends the general-purpose register set (EGPRs). Unlike legacy
+  GPRs, the state is not cached by KVM, so will be accessed directly to
+  live hardware registers (Part1). Based on that, VMX exit handling
+  (Part2) and instruction emulation (Part3) are updated before the
+  feature is exposed to guests (Part4).
+
+  * Part1, PATCH 01-03: GPR accessor refactoring and EGPR support
+  * Part2, PATCH 04-08: VMX handler changes for EGPR indices
+  * Part3, PATCH 09-12: Emulator changes for REX2 support
+  * Part4, PATCH 13-16: Feature expossure and self-tests
+
+The series is also available here:
+  git://github.com/intel/apx.git apx-kvm_v2
+
+This version is rebased on v6.19-rc5. I do not see any direct dependency
+on other pending changes right now; any conflict should be manageable
+later.
+
+Thanks,
+Chang
+
+[1] V1: https://lore.kernel.org/kvm/20251221040742.29749-1-chang.seok.bae@intel.com/
+[2] APX Architecture Specification:
+    https://cdrdv2.intel.com/v1/dl/getContent/784266
+[3] RFC: https://lore.kernel.org/kvm/20251110180131.28264-1-chang.seok.bae@intel.com/
+
+Chang S. Bae (15):
+  KVM: x86: Rename register accessors to be GPR-specific
+  KVM: x86: Refactor GPR accessors to differentiate register access
+    types
+  KVM: x86: Implement accessors for extended GPRs
+  KVM: VMX: Introduce unified instruction info structure
+  KVM: VMX: Refactor instruction information retrieval
+  KVM: VMX: Refactor GPR index retrieval from exit qualification
+  KVM: VMX: Support extended register index in exit handling
+  KVM: nVMX: Propagate the extended instruction info field
+  KVM: emulate: Support EGPR accessing and tracking
+  KVM: emulate: Handle EGPR index and REX2-incompatible opcodes
+  KVM: emulate: Support REX2-prefixed opcode decode
+  KVM: emulate: Reject EVEX-prefixed instructions
+  KVM: x86: Guard valid XCR0.APX settings
+  KVM: x86: Expose APX sub-features to guests
+  KVM: x86: selftests: Add APX state handling and XCR0 sanity checks
+
+Peter Fang (1):
+  KVM: x86: Expose APX foundational feature bit to guests
+
+ arch/x86/include/asm/kvm_host.h               |  19 +++
+ arch/x86/include/asm/kvm_vcpu_regs.h          |  16 +++
+ arch/x86/include/asm/vmx.h                    |   2 +
+ arch/x86/kvm/Kconfig                          |   4 +
+ arch/x86/kvm/cpuid.c                          |  14 +-
+ arch/x86/kvm/emulate.c                        | 121 +++++++++++-----
+ arch/x86/kvm/kvm_emulate.h                    |  11 +-
+ arch/x86/kvm/reverse_cpuid.h                  |   6 +
+ arch/x86/kvm/svm/svm.c                        |  23 +++-
+ arch/x86/kvm/vmx/nested.c                     |  87 ++++++------
+ arch/x86/kvm/vmx/nested.h                     |   2 +-
+ arch/x86/kvm/vmx/vmcs12.c                     |   1 +
+ arch/x86/kvm/vmx/vmcs12.h                     |   3 +-
+ arch/x86/kvm/vmx/vmx.c                        |  26 ++--
+ arch/x86/kvm/vmx/vmx.h                        | 106 ++++++++++++--
+ arch/x86/kvm/x86.c                            | 130 ++++++++++++++++--
+ arch/x86/kvm/x86.h                            |  24 +++-
+ arch/x86/kvm/xen.c                            |   2 +-
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/x86/state_test.c  |   6 +
+ .../selftests/kvm/x86/xcr0_cpuid_test.c       |  19 +++
+ 21 files changed, 498 insertions(+), 125 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Check vCPU ID against max x2AVIC ID if and only if
+[PATCH] KVM: SVM: Check vCPU ID against max x2AVIC ID if and only if
+Author: Sean Christopherson <seanjc@google.com>
+
+When allocating the AVIC backing page, only check one of the max AVIC vs.
+x2AVIC ID based on whether or not x2AVIC is enabled.  Doing so fixes a bug
+where KVM incorrectly inhibits AVIC if x2AVIC is _disabled_ and any vCPU
+with a non-zero APIC ID is created, as x2avic_max_physical_id is left '0'
+when x2AVIC is disabled.
+
+Fixes: 940fc47cfb0d ("KVM: SVM: Add AVIC support for 4k vCPUs in x2AVIC mode")
+Cc: stable@vger.kernel.org
+Cc: Naveen N Rao (AMD) <naveen@kernel.org>
+Cc: Suravee Suthikulpanit <suravee.suthikulpanit@amd.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/avic.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
