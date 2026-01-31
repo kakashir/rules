@@ -1,0 +1,306 @@
+From ebd912a35 to 5a8dab76b
+KVM mailing list update from ebd912a35 to 5a8dab76b
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      8 nvidia.com
+      2 iscas.ac.cn
+      1 kernel.org
+      1 gmail.com
+      1 fb.com
+      1 aosc.io
+
+Top 15 contributors (Based on Email Body)
+
+      8  Leon Romanovsky <leonro@nvidia.com>
+      2  Jiakai Xu <xujiakai2025@iscas.ac.cn>
+      1  Zixing Liu <liushuyu@aosc.io>
+      1  Ted Logan <tedlogan@fb.com>
+      1  Leon Romanovsky <leon@kernel.org>
+      1  Ethan Nelson-Moore <enelsonmoore@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  dma-buf: Rename .move_notify() callback to a clearer identifier
+[PATCH v7 1/8] dma-buf: Rename .move_notify() callback to a clearer identifier
+Author: Leon Romanovsky <leon@kernel.org>
+
+
+Rename the .move_notify() callback to .invalidate_mappings() to make its
+purpose explicit and highlight that it is responsible for invalidating
+existing mappings.
+
+Suggested-by: Christian König <christian.koenig@amd.com>
+Reviewed-by: Christian König <christian.koenig@amd.com>
+Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+---
+ drivers/dma-buf/dma-buf.c                   | 6 +++---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c | 4 ++--
+ drivers/gpu/drm/virtio/virtgpu_prime.c      | 2 +-
+ drivers/gpu/drm/xe/tests/xe_dma_buf.c       | 6 +++---
+ drivers/gpu/drm/xe/xe_dma_buf.c             | 2 +-
+ drivers/infiniband/core/umem_dmabuf.c       | 4 ++--
+ drivers/infiniband/hw/mlx5/mr.c             | 2 +-
+ drivers/iommu/iommufd/pages.c               | 2 +-
+ include/linux/dma-buf.h                     | 6 +++---
+ 9 files changed, 17 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  dma-buf: Use revoke mechanism to invalidate shared buffers
+[PATCH v7 0/8] dma-buf: Use revoke mechanism to invalidate shared buffers
+Author: Leon Romanovsky <leon@kernel.org>
+
+Changelog:
+v7:
+ * Fixed messed VFIO patch due to rebase.
+v6: https://patch.msgid.link/20260130-dmabuf-revoke-v6-0-06278f9b7bf0@nvidia.com
+ * Added Reviewed-by tags.
+ * Changed for blocking wait_for_completion() in VFIO
+ * Fixed race between ->attach and move_notify, where priv->revoked is
+   flipped and lock is released.
+v5: https://patch.msgid.link/20260124-dmabuf-revoke-v5-0-f98fca917e96@nvidia.com
+ * Documented the DMA-BUF expectations around DMA unmap.
+ * Added wait support in VFIO for DMA unmap.
+ * Reordered patches.
+ * Improved commit messages to document even more.
+v4: https://lore.kernel.org/all/20260121-dmabuf-revoke-v4-0-d311cbc8633d@nvidia.com
+ * Changed DMA_RESV_USAGE_KERNEL to DMA_RESV_USAGE_BOOKKEEP.
+ * Made .invalidate_mapping() truly optional.
+ * Added patch which renames dma_buf_move_notify() to be
+   dma_buf_invalidate_mappings().
+ * Restored dma_buf_attachment_is_dynamic() function.
+v3: https://lore.kernel.org/all/20260120-dmabuf-revoke-v3-0-b7e0b07b8214@nvidia.com/
+ * Used Jason's wordings for commits and cover letter.
+ * Removed IOMMUFD patch.
+ * Renamed dma_buf_attachment_is_revoke() to be dma_buf_attach_revocable().
+ * Added patch to remove CONFIG_DMABUF_MOVE_NOTIFY.
+ * Added Reviewed-by tags.
+ * Called to dma_resv_wait_timeout() after dma_buf_move_notify() in VFIO.
+ * Added dma_buf_attach_revocable() check to VFIO DMABUF attach function.
+ * Slightly changed commit messages.
+v2: https://patch.msgid.link/20260118-dmabuf-revoke-v2-0-a03bb27c0875@nvidia.com
+ * Changed series to document the revoke semantics instead of
+   implementing it.
+v1: https://patch.msgid.link/20260111-dmabuf-revoke-v1-0-fb4bcc8c259b@nvidia.com
+
+-------------------------------------------------------------------------
+This series is based on latest VFIO fix, which will be sent to Linus
+very soon.
+
+https://lore.kernel.org/all/20260121-vfio-add-pin-v1-1-4e04916b17f1@nvidia.com/
+
+Thanks
+-------------------------------------------------------------------------
+This series documents a dma-buf “revoke” mechanism: to allow a dma-buf
+exporter to explicitly invalidate (“kill”) a shared buffer after it has
+been distributed to importers, so that further CPU and device access is
+prevented and importers reliably observe failure.
+
+The change in this series is to properly document and use existing core
+“revoked” state on the dma-buf object and a corresponding exporter-triggered
+revoke operation.
+
+dma-buf has quietly allowed calling move_notify on pinned dma-bufs, even
+though legacy importers using dma_buf_attach() would simply ignore
+these calls.
+
+The intention was that move_notify() would tell the importer to expedite
+it's unmapping process and once the importer is fully finished with DMA it
+would unmap the dma-buf which finally signals that the importer is no
+longer ever going to touch the memory again. Importers that touch past
+their unmap() call can trigger IOMMU errors, AER and beyond, however
+read-and-discard access between move_notify() and unmap is allowed.
+
+Thus, we can define the exporter's revoke sequence for pinned dma-buf as:
+
+	dma_resv_lock(dmabuf->resv, NULL);
+	// Prevent new mappings from being established
+	priv->revoked = true;
+
+	// Tell all importers to eventually unmap
+	dma_buf_invalidate_mappings(dmabuf);
+
+	// Wait for any inprogress fences on the old mapping
+	dma_resv_wait_timeout(dmabuf->resv,
+			      DMA_RESV_USAGE_BOOKKEEP, false,
+			      MAX_SCHEDULE_TIMEOUT);
+	dma_resv_unlock(dmabuf->resv, NULL);
+
+	// Wait for all importers to complete unmap
+	wait_for_completion(&priv->unmapp_comp);
+
+However, dma-buf also supports importers that don't do anything on
+move_notify(), and will not unmap the buffer in bounded time.
+
+Since such importers would cause the above sequence to hang, a new
+mechanism is needed to detect incompatible importers.
+
+Introduce dma_buf_attach_revocable() which if true indicates the above
+sequence is safe to use and will complete in kernel-only bounded time for
+this attachment.
+
+Unfortunately dma_buf_attach_revocable() is going to fail for the popular
+RDMA pinned importer, which means we cannot introduce it to existing
+places using pinned move_notify() without potentially breaking existing
+userspace flows.
+
+Existing exporters that only trigger this flow for RAS errors should not
+call dma_buf_attach_revocable() and will suffer an unbounded block on the
+final completion, hoping that the userspace will notice the RAS and clean
+things up. Without revoke support on the RDMA pinned importers it doesn't
+seem like any other non-breaking option is currently possible.
+
+For new exporters, like VFIO and RDMA, that have userspace triggered
+revoke events, the unbouned sleep would not be acceptable. They can call
+dma_buf_attach_revocable() and will not work with the RDMA pinned importer
+from day 0, preventing regressions.
+
+In the process add documentation explaining the above details.
+
+Thanks
+
+Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+---
+Leon Romanovsky (8):
+      dma-buf: Rename .move_notify() callback to a clearer identifier
+      dma-buf: Rename dma_buf_move_notify() to dma_buf_invalidate_mappings()
+      dma-buf: Always build with DMABUF_MOVE_NOTIFY
+      vfio: Wait for dma-buf invalidation to complete
+      dma-buf: Make .invalidate_mapping() truly optional
+      dma-buf: Add dma_buf_attach_revocable()
+      vfio: Permit VFIO to work with pinned importers
+      iommufd: Add dma_buf_pin()
+
+ drivers/dma-buf/Kconfig                     | 12 -----
+ drivers/dma-buf/dma-buf.c                   | 69 ++++++++++++++++++++-----
+ drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c | 14 ++---
+ drivers/gpu/drm/amd/amdgpu/amdgpu_object.c  |  2 +-
+ drivers/gpu/drm/amd/amdkfd/Kconfig          |  2 +-
+ drivers/gpu/drm/virtio/virtgpu_prime.c      |  2 +-
+ drivers/gpu/drm/xe/tests/xe_dma_buf.c       |  7 ++-
+ drivers/gpu/drm/xe/xe_bo.c                  |  2 +-
+ drivers/gpu/drm/xe/xe_dma_buf.c             | 14 ++---
+ drivers/infiniband/core/umem_dmabuf.c       | 13 -----
+ drivers/infiniband/hw/mlx5/mr.c             |  2 +-
+ drivers/iommu/iommufd/pages.c               | 11 +++-
+ drivers/iommu/iommufd/selftest.c            |  2 +-
+ drivers/vfio/pci/vfio_pci_dmabuf.c          | 80 ++++++++++++++++++++++-------
+ include/linux/dma-buf.h                     | 17 +++---
+ 15 files changed, 153 insertions(+), 96 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Change imsic->vsfile_lock from rwlock_t to raw_spinlock_t
+[PATCH] RISC-V: KVM: Change imsic->vsfile_lock from rwlock_t to raw_spinlock_t
+Author: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+The per-vCPU IMSIC context uses a vsfile_lock to protect access
+to the VS-file. Currently, this lock is an rwlock_t, and is used
+with read_lock_irqsave/write_lock_irqsave in multiple places
+inside arch/riscv/kvm/aia_imsic.c.
+
+During fuzz testing of KVM ioctl sequences, an 
+"[BUG: Invalid wait context]" crash was observed when holding 
+vsfile_lock in certain VCPU scheduling paths, for example during 
+kvm_riscv_vcpu_aia_imsic_put(). Log shows that at this point
+the task may hold vcpu->mutex and scheduler runqueue locks,
+and thus is in a context where acquiring a read/write rwlock
+with irqsave is illegal.
+
+The crash manifests as:
+  [ BUG: Invalid wait context ]
+  (&imsic->vsfile_lock){....}-{3:3}, at:
+  kvm_riscv_vcpu_aia_imsic_put arch/riscv/kvm/aia_imsic.c:728
+  ...
+  2 locks held by syz.4.4541/8252:
+   #0: (&vcpu->mutex), at: kvm_vcpu_ioctl virt/kvm/kvm_main.c:4460
+   #1: (&rq->__lock), at: raw_spin_rq_lock_nested kernel/sched/core.c:639
+   #1: (&rq->__lock), at: raw_spin_rq_lock kernel/sched/sched.h:1580
+   #1: (&rq->__lock), at: rq_lock kernel/sched/sched.h:1907
+   #1: (&rq->__lock), at: __schedule kernel/sched/core.c:6772
+  ...
+  Call Trace:
+   _raw_read_lock_irqsave kernel/locking/spinlock.c:236
+   kvm_riscv_vcpu_aia_imsic_put arch/riscv/kvm/aia_imsic.c:716
+   kvm_riscv_vcpu_aia_put arch/riscv/kvm/aia.c:154
+   kvm_arch_vcpu_put arch/riscv/kvm/vcpu.c:650
+   kvm_sched_out virt/kvm/kvm_main.c:6421
+   __fire_sched_out_preempt_notifiers kernel/sched/core.c:4835
+   fire_sched_out_preempt_notifiers kernel/sched/core.c:4843
+   prepare_task_switch kernel/sched/core.c:5050
+   context_switch kernel/sched/core.c:5205
+   __schedule kernel/sched/core.c:6867
+   __schedule_loop kernel/sched/core.c:6949
+   schedule kernel/sched/core.c:6964
+   kvm_riscv_check_vcpu_requests arch/riscv/kvm/vcpu.c:699
+   kvm_arch_vcpu_ioctl_run arch/riscv/kvm/vcpu.c:920
+
+Therefore, replace vsfile_lock with raw_spinlock_t, and update 
+all acquire/release calls to 
+raw_spin_lock_irqsave()/raw_spin_unlock_irqrestore().
+
+Fixes: db8b7e97d6137a ("RISC-V: KVM: Add in-kernel virtualization of AIA IMSIC")
+Signed-off-by: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+Signed-off-by: Jiakai Xu <jiakaiPeanut@gmail.com>
+---
+ arch/riscv/kvm/aia_imsic.c | 36 ++++++++++++++++++------------------
+ 1 file changed, 18 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost: remove unnecessary module_init/exit functions
+[PATCH] vhost: remove unnecessary module_init/exit functions
+Author: Ethan Nelson-Moore <enelsonmoore@gmail.com>
+
+The vhost driver has unnecessary empty module_init and
+module_exit functions. Remove them. Note that if a module_init function
+exists, a module_exit function must also exist; otherwise, the module
+cannot be unloaded.
+
+Signed-off-by: Ethan Nelson-Moore <enelsonmoore@gmail.com>
+---
+ drivers/vhost/vhost.c | 12 ------------
+ 1 file changed, 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: selftests: only build tests on arm64 and x86_64
+[PATCH] vfio: selftests: only build tests on arm64 and x86_64
+Author: Ted Logan <tedlogan@fb.com>
+
+Only build vfio self-tests on arm64 and x86_64; these are the only
+architectures where the vfio self-tests are run. Addresses compiler
+warnings for format and conversions on i386.
+
+Reported-by: kernel test robot <lkp@intel.com>
+Closes: https://lore.kernel.org/oe-kbuild-all/202601211830.aBEjmEFD-lkp@intel.com/
+Signed-off-by: Ted Logan <tedlogan@fb.com>
+---
+Do not build vfio self-tests for 32-bit architectures, where they're
+untested and unmaintained. Only build these tests for arm64 and x86_64,
+where they're regularly tested.
+
+Compiler warning fixed by patch:
+
+   In file included from tools/testing/selftests/vfio/lib/include/libvfio.h:6:
+   tools/testing/selftests/vfio/lib/include/libvfio/iommu.h:49:2: warning: format specifies type 'unsigned long' but the argument has type 'u64' (aka 'unsigned long long') [-Wformat]
+      49 |         VFIO_ASSERT_EQ(__iommu_unmap(iommu, region, NULL), 0);
+         |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   tools/testing/selftests/vfio/lib/include/libvfio/assert.h:32:37: note: expanded from macro 'VFIO_ASSERT_EQ'
+      32 | #define VFIO_ASSERT_EQ(_a, _b, ...) VFIO_ASSERT_OP(_a, _b, ==, ##__VA_ARGS__)
+         |                                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   tools/testing/selftests/vfio/lib/include/libvfio/assert.h:27:22: note: expanded from macro 'VFIO_ASSERT_OP'
+      26 |         fprintf(stderr, "  Observed: %#lx %s %#lx\n",                           \
+         |                                              ~~~~
+      27 |                         (u64)__lhs, #_op, (u64)__rhs);                          \
+         |                                           ^~~~~~~~~~
+---
+ tools/testing/selftests/vfio/Makefile | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
