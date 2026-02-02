@@ -1,0 +1,466 @@
+From 9b1f83906 to 766e010e8
+KVM mailing list update from 9b1f83906 to 766e010e8
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     21 kernel.org
+      6 google.com
+      5 linux.alibaba.com
+      4 sony.com
+      4 linux.dev
+      2 iscas.ac.cn
+      2 fortanix.com
+      1 oracle.com
+      1 loongson.cn
+      1 linux.ibm.com
+      1 baidu.com
+
+Top 15 contributors (Based on Email Body)
+
+     21  Marc Zyngier <maz@kernel.org>
+      6  Fuad Tabba <tabba@google.com>
+      5  Fangyu Yu <fangyu.yu@linux.alibaba.com>
+      4  Shashank Balaji <shashank.mahadasyam@sony.com>
+      4  Lance Yang <lance.yang@linux.dev>
+      2  Jiakai Xu <xujiakai2025@iscas.ac.cn>
+      2  Jethro Beekman <jethro@fortanix.com>
+      1  Mike Christie <michael.christie@oracle.com>
+      1  Li RongQing <lirongqing@baidu.com>
+      1  Eric Farman <farman@linux.ibm.com>
+      1  Bibo Mao <maobibo@loongson.cn>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: Generalise RESx handling
+[PATCH v2 00/20] KVM: arm64: Generalise RESx handling
+Author: Marc Zyngier <maz@kernel.org>
+
+Having spent some time dealing with some dark corners of the
+architecture, I have realised that our RESx handling is a bit patchy.
+Specially when it comes to RES1 bits, which are not clearly defined in
+config.c, and rely on band-aids such as FIXED_VALUE.
+
+This series takes the excuse of adding SCTLR_EL2 sanitisation to bite
+the bullet and pursue several goals:
+
+- clearly define bits that are RES1 when a feature is absent
+
+- have a unified data structure to manage both RES0 and RES1 bits
+
+- deal with the annoying complexity of some features being
+  conditioned on E2H==1
+
+- allow a single bit to take different RESx values depending on the
+  value of E2H
+
+This allows quite a bit of cleanup, including the total removal of the
+FIXED_VALUE horror, which was always a bizarre construct. We also get
+a new debugfs file to introspect the RESx settings for a given guest.
+
+Overall, this lowers the complexity of expressing the configuration
+constraints, for very little code (most of the extra lines are
+introduced by the debugfs stuff, and SCTLR_EL2 being added to the
+sysreg file).
+
+Patches on top of my kvm-arm64/vtcr branch (which is currently
+simmering in -next).
+
+* From v1 [1]
+
+  - Simplified RES0 handling by dropping the RES0_WHEN_E2Hx macros
+
+  - Cleaned up the kvm_{g,s}et_sysreg_resx() helpers
+
+  - Simplified dynamic RESx handling
+
+  - New improved debugfs handling, thanks to Fuad!
+
+  - Various clean-ups and spelling fixes
+
+  - Collected RBs (thanks Fuad and Joey!)
+
+[1] https://lore.kernel.org/all/20260126121655.1641736-1-maz@kernel.org
+Marc Zyngier (20):
+  arm64: Convert SCTLR_EL2 to sysreg infrastructure
+  KVM: arm64: Remove duplicate configuration for SCTLR_EL1.{EE,E0E}
+  KVM: arm64: Introduce standalone FGU computing primitive
+  KVM: arm64: Introduce data structure tracking both RES0 and RES1 bits
+  KVM: arm64: Extend unified RESx handling to runtime sanitisation
+  KVM: arm64: Inherit RESx bits from FGT register descriptors
+  KVM: arm64: Allow RES1 bits to be inferred from configuration
+  KVM: arm64: Correctly handle SCTLR_EL1 RES1 bits for unsupported
+    features
+  KVM: arm64: Convert HCR_EL2.RW to AS_RES1
+  KVM: arm64: Simplify FIXED_VALUE handling
+  KVM: arm64: Add REQUIRES_E2H1 constraint as configuration flags
+  KVM: arm64: Add RES1_WHEN_E2Hx constraints as configuration flags
+  KVM: arm64: Move RESx into individual register descriptors
+  KVM: arm64: Simplify handling of HCR_EL2.E2H RESx
+  KVM: arm64: Get rid of FIXED_VALUE altogether
+  KVM: arm64: Simplify handling of full register invalid constraint
+  KVM: arm64: Remove all traces of FEAT_TME
+  KVM: arm64: Remove all traces of HCR_EL2.MIOCNCE
+  KVM: arm64: Add sanitisation to SCTLR_EL2
+  KVM: arm64: Add debugfs file dumping computed RESx values
+
+ arch/arm64/include/asm/kvm_host.h             |  38 +-
+ arch/arm64/include/asm/sysreg.h               |   7 -
+ arch/arm64/kvm/config.c                       | 427 ++++++++++--------
+ arch/arm64/kvm/emulate-nested.c               |  10 +-
+ arch/arm64/kvm/nested.c                       | 151 +++----
+ arch/arm64/kvm/sys_regs.c                     |  68 +++
+ arch/arm64/tools/sysreg                       |  82 +++-
+ tools/arch/arm64/include/asm/sysreg.h         |   6 -
+ tools/perf/Documentation/perf-arm-spe.txt     |   1 -
+ .../testing/selftests/kvm/arm64/set_id_regs.c |   1 -
+ 10 files changed, 478 insertions(+), 313 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Convert SCTLR_EL2 to sysreg infrastructure
+[PATCH v2 01/20] arm64: Convert SCTLR_EL2 to sysreg infrastructure
+Author: Marc Zyngier <maz@kernel.org>
+
+Convert SCTLR_EL2 to the sysreg infrastructure, as per the 2025-12_rel
+revision of the Registers.json file.
+
+Note that we slightly deviate from the above, as we stick to the ARM
+ARM M.a definition of SCTLR_EL2[9], which is RES0, in order to avoid
+dragging the POE2 definitions...
+
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/sysreg.h       |  7 ---
+ arch/arm64/tools/sysreg               | 69 +++++++++++++++++++++++++++
+ tools/arch/arm64/include/asm/sysreg.h |  6 ---
+ 3 files changed, 69 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  MAINTAINERS: Replace backup for s390 vfio-pci
+[PATCH] MAINTAINERS: Replace backup for s390 vfio-pci
+Author: Eric Farman <farman@linux.ibm.com>
+
+Farhan has been doing a masterful job coming on in the
+s390 PCI space, and my own attention has been lacking.
+Let's make MAINTAINERS reflect reality.
+
+Signed-off-by: Eric Farman <farman@linux.ibm.com>
+---
+ MAINTAINERS | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Support runtime configuration for per-VM's HGATP mode
+[PATCH v4 1/4] RISC-V: KVM: Support runtime configuration for per-VM's HGATP mode
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+Introduces one per-VM architecture-specific fields to support runtime
+configuration of the G-stage page table format:
+
+- kvm->arch.kvm_riscv_gstage_pgd_levels: the corresponding number of page
+  table levels for the selected mode.
+
+These fields replace the previous global variables
+kvm_riscv_gstage_mode and kvm_riscv_gstage_pgd_levels, enabling different
+virtual machines to independently select their G-stage page table format
+instead of being forced to share the maximum mode detected by the kernel
+at boot time.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/include/asm/kvm_gstage.h | 20 +++++----
+ arch/riscv/include/asm/kvm_host.h   | 19 +++++++++
+ arch/riscv/kvm/gstage.c             | 65 ++++++++++++++---------------
+ arch/riscv/kvm/main.c               | 12 +++---
+ arch/riscv/kvm/mmu.c                | 20 +++++----
+ arch/riscv/kvm/vm.c                 |  2 +-
+ arch/riscv/kvm/vmid.c               |  3 +-
+ 7 files changed, 84 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v4 1/4] RISC-V: KVM: Support runtime configuration for per-VM's HGATP mode
+ Skip: [PATCH v4 0/4] Support runtime configuration for per-VM's HGATP mode
+New:  x86/x2apic: disable x2apic on resume if the kernel
+[PATCH 1/3] x86/x2apic: disable x2apic on resume if the kernel
+Author: Shashank Balaji <shashank.mahadasyam@sony.com>
+
+In lapic_resume, ensure x2apic is actually disabled when the kernel expects it
+to be disabled, i.e. when x2apic_mode = 0.
+
+x2apic_mode is set to 0 and x2apic is disabled on boot if the kernel doesn't
+support irq remapping or for other reasons. On resume from s2ram
+(/sys/power/mem_sleep = deep), firmware can re-enable x2apic, but the kernel
+continues using the xapic interface because it didn't check to see if someone
+enabled x2apic behind its back, which causes hangs. This situation happens on
+defconfig + bare metal + s2ram, on which this fix has been tested.
+
+Fixes: 6e1cb38a2aef ("x64, x2apic/intr-remap: add x2apic support, including enabling interrupt-remapping")
+Cc: stable@vger.kernel.org
+Co-developed-by: Rahul Bukte <rahul.bukte@sony.com>
+Signed-off-by: Rahul Bukte <rahul.bukte@sony.com>
+Signed-off-by: Shashank Balaji <shashank.mahadasyam@sony.com>
+---
+ arch/x86/kernel/apic/apic.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  x86/x2apic: Fix hang-up of defconfig kernel on resume
+[PATCH 0/3] x86/x2apic: Fix hang-up of defconfig kernel on resume
+Author: Shashank Balaji <shashank.mahadasyam@sony.com>
+
+On resume from s2ram, a defconfig kernel gets into a state where the x2apic
+hardware state and the kernel's perceived state are different.
+
+On boot, x2apic is enabled by the firmware, and then the kernel does the
+following (relevant lines from dmesg):
+
+	[    0.000381] x2apic: enabled by BIOS, switching to x2apic ops
+	[    0.009939] APIC: Switched APIC routing to: cluster x2apic
+	[    0.095151] x2apic: IRQ remapping doesn't support X2APIC mode
+	[    0.095154] x2apic disabled
+	[    0.095551] APIC: Switched APIC routing to: physical flat
+
+defconfig has CONFIG_IRQ_REMAP=n, which leads to x2apic being disabled,
+because on bare metal, x2apic has an architectural dependence on interrupt
+remapping.
+
+While resuming from s2ram, x2apic is enabled again by the firmware, but
+the kernel continues using the physical flat apic routing. This causes a
+hang-up and no console output.
+
+Patch 1 fixes this in lapic_resume by disabling x2apic when the kernel expects
+it to be disabled.
+Patch 2 enables CONFIG_IRQ_REMAP in defconfig so that defconfig kernels at
+least don't disable x2apic because of a lack of IRQ_REMAP support.
+Patch 3 is a non-functional change renaming x2apic_available to
+x2apic_without_ir_available in struct x86_hyper_init, to better convey
+the semantic.
+
+Signed-off-by: Rahul Bukte <rahul.bukte@sony.com>
+Signed-off-by: Shashank Balaji <shashank.mahadasyam@sony.com>
+---
+Shashank Balaji (3):
+      x86/x2apic: disable x2apic on resume if the kernel expects so
+      x86/defconfig: add CONFIG_IRQ_REMAP
+      x86/virt: rename x2apic_available to x2apic_without_ir_available
+
+ arch/x86/configs/x86_64_defconfig |  1 +
+ arch/x86/include/asm/x86_init.h   |  4 ++--
+ arch/x86/kernel/apic/apic.c       | 10 ++++++++--
+ arch/x86/kernel/cpu/acrn.c        |  2 +-
+ arch/x86/kernel/cpu/bhyve.c       |  2 +-
+ arch/x86/kernel/cpu/mshyperv.c    |  2 +-
+ arch/x86/kernel/cpu/vmware.c      |  2 +-
+ arch/x86/kernel/jailhouse.c       |  2 +-
+ arch/x86/kernel/kvm.c             |  2 +-
+ arch/x86/kernel/x86_init.c        | 12 ++++++------
+ arch/x86/xen/enlighten_hvm.c      |  4 ++--
+ 11 files changed, 25 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Use standard seq_file iterator for idregs debugfs
+[PATCH v1 1/3] KVM: arm64: Use standard seq_file iterator for idregs debugfs
+Author: Fuad Tabba <tabba@google.com>
+
+The current implementation uses `idreg_debugfs_iter` in `struct
+kvm_arch` to track the sequence position. This effectively makes the
+iterator shared across all open file descriptors for the VM.
+
+This approach has significant drawbacks:
+- It enforces mutual exclusion, preventing concurrent reads of the
+  debugfs file (returning -EBUSY).
+- It relies on storing transient iterator state in the long-lived VM
+  structure (`kvm_arch`).
+- The use of `u8` for the iterator index imposes an implicit limit of
+  255 registers. While not currently exceeded, this is fragile against
+  future architectural growth. Switching to `loff_t` eliminates this
+  overflow risk.
+
+Refactor the implementation to use the standard `seq_file` iterator.
+Instead of storing state in `kvm_arch`, rely on the `pos` argument
+passed to the `start` and `next` callbacks, which tracks the logical
+index specific to the file descriptor.
+
+This change enables concurrent access and eliminates the
+`idreg_debugfs_iter` field from `struct kvm_arch`.
+
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  3 --
+ arch/arm64/kvm/sys_regs.c         | 50 +++++--------------------------
+ 2 files changed, 8 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Standardize debugfs iterators
+[PATCH v1 0/3] KVM: arm64: Standardize debugfs iterators
+Author: Fuad Tabba <tabba@google.com>
+
+This series refactors the debugfs implementations for `idregs` and
+`vgic-state` to use standard `seq_file` iterator patterns.
+
+The existing implementations relied on storing iterator state within
+global VM structures (`kvm_arch` and `vgic_dist`). This approach
+prevented concurrent reads of the debugfs files (returning -EBUSY) and
+created improper dependencies between transient file operations and
+long-lived VM state.
+
+The `vgic-debug` implementation relied on an XArray marking mechanism
+to snapshot LPIs during iteration. This modified global state during
+read operations and could lead to reference counting leaks in certain
+edge cases.
+
+Note that `vgic-its-debug` (for ITS tables) also uses a custom iterator
+pattern, but it is not addressed in this series. Unlike `vgic-state`,
+the ITS debug interface iterates over linked lists (`device_list` and
+`itt_head`) which require holding the `its_lock` for safety. Converting
+it to a lockless iterator would require a more invasive refactoring of
+the ITS data structures (e.g., to RCU or XArray), which is outside the
+scope of this cleanup.
+
+Based on Linux 6.19-rc7.
+
+Cheers,
+/fuad
+
+Fuad Tabba (3):
+  KVM: arm64: Use standard seq_file iterator for idregs debugfs
+  KVM: arm64: Reimplement vgic-debug XArray iteration
+  KVM: arm64: Use standard seq_file iterator for vgic-debug debugfs
+
+ arch/arm64/include/asm/kvm_host.h |   3 -
+ arch/arm64/kvm/sys_regs.c         |  50 +++-----------
+ arch/arm64/kvm/vgic/vgic-debug.c  | 108 +++++++++---------------------
+ include/kvm/arm_vgic.h            |   4 --
+ 4 files changed, 40 insertions(+), 125 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: use targeted IPIs for TLB sync with lockless page table walkers
+[PATCH v4 1/3] mm: use targeted IPIs for TLB sync with lockless page table walkers
+Author: Lance Yang <lance.yang@linux.dev>
+
+
+Currently, tlb_remove_table_sync_one() broadcasts IPIs to all CPUs to wait
+for any concurrent lockless page table walkers (e.g., GUP-fast). This is
+inefficient on systems with many CPUs, especially for RT workloads[1].
+
+This patch introduces a per-CPU tracking mechanism to record which CPUs are
+actively performing lockless page table walks for a specific mm_struct.
+When freeing/unsharing page tables, we can now send IPIs only to the CPUs
+that are actually walking that mm, instead of broadcasting to all CPUs.
+
+In preparation for targeted IPIs; a follow-up will switch callers to
+tlb_remove_table_sync_mm().
+
+Note that the tracking adds ~3% latency to GUP-fast, as measured on a
+64-core system.
+
+[1] https://lore.kernel.org/linux-mm/1b27a3fa-359a-43d0-bdeb-c31341749367@kernel.org/
+
+Suggested-by: David Hildenbrand (Red Hat) <david@kernel.org>
+Signed-off-by: Lance Yang <lance.yang@linux.dev>
+---
+ include/asm-generic/tlb.h |  2 ++
+ include/linux/mm.h        | 34 ++++++++++++++++++++++++++
+ kernel/events/core.c      |  2 ++
+ mm/gup.c                  |  2 ++
+ mm/mmu_gather.c           | 50 +++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 90 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  targeted TLB sync IPIs for lockless page table walkers
+[PATCH v4 0/3] targeted TLB sync IPIs for lockless page table walkers
+Author: Lance Yang <lance.yang@linux.dev>
+
+When freeing or unsharing page tables we send an IPI to synchronize with
+concurrent lockless page table walkers (e.g. GUP-fast). Today we broadcast
+that IPI to all CPUs, which is costly on large machines and hurts RT
+workloads[1].
+
+This series makes those IPIs targeted. We track which CPUs are currently
+doing a lockless page table walk for a given mm (per-CPU
+active_lockless_pt_walk_mm). When we need to sync, we only IPI those CPUs.
+GUP-fast and perf_get_page_size() set/clear the tracker around their walk;
+tlb_remove_table_sync_mm() uses it and replaces the previous broadcast in
+the free/unshare paths.
+
+On x86, when the TLB flush path already sends IPIs (native without INVLPGB,
+or KVM), the extra sync IPI is redundant. We add a property on pv_mmu_ops
+so each backend can declare whether its flush_tlb_multi sends real IPIs; if
+so, tlb_remove_table_sync_mm() is a no-op. We also have tlb_flush() pass
+both freed_tables and unshared_tables so lazy-TLB CPUs get IPIs during
+hugetlb unshare.
+
+David Hildenbrand did the initial implementation. I built on his work and
+relied on off-list discussions to push it further - thanks a lot David!
+
+[1] https://lore.kernel.org/linux-mm/1b27a3fa-359a-43d0-bdeb-c31341749367@kernel.org/
+
+v3 -> v4:
+- Rework based on David's two-step direction and per-CPU idea:
+  1) Targeted IPIs: per-CPU variable when entering/leaving lockless page
+     table walk; tlb_remove_table_sync_mm() IPIs only those CPUs.
+  2) On x86, pv_mmu_ops property set at init to skip the extra sync when
+     flush_tlb_multi() already sends IPIs.
+  https://lore.kernel.org/linux-mm/bbfdf226-4660-4949-b17b-0d209ee4ef8c@kernel.org/
+- https://lore.kernel.org/linux-mm/20260106120303.38124-1-lance.yang@linux.dev/
+
+v2 -> v3:
+- Complete rewrite: use dynamic IPI tracking instead of static checks
+  (per Dave Hansen, thanks!)
+- Track IPIs via mmu_gather: native_flush_tlb_multi() sets flag when
+  actually sending IPIs
+- Motivation for skipping redundant IPIs explained by David:
+  https://lore.kernel.org/linux-mm/1b27a3fa-359a-43d0-bdeb-c31341749367@kernel.org/
+- https://lore.kernel.org/linux-mm/20251229145245.85452-1-lance.yang@linux.dev/
+
+v1 -> v2:
+- Fix cover letter encoding to resolve send-email issues. Apologies for
+  any email flood caused by the failed send attempts :(
+
+RFC -> v1:
+- Use a callback function in pv_mmu_ops instead of comparing function
+  pointers (per David)
+- Embed the check directly in tlb_remove_table_sync_one() instead of
+  requiring every caller to check explicitly (per David)
+- Move tlb_table_flush_implies_ipi_broadcast() outside of
+  CONFIG_MMU_GATHER_RCU_TABLE_FREE to fix build error on architectures
+  that don't enable this config.
+  https://lore.kernel.org/oe-kbuild-all/202512142156.cShiu6PU-lkp@intel.com/
+- https://lore.kernel.org/linux-mm/20251213080038.10917-1-lance.yang@linux.dev/
+
+Lance Yang (3):
+  mm: use targeted IPIs for TLB sync with lockless page table walkers
+  mm: switch callers to tlb_remove_table_sync_mm()
+  x86/tlb: add architecture-specific TLB IPI optimization support
+
+ arch/x86/hyperv/mmu.c                 |  5 ++
+ arch/x86/include/asm/paravirt.h       |  5 ++
+ arch/x86/include/asm/paravirt_types.h |  6 +++
+ arch/x86/include/asm/tlb.h            | 20 +++++++-
+ arch/x86/kernel/kvm.c                 |  6 +++
+ arch/x86/kernel/paravirt.c            | 18 +++++++
+ arch/x86/kernel/smpboot.c             |  1 +
+ arch/x86/xen/mmu_pv.c                 |  2 +
+ include/asm-generic/tlb.h             | 28 +++++++++--
+ include/linux/mm.h                    | 34 +++++++++++++
+ kernel/events/core.c                  |  2 +
+ mm/gup.c                              |  2 +
+ mm/khugepaged.c                       |  2 +-
+ mm/mmu_gather.c                       | 69 ++++++++++++++++++++++++---
+ 14 files changed, 187 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
