@@ -1,0 +1,242 @@
+From 589d7a019 to 2361bc394
+KVM mailing list update from 589d7a019 to 2361bc394
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      9 google.com
+      3 iscas.ac.cn
+      2 amd.com
+      1 infradead.org
+      1 aosc.io
+
+Top 15 contributors (Based on Email Body)
+
+      9  Jim Mattson <jmattson@google.com>
+      3  Jiakai Xu <xujiakai2025@iscas.ac.cn>
+      2  Nikunj A Dadhania <nikunj@amd.com>
+      1  Zixing Liu <liushuyu@aosc.io>
+      1  Randy Dunlap <rdunlap@infradead.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86: nSVM: Clear VMCB_NPT clean bit when updating
+[PATCH v3 1/8] KVM: x86: nSVM: Clear VMCB_NPT clean bit when updating
+Author: Jim Mattson <jmattson@google.com>
+
+When running an L2 guest and writing to MSR_IA32_CR_PAT, the host PAT value
+is stored in vmcb01.ptr->save.g_pat, but the clean bit was only being
+cleared for svm->vmcb, which points to vmcb02 in guest mode.
+
+Introduce the helper svm_set_vmcb_gpat() which sets vmcb->save.g_pat and
+marks the VMCB dirty for VMCB_NPT. Use this helper in both svm_set_msr()
+for updating vmcb01 and in nested_vmcb02_compute_g_pat() for updating
+vmcb02, ensuring both VMCBs are properly marked dirty.
+
+Fixes: 4995a3685f1b ("KVM: SVM: Use a separate vmcb for the nested L2 guest")
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/nested.c | 2 +-
+ arch/x86/kvm/svm/svm.c    | 3 +--
+ arch/x86/kvm/svm/svm.h    | 6 ++++++
+ 3 files changed, 8 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: nSVM: Improve PAT virtualization
+[PATCH v3 0/8] KVM: x86: nSVM: Improve PAT virtualization
+Author: Jim Mattson <jmattson@google.com>
+
+Currently, KVM's implementation of nested SVM treats the PAT MSR the same
+way whether or not nested NPT is enabled: L1 and L2 share a single
+PAT. However, the APM specifies that when nested NPT is enabled, the host
+(L1) and the guest (L2) should have independent PATs: hPAT for L1 and gPAT
+for L2. This patch series implements the architectural specification in
+KVM.
+
+Use the existing PAT MSR (vcpu->arch.pat) for hPAT. Add a new field,
+svm->nested.gpat, for gPAT. With nested NPT enabled, redirect guest
+accesses to the IA32_PAT MSR to gPAT. All other accesses, including
+userspace accesses via KVM_{GET,SET}_MSRS, continue to reference hPAT.  The
+special handling of userspace accesses ensures save/restore forward
+compatibility (i.e. resuming a new checkpoint on an older kernel). When an
+old kernel restores a checkpoint from a new kernel, the gPAT will be lost,
+and L2 will simply use L1's PAT, which is the existing behavior of the old
+kernel anyway.
+
+v1: https://lore.kernel.org/kvm/20260113003016.3511895-1-jmattson@google.com/
+v2: https://lore.kernel.org/kvm/20260115232154.3021475-1-jmattson@google.com/
+
+v2 -> v3:
+
+* Extract VMCB_NPT clean bit fix as a separate patch [Yosry]
+* Squash v2 patches 2 and 3 (cache and validate g_pat) [Yosry]
+* Drop redundant npt_enabled check in g_pat validation since existing
+  nested_vmcb_check_controls() already rejects NP_ENABLE when !npt_enabled
+  [Yosry]
+* Fix svm_set_hpat() to propagate to vmcb02 only when !nested_npt_enabled,
+  not unconditionally when in guest mode [Jim]
+* Warn in svm_{get,set}_msr() if host_initiated and vcpu_wants_to_run when
+  accessing IA32_PAT [Sean]
+* Use dedicated svm->nested.gpat field instead of vmcb_save_area_cached
+* Use dedicated header field (kvm_svm_nested_state_hdr.gpat) for nested
+  state save/restore instead of overwriting vmcb01 save area
+* Replace restore_gpat_from_pat with legacy_gpat_semantics to correctly
+  handle KVM_GET_NESTED_STATE before the first KVM_RUN [Jim]
+* Remove nested_vmcb02_compute_g_pat() after removing all callers [Yosry]
+
+Jim Mattson (8):
+  KVM: x86: nSVM: Clear VMCB_NPT clean bit when updating g_pat in L2
+  KVM: x86: nSVM: Cache and validate vmcb12 g_pat
+  KVM: x86: nSVM: Set vmcb02.g_pat correctly for nested NPT
+  KVM: x86: nSVM: Redirect IA32_PAT accesses to either hPAT or gPAT
+  KVM: x86: nSVM: Save gPAT to vmcb12.g_pat on VMEXIT
+  KVM: x86: nSVM: Save/restore gPAT with KVM_{GET,SET}_NESTED_STATE
+  KVM: x86: nSVM: Handle restore of legacy nested state
+  KVM: selftests: nSVM: Add svm_nested_pat test
+
+ arch/x86/include/uapi/asm/kvm.h               |   5 +
+ arch/x86/kvm/svm/nested.c                     |  51 ++-
+ arch/x86/kvm/svm/svm.c                        |  37 ++-
+ arch/x86/kvm/svm/svm.h                        |  35 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/svm_nested_pat_test.c   | 298 ++++++++++++++++++
+ 6 files changed, 406 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/fred: Fix early boot failures on SEV-ES/SNP guests
+[PATCH] x86/fred: Fix early boot failures on SEV-ES/SNP guests
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+FRED enabled SEV-ES and SNP guests fail to boot due to the following
+issues in the early boot sequence:
+
+* FRED does not have a #VC exception handler in the dispatch logic
+
+* For secondary CPUs, FRED is enabled before setting up the FRED MSRs, and
+  console output triggers a #VC which cannot be handled
+
+* Early FRED #VC exceptions should use boot_ghcb until per-CPU GHCBs are
+  initialized
+
+Fix these issues to ensure SEV-ES/SNP guests can handle #VC exceptions
+correctly during early boot when FRED is enabled.
+
+Fixes: 14619d912b65 ("x86/fred: FRED entry/exit and dispatch code")
+Cc: stable@vger.kernel.org # 6.9+
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+
+Reason to add stable tag:
+
+With FRED support for SVM here 
+https://lore.kernel.org/kvm/20260129063653.3553076-1-shivansh.dhiman@amd.com,
+SVM and SEV guests running 6.9 and later kernels will support FRED.
+However, *SEV-ES and SNP guests cannot support FRED* and will fail to boot
+with the following error:
+
+    [    0.005144] Using GB pages for direct mapping
+    [    0.008402] Initialize FRED on CPU0
+    qemu-system-x86_64: cpus are not resettable, terminating
+
+Three problems were identified as detailed in the commit message above and
+is fixed with this patch.
+
+I would like the patch to be backported to the LTS kernels (6.12 and 6.18) to
+ensure SEV-ES and SNP guests running these stable kernel versions can boot
+with FRED enabled on FRED-enabled hypervisors.
+
+---
+
+ arch/x86/coco/sev/noinstr.c |  6 ++++++
+ arch/x86/entry/entry_fred.c |  5 +++++
+ arch/x86/kernel/fred.c      | 14 +++++++++++---
+ 3 files changed, 22 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/cpufeatures: Add AVX512 Bit Matrix Multiply (BMM) and Bit reversal support
+[PATCH] x86/cpufeatures: Add AVX512 Bit Matrix Multiply (BMM) and Bit reversal support
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Add support for AVX512 Bit Matrix Multiply (BMM) and Bit Reversal
+instructions, a feature that enables bit matrix multiply operations and
+bit reversal, which is exposed via CPUID leaf 0x80000021_EAX[23].
+
+Expose the support to guests when available by including it in the CPUID
+leaf 0x80000021_EAX feature list.
+
+While at it, reorder PREFETCHI to match the bit position order in CPUID
+leaf 0x80000021_EAX for better organization.
+
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+
+AMD64 Bit Matrix Multiply and Bit Reversal Instructions
+Publication #69192 Revision: 1.00
+Issue Date: January 2026
+
+https://docs.amd.com/v/u/en-US/69192-PUB
+---
+ arch/x86/include/asm/cpufeatures.h | 1 +
+ arch/x86/kvm/cpuid.c               | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Validate SBI STA shmem alignment in  kvm_sbi_ext_sta_set_reg()
+[PATCH v6 1/2] RISC-V: KVM: Validate SBI STA shmem alignment in  kvm_sbi_ext_sta_set_reg()
+Author: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+The RISC-V SBI Steal-Time Accounting (STA) extension requires the shared
+memory physical address to be 64-byte aligned, or set to all-ones to
+explicitly disable steal-time accounting.
+
+KVM exposes the SBI STA shared memory configuration to userspace via
+KVM_SET_ONE_REG. However, the current implementation of
+kvm_sbi_ext_sta_set_reg() does not validate the alignment of the configured
+shared memory address. As a result, userspace can install a misaligned
+shared memory address that violates the SBI specification.
+
+Such an invalid configuration may later reach runtime code paths that
+assume a valid and properly aligned shared memory region. In particular,
+KVM_RUN can trigger the following WARN_ON in
+kvm_riscv_vcpu_record_steal_time():
+
+  WARNING: arch/riscv/kvm/vcpu_sbi_sta.c:49 at
+  kvm_riscv_vcpu_record_steal_time
+
+WARN_ON paths are not expected to be reachable during normal runtime
+execution, and may result in a kernel panic when panic_on_warn is enabled.
+
+Fix this by validating the computed shared memory GPA at the
+KVM_SET_ONE_REG boundary. A temporary GPA is constructed and checked
+before committing it to vcpu->arch.sta.shmem. The validation allows
+either a 64-byte aligned GPA or INVALID_GPA (all-ones), which disables
+STA as defined by the SBI specification.
+
+This prevents invalid userspace state from reaching runtime code paths
+that assume SBI STA invariants and avoids unexpected WARN_ON behavior.
+
+Fixes: f61ce890b1f074 ("RISC-V: KVM: Add support for SBI STA registers")
+Signed-off-by: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+Signed-off-by: Jiakai Xu <jiakaiPeanut@gmail.com>
+---
+V5 -> V6: Initialized new_shmem to INVALID_GPA as suggested.
+V4 -> V5: Added parentheses to function name in subject.
+V3 -> V4: Declared new_shmem at the top of kvm_sbi_ext_sta_set_reg().
+          Initialized new_shmem to 0 instead of vcpu->arch.sta.shmem.
+          Added blank lines per review feedback.
+V2 -> V3: Added parentheses to function name in subject.
+V1 -> V2: Added Fixes tag.
+---
+ arch/riscv/kvm/vcpu_sbi_sta.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v6 1/2] RISC-V: KVM: Validate SBI STA shmem alignment in  kvm_sbi_ext_sta_set_reg()
+ Skip: [PATCH v6 0/2] RISC-V: KVM: Validate SBI STA shmem alignment
