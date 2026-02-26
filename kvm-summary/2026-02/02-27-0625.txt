@@ -1,0 +1,1100 @@
+From 26fd6f360 to 61c085bf3
+KVM mailing list update from 26fd6f360 to 61c085bf3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     37 arm.com
+     16 redhat.com
+      8 meta.com
+      8 amazon.com
+      5 linux.ibm.com
+      5 iscas.ac.cn
+      5 cispa.de
+      4 google.com
+      3 sony.com
+      2 amd.com
+      1 zte.com.cn
+      1 linux.intel.com
+      1 amazon.co.uk
+      1 163.com
+
+Top 15 contributors (Based on Email Body)
+
+     37  Sascha Bischoff <Sascha.Bischoff@arm.com>
+     16  Marc-André Lureau <marcandre.lureau@redhat.com>
+      8  Takahiro Itazuri <itazur@amazon.com>
+      8  Matt Evans <mattev@meta.com>
+      5  Lukas Gerlach <lukas.gerlach@cispa.de>
+      5  Jiakai Xu <xujiakai2025@iscas.ac.cn>
+      4  Suren Baghdasaryan <surenb@google.com>
+      4  Nina Schoetterl-Glausch <nsg@linux.ibm.com>
+      3  Yohei Kojima <yohei.kojima@sony.com>
+      2  Nikunj A Dadhania <nikunj@amd.com>
+      1  Wang Yechao <wang.yechao255@zte.com.cn>
+      1  Jinyu Tang <tjytimi@163.com>
+      1  David Woodhouse <dwmw@amazon.co.uk>
+      1  Dave Hansen <dave.hansen@linux.intel.com>
+      1  Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vfio/pci: Ensure VFIO barmap is set up before creating a DMABUF
+[RFC PATCH 1/7] vfio/pci: Ensure VFIO barmap is set up before creating a DMABUF
+Author: Matt Evans <mattev@meta.com>
+
+A DMABUF exports access to BAR resources which need to be requested
+before the DMABUF is handed out.  Usually the resources are requested
+when setting up the barmap when the VFIO device fd is mmap()ed, but
+there's no guarantee that happens before a DMABUF is created.
+
+Set up the barmap (and so request resources) in the DMABUF-creation
+path.
+
+Fixes: 5d74781ebc86c ("vfio/pci: Add dma-buf export support for MMIO regions")
+Signed-off-by: Matt Evans <mattev@meta.com>
+---
+ drivers/vfio/pci/vfio_pci_dmabuf.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add mmap() for DMABUFs
+[RFC PATCH 0/7] vfio/pci: Add mmap() for DMABUFs
+Author: Matt Evans <mattev@meta.com>
+
+Hi all,
+
+
+There were various suggestions in the September 2025 thread "[TECH
+TOPIC] vfio, iommufd: Enabling user space drivers to vend more
+granular access to client processes" [0], and LPC discussions, around
+improving the situation for multi-process userspace driver designs.
+This RFC series implements some of these ideas.
+
+
+Background: Multi-process USDs
+==============================
+
+The userspace driver scenario discussed in that thread involves a
+primary process driving a PCIe function through VFIO/iommufd, which
+manages the function-wide ownership/lifecycle.  The function is
+designed to provide multiple distinct programming interfaces (for
+example, several independent MMIO register frames in one function),
+and the primary process delegates control of these interfaces to
+multiple independent client processes (which do the actual work).
+This scenario clearly relies on a HW design that provides appropriate
+isolation between the programming interfaces.
+
+The two key needs are:
+
+ 1.  Mechanisms to safely delegate a subset of the device MMIO
+     resources to a client process without over-sharing wider access
+     (or influence over whole-device activities, such as reset).
+
+ 2.  Mechanisms to allow a client process to do its own iommufd
+     management w.r.t. its address space, in a way that's isolated
+     from DMA relating to other clients.
+
+
+mmap() of VFIO DMABUFs
+======================
+
+First, this RFC addresses #1, implementing the proposals in [0] to add
+mmap() support to the existing VFIO DMABUF exporter.
+
+This enables a userspace driver to define DMABUF ranges corresponding
+to sub-ranges of a BAR, and grant a given client (via a shared fd)
+the capability to access (only) those sub-ranges.  The VFIO device fds
+would be kept private to the primary process.  All the client can do
+with that fd is map (or iomap via iommufd) that specific subset of
+resources, and the impact of bugs/malice is contained.
+
+ (We'll follow up on #2 separately, as a related-but-distinct problem.
+  PASIDs are one way to achieve per-client isolation of DMA; another
+  could be sharing of a single IOVA space via 'constrained' iommufds.)
+
+
+Revocation/reclaim
+==================
+
+That's useful as-is, but then the lifetime of access granted to a
+client needs to be managed well.  For example, a protocol between the
+primary process and the client can indicate when the client is done,
+and when it's safe to reuse the resources elsewhere.
+
+Resources could be released cooperatively, but it's much more robust
+to enable the driver to make the resources guaranteed-inaccessible
+when it chooses, so that it can re-assign them to other uses in
+future.
+
+So, second, I've suggested a PoC/example mechanism for reclaiming
+ranges shared with clients: a new DMABUF ioctl, DMA_BUF_IOCTL_REVOKE,
+is routed to a DMABUF exporter callback.  The VFIO DMABUF exporter's
+implementation permanently revokes a DMABUF (notifying importers, and
+zapping PTEs for any mappings).  This makes the DMABUF defunct and any
+client (or third party the client has shared the buffer onto!) cannot
+be used to access the BAR ranges, whether via DMABUF import or mmap().
+
+A primary driver process would do this operation when the client's
+tenure ends to reclaim "loaned-out" MMIO interfaces, at which point
+the interfaces could be safely re-used.
+
+This ioctl is one of several possible approaches to achieve buffer
+revocation, but I wanted to demonstrate something here as it's an
+important part of the buffer lifecycle in this driver scenario.  An
+alternative implementation could be some VFIO-specific operation to
+search for a DMABUF (by address?) and kill it, but if the server keeps
+hold of the DMABUF fd that's already a clean way to locate it later.
+
+
+BAR mapping access attributes
+=============================
+
+Third, inspired by Alex [Mastro] and Jason's comments in [0], and
+Mahmoud's work in [1] with the goal of controlling CPU access
+attributes for VFIO BAR mappings (e.g. WC) I noticed that once we can
+mmap() VFIO DMABUFs representing BAR sub-spans, it's straightforward
+to decorate them with access attributes for the VMA.
+
+I've proposed reserving a field in struct
+vfio_device_feature_dma_buf's flags to specify an attribute for its
+ranges.  Although that keeps the (UAPI) struct unchanged, it means all
+ranges in a DMABUF share the same attribute.  I feel a single
+attribute-to-mmap() relation is logical/reasonable.  An application
+can also create multiple DMABUFs to describe any BAR layout and mix of
+attributes.
+
+
+Tests
+=====
+
+I've included an [RFC ONLY] userspace test program which I am _not_
+proposing to merge, but am sharing for context.  It illustrates &
+tests various map/revoke cases, but doesn't use the existing VFIO
+selftests and relies on a (tweaked) QEMU EDU function.  I'm working on
+integrating the scenarios into the existing VFIO selftests.
+
+This code has been tested in mapping DMABUFs of single/multiple
+ranges, aliasing mmap()s, aliasing ranges across DMABUFs, vm_pgoff >
+0, revocation, shutdown/cleanup scenarios, and hugepage mappings seem
+to work correctly.  I've lightly tested WC mappings also (by observing
+resulting PTEs as having the correct attributes...).
+
+
+(The first two commits are a couple of tiny bugfixes which I can send
+separately, should reviewers prefer.)
+
+This series is based on v6.19 but I expect to rebase, at least onto
+Leon's recent work [2] ("vfio: Wait for dma-buf invalidation to
+complete").
+
+What are people's thoughts?  I'll respin to de-RFC and capture
+comments, if we think this approach is appropriate.
+
+
+Thanks,
+
+
+Matt
+
+
+References:
+
+[0]: https://lore.kernel.org/linux-iommu/20250918214425.2677057-1-amastro@fb.com/
+[1]: https://lore.kernel.org/all/20250804104012.87915-1-mngyadam@amazon.de/
+[2]: https://lore.kernel.org/linux-iommu/20260205-nocturnal-poetic-chamois-f566ad@houat/T/#m310cd07011e3a1461b6fda45e3f9b886ba76571a
+
+
+Matt Evans (7):
+  vfio/pci: Ensure VFIO barmap is set up before creating a DMABUF
+  vfio/pci: Clean up DMABUFs before disabling function
+  vfio/pci: Support mmap() of a DMABUF
+  dma-buf: uapi: Mechanism to revoke DMABUFs via ioctl()
+  vfio/pci: Permanently revoke a DMABUF on request
+  vfio/pci: Add mmap() attributes to DMABUF feature
+  [RFC ONLY] selftests: vfio: Add standalone vfio_dmabuf_mmap_test
+
+ drivers/dma-buf/dma-buf.c                     |   5 +
+ drivers/vfio/pci/vfio_pci_core.c              |   4 +-
+ drivers/vfio/pci/vfio_pci_dmabuf.c            | 300 ++++++-
+ include/linux/dma-buf.h                       |  22 +
+ include/uapi/linux/dma-buf.h                  |   1 +
+ include/uapi/linux/vfio.h                     |  12 +-
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../vfio/standalone/vfio_dmabuf_mmap_test.c   | 822 ++++++++++++++++++
+ 8 files changed, 1153 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-v3: Drop userspace write
+[PATCH v5 01/36] KVM: arm64: vgic-v3: Drop userspace write
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Drop a check that blocked userspace writes to ID_AA64PFR0_EL1 for
+writes that set the GIC field to 0 (NI) on GICv5 hosts. There is no
+such check for GICv3 native systems, and having inconsistent behaviour
+both complicates the logic and risks breaking existing userspace
+software that expects to be able to write the register.
+
+This means that userspace is now able to create a GICv3 guest on GICv5
+hosts, and disable the guest from seeing that it has a GICv3. This
+matches the already existing behaviour for GICv3-native VMs.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arch/arm64/kvm/sys_regs.c | 8 --------
+ 1 file changed, 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Introduce vGIC-v5 with PPI support
+[PATCH v5 00/36] KVM: arm64: Introduce vGIC-v5 with PPI support
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+This is v5 of the patch series to add the virtual GICv5 [1] device
+(vgic_v5). Only PPIs are supported by this initial series, and the
+vgic_v5 implementation is restricted to the CPU interface,
+only. Further patch series are to follow in due course, and will add
+support for SPIs, LPIs, the GICv5 IRS, and the GICv5 ITS.
+
+v1, v2, v3, and v4 of this series can be found at [2], [3], [4], [5],
+respectively.
+
+Main changes since v4:
+
+* Split out host capabilities from guest configuration by adding
+  vgic_host_has_gicvX() for GICv3 and GICv5.
+
+* Updated the GICv5 trap handlers to check for FEAT_GCIE in the ID
+  registers, rather than checking the vgic model. This matches the
+  GICv3 behaviour.
+
+* Reworked the system register sanitisation to expose FEAT_GCIE in the
+  ID registers if the host supports it. Once an irqchip is created the
+  fields corresponding to othrr irqchips are zeroed. Twice. Once when
+  the irqchip is created, and a second time in kvm_finalize_sys_regs()
+  to work around QEMU restoring illegal state combinations to the
+  system registers.
+
+  This is ugly, but needs to be done to keep "legacy" (GICv3)
+  QEMU-based VMs running without modification on GICv5 hardware. See
+  "KVM: arm64: gic-v5: Sanitize ID_AA64PFR2_EL1.GCIE" for more
+  details.
+
+* Limited GICv5 VM support to 16 bits of ID space for SPIs and LPIs
+  (realistically, only LPIs). Previously, we matched the host, which
+  would have limited migration from 24-bit-capable hosts.
+
+* Added trapping for ICC_IDR0_EL1 accesses to expose the ID bits (and
+  hide whatever the host supports) and to hide FEAT_GCIE_LEGACY from
+  guests.
+
+* Renamed the no-vgic-v3 selftest to no-vgic, and extended it with
+  GICv5 support.
+
+These changes are based on v7.0-rc1. There's one additional fix
+required which has been posted and pulled into fixes separately, which
+can be found at [6]. I have pushed these changes (including the fix)
+to a branch that can be found at [7], with the full WIP set at [8].
+
+Thanks all for the feedback!
+
+Sascha
+
+[1] https://developer.arm.com/documentation/aes0070/latest
+[2] https://lore.kernel.org/all/20251212152215.675767-1-sascha.bischoff@arm=
+.com/
+[3] https://lore.kernel.org/all/20251219155222.1383109-1-sascha.bischoff@ar=
+m.com/
+[4] https://lore.kernel.org/all/20260109170400.1585048-1-sascha.bischoff@ar=
+m.com/
+[5] https://lore.kernel.org/all/20260128175919.3828384-1-sascha.bischoff@ar=
+m.com/
+[6] https://lore.kernel.org/all/20260225083130.3378490-1-sascha.bischoff@ar=
+m.com/
+[7] https://gitlab.arm.com/linux-arm/linux-sb/-/tree/gicv5_ppi_support_v5
+[8] https://gitlab.arm.com/linux-arm/linux-sb/-/tree/gicv5_support_wip
+
+Sascha Bischoff (36):
+  KVM: arm64: vgic-v3: Drop userspace write sanitization for
+    ID_AA64PFR0.GIC on GICv5
+  KVM: arm64: vgic: Rework vgic_is_v3() and add vgic_host_has_gicvX()
+  KVM: arm64: Return early from kvm_finalize_sys_regs() if guest has run
+  arm64/sysreg: Add remaining GICv5 ICC_ & ICH_ sysregs for KVM support
+  arm64/sysreg: Add GICR CDNMIA encoding
+  KVM: arm64: gic-v5: Add ARM_VGIC_V5 device to KVM headers
+  KVM: arm64: gic: Introduce interrupt type helpers
+  KVM: arm64: gic-v5: Add Arm copyright header
+  KVM: arm64: gic-v5: Detect implemented PPIs on boot
+  KVM: arm64: gic-v5: Sanitize ID_AA64PFR2_EL1.GCIE
+  KVM: arm64: gic-v5: Support GICv5 FGTs & FGUs
+  KVM: arm64: gic-v5: Add emulation for ICC_IAFFIDR_EL1 accesses
+  KVM: arm64: gic-v5: Trap and emulate ICC_IDR0_EL1 accesses
+  KVM: arm64: gic-v5: Add vgic-v5 save/restore hyp interface
+  KVM: arm64: gic-v5: Implement GICv5 load/put and save/restore
+  KVM: arm64: gic-v5: Implement direct injection of PPIs
+  KVM: arm64: gic-v5: Finalize GICv5 PPIs and generate mask
+  KVM: arm64: gic: Introduce queue_irq_unlock to irq_ops
+  KVM: arm64: gic-v5: Implement PPI interrupt injection
+  KVM: arm64: gic-v5: Init Private IRQs (PPIs) for GICv5
+  KVM: arm64: gic-v5: Check for pending PPIs
+  KVM: arm64: gic-v5: Trap and mask guest ICC_PPI_ENABLERx_EL1 writes
+  KVM: arm64: gic-v5: Support GICv5 interrupts with KVM_IRQ_LINE
+  KVM: arm64: gic-v5: Create and initialise vgic_v5
+  KVM: arm64: gic-v5: Initialise ID and priority bits when resetting
+    vcpu
+  KVM: arm64: gic-v5: Enlighten arch timer for GICv5
+  KVM: arm64: gic-v5: Mandate architected PPI for PMU emulation on GICv5
+  KVM: arm64: gic: Hide GICv5 for protected guests
+  KVM: arm64: gic-v5: Hide FEAT_GCIE from NV GICv5 guests
+  KVM: arm64: gic-v5: Introduce kvm_arm_vgic_v5_ops and register them
+  KVM: arm64: gic-v5: Set ICH_VCTLR_EL2.En on boot
+  KVM: arm64: gic-v5: Probe for GICv5 device
+  Documentation: KVM: Introduce documentation for VGICv5
+  KVM: arm64: selftests: Introduce a minimal GICv5 PPI selftest
+  KVM: arm64: gic-v5: Communicate userspace-driveable PPIs via a UAPI
+  KVM: arm64: selftests: Add no-vgic-v5 selftest
+
+ Documentation/virt/kvm/api.rst                |   6 +-
+ .../virt/kvm/devices/arm-vgic-v5.rst          |  50 ++
+ Documentation/virt/kvm/devices/index.rst      |   1 +
+ Documentation/virt/kvm/devices/vcpu.rst       |   5 +-
+ arch/arm64/include/asm/el2_setup.h            |   2 +
+ arch/arm64/include/asm/kvm_asm.h              |   4 +
+ arch/arm64/include/asm/kvm_host.h             |  34 ++
+ arch/arm64/include/asm/kvm_hyp.h              |   9 +
+ arch/arm64/include/asm/sysreg.h               |   7 +
+ arch/arm64/include/asm/vncr_mapping.h         |   3 +
+ arch/arm64/include/uapi/asm/kvm.h             |   1 +
+ arch/arm64/kvm/arch_timer.c                   | 118 +++-
+ arch/arm64/kvm/arm.c                          |  40 +-
+ arch/arm64/kvm/config.c                       | 123 +++-
+ arch/arm64/kvm/emulate-nested.c               |  68 +++
+ arch/arm64/kvm/hyp/include/hyp/switch.h       |  27 +
+ arch/arm64/kvm/hyp/nvhe/Makefile              |   2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |  32 ++
+ arch/arm64/kvm/hyp/nvhe/switch.c              |  15 +
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c            |   8 +
+ arch/arm64/kvm/hyp/vgic-v5-sr.c               | 120 ++++
+ arch/arm64/kvm/hyp/vhe/Makefile               |   2 +-
+ arch/arm64/kvm/nested.c                       |   5 +
+ arch/arm64/kvm/pmu-emul.c                     |  20 +-
+ arch/arm64/kvm/sys_regs.c                     | 175 +++++-
+ arch/arm64/kvm/vgic/vgic-init.c               | 151 +++--
+ arch/arm64/kvm/vgic/vgic-kvm-device.c         | 100 +++-
+ arch/arm64/kvm/vgic/vgic-mmio.c               |  28 +-
+ arch/arm64/kvm/vgic/vgic-v3.c                 |   2 +-
+ arch/arm64/kvm/vgic/vgic-v5.c                 | 531 +++++++++++++++++-
+ arch/arm64/kvm/vgic/vgic.c                    | 106 +++-
+ arch/arm64/kvm/vgic/vgic.h                    |  59 +-
+ arch/arm64/tools/sysreg                       | 480 ++++++++++++++++
+ include/kvm/arm_arch_timer.h                  |  11 +-
+ include/kvm/arm_pmu.h                         |   5 +-
+ include/kvm/arm_vgic.h                        | 143 ++++-
+ include/linux/irqchip/arm-gic-v5.h            |  35 ++
+ include/linux/kvm_host.h                      |   1 +
+ include/uapi/linux/kvm.h                      |   2 +
+ tools/arch/arm64/include/uapi/asm/kvm.h       |   1 +
+ tools/include/uapi/linux/kvm.h                |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   3 +-
+ .../testing/selftests/kvm/arm64/no-vgic-v3.c  | 177 ------
+ tools/testing/selftests/kvm/arm64/no-vgic.c   | 297 ++++++++++
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   | 219 ++++++++
+ .../selftests/kvm/include/arm64/gic_v5.h      | 148 +++++
+ 46 files changed, 3026 insertions(+), 352 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Fix Spectre-v1 vulnerabilities in register
+[PATCH 0/4] KVM: riscv: Fix Spectre-v1 vulnerabilities in register
+Author: Lukas Gerlach <lukas.gerlach@cispa.de>
+
+This series adds array_index_nospec() to RISC-V KVM to prevent
+speculative out-of-bounds access to kernel memory.
+
+Similar fixes exist for x86 (ioapic, lapic, PMU) and arm64 (vgic).
+
+Signed-off-by: Lukas Gerlach <lukas.gerlach@cispa.de>
+---
+Lukas Gerlach (4):
+      KVM: riscv: Fix Spectre-v1 in ONE_REG register access
+      KVM: riscv: Fix Spectre-v1 in AIA CSR access
+      KVM: riscv: Fix Spectre-v1 in floating-point register access
+      KVM: riscv: Fix Spectre-v1 in PMU counter access
+
+ arch/riscv/kvm/aia.c         | 11 +++++++++--
+ arch/riscv/kvm/vcpu_fp.c     | 17 +++++++++++++----
+ arch/riscv/kvm/vcpu_onereg.c | 36 ++++++++++++++++++++++++++++--------
+ arch/riscv/kvm/vcpu_pmu.c    |  4 ++++
+ 4 files changed, 54 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Fix Spectre-v1 in ONE_REG register access
+[PATCH 1/4] KVM: riscv: Fix Spectre-v1 in ONE_REG register access
+Author: Lukas Gerlach <lukas.gerlach@cispa.de>
+
+User-controlled register indices from the ONE_REG ioctl are used to
+index into arrays of register values. Sanitize them with
+array_index_nospec() to prevent speculative out-of-bounds access.
+
+Signed-off-by: Lukas Gerlach <lukas.gerlach@cispa.de>
+---
+ arch/riscv/kvm/vcpu_onereg.c | 36 ++++++++++++++++++++++++++++--------
+ 1 file changed, 28 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  system/rba: use DIV_ROUND_UP
+[PATCH v3 01/15] system/rba: use DIV_ROUND_UP
+Author: marcandre.lureau <marcandre.lureau@redhat.com>
+
+
+Mostly for readability.
+
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Reviewed-by: Cédric Le Goater <clg@redhat.com>
+---
+ system/ram-block-attributes.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Make RamDiscardManager work with multiple sources
+[PATCH v3 00/15] Make RamDiscardManager work with multiple sources
+Author: marcandre.lureau <marcandre.lureau@redhat.com>
+
+
+Hi,
+
+This is an attempt to fix the incompatibility of virtio-mem with confidential
+VMs. The solution implements what was discussed earlier with D. Hildenbrand:
+https://patchwork.ozlabs.org/project/qemu-devel/patch/20250407074939.18657-5-chenyi.qiang@intel.com/#3502238
+
+The first patches are misc cleanups. Then some code refactoring to have split a
+manager/source. And finally, the manager learns to deal with multiple sources.
+
+I haven't done thorough testing. I only launched a SEV guest with a virtio-mem
+device. It would be nice to have more tests for those scenarios with
+VFIO/virtio-mem/confvm.. In any case, review & testing needed!
+
+(should fix https://issues.redhat.com/browse/RHEL-131968)
+
+v3: issues found by Cédric
+ - fix assertion error on shutdown, due to rcu-defer cleanup
+ - fix API doc warnings
+
+v2:
+ - drop replay_{populated,discarded} from source, suggested by Peter Xu
+ - add extra manager cleanup
+ - add r-b tags for preliminary patches
+
+thanks
+
+Marc-André Lureau (15):
+  system/rba: use DIV_ROUND_UP
+  memory: drop RamDiscardListener::double_discard_supported
+  virtio-mem: use warn_report_err_once()
+  system/memory: minor doc fix
+  kvm: replace RamDicardManager by the RamBlockAttribute
+  system/memory: split RamDiscardManager into source and manager
+  system/memory: move RamDiscardManager to separate compilation unit
+  system/memory: constify section arguments
+  system/ram-discard-manager: implement replay via is_populated
+    iteration
+  virtio-mem: remove replay_populated/replay_discarded implementation
+  system/ram-discard-manager: drop replay from source interface
+  system/memory: implement RamDiscardManager multi-source aggregation
+  system/physmem: destroy ram block attributes before RCU-deferred
+    reclaim
+  system/memory: add RamDiscardManager reference counting and cleanup
+  tests: add unit tests for RamDiscardManager multi-source aggregation
+
+ include/hw/vfio/vfio-container.h            |    2 +-
+ include/hw/vfio/vfio-cpr.h                  |    2 +-
+ include/hw/virtio/virtio-mem.h              |    3 -
+ include/system/memory.h                     |  287 +----
+ include/system/ram-discard-manager.h        |  358 ++++++
+ include/system/ramblock.h                   |    3 +-
+ accel/kvm/kvm-all.c                         |    2 +-
+ hw/vfio/cpr-legacy.c                        |    4 +-
+ hw/vfio/listener.c                          |   12 +-
+ hw/virtio/virtio-mem.c                      |  290 +----
+ migration/ram.c                             |    6 +-
+ system/memory.c                             |   83 +-
+ system/memory_mapping.c                     |    4 +-
+ system/physmem.c                            |    2 +-
+ system/ram-block-attributes.c               |  279 +----
+ system/ram-discard-manager.c                |  612 +++++++++
+ tests/unit/test-ram-discard-manager-stubs.c |   48 +
+ tests/unit/test-ram-discard-manager.c       | 1234 +++++++++++++++++++
+ system/meson.build                          |    1 +
+ tests/unit/meson.build                      |    8 +-
+ 20 files changed, 2361 insertions(+), 879 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Avoid silent kvm-clock activation failures
+[RFC PATCH v2 1/7] KVM: x86: Avoid silent kvm-clock activation failures
+Author: Takahiro Itazuri <itazur@amazon.com>
+
+kvm_write_system_time() previously ignored the return value of
+kvm_gpc_activate().  As a result, kvm-clock activation could fail
+silently, making debugging harder.
+
+Propagate the return value so that the MSR write fail properly instead
+of continuing silently.
+
+Signed-off-by: Takahiro Itazuri <itazur@amazon.com>
+---
+ arch/x86/kvm/x86.c | 18 ++++++++++--------
+ 1 file changed, 10 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: pfncache: Add guest_memfd support to pfncache
+[RFC PATCH v2 0/7] KVM: pfncache: Add guest_memfd support to pfncache
+Author: Takahiro Itazuri <itazur@amazon.com>
+
+[ based on v6.18 with [1] ]
+
+This patch series is a follow-up to RFC v1.  (This is still labelled RFC
+since its dependency [1]  has not yet been merged.)
+
+=3D=3D=3D Problem Statement =3D=3D=3D
+
+gfn_to_pfn_cache (a.k.a. pfncache) does not work with guest_memfd.  As
+of today, pfncaches resolve PFNs via hva_to_pfn(), which requires a
+userspace mapping and relies on GUP.  This does not work for guest_memfd
+in the following two ways:
+
+  * guest_memfd created with GUEST_MEMFD_FLAP_MMAP does not have a
+    userspace mapping due to the nature of private memory.
+
+  * guest_memfd created with GUEST_MEMFD_FLAG_NO_DIRECT_MAP uses an
+    AS_NO_DIRECT_MAP mapping, which is rejected by GUP.
+
+In addition, pfncaches map RAM pages via kmap(), which typically returns
+an address derived from the direct map.  So kmap() cannot be used for
+NO_DIRECT_MAP guest_memfd.  pfncaches require fault-free KHVAs since
+they can be used from atomic context.  Thus, it cannot fall back to
+access via a userspace mapping like KVM does for other accesses to
+NO_DIRECT_MAP guest_memfd.
+
+The introduction of guest_memfd support necessitates additional
+invalidation paths in addition to the existing MMU notifier path: one
+from guest_memfd invalidation and another from memory attribute updates.
+
+=3D=3D=3D Core Approach =3D=3D=3D
+
+The core part keeps the original approach in RFC v1:
+
+  * Resolve PFNs for guest_memfd-backed GPAs via kvm_gmem_get_pfn()
+
+  * Obtain a fault-free KHVA for NO_DIRECT_MAP pages via vmap()
+
+=3D=3D=3D Changes since RFC v1 =3D=3D=3D
+
+  * Hook pfncache invalidation into guest_memfd invalidation (punch hole
+    / release / error handling) as well as into memory attribute updates
+    (switch between shared and private memories).
+
+=3D=3D=3D  Design Considerations (Feedback Appreciated) =3D=3D=3D
+
+To implement the above change, this series tries to reuse as much of the
+existing invalidation and retry infrastructure as possible.  The
+following points are potential design trade-offs where feedback is
+especially welcome:
+
+  * Generalize and reuse the existing mn_active_invalidate_count
+    (renamed to active_invalidate_count).  This allows reusing the
+    existing pfncache retry logic as-is and enables invalidating
+    pfncaches without holding mmu_lock from guest_memfd invalidation
+    context.  As a side effect, active memslots swap is blocked while
+    active_invalidate_count > 0.  To avoid this block, it would be
+    possible to introduce a dedicated gmem_active_invalidate_count in
+    struct kvm instead.
+
+  * Although both guest_memfd invalidation and memory attribute update
+    are driven by GFN ranges, pfncache invalidation is performed using
+    HVA ranges and reuses the existing function.  This is because
+    GPA-based pfncaches translate GPA->UHVA->PFN and therefore have
+    memslot/GPA info, whereas HVA-based pfncaches resolve PFN directly
+    from UHVA and do not store memslot/GPA info.  Using GFN-based
+    invalidation would therefore miss HVA-based pfncaches.  Technically,
+    it would be possible to refactor HVA-based pfncaches to search for
+    and retain the corresponding memslot/GPA at activation / refresh
+    time instead of at invalidation time.
+
+  * pfncaches are not dynamically allocated but are statically allocated
+    on a per-VM and per-vCPU basis.  For a normal VM (i.e. non-Xen),
+    there is one pfncache per vCPU.  For a Xen VM, there is one per-VM
+    pfncache and five per-vCPU pfncaches.  Given the maximum of 1024
+    vCPUs, a normal VM can have up to 1024 pfncaches, consuming 4 MB of
+    virtual address space.  A Xen VM can have up to 5121 pfncaches,
+    consuming approximately 20 MB of virtual address space.  Although
+    the vmalloc area is limited on 32-bit systems, it should be large
+    enough and typically tens of TB on 64-bit systems (e.g. 32 TB for
+    4-level paging and 12800 TB for 5-level paging on x86_64).  If
+    virtual address space exhaustion became a concern, migration to
+    mm-local region (forthcoming mermap?) could be considered in the
+    future.  Note that vmap() only creates virtual mappings to existing
+    pages; they do not allocate new physical pages.
+
+  * With this patch series, HVA-based pfncaches always resolve PFNs
+    via hva_to_pfn(), and thus activation for NO_DIRECT_MAP guest_memfd
+    fails.  It is technically possible to support this scenario, but it
+    would require searching the corresponding memslot and GPA from the
+    given UHVA in order to determine whether it is backed by
+    guest_memfd.  Doing so would add overhead to the HVA-based pfncache
+    activation / refresh paths, to a greater or lesser extent,
+    regardless of guest_memfd-backed or not.  At the time of writing,
+    only Xen uses HVA-based pfncaches.
+
+RFC v1: https://lore.kernel.org/all/20251203144159.6131-1-itazur@amazon.com/
+
+[1]: https://lore.kernel.org/all/20260126164445.11867-1-kalyazin@amazon.com/
+
+Takahiro Itazuri (7):
+  KVM: x86: Avoid silent kvm-clock activation failures
+  KVM: pfncache: Resolve PFNs via kvm_gmem_get_pfn() for gmem-backed GPAs
+  KVM: pfncache: Obtain KHVA via vmap() for gmem with NO_DIRECT_MAP
+  KVM: Rename invalidate_begin to invalidate_start for consistency
+  KVM: pfncache: Rename invalidate_start() helper
+  KVM: Rename mn_* invalidate-related fields to generic ones
+  KVM: pfncache: Invalidate on gmem invalidation and memattr updates
+
+ Documentation/virt/kvm/locking.rst |   8 +--
+ arch/x86/kvm/mmu/mmu.c             |   2 +-
+ arch/x86/kvm/x86.c                 |  18 ++---
+ include/linux/kvm_host.h           |  13 ++--
+ include/linux/mmu_notifier.h       |   4 +-
+ virt/kvm/guest_memfd.c             |  64 +++++++++++++++--
+ virt/kvm/kvm_main.c                |  99 +++++++++++++++++++-------
+ virt/kvm/kvm_mm.h                  |  12 ++--
+ virt/kvm/pfncache.c                | 110 ++++++++++++++++++++---------
+ 9 files changed, 235 insertions(+), 95 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Minor refactor of base/ext facility
+[PATCH v2 1/4] KVM: s390: Minor refactor of base/ext facility
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+
+Directly use the size of the arrays instead of going through the
+indirection of kvm_s390_fac_size().
+Don't use magic number for the number of entries in the non hypervisor
+managed facility bit mask list.
+Make the constraint of that number on kvm_s390_fac_base obvious.
+Get rid of implicit double anding of stfle_fac_list.
+
+Signed-off-by: Nina Schoetterl-Glausch <nsg@linux.ibm.com>
+Co-developed-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 44 +++++++++++++++++++-------------------------
+ 1 file changed, 19 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: vsie: Implement ASTFLEIE facility 2
+[PATCH v2 0/4] KVM: s390: vsie: Implement ASTFLEIE facility 2
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+Add support for STFLE format 2 in VSIE guests.
+
+The change requires qemu support to set the ASTFLEIE2 feature bit.
+ASTFLEIE2 is available since IBM z16.
+To function G1 has to run this KVM code and G1 and G2 have to run QEMU
+
+Tests are implemented in kvm-unit-tests and sent as a series to that
+list.
+
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+The series was originally developed by Nina and only rebased and
+slightly adjusted by me for v1. It was not sent earlier since the accompanying
+kvm-unit-tests and qemu changes were not ready.
+
+---
+Changes in v2:
+- adjusted variable naming in handle_stfle()
+- add some constants for readability
+- add struct for format-2 facility list control block
+- rebased to v7.0-rc1
+
+---
+Nina Schoetterl-Glausch (4):
+      KVM: s390: Minor refactor of base/ext facility lists
+      s390/sclp: Detect ASTFLEIE 2 facility
+      KVM: s390: vsie: Refactor handle_stfle
+      KVM: s390: vsie: Implement ASTFLEIE facility 2
+
+ arch/s390/include/asm/kvm_host.h |  9 +++++
+ arch/s390/include/asm/sclp.h     |  1 +
+ arch/s390/include/uapi/asm/kvm.h |  1 +
+ arch/s390/kvm/kvm-s390.c         | 46 ++++++++++------------
+ arch/s390/kvm/vsie.c             | 85 +++++++++++++++++++++++++++++++---------
+ drivers/s390/char/sclp_early.c   |  4 +-
+ 6 files changed, 101 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Fix C++ user API for structures with variable
+[PATCH] KVM: x86: Fix C++ user API for structures with variable
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+--=-Lq7OSrHHEH8wxLkp+c3C
+
+
+Commit 94dfc73e7cf4 ("treewide: uapi: Replace zero-length arrays with
+flexible-array members") broke the userspace API for C++. Not just in
+the sense of 'userspace needs to be updated, but UAPI is supposed to be
+stable", but broken in the sense that I can't actually see *how* the
+structures can be used from C++ in the same way that they were usable
+before.
+
+These structures ending in VLAs are typically a *header*, which can be
+followed by an arbitrary number of entries. Userspace typically creates
+a larger structure with some non-zero number of entries, for example in
+QEMU's kvm_arch_get_supported_msr_feature():
+
+    struct {
+        struct kvm_msrs info;
+        struct kvm_msr_entry entries[1];
+    } msr_data =3D {};
+
+While that works in C, it fails in C++ with an error like:
+ flexible array member =E2=80=98kvm_msrs::entries=E2=80=99 not at end of =
+=E2=80=98struct msr_data=E2=80=99
+
+Fix this by using __DECLARE_FLEX_ARRAY() for the VLA, which is a helper
+provided by <linux/stddef.h> that already uses [0] for C++ compilation.
+
+Also put the header fields into a struct_group() to provide (in C) a
+separate struct (e.g 'struct kvm_msrs_hdr') without the trailing VLA.
+
+Fixes: 94dfc73e7cf4 ("treewide: uapi: Replace zero-length arrays with flexi=
+ble-array members")
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/uapi/asm/kvm.h | 29 ++++++++++++++++++-----------
+ include/uapi/linux/kvm.h        |  9 ++++++---
+ 2 files changed, 24 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/cpu: Disable CR pinning during CPU bringup
+[PATCH v2 1/2] x86/cpu: Disable CR pinning during CPU bringup
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+
+== CR Pinning Background ==
+
+Modern CPU hardening features like SMAP/SMEP are enabled by flipping
+control register (CR) bits. Attackers find these features inconvenient and
+often try to disable them.
+
+CR-pinning is a kernel hardening feature that detects when
+security-sensitive control bits are flipped off, complains about it, then
+turns them back on. The CR-pinning checks are performed in the CR
+manipulation helpers.
+
+X86_CR4_FRED controls FRED enabling and is pinned. There is a single,
+system-wide static key that controls CR-pinning behavior. The static key is
+enabled by the boot CPU after it has established its CR configuration.
+
+The end result is that CR-pinning is not active while initializing the boot
+CPU but it is active while bringing up secondary CPUs.
+
+== FRED Background ==
+
+FRED is a new hardware entry/exit feature for the kernel. It is not on by
+default and started out as Intel-only. AMD is just adding support now.
+
+FRED has MSRs for configuration and is enabled by the pinned X86_CR4_FRED
+bit. It should not be enabled until after MSRs are properly initialized.
+
+== SEV Background ==
+
+AMD SEV-ES and SEV-SNP use #VC (Virtualization Communication) exceptions to
+handle operations that require hypervisor assistance. These exceptions
+occur during various operations including MMIO access, CPUID instructions,
+and certain memory accesses.
+
+Writes to the console can generate #VC.
+
+== Problem ==
+
+CR-pinning implicitly enables FRED on secondary CPUs at a different point
+than the boot CPU. This point is *before* the CPU has done an explicit
+cr4_set_bits(X86_CR4_FRED) and before the MSRs are initialized. This means
+that there is a window where no exceptions can be handled.
+
+For SEV-ES/SNP and TDX guests, any console output during this window
+triggers #VC or #VE exceptions that result in triple faults because the
+exception handlers rely on FRED MSRs that aren't yet configured.
+
+== Fix ==
+
+Defer CR-pinning enforcement during secondary CPU bringup. This avoids any
+implicit CR changes during CPU bringup, ensuring that FRED is not enabled
+before it is configured and able to handle a #VC or #VE.
+
+This also aligns boot and secondary CPU bringup.
+
+CR-pinning is now enforced only when the CPU is online. cr4_init() is
+called during secondary CPU bringup, while the CPU is still offline, so the
+pinning logic in cr4_init() is redundant. Remove it and add WARN_ON_ONCE()
+to catch any future break of this assumption.
+
+Note: FRED is not on by default anywhere so this is not likely to be
+causing many problems. The only reason this was noticed was that AMD
+started to enable FRED and was turning it on.
+
+Fixes: 14619d912b65 ("x86/fred: FRED entry/exit and dispatch code")
+Reported-by: Nikunj A Dadhania <nikunj@amd.com>
+Signed-off-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+[ Nikunj: Updated SEV background section wording ]
+Reviewed-by: Sohil Mehta <sohil.mehta@intel.com>
+Cc: stable@vger.kernel.org # 6.9+
+---
+ arch/x86/kernel/cpu/common.c | 23 +++++++++++++++++++----
+ 1 file changed, 19 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/fred: Fix SEV-ES/SNP guest boot failures
+[PATCH v2 0/2] x86/fred: Fix SEV-ES/SNP guest boot failures
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+SEV-ES and SNP guests fail to boot when FRED is enabled due to missing #VC
+exception handling and a CR-pinning issue that prematurely enables FRED before
+its MSRs are configured.
+
+Patch 1 fixes the CR-pinning issue by deferring enforcement during secondary
+CPU bringup, preventing FRED from being enabled before it is configured and
+able to handle exceptions.
+
+Patch 2 adds #VC exception handling to FRED and fixes early GHCB access to
+use boot_ghcb before per-CPU GHCBs are initialized.
+
+These fixes enable SEV-ES/SNP guests to boot successfully with FRED enabled.
+
+Changelog:
+v1 -> v2:
+* Instead of moving pr_info(), fix the root cause by disabling CR pinning
+  during secondary CPU bringup (Dave Hansen)
+* Use unified #VC exception handler in fred_hwexc() (Dave Hansen)
+* Collect RoB (Sohil Mehta)
+
+v1: https://lore.kernel.org/kvm/20260205051030.1225975-1-nikunj@amd.com/
+
+Dave Hansen (1):
+  x86/cpu: Disable CR pinning during CPU bringup
+
+Nikunj A Dadhania (1):
+  x86/fred: Fix early boot failures on SEV-ES/SNP guests
+
+ arch/x86/coco/sev/noinstr.c  |  6 ++++++
+ arch/x86/entry/entry_fred.c  | 14 ++++++++++++++
+ arch/x86/kernel/cpu/common.c | 23 +++++++++++++++++++----
+ 3 files changed, 39 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Validate SBI STA shmem alignment in  kvm_sbi_ext_sta_set_reg()
+[PATCH v8 1/3] RISC-V: KVM: Validate SBI STA shmem alignment in  kvm_sbi_ext_sta_set_reg()
+Author: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+The RISC-V SBI Steal-Time Accounting (STA) extension requires the shared
+memory physical address to be 64-byte aligned, or set to all-ones to
+explicitly disable steal-time accounting.
+
+KVM exposes the SBI STA shared memory configuration to userspace via
+KVM_SET_ONE_REG. However, the current implementation of
+kvm_sbi_ext_sta_set_reg() does not validate the alignment of the configured
+shared memory address. As a result, userspace can install a misaligned
+shared memory address that violates the SBI specification.
+
+Such an invalid configuration may later reach runtime code paths that
+assume a valid and properly aligned shared memory region. In particular,
+KVM_RUN can trigger the following WARN_ON in
+kvm_riscv_vcpu_record_steal_time():
+
+  WARNING: arch/riscv/kvm/vcpu_sbi_sta.c:49 at
+  kvm_riscv_vcpu_record_steal_time
+
+WARN_ON paths are not expected to be reachable during normal runtime
+execution, and may result in a kernel panic when panic_on_warn is enabled.
+
+Fix this by validating the computed shared memory GPA at the
+KVM_SET_ONE_REG boundary. A temporary GPA is constructed and checked
+before committing it to vcpu->arch.sta.shmem. The validation allows
+either a 64-byte aligned GPA or INVALID_GPA (all-ones), which disables
+STA as defined by the SBI specification.
+
+This prevents invalid userspace state from reaching runtime code paths
+that assume SBI STA invariants and avoids unexpected WARN_ON behavior.
+
+Fixes: f61ce890b1f074 ("RISC-V: KVM: Add support for SBI STA registers")
+Signed-off-by: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+Signed-off-by: Jiakai Xu <jiakaiPeanut@gmail.com>
+Reviewed-by: Andrew Jones <andrew.jones@oss.qualcomm.com>
+---
+V5 -> V6: Initialized new_shmem to INVALID_GPA as suggested.
+V4 -> V5: Added parentheses to function name in subject.
+V3 -> V4: Declared new_shmem at the top of kvm_sbi_ext_sta_set_reg().
+          Initialized new_shmem to 0 instead of vcpu->arch.sta.shmem.
+          Added blank lines per review feedback.
+V2 -> V3: Added parentheses to function name in subject.
+V1 -> V2: Added Fixes tag.
+---
+ arch/riscv/kvm/vcpu_sbi_sta.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v8 1/3] RISC-V: KVM: Validate SBI STA shmem alignment in  kvm_sbi_ext_sta_set_reg()
+ Skip: [PATCH v8 0/3] RISC-V: KVM: Validate SBI STA shmem alignment
+New:  KVM: selftests: Add test case for readonly memslots on x86
+[PATCH 0/2] KVM: selftests: Add test case for readonly memslots on x86
+Author: Yohei Kojima <yohei.kojima@sony.com>
+
+Currently, there are no x86 test cases to verify that read and execute
+on RO-memslot succeeds, and write is blocked as MMIO fault. This
+behavior might break if changes are made to the MMIO path, because
+x86's RO-memslot relies on the fault propagation mechanism for MMIO.
+
+The first patch adds a function vm_userspace_mem_region_add_map(), which
+is essentially the memslot setup code extracted from spawn_vm(). The
+second patch adds an x86 test case for read/write/exec on RO-memslot.
+
+This series is developed based on kvm/master, although this series adds
+a test case for x86. This is because the first patch changes the
+spawn_vm() function, which is used in the tests for other architectures.
+
+base-commit: 0de4a0eec25b9171f2a2abb1a820e125e6797770
+
+Yohei Kojima (2):
+  KVM: selftests: Extract memslot setup code from spawn_vm()
+  KVM: selftests: Add test case for readonly memslots on x86
+
+ .../selftests/kvm/set_memory_region_test.c    | 147 +++++++++++++++---
+ 1 file changed, 129 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Extract memslot setup code from spawn_vm()
+[PATCH 1/2] KVM: selftests: Extract memslot setup code from spawn_vm()
+Author: Yohei Kojima <yohei.kojima@sony.com>
+
+Add vm_userspace_mem_region_add_map() function to set up memslot, and
+update spawn_vm() to use it. This helps the test cases to create
+additional memslots easily.
+
+Signed-off-by: Yohei Kojima <yohei.kojima@sony.com>
+---
+ .../selftests/kvm/set_memory_region_test.c    | 47 ++++++++++++-------
+ 1 file changed, 29 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm/vma: cleanup error handling path in vma_expand()
+[PATCH v3 1/3] mm/vma: cleanup error handling path in vma_expand()
+Author: Suren Baghdasaryan <surenb@google.com>
+
+vma_expand() error handling is a bit confusing with "if (ret) return ret;"
+mixed with "if (!ret && ...) ret = ...;". Simplify the code to check
+for errors and return immediately after an operation that might fail.
+This also makes later changes to this function more readable.
+
+No functional change intended.
+
+Suggested-by: Jann Horn <jannh@google.com>
+Signed-off-by: Suren Baghdasaryan <surenb@google.com>
+---
+ mm/vma.c | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Use killable vma write locking in most places
+[PATCH v3 0/3] Use killable vma write locking in most places
+Author: Suren Baghdasaryan <surenb@google.com>
+
+Now that we have vma_start_write_killable() we can replace most of the
+vma_start_write() calls with it, improving reaction time to the kill
+signal.
+
+There are several places which are left untouched by this patchset:
+
+1. free_pgtables() because function should free page tables even if a
+fatal signal is pending.
+
+2. userfaultd code, where some paths calling vma_start_write() can
+handle EINTR and some can't without a deeper code refactoring.
+
+3. mpol_rebind_mm() which is used by cpusset controller for migrations
+and operates on a remote mm. Incomplete operations here would result
+in an inconsistent cgroup state.
+
+4. vm_flags_{set|mod|clear} require refactoring that involves moving
+vma_start_write() out of these functions and replacing it with
+vma_assert_write_locked(), then callers of these functions should
+lock the vma themselves using vma_start_write_killable() whenever
+possible.
+
+A cleanup patch is added in the beginning to make later changes more
+readable. The second patch contains most of the changes and the last
+patch contains the changes associated with process_vma_walk_lock()
+error handling.
+
+Changes since v2 [1]:
+- rebased over mm-unstable, per Matthew Wilcox;
+- removed mpol_rebind_mm() changes since the function operates on a
+remote mm and incomplete operation can leave unrelated process in an
+inconsistent state;
+- moved vma_start_write_killable() inside set_mempolicy_home_node() to
+avoid locking extra vmas, per Liam R. Howlett
+- moved vma_start_write_killable() inside __mmap_new_vma() to lock the
+vma right after it's allocation, per Liam R. Howlett
+- introduced VMA_MERGE_ERROR_INTR to add EINTR handling for vma_modify()
+- changed do_mbind() error handling for avoid EINTR overrides;
+- changed migrate_to_node() error handling for avoid EINTR overrides;
+- added EINTR handling in queue_pages_range();
+- fixed clear_refs_write() error handling which previous verstion broke
+by skipping some of the cleanup logic;
+
+[1] https://lore.kernel.org/all/20260217163250.2326001-1-surenb@google.com/
+
+Suren Baghdasaryan (3):
+  mm/vma: cleanup error handling path in vma_expand()
+  mm: replace vma_start_write() with vma_start_write_killable()
+  mm: use vma_start_write_killable() in process_vma_walk_lock()
+
+ arch/powerpc/kvm/book3s_hv_uvmem.c |   5 +-
+ arch/s390/kvm/kvm-s390.c           |   2 +-
+ fs/proc/task_mmu.c                 |   5 +-
+ mm/khugepaged.c                    |   5 +-
+ mm/madvise.c                       |   4 +-
+ mm/memory.c                        |   2 +
+ mm/mempolicy.c                     |  22 +++--
+ mm/mlock.c                         |  21 +++--
+ mm/mprotect.c                      |   4 +-
+ mm/mremap.c                        |   4 +-
+ mm/pagewalk.c                      |  20 +++--
+ mm/vma.c                           | 127 ++++++++++++++++++++---------
+ mm/vma.h                           |   6 ++
+ mm/vma_exec.c                      |   6 +-
+ 14 files changed, 167 insertions(+), 66 deletions(-)
+
+----------------------------------------------------------------------
+
