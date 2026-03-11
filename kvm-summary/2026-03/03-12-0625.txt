@@ -1,0 +1,823 @@
+From 120067069 to 9fb4209ac
+KVM mailing list update from 120067069 to 9fb4209ac
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     27 google.com
+     21 nvidia.com
+      7 loongson.cn
+      5 suse.de
+      4 amd.com
+      3 redhat.com
+      2 alyssa.is
+      1 theori.io
+      1 kernel.org
+      1 intel.com
+      1 amazon.com
+
+Top 15 contributors (Based on Email Body)
+
+     27  Sean Christopherson <seanjc@google.com>
+     21  Manish Honap <mhonap@nvidia.com>
+      5  Carlos L=C3=B3pez <clopez@suse.de>
+      4  Kim Phillips <kim.phillips@amd.com>
+      4  Bibo Mao <maobibo@loongson.cn>
+      3  Song Gao <gaosong@loongson.cn>
+      3  Ani Sinha <anisinha@redhat.com>
+      2  Alyssa Ross <hi@alyssa.is>
+      1  Yosry Ahmed <yosry@kernel.org>
+      1  Taeyang Lee <0wn@theori.io>
+      1  Isaku Yamahata <isaku.yamahata@intel.com>
+      1  Carsten Stollmaier <stollmc@amazon.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  cxl: Introduce cxl_get_hdm_reg_info()
+[PATCH 01/20] cxl: Introduce cxl_get_hdm_reg_info()
+Author: mhonap <mhonap@nvidia.com>
+
+
+CXL core has the information of what CXL register groups a device has.
+When initializing the device, the CXL core probes the register groups
+and saves the information. The probing sequence is quite complicated.
+
+vfio-cxl requires the HDM register information to emulate the HDM decoder
+registers.
+
+Introduce cxl_get_hdm_reg_info() for vfio-cxl to leverage the HDM
+register information in the CXL core. Thus, it doesn't need to implement
+its own probing sequence.
+
+Co-developed-by: Zhi Wang <zhiw@nvidia.com>
+Signed-off-by: Zhi Wang <zhiw@nvidia.com>
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/cxl/core/pci.c | 45 ++++++++++++++++++++++++++++++++++++++++++
+ include/cxl/cxl.h      |  3 +++
+ 2 files changed, 48 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add CXL Type-2 device passthrough support
+[PATCH 00/20] vfio/pci: Add CXL Type-2 device passthrough support
+Author: mhonap <mhonap@nvidia.com>
+
+
+This series adds support for passthrough of CXL Type-2 devices to virtual
+machines through VFIO; The goal is to expose CXL functionality through
+the generic vfio-pci core, without any need for a variant driver.
+
+Current design is based on CXL core APIs provided by Alejandro's CXL
+type-2 device support patch series which is currently in upstream
+review. (see drivers/net/ethernet/sfc/efx_cxl.c) [1].
+
+This patchset should be applied on the cxl next branch using the base
+specified at the end of this cover letter + Alejandro's v23 mentioned in
+[1].
+
+This patch series introduces CONFIG_VFIO_CXL_CORE, a new optional module
+source compiled into vfio-pci-core, that hooks into the vfio-pci
+open/close and reset paths to provide:
+
+  * Automatic CXL Type-2 detection at device open time via the CXL Device
+    DVSEC capability (Vendor ID 0x1E98, ID 0x0000) and HDM Decoder
+    Capability block.
+
+  * Kernel-owned HDM decoder management.  The VMM never programs HDM
+    decoders directly; instead it reads and writes an emulated shadow copy
+    of the HDM register block through a dedicated COMP_REGS VFIO region.
+    All bit-field rules (reserved bits, read-only bits, the
+    COMMIT/COMMITTED latch) are enforced by the kernel.
+
+  * A DPA VFIO region backed by the kernel-assigned Host Physical Address
+    (HPA).  The VMM maps this region with mmap(); PTEs are inserted lazily
+    on first fault.  During FLR/reset all PTEs are invalidated atomically
+    under memory_lock and re-inserted after the reset path re-enables the
+    decoder.
+
+  * CXL DVSEC configuration-space emulation.  Writes to the CXL Control,
+    Status, Control2, Status2, Lock, and Range Base registers in the
+    device's PCI extended configuration space are intercepted and replayed
+    through a per-device shadow (vconfig), enforcing CXL 3.1 register
+    semantics including the RWL/RW1CS/RWO access types and the CONFIG_LOCK
+    one-shot latch.
+
+  * A new VFIO_DEVICE_INFO_CAP_CXL capability (id=6) returned in the
+    VFIO_DEVICE_GET_INFO capability chain, carrying all the information a
+    VMM (e.g. QEMU) needs: HDM decoder count, BAR index and offset of the
+    component registers, total DPA size, and indices of the two new VFIO
+    regions.
+
+  * Two new VFIO region subtypes under the PCI_VENDOR_ID_CXL vendor
+    namespace: VFIO_REGION_SUBTYPE_CXL (DPA memory) and
+    VFIO_REGION_SUBTYPE_CXL_COMP_REGS (emulated HDM registers).
+
+  * A module parameter (disable_cxl=1) and a per-device flag
+    (vdev->disable_cxl) so that the feature can be suppressed for
+    individual devices or globally without recompiling.
+
+  * Comprehensive selftests in tools/testing/selftests/vfio/ covering
+    device detection, capability parsing, region enumeration, HDM register
+    emulation, DPA mmap with page-fault insertion, FLR invalidation, and
+    DVSEC register emulation.
+
+This new design is moved away from variant driver approach and all the
+CXL functionality is now made part of vfio-pci driver.
+
+The reasons for this change are:
+
+  * Generic CXL Type-2 support features (DVSEC, HDM, regions, reset)
+    are common to all CXL adapters and don't belong in variant drivers.
+    When something is vendor-specific (e.g. live migration, proprietary
+    features), a variant is appropriate; generic CXL behavior should
+    not require a vendor-specific driver. Generic CXL support belongs
+    in the core, not behind a variant.
+
+  * With this new approach, the user always binds to vfio-pci. No need to
+    choose or document a CXL-specific or vendor-specific driver for
+    standard CXL Type-2 passthrough.
+
+  * For any CXL Type-2 device, enlightened vfio-pci works with any device
+    that presents CXL Device DVSEC and the expected component layout.
+
+  * CXL detection, state, register emulation, region creation, and reset
+    live in a CXL-aware layer invoked from the core (optionally built
+    via CONFIG_VFIO_CXL_CORE). The core stays a single entry point;
+    CXL is an optional extension, not a separate driver stack.
+
+  * Pushing CXL into the pci-core avoids per-device CXL detection and
+    feature toggling inside vendor-specific drivers.
+
+Series structure
+================
+
+  * Patches 1-5 extend the CXL subsystem to export the interfaces and
+    defines that vfio-pci-core needs.
+
+  * Patches 6-8 lay the vfio-pci-core plumbing.
+
+  * Patches 9-12 implement the core device lifecycle and DPA region.
+
+  * Patches 13-15 implement configuration-space and register emulation.
+
+  * Patches 16-18 wire everything together.
+
+  * Patches 19-20 add documentation and testing.
+
+Limitations and future work
+===========================
+
+  * This series does not yet support switched topologies with more than one
+    caching agent; that is planned for a future series.
+
+  * RAS / ECC / CCA / Reset Support
+    This design will integrate RAS and ECC handling in generic vfio-pci by
+    leveraging CXL core and RAS capabilities in next patch updates.
+
+  * cxl_reset support [2]
+    Integrate changes from Srirangan to have VFIO-CXL reset support.
+
+Dependencies
+============
+
+[1] Type2 device basic support https://lore.kernel.org/linux-cxl/20260201155438.2664640-1-alejandro.lucero-palau@amd.com/
+[2] CXL Reset support for Type 2 devices https://lore.kernel.org/linux-cxl/20260306092322.148765-1-smadhavan@nvidia.com/
+
+Cc: Alex Williamson <alex.williamson@redhat.com>
+Cc: Dan Williams <dan.j.williams@intel.com>
+Cc: Ira Weiny <ira.weiny@intel.com>
+Cc: Jonathan Cameron <Jonathan.Cameron@huawei.com>
+Cc: Alejandro Lucero <alejandro.lucero-palau@amd.com>
+Cc: linux-cxl@vger.kernel.org
+Cc: kvm@vger.kernel.org
+
+Co-developed-by: Zhi Wang <zhiw@nvidia.com>
+Signed-off-by: Zhi Wang <zhiw@nvidia.com>
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+
+--
+
+Manish Honap (20):
+  cxl: Introduce cxl_get_hdm_reg_info()
+  cxl: Expose cxl subsystem specific functions for vfio
+  cxl: Move CXL spec defines to public header
+  cxl: Media ready check refactoring
+  cxl: Expose BAR index and offset from register map
+  vfio/cxl: Add UAPI for CXL Type-2 device passthrough
+  vfio/pci: Add CXL state to vfio_pci_core_device
+  vfio/pci: Add vfio-cxl Kconfig and build infrastructure
+  vfio/cxl: Implement CXL device detection and HDM register probing
+  vfio/cxl: CXL region management
+  vfio/cxl: Expose DPA memory region to userspace with fault+zap mmap
+  vfio/pci: Export config access helpers
+  vfio/cxl: Introduce HDM decoder register emulation framework
+  vfio/cxl: Check media readiness and create CXL memdev
+  vfio/cxl: Introduce CXL DVSEC configuration space emulation
+  vfio/pci: Expose CXL device and region info via VFIO ioctl
+  vfio/cxl: Provide opt-out for CXL feature
+  docs: vfio-pci: Document CXL Type-2 device passthrough
+  selftests/vfio: Add CXL Type-2 passthrough tests
+  selftests/vfio: Fix VLA initialisation in vfio_pci_irq_set()
+
+ Documentation/driver-api/index.rst            |   1 +
+ Documentation/driver-api/vfio-pci-cxl.rst     | 216 +++++
+ drivers/cxl/core/pci.c                        |  80 +-
+ drivers/cxl/core/regs.c                       |  29 +
+ drivers/cxl/cxl.h                             |  34 -
+ drivers/vfio/pci/Kconfig                      |   2 +
+ drivers/vfio/pci/Makefile                     |   1 +
+ drivers/vfio/pci/cxl/Kconfig                  |   7 +
+ drivers/vfio/pci/cxl/vfio_cxl_config.c        | 304 +++++++
+ drivers/vfio/pci/cxl/vfio_cxl_core.c          | 713 +++++++++++++++
+ drivers/vfio/pci/cxl/vfio_cxl_emu.c           | 414 +++++++++
+ drivers/vfio/pci/cxl/vfio_cxl_priv.h          | 123 +++
+ drivers/vfio/pci/vfio_pci.c                   |  32 +
+ drivers/vfio/pci/vfio_pci_config.c            |  58 +-
+ drivers/vfio/pci/vfio_pci_core.c              |  31 +
+ drivers/vfio/pci/vfio_pci_priv.h              |  72 ++
+ drivers/vfio/pci/vfio_pci_rdwr.c              |   8 +
+ include/cxl/cxl.h                             |  52 ++
+ include/linux/vfio_pci_core.h                 |  10 +
+ include/uapi/linux/vfio.h                     |  52 ++
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../selftests/vfio/lib/vfio_pci_device.c      |   4 +-
+ .../selftests/vfio/vfio_cxl_type2_test.c      | 816 ++++++++++++++++++
+ 23 files changed, 3013 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  cpu/bugs: Allow forcing Automatic IBRS with SNP enabled using spectre_v2=eibrs
+[PATCH v2 1/3] cpu/bugs: Allow forcing Automatic IBRS with SNP enabled using spectre_v2=eibrs
+Author: Kim Phillips <kim.phillips@amd.com>
+
+To allow this, do the SNP check in spectre_v2_select_mitigation()
+processing instead of the original commit's implementation in
+cpu_set_bug_bits().
+
+Since SPECTRE_V2_CMD_AUTO logic falls through to SPECTRE_V2_CMD_FORCE,
+double-check if SPECTRE_V2_CMD_FORCE is used before allowing
+SPECTRE_V2_EIBRS with SNP enabled.
+
+Also mute SPECTRE_V2_IBRS_PERF_MSG if SNP is enabled on an AutoIBRS
+capable machine, since, in that case, the message doesn't apply.
+
+Fixes: acaa4b5c4c85 ("x86/speculation: Do not enable Automatic IBRS if SEV-SNP is enabled")
+Reported-by: Tom Lendacky <thomas.lendacky@amd.com>
+Cc: Borislav Petkov (AMD) <bp@alien8.de>
+Cc: stable@kernel.org
+Signed-off-by: Kim Phillips <kim.phillips@amd.com>
+---
+v2:
+ - Address Dave Hansen's comment to adhere to using the IBRS_ENHANCED
+   Intel feature flag also for AutoIBRS.
+
+v1:
+ https://lore.kernel.org/kvm/20260224180157.725159-2-kim.phillips@amd.com/
+
+ arch/x86/kernel/cpu/bugs.c   | 12 ++++++++++--
+ arch/x86/kernel/cpu/common.c |  6 +-----
+ 2 files changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: Add support for BTB Isolation
+[PATCH v2 0/3] KVM: SEV: Add support for BTB Isolation
+Author: Kim Phillips <kim.phillips@amd.com>
+
+This feature ensures SNP guest Branch Target Buffers (BTBs) are not
+affected by context outside that guest.
+
+The first patch fixes a longstanding bug where users weren't able
+to force Automatic IBRS on SNP enabled machines using spectre_v2=eibrs.
+
+The second patch fixes another longstanding bug where users couldn't
+select legacy / toggling SPEC_CTRL[IBRS] on AMD systems.  Users of
+the BTB Isolation feature may use IBRS to mitigate possible
+performance degradation caused by BTB Isolation.
+
+The third patch adds support for the feature by adding it to the
+supported features bitmask.
+
+Based on tip/master, currently 7726ce228780.
+https://git.kernel.org/pub/scm/linux/kernel/git/tip/tip.git
+
+This series also available here:
+
+https://github.com/AMDESE/linux/tree/btb-isol-latest
+
+Advance qemu bits (to add btb-isol=on/off switch) available here:
+
+https://github.com/AMDESE/qemu/tree/btb-isol-latest
+
+Qemu bits will be posted upstream once kernel bits are merged.
+They depend on Naveen Rao's "target/i386: SEV: Add support for
+enabling VMSA SEV features":
+
+https://lore.kernel.org/qemu-devel/cover.1761648149.git.naveen@kernel.org/
+
+v2:
+ - Patch 1/3:
+   - Address Dave Hansen's comment to adhere to using the IBRS_ENHANCED
+     Intel feature flag also for AutoIBRS.
+
+v1:
+ https://lore.kernel.org/kvm/20260224180157.725159-1-kim.phillips@amd.com/
+
+Kim Phillips (3):
+  cpu/bugs: Allow forcing Automatic IBRS with SNP enabled using
+    spectre_v2=eibrs
+  cpu/bugs: Allow spectre_v2=ibrs on x86 vendors other than Intel
+  KVM: SEV: Add support for SNP BTB Isolation
+
+ arch/x86/include/asm/svm.h   |  1 +
+ arch/x86/kernel/cpu/bugs.c   | 19 +++++++++++--------
+ arch/x86/kernel/cpu/common.c |  6 +-----
+ arch/x86/kvm/svm/sev.c       |  3 +++
+ 4 files changed, 16 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: clear map->gfn in kvm_vcpu_unmap() to prevent stale validity checks
+[PATCH] KVM: clear map->gfn in kvm_vcpu_unmap() to prevent stale validity checks
+Author: Taeyang Lee <0wn@theori.io>
+
+kvm_vcpu_unmap() clears map->hva and map->page but leaves map->gfn with
+its previous value. This creates an inconsistent state: callers that
+check gfn != 0 as a proxy for map validity will believe the map is still
+valid when hva is already NULL.
+
+This pattern caused a null pointer dereference in the 6.1.x LTS branch,
+where vmx_guest_apic_has_interrupt() checked virtual_apic_map.gfn but
+dereferenced virtual_apic_map.hva unconditionally. That specific call
+site no longer exists in mainline due to the gfn_to_pfn_cache
+refactoring, but the inconsistency in kvm_vcpu_unmap() remains and could
+affect future kvm_host_map users that rely on gfn for validity.
+
+Similarly, kvm_vcpu_map() does not modify the map struct on failure, so
+stale gfn values from a previous successful mapping survive a failed
+remap attempt. Clearing gfn in kvm_vcpu_unmap() ensures that after an
+unmap-then-failed-remap sequence, gfn correctly reflects that no valid
+mapping exists.
+
+Clear map->gfn in kvm_vcpu_unmap().
+
+Reported-by: Taeyang Lee <0wn@theori.io>
+Fixes: e45adf665a53 ("KVM: Introduce a new guest mapping API")
+Signed-off-by: Taeyang Lee <0wn@theori.io>
+---
+ virt/kvm/kvm_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  target/arm/kvm: fall back if nested unsupported
+[PATCH] target/arm/kvm: fall back if nested unsupported
+Author: Alyssa Ross <hi@alyssa.is>
+
+If I create a machine with more CPUs than KVM supports, but specify
+multiple accelerator options, QEMU will fall back to the next
+accelerator.  This is great, because if I've explicitly specified
+multiple accelerators, I've told QEMU I'm fine with any of them being
+used to provide the machine I want.
+
+When I create a machine with nested virtualization enabled, though,
+this doesn't happen.  KVM often doesn't support it, but TCG always
+does.  The nice thing to do would be for QEMU to fall back to TCG if
+KVM can't provide, like it does when too many CPUs are requested.
+This patch adjusts the behaviour to do that.
+
+This is very helpful for OS development scripts that run an OS in QEMU
+— I want everybody to be able to run the script, always with
+virtualization enabled because the OS requires it, but for it to take
+advantage of KVM acceleration when available.
+
+Signed-off-by: Alyssa Ross <hi@alyssa.is>
+---
+ hw/arm/virt.c    | 6 ------
+ target/arm/kvm.c | 8 ++++++++
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  accel/kvm: fix typo in variable name
+[PATCH] accel/kvm: fix typo in variable name
+Author: Alyssa Ross <hi@alyssa.is>
+
+Fixes: 94a8d39afd ("kvm: Consolidate must-have capability checks")
+Signed-off-by: Alyssa Ross <hi@alyssa.is>
+---
+ accel/kvm/kvm-all.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Add DMSINTC support irqchip in kernel
+[PATCH v7 0/2] LoongArch: KVM: Add DMSINTC support irqchip in kernel
+Author: Song Gao <gaosong@loongson.cn>
+
+Hi,
+
+This series  implements the DMSINTC in-kernel irqchip device,
+enables irqfd to deliver MSI to DMSINTC, and supports injecting MSI interrupts
+to the target vCPU.
+applied this series.  use netperf test.
+VM with one CPU and start netserver, host run netperf.
+disable dmsintc
+taskset 0x2f  netperf -H 192.168.122.204 -t UDP_RR  -l 36000
+Local /Remote
+Socket Size   Request  Resp.   Elapsed  Trans.
+Send   Recv   Size     Size    Time     Rate
+bytes  Bytes  bytes    bytes   secs.    per sec
+
+212992 212992 1        1       36000.00   27107.36
+
+enable dmsintc
+Local /Remote
+Socket Size   Request  Resp.   Elapsed  Trans.
+Send   Recv   Size     Size    Time     Rate
+bytes  Bytes  bytes    bytes   secs.    per sec
+
+212992 212992 1        1       36000.00   28831.14  (+6.3%)
+
+v7:
+  *Rebase;
+  *Fix a typo error;
+  *Drop an extra space;
+  *Move some code from patch2 to patch1.
+  *Rename loongarch_dmsintc_inject_irq() to dmsintc_inject_irq() and move
+it to interrupt.c;
+  *Rename kvm_loongarch_deliver_msi_to_vcpu() to
+dmsintc_deliver_msi_to_vcpu() and move it to irqfd.c;
+  *Drop loongarch_set_msi() and dispatch the dmsintc/eiointc
+paths in pch_msi_set_irq().
+
+v6:
+  Fix kvm_device leak in kvm_dmsintc_destroy().
+
+v5:
+  Combine patch2 and patch3
+  Add check msgint feature when register DMSINT device.
+
+V4: Rebase and R-b;
+   replace DINTC to DMSINTC.
+
+
+V3: Fix kvm_arch_set_irq_inatomic() missing dmsintc set msi.(patch3)
+
+V2:
+https://patchew.org/linux/20251128091125.2720148-1-gaosong@loongson.cn/
+
+Thanks.
+Song Gao
+
+Song Gao (2):
+  LoongArch: KVM: Add DMSINTC device support
+  LoongArch: KVM: Add dmsintc inject msi to the dest vcpu
+
+ arch/loongarch/include/asm/kvm_dmsintc.h |  23 +++++
+ arch/loongarch/include/asm/kvm_host.h    |   3 +
+ arch/loongarch/include/asm/kvm_pch_pic.h |   4 +-
+ arch/loongarch/include/uapi/asm/kvm.h    |   4 +
+ arch/loongarch/kvm/Makefile              |   1 +
+ arch/loongarch/kvm/intc/dmsintc.c        | 117 +++++++++++++++++++++++
+ arch/loongarch/kvm/intc/pch_pic.c        |  16 +++-
+ arch/loongarch/kvm/interrupt.c           |  37 +++++++
+ arch/loongarch/kvm/irqfd.c               |  48 ++++++++--
+ arch/loongarch/kvm/main.c                |   6 ++
+ include/uapi/linux/kvm.h                 |   2 +
+ 11 files changed, 252 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Add DMSINTC device support
+[PATCH v7 1/2] LoongArch: KVM: Add DMSINTC device support
+Author: Song Gao <gaosong@loongson.cn>
+
+Add device model for DMSINTC interrupt controller, implement basic
+create/destroy/set_attr interfaces, and register device model to kvm
+device table.
+
+Reviewed-by: Bibo Mao <maobibo@loongson.cn>
+Signed-off-by: Song Gao <gaosong@loongson.cn>
+---
+ arch/loongarch/include/asm/kvm_dmsintc.h |  21 ++++
+ arch/loongarch/include/asm/kvm_host.h    |   3 +
+ arch/loongarch/include/uapi/asm/kvm.h    |   4 +
+ arch/loongarch/kvm/Makefile              |   1 +
+ arch/loongarch/kvm/intc/dmsintc.c        | 117 +++++++++++++++++++++++
+ arch/loongarch/kvm/main.c                |   6 ++
+ include/uapi/linux/kvm.h                 |   2 +
+ 7 files changed, 154 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  coverity: fix coverity issues related to confidential guest reset
+[PATCH] coverity: fix coverity issues related to confidential guest reset
+Author: Ani Sinha <anisinha@redhat.com>
+
+Fix issues reported by Peter.
+
+Reported-by: Peter Maydell <peter.maydell@linaro.org>
+Signed-off-by: Ani Sinha <anisinha@redhat.com>
+---
+ system/runstate.c | 5 ++++-
+ target/i386/sev.c | 4 ----
+ 2 files changed, 4 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Add kvm_request_pending checking in kvm_late_check_requests()
+[PATCH 1/3] LoongArch: KVM: Add kvm_request_pending checking in kvm_late_check_requests()
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Add kvm_request_pending() checking firstly in kvm_late_check_requests(),
+at most time there is no pending request, the following pending bit
+checking can be skipped then.
+
+Also move function kvm_check_pmu() in kvm_late_check_requests(), and put
+it after kvm_request_pending() checking.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/vcpu.c | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Some small enhanments
+[PATCH 0/3] LoongArch: KVM: Some small enhanments
+Author: Bibo Mao <maobibo@loongson.cn>
+
+There are some small enhancements about LoongArch KVM. There is
+improvement about VM entry path in patch 1 and patch, add pending
+request checking in advance and it is empty at most time.
+
+Also change vcpu_is_preempted() from function to macro method, by actual
+benchmark test such as unixbench. It is affected on physical machine
+with function method. With the macro method, only one nop instruction
+is added and there is no parameter parsing, there is no obvious
+performance influence with physical machine.
+
+Bibo Mao (3):
+  LoongArch: KVM: Add kvm_request_pending checking in
+    kvm_late_check_requests()
+  LoongArch: KVM: Move host CSR_EENTRY save in context switch
+  LoongArch: KVM: Set vcpu_is_preempted() macro rather than function
+
+ arch/loongarch/include/asm/qspinlock.h | 27 +++++++++++++++++++++-----
+ arch/loongarch/kernel/paravirt.c       | 15 ++------------
+ arch/loongarch/kvm/vcpu.c              | 24 +++++++++++------------
+ 3 files changed, 36 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Eliminate warnings by sparse in vmcs12.c and hyperv_evmcs.c
+[PATCH] KVM: VMX: Eliminate warnings by sparse in vmcs12.c and hyperv_evmcs.c
+Author: isaku.yamahata <isaku.yamahata@intel.com>
+
+
+Make ROL16() explicitly mask instead of the truncation by u16 cast.
+Sparse complains as follows for vmcs12.c and hyperv_evmcs.c.
+  > vmcs12.c:17:9: warning: cast truncates bits from constant value
+  > (20002 becomes 2)
+
+It is because ROL16(val, n) includes "(u16)(val) << (n)" whose type is int,
+not u16, due to integer promotion even with a u16 cast.  The outermost u16
+cast in ROL16() may truncate it.  Explicitly mask it to avoid truncation by
+the u16 cast.
+
+Reported-by: kernel test robot <lkp@intel.com>
+Closes: https://lore.kernel.org/oe-kbuild-all/202603061942.wdSsERnL-lkp@intel.com/
+Signed-off-by: Isaku Yamahata <isaku.yamahata@intel.com>
+---
+ arch/x86/kvm/vmx/vmcs.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Add dedicated storage for guest RIP
+[PATCH 1/7] KVM: x86: Add dedicated storage for guest RIP
+Author: Sean Christopherson <seanjc@google.com>
+
+Add kvm_vcpu_arch.rip to track guest RIP instead of including it in the
+generic regs[] array.  Decoupling RIP from regs[] will allow using a
+*completely* arbitrary index for RIP, as opposed to the mostly-arbitrary
+index that is currently used.  That in turn will allow using indices
+16-31 to track R16-R31 that are coming with APX.
+
+Note, although RIP can used for addressing, it does NOT have an
+architecturally defined index, and so can't be reached via flows like
+get_vmx_mem_address() where KVM "blindly" reads a general purpose register
+given the SIB information reported by hardware.  For RIP-relative
+addressing, hardware reports the full "offset" in vmcs.EXIT_QUALIFICATION.
+
+Note #2, keep the available/dirty tracking as RSP is context switched
+through the VMCS, i.e. needs to be cached for VMX.
+
+Opportunistically rename NR_VCPU_REGS to NR_VCPU_GENERAL_PURPOSE_REGS to
+better capture what it tracks, and so that KVM can slot in R16-R13 without
+running into weirdness where KVM's definition of "EXREG" doesn't line up
+with APX's definition of "extended reg".
+
+No functional change intended.
+
+Cc: Chang S. Bae <chang.seok.bae@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 10 ++++++----
+ arch/x86/kvm/kvm_cache_regs.h   | 12 ++++++++----
+ arch/x86/kvm/svm/sev.c          |  2 +-
+ arch/x86/kvm/svm/svm.c          |  6 +++---
+ arch/x86/kvm/vmx/vmx.c          |  8 ++++----
+ arch/x86/kvm/vmx/vmx.h          |  2 +-
+ 6 files changed, 23 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: APX reg prep work
+[PATCH 0/7] KVM: x86: APX reg prep work
+Author: Sean Christopherson <seanjc@google.com>
+
+Clean up KVM's register tracking and storage in preparation for landing APX,
+which expands the maximum number of GPRs from 16 to 32.
+
+This is kinda sorta an RFC, as there are some very opinionated changes.  I.e.
+if you dislike something, please speak up.
+
+My thought is to treat R16-R31 as much like other GPRs as possible (though
+maybe we don't need to expand regs[] as sketched out in the last patch?).
+
+Sean Christopherson (7):
+  KVM: x86: Add dedicated storage for guest RIP
+  KVM: x86: Drop the "EX" part of "EXREG" to avoid collision with APX
+  KVM: nVMX: Do a bitwise-AND of regs_avail when switching active VMCS
+  KVM: x86: Add wrapper APIs to reset dirty/available register masks
+  KVM: x86: Track available/dirty register masks as "unsigned long"
+    values
+  KVM: x86: Use a proper bitmap for tracking available/dirty registers
+  *** DO NOT MERGE *** KVM: x86: Pretend that APX is supported on 64-bit
+    kernels
+
+ arch/x86/include/asm/kvm_host.h | 53 +++++++++++++++++++--------
+ arch/x86/kvm/kvm_cache_regs.h   | 64 +++++++++++++++++++++++----------
+ arch/x86/kvm/svm/sev.c          |  2 +-
+ arch/x86/kvm/svm/svm.c          | 16 ++++-----
+ arch/x86/kvm/svm/svm.h          |  2 +-
+ arch/x86/kvm/vmx/nested.c       | 10 +++---
+ arch/x86/kvm/vmx/tdx.c          | 36 +++++++++----------
+ arch/x86/kvm/vmx/vmx.c          | 52 +++++++++++++--------------
+ arch/x86/kvm/vmx/vmx.h          | 24 ++++++-------
+ arch/x86/kvm/x86.c              | 20 +++++------
+ 10 files changed, 166 insertions(+), 113 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Remove duplicate LAUNCH_UPDATE_VMSA
+[PATCH 01/21] KVM: selftests: Remove duplicate LAUNCH_UPDATE_VMSA
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop the explicit KVM_SEV_LAUNCH_UPDATE_VMSA call when creating an SEV-ES
+VM in the SEV migration test, as sev_vm_create() automatically updates the
+VMSA pages for SEV-ES guests.  The only reason the duplicate call doesn't
+cause visible problems is because the test doesn't actually try to run the
+vCPUs.  That will change when KVM adds a check to prevent userspace from
+re-launching a VMSA (which corrupts the VMSA page due to KVM writing
+encrypted private memory).
+
+Fixes: 69f8e15ab61f ("KVM: selftests: Use the SEV library APIs in the intra-host migration test")
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/x86/sev_migrate_tests.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Fixes and lock cleanup+hardening
+[PATCH 00/21] Fixes and lock cleanup+hardening
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix several fatal SEV bugs, then clean up the SEV+ APIs to either document
+that they are safe to query outside of kvm->lock, or to use lockdep-protect=
+ed
+version.  The sev_mem_enc_register_region() goof is at least the second bug
+we've had related to checking for an SEV guest outside of kvm->lock, and in
+general it's nearly impossible to just "eyeball" the safety of KVM's usage.
+
+I included Carlos' guard() cleanups here to avoid annoying conflicts (well,
+to solve them now instead of when applying).
+
+Carlos L=C3=B3pez (5):
+  KVM: SEV: use mutex guard in snp_launch_update()
+  KVM: SEV: use mutex guard in sev_mem_enc_ioctl()
+  KVM: SEV: use mutex guard in sev_mem_enc_unregister_region()
+  KVM: SEV: use mutex guard in snp_handle_guest_req()
+  KVM: SVM: Move lock-protected allocation of SEV ASID into a separate
+    helper
+
+Sean Christopherson (16):
+  KVM: selftests: Remove duplicate LAUNCH_UPDATE_VMSA call in SEV-ES
+    migrate test
+  KVM: SEV: Reject attempts to sync VMSA of an
+    already-launched/encrypted vCPU
+  KVM: SEV: Protect *all* of sev_mem_enc_register_region() with
+    kvm->lock
+  KVM: SEV: Disallow LAUNCH_FINISH if vCPUs are actively being created
+  KVM: SEV: Lock all vCPUs when synchronzing VMSAs for SNP launch finish
+  KVM: SEV: Lock all vCPUs for the duration of SEV-ES VMSA
+    synchronization
+  KVM: SEV: Provide vCPU-scoped accessors for detecting SEV+ guests
+  KVM: SEV: Add quad-underscore version of VM-scoped APIs to detect SEV+
+    guests
+  KVM: SEV: Document the SEV-ES check when querying SMM support as
+    "safe"
+  KVM: SEV: Move standard VM-scoped helpers to detect SEV+ guests to
+    sev.c
+  KVM: SEV: Move SEV-specific VM initialization to sev.c
+  KVM: SEV: WARN on unhandled VM type when initializing VM
+  KVM: SEV: Hide "struct kvm_sev_info" behind CONFIG_KVM_AMD_SEV=3Dy
+  KVM: SEV: Document that checking for SEV+ guests when reclaiming
+    memory is "safe"
+  KVM: SEV: Assert that kvm->lock is held when querying SEV+ support
+  KVM: SEV: Goto an existing error label if charging misc_cg for an ASID
+    fails
+
+ arch/x86/kvm/svm/sev.c                        | 315 +++++++++++-------
+ arch/x86/kvm/svm/svm.c                        | 106 +++---
+ arch/x86/kvm/svm/svm.h                        |  36 +-
+ include/linux/kvm_host.h                      |   7 +
+ .../selftests/kvm/x86/sev_migrate_tests.c     |   2 -
+ 5 files changed, 275 insertions(+), 191 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Move nested_run_pending to kvm_vcpu_arch
+[PATCH 1/2] KVM: x86: Move nested_run_pending to kvm_vcpu_arch
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Move nested_run_pending field present in both svm_nested_state and
+nested_vmx to the common kvm_vcpu_arch. This allows for common code to
+use without plumbing it through per-vendor helpers.
+
+nested_run_pending remains zero-initialized, as the entire kvm_vcpu
+struct is, and all further accesses are done through vcpu->arch instead
+of svm->nested or vmx->nested.
+
+No functional change intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+[sean: expand the commend in the field declaration]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  9 +++++++
+ arch/x86/kvm/svm/nested.c       | 18 ++++++-------
+ arch/x86/kvm/svm/svm.c          | 16 ++++++------
+ arch/x86/kvm/svm/svm.h          |  4 ---
+ arch/x86/kvm/vmx/nested.c       | 46 ++++++++++++++++-----------------
+ arch/x86/kvm/vmx/vmx.c          | 16 ++++++------
+ arch/x86/kvm/vmx/vmx.h          |  3 ---
+ 7 files changed, 57 insertions(+), 55 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Syzkaller nested_run_pending defense
+[PATCH 0/2] KVM: x86: Syzkaller nested_run_pending defense
+Author: Sean Christopherson <seanjc@google.com>
+
+Defeat syzkaller once and for all when it comes to nested_run_pending (yeah,
+those words won't come back to haunt me), by treating nested_run_pending as
+"untrusted" for the purposes of WARNs if userspace gains control of the vCPU.
+I.e. don't WARN if userspace _may_ have stuffed vCPU state to force an
+impossible VM-Exit.
+
+We've reached the point where the signal:noise ratio for nested_run_pending
+WARNs when syzkaller is fuzzing nVMX/nSVM is awful, and playing whack-a-mole
+with syzkaller is doing more harm that good at this point.  While it's
+possible syzkaller could find an actual KVM bug by stuffing vCPU state, if the
+_only_ symptom is the nested_run_pending WARN, then in theory the bug should
+also be hittable by stuffing L2 state prior to nested VM-Enter.
+
+Sean Christopherson (1):
+  KVM: x86: Suppress WARNs on nested_run_pending after userspace exit
+
+Yosry Ahmed (1):
+  KVM: x86: Move nested_run_pending to kvm_vcpu_arch
+
+ arch/x86/include/asm/kvm_host.h | 15 ++++++++++
+ arch/x86/kvm/svm/nested.c       | 23 ++++++++-------
+ arch/x86/kvm/svm/svm.c          | 16 +++++------
+ arch/x86/kvm/svm/svm.h          |  4 ---
+ arch/x86/kvm/vmx/nested.c       | 50 +++++++++++++++++----------------
+ arch/x86/kvm/vmx/vmx.c          | 16 +++++------
+ arch/x86/kvm/vmx/vmx.h          |  3 --
+ arch/x86/kvm/x86.c              |  7 +++++
+ arch/x86/kvm/x86.h              | 10 +++++++
+ 9 files changed, 87 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
