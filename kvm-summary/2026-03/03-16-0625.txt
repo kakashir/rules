@@ -1,0 +1,311 @@
+From 97f96b41b to f8b17bde7
+KVM mailing list update from 97f96b41b to f8b17bde7
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     23 intel.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     22  Chao Gao <chao.gao@intel.com>
+      1  Osama Abdelkader <osama.abdelkader@gmail.com>
+      1  Kai Huang <kai.huang@intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  x86/virt/tdx: Move low level SEAMCALL helpers out of <asm/tdx.h>
+[PATCH v5 01/22] x86/virt/tdx: Move low level SEAMCALL helpers out of <asm/tdx.h>
+Author: Chao Gao <chao.gao@intel.com>
+
+
+TDX host core code implements three seamcall*() helpers to make SEAMCALL
+to the TDX module.  Currently, they are implemented in <asm/tdx.h> and
+are exposed to other kernel code which includes <asm/tdx.h>.
+
+However, other than the TDX host core, seamcall*() are not expected to
+be used by other kernel code directly.  For instance, for all SEAMCALLs
+that are used by KVM, the TDX host core exports a wrapper function for
+each of them.
+
+Move seamcall*() and related code out of <asm/tdx.h> and make them only
+visible to TDX host core.
+
+Since TDX host core tdx.c is already very heavy, don't put low level
+seamcall*() code there but to a new dedicated "seamcall_internal.h".  Also,
+currently tdx.c has seamcall_prerr*() helpers which additionally print
+error message when calling seamcall*() fails.  Move them to
+"seamcall_internal.h" as well. In such way all low level SEAMCALL helpers
+are in a dedicated place, which is much more readable.
+
+Copy the copyright notice from the original files and consolidate the
+date ranges to:
+
+	Copyright (C) 2021-2023 Intel Corporation
+
+Signed-off-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Zhenzhong Duan <zhenzhong.duan@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+Acked-by: Dave Hansen <dave.hansen@linux.intel.com>
+---
+v5:
+ - s/seamcall.h/seamcall_internal.h [Binbin]
+ - Fix an unintentional change to sc_retry() during code movement.
+v4:
+ - Collect reviews
+ - add "internal" to the new header file [Dave]
+ - document the scope of the new header file [Dave]
+ - correct the copyright notice [Dave]
+v2:
+ - new
+---
+ arch/x86/include/asm/tdx.h                |  47 ----------
+ arch/x86/virt/vmx/tdx/seamcall_internal.h | 109 ++++++++++++++++++++++
+ arch/x86/virt/vmx/tdx/tdx.c               |  47 +---------
+ 3 files changed, 111 insertions(+), 92 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Runtime TDX module update support
+[PATCH v5 00/22] Runtime TDX module update support
+Author: Chao Gao <chao.gao@intel.com>
+
+Hi Reviewers,
+
+With this posting, I'm hoping to collect more Reviewed-by or Acked-by tags.
+
+Please note these changes:
+
+  Patch 18 handles a CPU erratum that clears the active VMCS after
+  P-SEAMLDR calls. Because of this erratum, patch 6 now exposes seamldr
+  attributes during device probe rather than creation as unconditional
+  exposure would be unsafe.
+
+  Patch 22 adds error logging for update failures. It's kind of
+  nice-to-have, so it is placed last for easy removal if necessary.
+
+For transparency, I should note that I used an Intel-operated AI tool to
+help proofread this cover-letter and commit messages.
+
+Changelog:
+v4->v5:
+ - s/TDX Module/TDX module/g [Binbin/Dave]
+ - drop is_vmalloc_addr() checking [Dave/Rick]
+ - protect lockstep control data with a lock [Dave]
+ - clarify why raw_spinlock is used [Dave/Kai]
+ - drop patches that check all CPUs are online and updates are not exhausted [Dave]
+ - register seamldr attributes in device probe
+ - use devm_add_action_or_reset for seamldr deinit [Yilun]
+ - remove global tdx_fw [Yilun]
+ - clarify request_firmware() doesn't take filename from userspace [Rick]
+ - drop unnecessary checks when populating an update request [Rick]
+ - rewrite the commit message for the skeleton patch
+ - rewrite the commit message for the "update-sensitive operations" handling patch
+ - other minor code changes, changelog improvements and typo fixes [Binbin/Yan etc]
+ - collect review tags from Yilun/Rick/Kai/Binbin
+ - v4: https://lore.kernel.org/kvm/20260212143606.534586-1-chao.gao@intel.com/
+
+This series adds support for runtime TDX module updates that preserve
+running TDX guests. It is also available at:
+
+  https://github.com/gaochaointel/linux-dev/commits/tdx-module-updates-v5/
+
+== Background ==
+
+Intel TDX isolates Trusted Domains (TDs), or confidential guests, from the
+host. A key component of Intel TDX is the TDX module, which enforces
+security policies to protect the memory and CPU states of TDs from the
+host. However, the TDX module is software that requires updates.
+
+== Problems ==
+
+Currently, the TDX module is loaded by the BIOS at boot time, and the only
+way to update it is through a reboot, which results in significant system
+downtime. Users expect the TDX module to be updatable at runtime without
+disrupting TDX guests.
+
+== Solution ==
+
+On TDX platforms, P-SEAMLDR[1] is a component within the protected SEAM
+range. It is loaded by the BIOS and provides the host with functions to
+install a TDX module at runtime.
+
+Implement a TDX module update facility via the fw_upload mechanism. Given
+that there is variability in which module update to load based on features,
+fix levels, and potentially reloading the same version for error recovery
+scenarios, the explicit userspace chosen payload flexibility of fw_upload
+is attractive.
+
+This design allows the kernel to accept a bitstream instead of loading a
+named file from the filesystem, as the module selection and policy
+enforcement for TDX modules are quite complex (see patch "coco/tdx-host:
+Implement firmware upload sysfs ABI for TDX module updates"). By doing
+so, much of this complexity is shifted out of the kernel. The kernel
+needs to expose information, such as the TDX module version, to
+userspace.  Userspace must understand the TDX module versioning scheme
+and update policy to select the appropriate TDX module (see "TDX module
+Versioning" below).
+
+In the unlikely event the update fails, for example userspace picks an
+incompatible update image, or the image is otherwise corrupted, all TDs
+will experience SEAMCALL failures and be killed. The recovery of TD
+operation from that event requires a reboot.
+
+Given there is no mechanism to quiesce SEAMCALLs, the TDs themselves must
+pause execution over an update. The most straightforward way to meet the
+'pause TDs while update executes' constraint is to run the update in
+stop_machine() context. All other evaluated solutions export more
+complexity to KVM, or exports more fragility to userspace.
+
+== How to test this series ==
+
+First, load kvm-intel.ko and tdx-host.ko if they haven't been loaded:
+
+ # modprobe -r kvm_intel
+ # modprobe kvm_intel tdx=1
+ # modprobe tdx-host
+
+Then, use the userspace tool below to select the appropriate TDX module and
+install it via the interfaces exposed by this series:
+
+ # git clone https://github.com/intel/tdx-module-binaries
+ # cd tdx-module-binaries
+ # python version_select_and_load.py --update
+
+this version changes the firmware directory name from seamldr_upload to
+tdx_module, so, below change should be applied to version_select_and_load.py:
+
+diff --git a/version_select_and_load.py b/version_select_and_load.py
+index 2193bd8..6a3b604 100644
+--- a/version_select_and_load.py
++++ b/version_select_and_load.py
+@@ -38,7 +38,7 @@ except ImportError:
+     print("Error: cpuid module is not installed. Please install it using 'pip install cpuid'")
+     sys.exit(1)
+
+-FIRMWARE_PATH = "/sys/class/firmware/seamldr_upload"
++FIRMWARE_PATH = "/sys/class/firmware/tdx_module"
+ MODULE_PATH = "/sys/devices/faux/tdx_host"
+ SEAMLDR_PATH = "/sys/devices/faux/tdx_host/seamldr"
+ allow_debug = False
+
+
+== Other information relevant to Runtime TDX module updates ==
+
+=== TDX module versioning ===
+
+Each TDX module is assigned a version number x.y.z, where x represents the
+"major" version, y the "minor" version, and z the "update" version.
+
+Runtime TDX module updates are restricted to Z-stream releases.
+
+Note that Z-stream releases do not necessarily guarantee compatibility. A
+new release may not be compatible with all previous versions. To address this,
+Intel provides a separate file containing compatibility information, which
+specifies the minimum module version required for a particular update. This
+information is referenced by the tool to determine if two modules are
+compatible.
+
+=== TCB Stability ===
+
+Updates change the TCB as viewed by attestation reports. In TDX there is
+a distinction between launch-time version and current version where
+runtime TDX module updates cause that latter version number to change,
+subject to Z-stream constraints.
+
+The concern that a malicious host may attack confidential VMs by loading
+insecure updates was addressed by Alex in [3]. Similarly, the scenario
+where some "theoretical paranoid tenant" in the cloud wants to audit
+updates and stop trusting the host after updates until audit completion
+was also addressed in [4]. Users not in the cloud control the host machine
+and can manage updates themselves, so they don't have these concerns.
+
+See more about the implications of current TCB version changes in
+attestation as summarized by Dave in [5].
+
+=== TDX module Distribution Model ===
+
+At a high level, Intel publishes all TDX modules on the github [2], along
+with a mapping_file.json which documents the compatibility information
+about each TDX module and a userspace tool to install the TDX module. OS
+vendors can package these modules and distribute them. Administrators
+install the package and use the tool to select the appropriate TDX module
+and install it via the interfaces exposed by this series.
+
+[1]: https://cdrdv2.intel.com/v1/dl/getContent/733584
+[2]: https://github.com/intel/tdx-module-binaries
+[3]: https://lore.kernel.org/all/665c5ae0-4b7c-4852-8995-255adf7b3a2f@amazon.com/
+[4]: https://lore.kernel.org/all/5d1da767-491b-4077-b472-2cc3d73246d6@amazon.com/
+[5]: https://lore.kernel.org/all/94d6047e-3b7c-4bc1-819c-85c16ff85abf@intel.com/
+
+
+Chao Gao (21):
+  coco/tdx-host: Introduce a "tdx_host" device
+  coco/tdx-host: Expose TDX module version
+  x86/virt/seamldr: Introduce a wrapper for P-SEAMLDR SEAMCALLs
+  x86/virt/seamldr: Retrieve P-SEAMLDR information
+  coco/tdx-host: Expose P-SEAMLDR information via sysfs
+  coco/tdx-host: Implement firmware upload sysfs ABI for TDX module
+    updates
+  x86/virt/seamldr: Allocate and populate a module update request
+  x86/virt/seamldr: Introduce skeleton for TDX module updates
+  x86/virt/seamldr: Abort updates if errors occurred midway
+  x86/virt/seamldr: Shut down the current TDX module
+  x86/virt/tdx: Reset software states during TDX module shutdown
+  x86/virt/seamldr: Install a new TDX module
+  x86/virt/seamldr: Do TDX per-CPU initialization after updates
+  x86/virt/tdx: Restore TDX module state
+  x86/virt/tdx: Update tdx_sysinfo and check features post-update
+  x86/virt/tdx: Avoid updates during update-sensitive operations
+  coco/tdx-host: Don't expose P-SEAMLDR features on CPUs with erratum
+  x86/virt/tdx: Enable TDX module runtime updates
+  coco/tdx-host: Document TDX module update compatibility criteria
+  x86/virt/tdx: Document TDX module update
+  x86/virt/seamldr: Log TDX module update failures
+
+Kai Huang (1):
+  x86/virt/tdx: Move low level SEAMCALL helpers out of <asm/tdx.h>
+
+ .../ABI/testing/sysfs-devices-faux-tdx-host   |  75 ++++
+ Documentation/arch/x86/tdx.rst                |  36 ++
+ arch/x86/include/asm/cpufeatures.h            |   1 +
+ arch/x86/include/asm/seamldr.h                |  37 ++
+ arch/x86/include/asm/tdx.h                    |  65 +---
+ arch/x86/include/asm/tdx_global_metadata.h    |   5 +
+ arch/x86/include/asm/vmx.h                    |   1 +
+ arch/x86/kvm/vmx/tdx_errno.h                  |   2 -
+ arch/x86/virt/vmx/tdx/Makefile                |   2 +-
+ arch/x86/virt/vmx/tdx/seamcall_internal.h     | 109 ++++++
+ arch/x86/virt/vmx/tdx/seamldr.c               | 325 ++++++++++++++++++
+ arch/x86/virt/vmx/tdx/tdx.c                   | 165 ++++++---
+ arch/x86/virt/vmx/tdx/tdx.h                   |  11 +-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c   |  18 +
+ drivers/virt/coco/Kconfig                     |   2 +
+ drivers/virt/coco/Makefile                    |   1 +
+ drivers/virt/coco/tdx-host/Kconfig            |  12 +
+ drivers/virt/coco/tdx-host/Makefile           |   1 +
+ drivers/virt/coco/tdx-host/tdx-host.c         | 228 ++++++++++++
+ 19 files changed, 995 insertions(+), 101 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  riscv: kvm: fix vector context allocation leak
+[PATCH] riscv: kvm: fix vector context allocation leak
+Author: Osama Abdelkader <osama.abdelkader@gmail.com>
+
+When the second kzalloc (host_context.vector.datap) fails in
+kvm_riscv_vcpu_alloc_vector_context, the first allocation
+(guest_context.vector.datap) is leaked. Free it before returning.
+
+Signed-off-by: Osama Abdelkader <osama.abdelkader@gmail.com>
+---
+ arch/riscv/kvm/vcpu_vector.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
