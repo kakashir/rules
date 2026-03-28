@@ -1,0 +1,1196 @@
+
+On /root/mail/repo:
+From 6b1a32c01 to 82b0b3450
+KVM mailing list update from 6b1a32c01 to 82b0b3450
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     43 google.com
+     25 linux.intel.com
+     18 kernel.org
+     16 redhat.com
+     12 intel.com
+      4 gmail.com
+      1 arndb.de
+
+Top 15 contributors (Based on Email Body)
+
+     22  Xu Yilun <yilun.xu@linux.intel.com>
+     18  Marc Zyngier <maz@kernel.org>
+     15  Kostiantyn Kostiuk <kkostiuk@redhat.com>
+     13  Sean Christopherson <seanjc@google.com>
+     13  Fuad Tabba <tabba@google.com>
+     10  Jim Mattson <jmattson@google.com>
+      7  Suren Baghdasaryan <surenb@google.com>
+      5  Rick Edgecombe <rick.p.edgecombe@intel.com>
+      4  Zhenzhong Duan <zhenzhong.duan@intel.com>
+      3  vince <liuwf0302@gmail.com>
+      2  Lu Baolu <baolu.lu@linux.intel.com>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+      1  "Kirill A. Shutemov" <kirill.shutemov@linux.intel.com>
+      1  Dave Jiang <dave.jiang@intel.com>
+      1  Dan Williams <dan.j.williams@intel.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86: nSVM: Improve PAT virtualization
+[PATCH v7 0/9] KVM: x86: nSVM: Improve PAT virtualization
+Author: Jim Mattson <jmattson@google.com>
+
+Currently, KVM's implementation of nested SVM treats the PAT MSR the same
+way whether or not nested NPT is enabled: L1 and L2 share a single
+PAT. However, the AMD APM specifies that when nested NPT is enabled, the host
+(L1) and the guest (L2) should have independent PATs: hPAT for L1 and gPAT
+for L2.
+
+This patch series implements independent PATs for L1 and L2 when nested NPT
+is enabled, but only when a new quirk, KVM_X86_QUIRK_NESTED_SVM_SHARED_PAT,
+is disabled. By default, the quirk is enabled, preserving KVM's legacy
+behavior. When the quirk is disabled, KVM correctly virtualizes a separate
+PAT register for L2, using the g_pat field in the VMCB.
+
+Guest accesses to the IA32_PAT MSR are redirected to either hPAT or gPAT
+depending on the current mode and whether nested NPT is enabled. All other
+accesses, including userspace accesses via KVM_{GET,SET}_MSRS, continue to
+reference hPAT. L2's gPAT is saved and restored via a new 'gpat' field in
+kvm_svm_nested_state_hdr, which is within the existing padding of the header
+to maintain ABI compatibility.
+
+v1: https://lore.kernel.org/kvm/20260113003016.3511895-1-jmattson@google.com/
+v2: https://lore.kernel.org/kvm/20260115232154.3021475-1-jmattson@google.com/
+v3: https://lore.kernel.org/kvm/20260205214326.1029278-1-jmattson@google.com/
+v4: https://lore.kernel.org/kvm/20260212155905.3448571-1-jmattson@google.com/
+v5: https://lore.kernel.org/kvm/20260224005500.1471972-1-jmattson@google.com/
+v6: https://lore.kernel.org/kvm/20260326174944.3820245-1-jmattson@google.com/
+
+  v6 -> v7:
+  * Drop the patch "KVM: x86: Remove common handling of MSR_IA32_CR_PAT,"
+    because TDX still calls the common handler.
+  * Instead, add a warning to the common PAT handling code if it is
+    called by an SVM-capable vCPU
+  * Add comments about userspace disabling the  quirk while a vCPU is
+    running.
+  * Cache the value of use_separate_l2_pat in KVM_SET_NESTED_STATE, in
+    case the quirk is disabled concurrently with the execution of that
+    function.
+
+Jim Mattson (9):
+  KVM: x86: Define KVM_X86_QUIRK_NESTED_SVM_SHARED_PAT
+  KVM: x86: nSVM: Clear VMCB_NPT clean bit when updating hPAT from guest
+    mode
+  KVM: x86: nSVM: Cache and validate vmcb12 g_pat
+  KVM: x86: nSVM: Set vmcb02.g_pat correctly for nested NPT
+  KVM: x86: nSVM: Redirect IA32_PAT accesses to either hPAT or gPAT
+  KVM: x86: nSVM: Save gPAT to vmcb12.g_pat on VMEXIT
+  KVM: Documentation: document KVM_{GET,SET}_NESTED_STATE for SVM
+  KVM: x86: nSVM: Save/restore gPAT with KVM_{GET,SET}_NESTED_STATE
+  KVM: selftests: nSVM: Add svm_nested_pat test
+
+ Documentation/virt/kvm/api.rst                |  26 ++
+ arch/x86/include/asm/kvm_host.h               |   3 +-
+ arch/x86/include/uapi/asm/kvm.h               |   2 +
+ arch/x86/kvm/svm/nested.c                     |  65 +++-
+ arch/x86/kvm/svm/svm.c                        |  54 +++-
+ arch/x86/kvm/svm/svm.h                        |  19 +-
+ arch/x86/kvm/x86.c                            |   6 +
+ tools/arch/x86/include/uapi/asm/kvm.h         |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/svm_nested_pat_test.c   | 304 ++++++++++++++++++
+ 10 files changed, 457 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Define KVM_X86_QUIRK_NESTED_SVM_SHARED_PAT
+[PATCH v7 1/9] KVM: x86: Define KVM_X86_QUIRK_NESTED_SVM_SHARED_PAT
+Author: Jim Mattson <jmattson@google.com>
+
+Define a quirk to control whether nested SVM shares L1's PAT with L2
+(legacy behavior) or gives L2 its own independent gPAT (correct behavior
+per the APM).
+
+When the quirk is enabled (default), L2 shares L1's PAT, preserving the
+legacy KVM behavior. When userspace disables the quirk, KVM correctly
+virtualizes the PAT for nested SVM guests, giving L2 a separate gPAT as
+specified in the AMD architecture.
+
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ Documentation/virt/kvm/api.rst  | 14 ++++++++++++++
+ arch/x86/include/asm/kvm_host.h |  3 ++-
+ arch/x86/include/uapi/asm/kvm.h |  1 +
+ arch/x86/kvm/svm/svm.h          | 11 +++++++++++
+ 4 files changed, 28 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  mm/vma: cleanup error handling path in vma_expand()
+[PATCH v6 1/6] mm/vma: cleanup error handling path in vma_expand()
+Author: Suren Baghdasaryan <surenb@google.com>
+
+vma_expand() error handling is a bit confusing with "if (ret) return ret;"
+mixed with "if (!ret && ...) ret = ...;". Simplify the code to check
+for errors and return immediately after an operation that might fail.
+This also makes later changes to this function more readable.
+Change variable name for storing the error code from "ret" to "err".
+
+No functional change intended.
+
+Suggested-by: Jann Horn <jannh@google.com>
+Signed-off-by: Suren Baghdasaryan <surenb@google.com>
+Reviewed-by: Liam R. Howlett <Liam.Howlett@oracle.com>
+Reviewed-by: Lorenzo Stoakes <lorenzo.stoakes@oracle.com>
+Reviewed-by: Barry Song <baohua@kernel.org>
+---
+ mm/vma.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Use killable vma write locking in most places
+[PATCH v6 0/6] Use killable vma write locking in most places
+Author: Suren Baghdasaryan <surenb@google.com>
+
+Now that we have vma_start_write_killable() we can replace most of the
+vma_start_write() calls with it, improving reaction time to the kill
+signal.
+
+There are several places which are left untouched by this patchset:
+
+1. free_pgtables() because function should free page tables even if a
+fatal signal is pending.
+
+2. userfaultd code, where some paths calling vma_start_write() can
+handle EINTR and some can't without a deeper code refactoring.
+
+3. mpol_rebind_mm() which is used by cpusset controller for migrations
+and operates on a remote mm. Incomplete operations here would result
+in an inconsistent cgroup state.
+
+4. vm_flags_{set|mod|clear} require refactoring that involves moving
+vma_start_write() out of these functions and replacing it with
+vma_assert_write_locked(), then callers of these functions should
+lock the vma themselves using vma_start_write_killable() whenever
+possible.
+
+Changes since v5 [1]:
+- Added Reviewed-by for unchanged patches, per Lorenzo Stoakes
+
+Patch#2:
+- Fixed locked_vm counter if mlock_vma_pages_range() fails in
+mlock_fixup(), per Sashiko
+- Avoid VMA re-locking in madvise_update_vma(), mprotect_fixup() and
+mseal_apply() when vma_modify_XXX creates a new VMA as it will already be
+locked. This prevents the possibility of incomplete operation if signal
+happens after a successful vma_modify_XXX modified the vma tree,
+per Sashiko
+- Removed obsolete comment in madvise_update_vma() and mprotect_fixup()
+
+Patch#4:
+- Added clarifying comment for vma_start_write_killable() when locking a
+detached VMA
+- Override VMA_MERGE_NOMERGE in vma_expand() to prevent callers from
+falling back to a new VMA allocation, per Sashiko
+- Added a note in the changelog about temporary workaround of using
+ENOMEM to propagate the error in vma_merge_existing_range() and
+vma_expand()
+
+Patch#5:
+- Added fatal_signal_pending() check in do_mbind() to detect
+queue_pages_range() failures due to a pendig fatal signal, per Sashiko
+
+[1] https://lore.kernel.org/all/20260326080836.695207-1-surenb@google.com/
+
+Suren Baghdasaryan (6):
+  mm/vma: cleanup error handling path in vma_expand()
+  mm: use vma_start_write_killable() in mm syscalls
+  mm/khugepaged: use vma_start_write_killable() in collapse_huge_page()
+  mm/vma: use vma_start_write_killable() in vma operations
+  mm: use vma_start_write_killable() in process_vma_walk_lock()
+  KVM: PPC: use vma_start_write_killable() in
+    kvmppc_memslot_page_merge()
+
+ arch/powerpc/kvm/book3s_hv_uvmem.c |   5 +-
+ fs/proc/task_mmu.c                 |  12 +--
+ mm/khugepaged.c                    |   5 +-
+ mm/madvise.c                       |  13 ++-
+ mm/memory.c                        |   2 +
+ mm/mempolicy.c                     |  21 +++-
+ mm/mlock.c                         |  30 ++++--
+ mm/mprotect.c                      |  25 +++--
+ mm/mremap.c                        |   8 +-
+ mm/mseal.c                         |  24 ++++-
+ mm/pagewalk.c                      |  22 ++--
+ mm/vma.c                           | 162 ++++++++++++++++++++++-------
+ mm/vma_exec.c                      |   6 +-
+ 13 files changed, 251 insertions(+), 84 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/tdx: Use pg_level in TDX APIs, not the TDX-Module's 0-based level
+[PATCH 01/17] x86/tdx: Use pg_level in TDX APIs, not the TDX-Module's 0-based level
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Rework the TDX APIs to take the kernel's 1-based pg_level enum, not the
+TDX-Module's 0-based level.  The APIs are _kernel_ APIs, not TDX-Module
+APIs, and the kernel (and KVM) uses "enum pg_level" literally everywhere.
+
+Using "enum pg_level" eliminates ambiguity when looking at the APIs (it's
+NOT clear that "int level" refers to the TDX-Module's level), and will
+allow for using existing helpers like page_level_size() when support for
+hugepages is added to the S-EPT APIs.
+
+No functional change intended.
+
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Cc: Vishal Annapurve <vannapurve@google.com>
+Cc: Ackerley Tng <ackerleytng@google.com>
+Acked-by: Kiryl Shutsemau <kas@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Tested-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+ arch/x86/include/asm/tdx.h  | 14 ++++----------
+ arch/x86/kvm/vmx/tdx.c      | 11 ++++-------
+ arch/x86/virt/vmx/tdx/tdx.c | 26 ++++++++++++++++++--------
+ 3 files changed, 26 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  TDX MMU refactors
+[PATCH 00/17] TDX MMU refactors
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+Hi,
+
+This is all the MMU refactors extracted from the discussion on Sean’s 
+DPAMT/Huge page combined series [0]. I was thinking that since they are 
+valid cleanups in their own way, we could maybe get them upstream ahead of 
+time. Yan and I rebased DPAMT/huge pages on this series and made sure it 
+all still fits together.
+
+It’s not suggested for merging yet. We should go over it again for a more
+thorough bug check with everything put together. Sean/Paolo please feel
+free to ignore for now, except to maybe comment if you have any objections
+to merging it earlier as a cleanup series.
+
+Changes from on-list discussion:
+ - Go back to free_external_spt() name. Since free_external_sp() was 
+   dropped from the changes there was no similarly named function to 
+   confuse.
+ - Suggestions around dropping or moving KVM_BUG_ON/WARNs turned into
+   patches.
+   
+Another possible point of discussion:
+ - Is the last patch needed and does it fit in to a general
+   refactor/cleanup? (Yan)
+
+Since some of the patches were created from diffs posted by Sean without
+SOB, I left them not signed off for now.
+
+Based on kvm-x86-next-2026.03.13, testing was our usual CI suite. AI
+review is pending. We'll work through any Sashiko feedback on the list.
+
+Thanks,
+Rick
+
+[0] https://lore.kernel.org/kvm/20260129011517.3545883-1-seanjc@google.com/
+
+Rick Edgecombe (4):
+  KVM: x86/tdp_mmu: Drop zapping KVM_BUG_ON()
+    set_external_spte_present()
+  KVM: x86/tdp_mmu: Morph the !is_frozen_spte() check into a
+    KVM_MMU_WARN_ON()
+  KVM: TDX: Move set_external_spte_present() assert into TDX code
+  KVM: x86/mmu: Remove KVM_BUG_ON() that checks lock when removing PTs
+
+Sean Christopherson (13):
+  x86/tdx: Use pg_level in TDX APIs, not the TDX-Module's 0-based level
+  KVM: x86/mmu: Update iter->old_spte if cmpxchg64 on mirror SPTE
+    "fails"
+  KVM: TDX: Account all non-transient page allocations for per-TD
+    structures
+  KVM: x86: Make "external SPTE" ops that can fail RET0 static calls
+  KVM: x86/tdp_mmu: Centralize updates to present external PTEs
+  KVM: TDX: Drop kvm_x86_ops.link_external_spt(), use
+    .set_external_spte() for all
+  KVM: TDX: Add helper to handle mapping leaf SPTE into S-EPT
+  KVM: x86/mmu: Fold set_external_spte_present() into its sole caller
+  KVM: x86/mmu: Plumb the old_spte into kvm_x86_ops.set_external_spte()
+  KVM: TDX: Hoist tdx_sept_remove_private_spte() above
+    set_private_spte()
+  KVM: TDX: Handle removal of leaf SPTEs in .set_private_spte()
+  KVM: x86: Move error handling inside free_external_spt()
+  KVM: TDX: Move external page table freeing to TDX code
+
+ arch/x86/include/asm/kvm-x86-ops.h |   4 +-
+ arch/x86/include/asm/kvm_host.h    |  13 +-
+ arch/x86/include/asm/tdx.h         |  14 +-
+ arch/x86/kvm/mmu/tdp_mmu.c         | 253 ++++++++++++-----------------
+ arch/x86/kvm/vmx/tdx.c             | 147 ++++++++++-------
+ arch/x86/virt/vmx/tdx/tdx.c        |  26 ++-
+ 6 files changed, 219 insertions(+), 238 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: unhide vdev->debug_root
+[PATCH] vfio: unhide vdev->debug_root
+Author: Arnd Bergmann <arnd@kernel.org>
+
+
+When debugfs is disabled, the hisilicon driver now fails to build:
+
+drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c: In function 'hisi_acc_vfio_debug_init':
+drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c:1671:62: error: 'struct vfio_device' has no member named 'debug_root'
+ 1671 |         vfio_dev_migration = debugfs_lookup("migration", vdev->debug_root);
+      |                                                              ^~
+
+The driver otherwise relies on dead-code elimination, but this reference
+fails. The single struct member is not going to make much of a difference
+for memory consumption, so just keep this visible unconditionally.
+
+Signed-off-by: Arnd Bergmann <arnd@arndb.de>
+----
+This seems to be a new build failure, but I could not pinpoint which
+commit caused it, as both the #ifdef and the the use were introduced
+a while ago.
+---
+ include/linux/vfio.h | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/tdx: Move all TDX error defines into <asm/shared/tdx_errno.h>
+[PATCH v2 01/31] x86/tdx: Move all TDX error defines into <asm/shared/tdx_errno.h>
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+
+Today there are two separate locations where TDX error codes are defined:
+         arch/x86/include/asm/tdx.h
+         arch/x86/kvm/vmx/tdx_errno.h
+
+They have some overlap that is already defined similarly. Reduce the
+duplication and prepare to introduce some helpers for these error codes in
+the central place by unifying them. Join them at:
+        asm/shared/tdx_errno.h
+...and update the headers that contained the duplicated definitions to
+include the new unified header.
+
+"asm/shared" is used for sharing TDX code between the early compressed
+code and the normal kernel code. While the compressed code for the guest
+doesn't use these error code header definitions today, it does make the
+types of calls that return the values they define. So place the defines in
+"shared" location so that it can, but leave such cleanups for future
+changes.
+
+Also, adjust BITUL() -> _BITULL() to address 32 bit build errors after the
+move.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+[enhance log]
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+---
+ arch/x86/include/asm/shared/tdx.h             |  1 +
+ .../vmx => include/asm/shared}/tdx_errno.h    | 28 +++++++++++++++----
+ arch/x86/include/asm/tdx.h                    | 21 --------------
+ arch/x86/kvm/vmx/tdx.h                        |  1 -
+ 4 files changed, 23 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI/TSM: PCIe Link Encryption Establishment via TDX platform services
+[PATCH v2 00/31] PCI/TSM: PCIe Link Encryption Establishment via TDX platform services
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+This series is based on mainline v7.0-rc2 and targets v7.1 (quite
+aggressive though). The merge path will be through tsm.git with tip.git
+acks where needed. I know there are several parallel series on the fly,
+so Dave you can wait for Dan to review, or ack/nak as you have time,
+thanks.  No KVM change, no acks from kvm.git is needed.
+
+== Overview ==
+
+This series adds a PCI/TSM low-level driver implementation for TDX
+Connect (the TEE I/O architecture for Intel platforms). PCI/TSM is the
+Linux PCI core subsystem [1][2] that supports Link Encryption & trust
+establishment between CoCo-VM and assigned devices, allowing CoCo-VM to
+accept devices for private memory access (private DMA). This series
+only implements Link Encryption. It is a pre-requisite for trusted
+device assignment in TDX system.
+
+Two protocols, SPDM (Security Protocol and Data Model) and PCI
+IDE (Integrity and Data Encryption) work together to establish the Link
+Encryption. SPDM creates trust on untrusted transit for key exchanging.
+IDE performs the actual real-time encryption for data traffic. In TSM
+world, they are managed by secure firmwares, e.g. TDX Module.
+
+To manage these protocols, TDX Module introduces Extensions to support
+long running / hard-irq preemptible flows inside. Host invokes these
+flows via Extension-SEAMCALLs.
+
+This series has 2 distinct parts:
+
+  Patches  1-13: TDX core cleanups and TDX Module Extensions enabling
+  Patches 14-31: tdx_host TSM driver for PCIe Link Encryption
+
+[1]: https://lore.kernel.org/linux-coco/20251031212902.2256310-1-dan.j.williams@intel.com/
+[2]: https://lore.kernel.org/linux-coco/20251105040055.2832866-1-dan.j.williams@intel.com/
+
+== Merge notes ==
+
+ - Merge conflicts with parallel series:
+   Sean's VMXON: https://lore.kernel.org/all/20260214012702.2368778-1-seanjc@google.com/
+   Chao's runtime update: https://lore.kernel.org/all/20260326084448.29947-1-chao.gao@intel.com/
+
+ - Picked several patches from parallel series:
+   Patch  1: https://lore.kernel.org/all/20260323-fuller_tdx_kexec_support-v2-1-87a36409e051@intel.com/
+   Patch 14: https://lore.kernel.org/all/20260303000207.1836586-2-dan.j.williams@intel.com/
+   Patch 15: https://lore.kernel.org/all/20260326084448.29947-3-chao.gao@intel.com/
+
+== Changelog ==
+v2:
+- Subject change. previously it was:
+  "PCI/TSM: TDX Connect: SPDM Session and IDE Establishment"
+- Remove __free() for core TDX and refactor all tdx_ext functions
+- Use kzalloc(PAGE_SIZE, ...) instead of alloc_page() in TDX core
+- Check feature0 support before reading optional global metadata
+- Split the TDX Module Extensions enabling into small patches
+- Enable TDX Module Extensions along with Basic TDX enabling
+- Refactor SEAMCALL version handling
+- For tdx_page_array, make page allocation method configurable
+  - For TDX Module Extensions, use contiguous page allocation
+  - For IOMMU_MT, use a custom page allocation
+- Print TDX Extensions memory usage
+- Various Changelog & comments refine
+
+v1: https://lore.kernel.org/all/20251117022311.2443900-1-yilun.xu@linux.intel.com/
+- No tdx_enable() needed in tdx-host
+- Simplify tdx_page_array kAPI, no singleton mode input
+- Refactor the handling of TDX_INTERRUPTED_RESUMABLE
+- Refine the usage of scope-based cleanup in tdx-host
+- Set nr_stream_id in tdx-host, not in PCI ACPI initialization
+- Use KEYP table + ECAP bit50 to decide Domain ID reservation
+- Refactor IDE Address Association Register setup
+- Remove prototype patches
+- Refactor tdx_enable_ext() locking because of Sean's change
+- Pick ACPICA KEYP patch from ACPICA repo
+- Select TDX Connect feature for TDH.SYS.CONFIG, remove temporary
+  solution for TDH.SYS.INIT
+- Use Rick's tdx_errno.h movement patch [6]
+- Factor out scope-based cleanup patches in mm
+- Remove redunant header files, add header files only when first used
+- Use dev_err_probe() when possible
+- keyp_info_match() refactor
+- Use bitfield.h macros for PAGE_LIST_INFO & HPA_ARRAY_T raw value
+- Remove reserved fields for spdm_config_info_t
+- Simplify return for tdh_ide_stream_block()
+- Other small fixes for Jonathan's comments
+
+RFC: https://lore.kernel.org/linux-coco/20250919142237.418648-1-dan.j.williams@intel.com/
+
+
+Chao Gao (1):
+  coco/tdx-host: Introduce a "tdx_host" device
+
+Dan Williams (1):
+  PCI/TSM: Report active IDE streams per host bridge
+
+Dave Jiang (1):
+  acpi: Add KEYP support to fw_table parsing
+
+Kiryl Shutsemau (1):
+  x86/tdx: Move all TDX error defines into <asm/shared/tdx_errno.h>
+
+Lu Baolu (2):
+  iommu/vt-d: Cache max domain ID to avoid redundant calculation
+  iommu/vt-d: Reserve the MSB domain ID bit for the TDX module
+
+Xu Yilun (21):
+  x86/virt/tdx: Move bit definitions of TDX_FEATURES0 to public header
+  x86/virt/tdx: Add tdx_page_array helpers for new TDX Module objects
+  x86/virt/tdx: Support allocating contiguous pages for tdx_page_array
+  x86/virt/tdx: Extend tdx_page_array to support IOMMU_MT
+  x86/virt/tdx: Read global metadata for TDX Module Extensions/Connect
+  x86/virt/tdx: Embed version info in SEAMCALL leaf function definitions
+  x86/virt/tdx: Configure TDX Module with optional TDX Connect feature
+  x86/virt/tdx: Move tdx_clflush_page() up in the file
+  x86/virt/tdx: Add extra memory to TDX Module for Extensions
+  x86/virt/tdx: Make TDX Module initialize Extensions
+  x86/virt/tdx: Enable the Extensions after basic TDX Module init
+  x86/virt/tdx: Extend tdx_clflush_page() to handle compound pages
+  coco/tdx-host: Support Link TSM for TDX host
+  x86/virt/tdx: Add a helper to loop on TDX_INTERRUPTED_RESUMABLE
+  iommu/vt-d: Export a helper to do function for each dmar_drhd_unit
+  coco/tdx-host: Setup all trusted IOMMUs on TDX Connect init
+  mm: Add __free() support for __free_page()
+  coco/tdx-host: Parse ACPI KEYP table to init IDE for PCI host bridges
+  x86/virt/tdx: Add SEAMCALL wrappers for IDE stream management
+  coco/tdx-host: Implement IDE stream setup/teardown
+  coco/tdx-host: Finally enable SPDM session and IDE Establishment
+
+Zhenzhong Duan (4):
+  x86/virt/tdx: Add SEAMCALL wrappers for trusted IOMMU setup and clear
+  coco/tdx-host: Add a helper to exchange SPDM messages through DOE
+  x86/virt/tdx: Add SEAMCALL wrappers for SPDM management
+  coco/tdx-host: Implement SPDM session setup
+
+ drivers/virt/coco/Kconfig                     |   2 +
+ drivers/virt/coco/tdx-host/Kconfig            |  16 +
+ drivers/virt/coco/Makefile                    |   1 +
+ drivers/virt/coco/tdx-host/Makefile           |   1 +
+ Documentation/ABI/testing/sysfs-class-tsm     |  13 +
+ arch/x86/include/asm/shared/tdx.h             |   1 +
+ .../vmx => include/asm/shared}/tdx_errno.h    |  30 +-
+ arch/x86/include/asm/tdx.h                    |  95 +-
+ arch/x86/include/asm/tdx_global_metadata.h    |  14 +
+ arch/x86/kvm/vmx/tdx.h                        |   1 -
+ arch/x86/virt/vmx/tdx/tdx.h                   |  42 +-
+ drivers/iommu/intel/iommu.h                   |   2 +
+ include/linux/acpi.h                          |   3 +
+ include/linux/dmar.h                          |   2 +
+ include/linux/fw_table.h                      |   1 +
+ include/linux/gfp.h                           |   1 +
+ include/linux/pci-ide.h                       |   4 +
+ include/linux/tsm.h                           |   3 +
+ arch/x86/virt/vmx/tdx/tdx.c                   | 839 ++++++++++++++-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c   |  36 +
+ drivers/acpi/tables.c                         |  12 +-
+ drivers/iommu/intel/dmar.c                    |  67 ++
+ drivers/iommu/intel/iommu.c                   |  10 +-
+ drivers/pci/ide.c                             |   9 +-
+ drivers/virt/coco/tdx-host/tdx-host.c         | 952 ++++++++++++++++++
+ drivers/virt/coco/tsm-core.c                  |  97 ++
+ lib/fw_table.c                                |   9 +
+ 27 files changed, 2202 insertions(+), 61 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  meson: Use stddef.h instead of unistd.h
+[PATCH v2 01/15] meson: Use stddef.h instead of unistd.h
+Author: Kostiantyn Kostiuk <kkostiuk@redhat.com>
+
+POSIX says stddef.h provides size_t, which is the only thing
+we care about here. unistd.h can be missing in non-POSIX runtimes,
+so include stddef.h instead.
+
+Signed-off-by: Kostiantyn Kostiuk <kkostiuk@redhat.com>
+---
+ meson.build | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Misc changes to allow building with Windows Clang
+[PATCH v2 00/15] Misc changes to allow building with Windows Clang
+Author: Kostiantyn Kostiuk <kkostiuk@redhat.com>
+
+v2 -> v1:
+ - Added additional commits to remove strcasecmp/strncasecmp usage in
+   favor of g_ascii_strcasecmp/g_ascii_strncasecmp
+ - Don't remove dirent.h from util/drm.c since it's used there
+ - Updated commit messages with more explanation
+
+v1: https://patchew.org/QEMU/20260326160033.68318-1-kkostiuk@redhat.com/
+
+Kostiantyn Kostiuk (14):
+  meson: Use stddef.h instead of unistd.h
+  qom: Use g_ascii_strcasecmp instead of strcasecmp
+  block: Use glib2 instead of strcasecmp/strncasecmp
+  io: Use glib2 instead of strcasecmp/strncasecmp
+  hw/arm: Use glib2 instead of strcasecmp/strncasecmp
+  target/sparc: Use glib2 instead of strcasecmp/strncasecmp
+  target/riscv: Use glib2 instead of strcasecmp/strncasecmp
+  target/ppc: Use glib2 instead of strcasecmp/strncasecmp
+  target/xtensa: Use glib2 instead of strcasecmp/strncasecmp
+  hw/ppc: Use glib2 instead of strcasecmp/strncasecmp
+  osdep: Remove unused strings.h
+  util: Remove unused dirent.h
+  util: Remove unused sys/param.h
+  meson: Don't require nm for non-modular builds
+
+Paolo Bonzini (1):
+  storage-daemon: use same link arguments as other tools
+
+ block/curl.c               |  4 ++--
+ hw/arm/xilinx_zynq.c       |  8 ++++----
+ hw/ppc/spapr_caps.c        |  2 +-
+ include/qemu/osdep.h       |  1 -
+ io/channel-websock.c       |  4 ++--
+ meson.build                | 35 +++++++++++++++++++----------------
+ qom/object.c               |  4 ++--
+ storage-daemon/meson.build | 16 ++++++++--------
+ target/ppc/kvm.c           |  2 +-
+ target/riscv/monitor.c     |  4 ++--
+ target/sparc/cpu.c         |  8 ++++----
+ target/xtensa/xtensa-isa.c |  4 ++--
+ util/path.c                |  2 --
+ 13 files changed, 47 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Extract VMA size resolution in user_mem_abort()
+[PATCH v2 01/30] KVM: arm64: Extract VMA size resolution in user_mem_abort()
+Author: Marc Zyngier <maz@kernel.org>
+
+
+As part of an effort to refactor user_mem_abort() into smaller, more
+focused helper functions, extract the logic responsible for determining
+the VMA shift and page size into a new static helper,
+kvm_s2_resolve_vma_size().
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/mmu.c | 130 ++++++++++++++++++++++++-------------------
+ 1 file changed, 73 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Combined user_mem_abort() rework
+[PATCH v2 00/30] KVM: arm64: Combined user_mem_abort() rework
+Author: Marc Zyngier <maz@kernel.org>
+
+Fuad and I have been working on this "put a stick of dynamite in
+user_mem_abort() and watch the resulting firework" project, and it
+looks surprisingly OK so far. Disappointingly so, I'd even say.
+
+This v2 is has very few changes from the original posting (cleaning up
+the comments in Fuad's series [1], and some minor restructuring in
+mine [2]), but I wanted to post the combined series for people's
+awareness and for the sake of running it through sashiko.
+
+If nothing catches fire, I'll may end-up taking it into 7.1.
+
+[1] https://lore.kernel.org/all/20260306140232.2193802-1-tabba@google.com
+[2] https://lore.kernel.org/all/20260316175451.1866175-1-maz@kernel.org
+
+Fuad Tabba (13):
+  KVM: arm64: Extract VMA size resolution in user_mem_abort()
+  KVM: arm64: Introduce struct kvm_s2_fault to user_mem_abort()
+  KVM: arm64: Extract PFN resolution in user_mem_abort()
+  KVM: arm64: Isolate mmap_read_lock inside new
+    kvm_s2_fault_get_vma_info() helper
+  KVM: arm64: Extract stage-2 permission logic in user_mem_abort()
+  KVM: arm64: Extract page table mapping in user_mem_abort()
+  KVM: arm64: Simplify nested VMA shift calculation
+  KVM: arm64: Remove redundant state variables from struct kvm_s2_fault
+  KVM: arm64: Simplify return logic in user_mem_abort()
+  KVM: arm64: Initialize struct kvm_s2_fault completely at declaration
+  KVM: arm64: Optimize early exit checks in kvm_s2_fault_pin_pfn()
+  KVM: arm64: Hoist MTE validation check out of MMU lock path
+  KVM: arm64: Clean up control flow in kvm_s2_fault_map()
+
+Marc Zyngier (17):
+  KVM: arm64: Kill fault->ipa
+  KVM: arm64: Make fault_ipa immutable
+  KVM: arm64: Move fault context to const structure
+  KVM: arm64: Replace fault_is_perm with a helper
+  KVM: arm64: Constrain fault_granule to kvm_s2_fault_map()
+  KVM: arm64: Kill write_fault from kvm_s2_fault
+  KVM: arm64: Kill exec_fault from kvm_s2_fault
+  KVM: arm64: Kill topup_memcache from kvm_s2_fault
+  KVM: arm64: Move VMA-related information to kvm_s2_fault_vma_info
+  KVM: arm64: Kill logging_active from kvm_s2_fault
+  KVM: arm64: Restrict the scope of the 'writable' attribute
+  KVM: arm64: Move kvm_s2_fault.{pfn,page} to kvm_s2_vma_info
+  KVM: arm64: Replace force_pte with a max_map_size attribute
+  KVM: arm64: Move device mapping management into kvm_s2_fault_pin_pfn()
+  KVM: arm64: Directly expose mapping prot and kill kvm_s2_fault
+  KVM: arm64: Simplify integration of adjust_nested_*_perms()
+  KVM: arm64: Convert gmem_abort() to struct kvm_s2_fault_desc
+
+ arch/arm64/kvm/mmu.c | 507 +++++++++++++++++++++++++------------------
+ 1 file changed, 299 insertions(+), 208 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Document next_segment() behavior
+[PATCH] KVM: Document next_segment() behavior
+Author: Chrinovic M <chrinovicmu@gmail.com>
+
+Add a brief comment describing how next_segment() computes
+the number of bytes available in the current page when
+handling guest memory accesses.
+
+No functional change.
+
+Signed-off-by: Chrinovic M <chrinovicmu@gmail.com>
+---
+ virt/kvm/kvm_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  x86: Add GDB stub and step-debug support
+[PATCH v2 1/2] x86: Add GDB stub and step-debug support
+Author: vince <liuwf0302@gmail.com>
+
+---
+ Makefile                       |   13 +-
+ README                         |   29 +
+ builtin-run.c                  |   13 +-
+ docs/gdb-stub-architecture.md  |  142 +++
+ gdb.c                          | 1819 ++++++++++++++++++++++++++++++++
+ include/kvm/gdb.h              |  138 +++
+ include/kvm/kvm-config.h       |    2 +
+ kvm-cpu.c                      |    9 +-
+ term.c                         |   18 +-
+ tests/Makefile                 |    4 +
+ tests/boot/Makefile            |   10 +-
+ tests/gdb/Makefile             |    8 +
+ tests/gdb/test-x86-gdb-stub.py |  178 ++++
+ x86/gdb.c                      |  573 ++++++++++
+ 14 files changed, 2944 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Add GDB stub and step-debug support for x86 and arm64
+[PATCH v2 0/2] Add GDB stub and step-debug support for x86 and arm64
+Author: vince <liuwf0302@gmail.com>
+
+This series adds a built-in GDB remote stub for kvmtool on x86 and arm64,
+including packet handling, architecture glue, and integration into the run loop.
+
+It also adds basic documentation and test coverage so the feature can be
+validated and maintained across both architectures.
+
+Changes in v2:
+- address review comments on the arm64 software breakpoint instruction
+  visibility path
+- split guest memory writes from guest instruction patching in the GDB stub
+- synchronize arm64 guest instruction patches when inserting, removing, and
+  stepping over software breakpoints
+- drop the test-spec and security-notes documents to keep the series focused
+
+
+vince (2):
+  x86: Add GDB stub and step-debug support
+  arm64: Add GDB stub and step-debug support
+
+ Makefile                       |   13 +-
+ README                         |   29 +
+ arm/aarch64/gdb.c              |  752 ++++++++++++
+ builtin-run.c                  |   13 +-
+ docs/gdb-stub-architecture.md  |  142 +++
+ gdb.c                          | 2104 ++++++++++++++++++++++++++++++++
+ include/kvm/gdb.h              |  148 +++
+ include/kvm/kvm-config.h       |    2 +
+ kvm-cpu.c                      |    9 +-
+ term.c                         |   18 +-
+ tests/Makefile                 |    4 +
+ tests/boot/Makefile            |   10 +-
+ tests/gdb/Makefile             |    8 +
+ tests/gdb/test-x86-gdb-stub.py |  178 +++
+ x86/gdb.c                      |  577 +++++++++
+ 15 files changed, 3995 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 731f2c1d8 to 1bf4d52fd
+KVM mailing list update from 731f2c1d8 to 1bf4d52fd
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     62 kernel.org
+     15 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     44  Will Deacon <will@kernel.org>
+     18  Marc Zyngier <maz@kernel.org>
+     14  Fuad Tabba <tabba@google.com>
+      1  Quentin Perret <qperret@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: Don't leave mmu->pgt dangling on kvm_init_stage2_mmu() error
+[PATCH 1/2] KVM: arm64: Don't leave mmu->pgt dangling on kvm_init_stage2_mmu() error
+Author: Will Deacon <will@kernel.org>
+
+If kvm_init_stage2_mmu() fails to allocate 'mmu->last_vcpu_ran', it
+destroys the newly allocated stage-2 page-table before returning ENOMEM.
+
+Unfortunately, it also leaves a dangling pointer in 'mmu->pgt' which
+points at the freed 'kvm_pgtable' structure. This is likely to confuse
+the kvm_vcpu_init_nested() failure path which can double-free the
+structure if it finds it via kvm_free_stage2_pgd().
+
+Ensure that the dangling 'mmu->pgt' pointer is cleared when returning an
+error from kvm_init_stage2_mmu().
+
+Link: https://sashiko.dev/#/patchset/20260327140039.21228-1-will%40kernel.org?patch=12265
+Signed-off-by: Will Deacon <will@kernel.org>
+---
+ arch/arm64/kvm/mmu.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Tentative fixes for page-table lifetime issues
+[PATCH 0/2] KVM: arm64: Tentative fixes for page-table lifetime issues
+Author: Will Deacon <will@kernel.org>
+
+Hi all,
+
+Sashiko highlighted a couple of potential page-table lifetime issues
+in the upstream code while it was reviewing the pKVM protected memory
+series. They make sense to me so I've had a crack at fixing them and
+writing a better description of the problem in the commit message.
+
+For the second issue, I've tested it by forcing the notifier
+registration to fail and then watching the SecPageTables line in
+/proc/meminfo after attempting to create VMs.
+
+Cheers,
+
+Will
+
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Cc: Joey Gouly <joey.gouly@arm.com>
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Zenghui Yu <yuzenghui@huawei.com>
+
+--->8
+
+Will Deacon (2):
+  KVM: arm64: Don't leave mmu->pgt dangling on kvm_init_stage2_mmu()
+    error
+  KVM: arm64: Destroy stage-2 page-table in kvm_arch_destroy_vm()
+
+ arch/arm64/kvm/arm.c | 1 +
+ arch/arm64/kvm/mmu.c | 1 +
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Remove unused PKVM_ID_FFA definition
+[PATCH v4 01/38] KVM: arm64: Remove unused PKVM_ID_FFA definition
+Author: Will Deacon <will@kernel.org>
+
+Commit 7cbf7c37718e ("KVM: arm64: Drop pkvm_mem_transition for host/hyp
+sharing") removed the last users of PKVM_ID_FFA, so drop the definition
+altogether.
+
+Signed-off-by: Will Deacon <will@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add support for protected guest memory with pKVM
+[PATCH v4 00/38] KVM: arm64: Add support for protected guest memory with pKVM
+Author: Will Deacon <will@kernel.org>
+
+Hi again, folks,
+
+Here's v4 of the pKVM protected memory patches previously posted here:
+
+  v1: https://lore.kernel.org/kvmarm/20260105154939.11041-1-will@kernel.org/
+  v2: https://lore.kernel.org/kvmarm/20260119124629.2563-1-will@kernel.org/
+  v3: https://lore.kernel.org/r/20260305144351.17071-1-will@kernel.org
+
+Changes since v3 include:
+
+  * Rebased onto v7.0-rc4
+  * Remove unused PKVM_ID_FFA
+  * Make ARM_PKVM_GUEST depend on DMA_RESTRICTED_POOL
+  * Use FAR_TO_FIPA_OFFSET() instead of open-coding it
+  * Remove PROTECTED_VM_UAPI config option and update documentation
+
+As before, I've pushed an updated branch with this series:
+
+  https://git.kernel.org/pub/scm/linux/kernel/git/will/linux.git/log/?h=kvm/protected-memory
+
+and the kvmtool patches are available at:
+
+  https://git.kernel.org/pub/scm/linux/kernel/git/will/kvmtool.git/log/?h=pkvm
+
+I fully expect to send a v5, as this is the first time Sashiko has had
+a chance to chew on this and I'm expecting a roasting.
+
+Cheers,
+
+Will
+
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Cc: Joey Gouly <joey.gouly@arm.com>
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Zenghui Yu <yuzenghui@huawei.com>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Quentin Perret <qperret@google.com>
+Cc: Fuad Tabba <tabba@google.com>
+Cc: Vincent Donnefort <vdonnefort@google.com>
+Cc: Mostafa Saleh <smostafa@google.com>
+Cc: Alexandru Elisei <alexandru.elisei@arm.com>
+
+--->8
+
+Fuad Tabba (1):
+  KVM: arm64: Expose self-hosted debug regs as RAZ/WI for protected
+    guests
+
+Quentin Perret (1):
+  KVM: arm64: Inject SIGSEGV on illegal accesses
+
+Will Deacon (36):
+  KVM: arm64: Remove unused PKVM_ID_FFA definition
+  KVM: arm64: Don't leak stage-2 page-table if VM fails to init under
+    pKVM
+  KVM: arm64: Move handle check into pkvm_pgtable_stage2_destroy_range()
+  KVM: arm64: Rename __pkvm_pgtable_stage2_unmap()
+  KVM: arm64: Don't advertise unsupported features for protected guests
+  KVM: arm64: Remove is_protected_kvm_enabled() checks from hypercalls
+  KVM: arm64: Ignore MMU notifier callbacks for protected VMs
+  KVM: arm64: Prevent unsupported memslot operations on protected VMs
+  KVM: arm64: Ignore -EAGAIN when mapping in pages for the pKVM host
+  KVM: arm64: Split teardown hypercall into two phases
+  KVM: arm64: Introduce __pkvm_host_donate_guest()
+  KVM: arm64: Hook up donation hypercall to pkvm_pgtable_stage2_map()
+  KVM: arm64: Handle aborts from protected VMs
+  KVM: arm64: Introduce __pkvm_reclaim_dying_guest_page()
+  KVM: arm64: Hook up reclaim hypercall to pkvm_pgtable_stage2_destroy()
+  KVM: arm64: Factor out pKVM host exception injection logic
+  KVM: arm64: Support translation faults in inject_host_exception()
+  KVM: arm64: Avoid pointless annotation when mapping host-owned pages
+  KVM: arm64: Generalise kvm_pgtable_stage2_set_owner()
+  KVM: arm64: Introduce host_stage2_set_owner_metadata_locked()
+  KVM: arm64: Change 'pkvm_handle_t' to u16
+  KVM: arm64: Annotate guest donations with handle and gfn in host
+    stage-2
+  KVM: arm64: Introduce hypercall to force reclaim of a protected page
+  KVM: arm64: Reclaim faulting page from pKVM in spurious fault handler
+  KVM: arm64: Return -EFAULT from VCPU_RUN on access to a poisoned pte
+  KVM: arm64: Add hvc handler at EL2 for hypercalls from protected VMs
+  KVM: arm64: Implement the MEM_SHARE hypercall for protected VMs
+  KVM: arm64: Implement the MEM_UNSHARE hypercall for protected VMs
+  KVM: arm64: Allow userspace to create protected VMs when pKVM is
+    enabled
+  KVM: arm64: Add some initial documentation for pKVM
+  KVM: arm64: Extend pKVM page ownership selftests to cover guest
+    donation
+  KVM: arm64: Register 'selftest_vm' in the VM table
+  KVM: arm64: Extend pKVM page ownership selftests to cover forced
+    reclaim
+  KVM: arm64: Extend pKVM page ownership selftests to cover guest hvcs
+  KVM: arm64: Rename PKVM_PAGE_STATE_MASK
+  drivers/virt: pkvm: Add Kconfig dependency on DMA_RESTRICTED_POOL
+
+ .../admin-guide/kernel-parameters.txt         |   4 +-
+ Documentation/virt/kvm/arm/index.rst          |   1 +
+ Documentation/virt/kvm/arm/pkvm.rst           | 106 ++++
+ arch/arm64/include/asm/kvm_asm.h              |  31 +-
+ arch/arm64/include/asm/kvm_host.h             |   9 +-
+ arch/arm64/include/asm/kvm_pgtable.h          |  45 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |   4 +-
+ arch/arm64/include/asm/virt.h                 |   9 +
+ arch/arm64/kvm/arm.c                          |  12 +-
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |  10 +-
+ arch/arm64/kvm/hyp/include/nvhe/memory.h      |  12 +-
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h        |   7 +-
+ .../arm64/kvm/hyp/include/nvhe/trap_handler.h |   2 +
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            | 184 +++---
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 585 ++++++++++++++++--
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                | 224 ++++++-
+ arch/arm64/kvm/hyp/nvhe/switch.c              |   1 +
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c            |   8 +
+ arch/arm64/kvm/hyp/pgtable.c                  |  33 +-
+ arch/arm64/kvm/mmu.c                          | 114 +++-
+ arch/arm64/kvm/pkvm.c                         | 151 ++++-
+ arch/arm64/mm/fault.c                         |  33 +-
+ drivers/virt/coco/pkvm-guest/Kconfig          |   2 +-
+ include/uapi/linux/kvm.h                      |   5 +
+ 24 files changed, 1365 insertions(+), 227 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Disable TRBE Trace Buffer Unit when running in guest context
+[PATCH v4 1/3] KVM: arm64: Disable TRBE Trace Buffer Unit when running in guest context
+Author: Will Deacon <will@kernel.org>
+
+The nVHE world-switch code relies on zeroing TRFCR_EL1 to disable trace
+generation in guest context when self-hosted TRBE is in use by the host.
+
+Per D3.2.1 ("Controls to prohibit trace at Exception levels"), clearing
+TRFCR_EL1 means that trace generation is prohibited at EL1 and EL0 but
+per R_YCHKJ the Trace Buffer Unit will still be enabled if
+TRBLIMITR_EL1.E is set. R_SJFRQ goes on to state that, when enabled, the
+Trace Buffer Unit can perform address translation for the "owning
+exception level" even when it is out of context.
+
+Consequently, we can end up in a state where TRBE performs speculative
+page-table walks for a host VA/IPA in guest/hypervisor context depending
+on the value of MDCR_EL2.E2TB, which changes over world-switch. The
+potential result appears to be a heady mixture of SErrors, data
+corruption and hardware lockups.
+
+Extend the TRBE world-switch code to clear TRBLIMITR_EL1.E after
+draining the buffer, restoring the register on return to the host. This
+unfortunately means we need to tackle CPU errata #2064142 and #2038923
+which add additional synchronisation requirements around manipulations
+of the limit register. Hopefully this doesn't need to be fast.
+
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Cc: James Clark <james.clark@linaro.org>
+Cc: Leo Yan <leo.yan@arm.com>
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Fuad Tabba <tabba@google.com>
+Cc: Alexandru Elisei <alexandru.elisei@arm.com>
+Tested-by: Leo Yan <leo.yan@arm.com>
+Tested-by: Fuad Tabba <tabba@google.com>
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Fixes: a1319260bf62 ("arm64: KVM: Enable access to TRBE support for host")
+Signed-off-by: Will Deacon <will@kernel.org>
+---
+ arch/arm64/include/asm/kvm_host.h  |  1 +
+ arch/arm64/kvm/hyp/nvhe/debug-sr.c | 71 ++++++++++++++++++++++++++----
+ arch/arm64/kvm/hyp/nvhe/switch.c   |  2 +-
+ 3 files changed, 64 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Fix SPE and TRBE nVHE world switch
+[PATCH v4 0/3] KVM: arm64: Fix SPE and TRBE nVHE world switch
+Author: Will Deacon <will@kernel.org>
+
+Hi all,
+
+I got the Sashiko treatment on v3, so here's a quick respin to address
+the BRBE thinko it found in the last patch.
+
+Previous versions of the series are available at:
+
+  v1: https://lore.kernel.org/r/20260216130959.19317-1-will@kernel.org
+  v2: https://lore.kernel.org/r/20260227212136.7660-1-will@kernel.org
+  v3: https://lore.kernel.org/r/20260326141214.18990-1-will@kernel.org
+
+Changes since v3 include:
+
+  * Retain zeroing of *brbcr_el1 when saving BRBE state
+  * Dropped R-b / T-b tags on the BRBE patch
+
+Cheers,
+
+Will
+
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Cc: James Clark <james.clark@linaro.org>
+Cc: Leo Yan <leo.yan@arm.com>
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Fuad Tabba <tabba@google.com>
+Cc: Alexandru Elisei <alexandru.elisei@arm.com>
+Cc: Yabin Cui <yabinc@google.com>
+
+--->8
+
+Will Deacon (3):
+  KVM: arm64: Disable TRBE Trace Buffer Unit when running in guest
+    context
+  KVM: arm64: Disable SPE Profiling Buffer when running in guest context
+  KVM: arm64: Don't pass host_debug_state to BRBE world-switch routines
+
+ arch/arm64/include/asm/kvm_host.h  |   2 +
+ arch/arm64/kvm/hyp/nvhe/debug-sr.c | 116 +++++++++++++++++++++++------
+ arch/arm64/kvm/hyp/nvhe/switch.c   |   2 +-
+ 3 files changed, 95 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Combined user_mem_abort() rework
+[PATCH v2 00/30] KVM: arm64: Combined user_mem_abort() rework
+Author: Marc Zyngier <maz@kernel.org>
+
+Fuad and I have been working on this "put a stick of dynamite in
+user_mem_abort() and watch the resulting firework" project, and it
+looks surprisingly OK so far. Disappointingly so, I'd even say.
+
+This v2 is has very few changes from the original posting (cleaning up
+the comments in Fuad's series [1], and some minor restructuring in
+mine [2]), but I wanted to post the combined series for people's
+awareness and for the sake of running it through sashiko.
+
+If nothing catches fire, I'll may end-up taking it into 7.1.
+
+[1] https://lore.kernel.org/all/20260306140232.2193802-1-tabba@google.com
+[2] https://lore.kernel.org/all/20260316175451.1866175-1-maz@kernel.org
+
+Fuad Tabba (13):
+  KVM: arm64: Extract VMA size resolution in user_mem_abort()
+  KVM: arm64: Introduce struct kvm_s2_fault to user_mem_abort()
+  KVM: arm64: Extract PFN resolution in user_mem_abort()
+  KVM: arm64: Isolate mmap_read_lock inside new
+    kvm_s2_fault_get_vma_info() helper
+  KVM: arm64: Extract stage-2 permission logic in user_mem_abort()
+  KVM: arm64: Extract page table mapping in user_mem_abort()
+  KVM: arm64: Simplify nested VMA shift calculation
+  KVM: arm64: Remove redundant state variables from struct kvm_s2_fault
+  KVM: arm64: Simplify return logic in user_mem_abort()
+  KVM: arm64: Initialize struct kvm_s2_fault completely at declaration
+  KVM: arm64: Optimize early exit checks in kvm_s2_fault_pin_pfn()
+  KVM: arm64: Hoist MTE validation check out of MMU lock path
+  KVM: arm64: Clean up control flow in kvm_s2_fault_map()
+
+Marc Zyngier (17):
+  KVM: arm64: Kill fault->ipa
+  KVM: arm64: Make fault_ipa immutable
+  KVM: arm64: Move fault context to const structure
+  KVM: arm64: Replace fault_is_perm with a helper
+  KVM: arm64: Constrain fault_granule to kvm_s2_fault_map()
+  KVM: arm64: Kill write_fault from kvm_s2_fault
+  KVM: arm64: Kill exec_fault from kvm_s2_fault
+  KVM: arm64: Kill topup_memcache from kvm_s2_fault
+  KVM: arm64: Move VMA-related information to kvm_s2_fault_vma_info
+  KVM: arm64: Kill logging_active from kvm_s2_fault
+  KVM: arm64: Restrict the scope of the 'writable' attribute
+  KVM: arm64: Move kvm_s2_fault.{pfn,page} to kvm_s2_vma_info
+  KVM: arm64: Replace force_pte with a max_map_size attribute
+  KVM: arm64: Move device mapping management into kvm_s2_fault_pin_pfn()
+  KVM: arm64: Directly expose mapping prot and kill kvm_s2_fault
+  KVM: arm64: Simplify integration of adjust_nested_*_perms()
+  KVM: arm64: Convert gmem_abort() to struct kvm_s2_fault_desc
+
+ arch/arm64/kvm/mmu.c | 507 +++++++++++++++++++++++++------------------
+ 1 file changed, 299 insertions(+), 208 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Extract VMA size resolution in user_mem_abort()
+[PATCH v2 01/30] KVM: arm64: Extract VMA size resolution in user_mem_abort()
+Author: Marc Zyngier <maz@kernel.org>
+
+
+As part of an effort to refactor user_mem_abort() into smaller, more
+focused helper functions, extract the logic responsible for determining
+the VMA shift and page size into a new static helper,
+kvm_s2_resolve_vma_size().
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/mmu.c | 130 ++++++++++++++++++++++++-------------------
+ 1 file changed, 73 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
