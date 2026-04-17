@@ -1,0 +1,637 @@
+
+On /root/mail/repo:
+From 06b13592c to 76444df15
+KVM mailing list update from 06b13592c to 76444df15
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     12 huawei.com
+     10 meta.com
+     10 google.com
+      4 kernel.org
+      1 nvidia.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     12  Chengwen Feng <fengchengwen@huawei.com>
+     10  Sean Christopherson <seanjc@google.com>
+     10  Matt Evans <mattev@meta.com>
+      4  Tycho Andersen <tycho@kernel.org>
+      1  Ashutosh Desai <ashutoshdesai993@gmail.com>
+      1  Ankit Agrawal <ankita@nvidia.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  crypto/ccp: hoist kernel part of SNP_PLATFORM_STATUS
+[PATCH v3 1/7] crypto/ccp: hoist kernel part of SNP_PLATFORM_STATUS
+Author: Sean Christopherson <seanjc@google.com>
+
+
+...to its own function. This way it can be used when the kernel needs
+access to the platform status regardless of the INIT state of the firmware.
+
+No functional change intended.
+
+Cc: Herbert Xu <herbert@gondor.apana.org.au>
+Signed-off-by: Tycho Andersen (AMD) <tycho@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ drivers/crypto/ccp/sev-dev.c | 31 +++++++++++++++++++++++--------
+ 1 file changed, 23 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: Don't advertise unusable VM types
+[PATCH v3 0/7] KVM: SEV: Don't advertise unusable VM types
+Author: Sean Christopherson <seanjc@google.com>
+
+My preference would be to take this through the KVM tree, with acks on the
+crypto patches.  I'd also be a-ok with a stable branch/tag of the crypto
+changes.
+
+In the words of Tycho:
+
+Recent SEV firmware [1] does not support SEV-ES VMs when SNP is enabled.
+Expose this by revoking VM-types that are not supported by the current
+configurations either from firmware restrictions or ASID configuration.
+
+My previous version of this patch series [2] used SNP_VERIFY_MITIGATION
+to test for a mitigation bit. While AMD-SB-3023 says that there is a
+mitigation bit (3) for CVE-2025-48514, bit 3 corresponds to an unrelated
+issue. The correct way to check for this is to use the SVN/SPL from the
+TCB. We are in the process of updating the SB to reflect this.
+
+v3:
+ - Relocate the supported_vm_types updates to sev_hardware_setup.
+ - Report unusable VM types as such in dmesg.
+
+v2:
+ - https://lore.kernel.org/all/20260324194034.1442133-1-tycho@kernel.org
+ - compare SVN as above
+ - fix commit message prefixes
+ - supported_vm_types local is a u32
+ - move crypto stuff before KVM stuff in the event of patch tetris
+
+[1]: https://www.amd.com/en/resources/product-security/bulletin/amd-sb-3023.html
+[2]: https://lore.kernel.org/all/20260303191509.1565629-1-tycho@kernel.org
+
+Sean Christopherson (3):
+  KVM: SEV: Set supported SEV+ VM types during sev_hardware_setup()
+  KVM: SEV: Consolidate logic for printing state of SEV{,-ES,-SNP}
+    enabling
+  KVM: SEV: Don't advertise support for unusable VM types
+
+Tycho Andersen (4):
+  crypto/ccp: hoist kernel part of SNP_PLATFORM_STATUS
+  crypto/ccp: export firmware supported vm types
+  KVM: SEV: Don't advertise VM types that are disabled by firmware
+  KVM: selftests: Teach sev_*_test about revoking VM types
+
+ arch/x86/kvm/svm/sev.c                        |  40 ++++---
+ drivers/crypto/ccp/sev-dev.c                  | 101 ++++++++++++++++--
+ include/linux/psp-sev.h                       |  37 +++++++
+ .../selftests/kvm/x86/sev_init2_tests.c       |  14 ++-
+ .../selftests/kvm/x86/sev_migrate_tests.c     |   2 +-
+ .../selftests/kvm/x86/sev_smoke_test.c        |   4 +-
+ 6 files changed, 163 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Fix page overflow in sev_dbg_crypt() for
+[PATCH v2 1/6] KVM: SVM: Fix page overflow in sev_dbg_crypt() for
+Author: Sean Christopherson <seanjc@google.com>
+
+
+In sev_dbg_crypt(), the per-iteration transfer length is bounded by
+the source page offset (PAGE_SIZE - s_off) but not by the destination
+page offset (PAGE_SIZE - d_off).  When d_off > s_off, the encrypt
+path (__sev_dbg_encrypt_user) performs a read-modify-write using a
+single-page intermediate buffer (dst_tpage):
+
+  1. __sev_dbg_decrypt() expands the size to round_up(len + (d_off & 15), 16)
+     before issuing the PSP command.  If len + (d_off & 15) > PAGE_SIZE,
+     the PSP writes beyond the end of the 4096-byte dst_tpage allocation.
+
+  2. The subsequent memcpy()/copy_from_user() into
+     page_address(dst_tpage) + (d_off & 15) of 'len' bytes overflows
+     by up to 15 bytes under the same condition.
+
+Trigger example: s_off = 0, d_off = 1, debug.len = PAGE_SIZE -
+the PSP is instructed to write round_up(4097, 16) = 4112 bytes to
+a 4096-byte buffer.
+
+Fix by also bounding len by (PAGE_SIZE - d_off), the same check that
+sev_send_update_data() already performs for its single-page guest
+region.
+
+ ==================================================================
+ BUG: KASAN: slab-use-after-free in sev_dbg_crypt+0x993/0xd10 [kvm_amd]
+ Write of size 4095 at addr ff110062293bb009 by task sev_dbg_test/228214
+
+ CPU: 96 UID: 0 PID: 228214 Comm: sev_dbg_test Tainted: G     U  W           7.0.0-smp--5ce9b0c48211-dbg #156 PREEMPTLAZY
+ Tainted: [U]=USER, [W]=WARN
+ Hardware name: Google Astoria/astoria, BIOS 0.20250817.1-0 08/25/2025
+ Call Trace:
+  <TASK>
+  dump_stack_lvl+0x54/0x70
+  print_report+0xbc/0x260
+  kasan_report+0xa2/0xd0
+  kasan_check_range+0x25f/0x2c0
+  __asan_memcpy+0x40/0x70
+  sev_dbg_crypt+0x993/0xd10 [kvm_amd]
+  sev_mem_enc_ioctl+0x33c/0x450 [kvm_amd]
+  kvm_vm_ioctl+0x65d/0x6d0 [kvm]
+  __se_sys_ioctl+0xb2/0x100
+  do_syscall_64+0xe8/0x870
+  entry_SYSCALL_64_after_hwframe+0x4b/0x53
+  </TASK>
+
+ The buggy address belongs to the physical page:
+ page: refcount:1 mapcount:0 mapping:0000000000000000 index:0x7fe72b6a0 pfn:0x62293bb
+ memcg:ff11000112827d82
+ flags: 0x1400000000000000(node=1|zone=1)
+ raw: 1400000000000000 0000000000000000 dead000000000122 0000000000000000
+ raw: 00000007fe72b6a0 0000000000000000 00000001ffffffff ff11000112827d82
+ page dumped because: kasan: bad access detected
+
+ Memory state around the buggy address:
+  ff110062293bbf00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  ff110062293bbf80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+ >ff110062293bc000: fa fb fb fb fb fb fb fb fc fc fc fc fc fc fc fc
+                    ^
+  ff110062293bc080: fa fb fb fb fb fb fb fb fc fc fc fc fc fc fc fc
+  ff110062293bc100: fa fb fb fb fb fb fb fb fc fc fc fc fc fc fc fc
+ ==================================================================
+ Disabling lock debugging due to kernel taint
+
+Fixes: 24f41fb23a39 ("KVM: SVM: Add support for SEV DEBUG_DECRYPT command")
+Fixes: 7d1594f5d94b ("KVM: SVM: Add support for SEV DEBUG_ENCRYPT command")
+Cc: stable@vger.kernel.org
+Signed-off-by: Ashutosh Desai <ashutoshdesai993@gmail.com>
+[sean: add sample KASAN splat, Fixes, and stable@]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: sev_dbg_crypt() fix and overhaul
+[PATCH v2 0/6] KVM: SEV: sev_dbg_crypt() fix and overhaul
+Author: Sean Christopherson <seanjc@google.com>
+
+Ashutosh's fix for a heap OOB/UAF bug in the debug {de,en}crypt code, now
+with a selftest to detect the bug (and confirm the fix), and to validate the
+functionality.
+
+The rest of the patches completely rewrite the code.  When creating the
+selftest, I did the silly thing of testing arbitrary offsets+sizes, and
+couldn't trigger the true badness because the test failed long before it got
+to the larger sizes.
+
+Specifically (or, at least) the current code fails to handle cases where an
+address and the size aren't naturally aligned.  E.g. when encrypting 9 bytes
+at offset 8, KVM needs to _decrypt_ destination[31:0] into a temporary buffer,
+buffer[31:0], then copy 9 bytes from source[8:0] to buffer[16:8], then encrypt
+buffer[31:0] back into destination[31:0].  The current code only ever copies
+16 bytes, and bizarrely uses a temporary buffer for the source as well.
+
+A wholesale rewrite in a single patch isn't my first choice, but the existing
+code obviously hasn't been tested, and it's so bizarre and unnecessarily
+complex that I've zero confidence that an iterative cleanup would be a net
+positive, especially given how many hours it would take.
+
+The initial fix is 7.1 material, the rest (including the selftest, because it
+won't pass), can wait for 7.2.
+
+v1: https://lore.kernel.org/all/20260410050854.2463447-1-ashutoshdesai993@gmail.com
+
+Ashutosh Desai (1):
+  KVM: SVM: Fix page overflow in sev_dbg_crypt() for ENCRYPT path
+
+Sean Christopherson (5):
+  KVM: selftests: Add a test to verify SEV {en,de}crypt debug ioctls
+  KVM: SEV: Explicitly validate the dst buffer for debug operations
+  KVM: SEV: Add helper function to pin/unpin a single page
+  KVM: SEV: Rewrite logic to {de,en}crypt memory for debug
+  KVM: SEV: Allocate only as many bytes as needed for temp crypt buffers
+
+ arch/x86/kvm/svm/sev.c                        | 423 +++++++++---------
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ tools/testing/selftests/kvm/include/x86/sev.h |  24 +
+ .../testing/selftests/kvm/x86/sev_dbg_test.c  | 118 +++++
+ 4 files changed, 347 insertions(+), 219 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Fix vfio_pci_dma_buf_cleanup() double-put
+[PATCH 1/9] vfio/pci: Fix vfio_pci_dma_buf_cleanup() double-put
+Author: Matt Evans <mattev@meta.com>
+
+vfio_pci_dma_buf_cleanup() assumed all VFIO device DMABUFs need to be
+revoked.  However, if vfio_pci_dma_buf_move() revokes DMABUFs before
+the fd/device closes, then vfio_pci_dma_buf_cleanup() would do a
+second/underflowing kref_put() then wait_for_completion() on a
+completion that never fires.  Fixed by predicating on revocation
+status.
+
+This could happen if PCI_COMMAND_MEMORY is cleared before closing the
+device fd (but the scenario is more likely to hit when future commits
+add more methods to revoke DMABUFs).
+
+Fixes: 1a8a5227f2299 ("vfio: Wait for dma-buf invalidation to complete")
+Signed-off-by: Matt Evans <mattev@meta.com>
+---
+
+(Just a fix, but later "vfio/pci: Convert BAR mmap() to use a DMABUF"
+and "vfio/pci: Permanently revoke a DMABUF on request" depend on this
+context, so including in this series.)
+
+drivers/vfio/pci/vfio_pci_dmabuf.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add mmap() for DMABUFs
+[PATCH 0/9] vfio/pci: Add mmap() for DMABUFs
+Author: Matt Evans <mattev@meta.com>
+
+
+Hi all,
+
+
+This series is based on previous RFCs/discussions:
+
+Tech topic: https://lore.kernel.org/linux-iommu/20250918214425.2677057-1-amastro@fb.com/
+RFCv1:	    https://lore.kernel.org/all/20260226202211.929005-1-mattev@meta.com/
+RFCv2:	    https://lore.kernel.org/kvm/20260312184613.3710705-1-mattev@meta.com/
+
+
+The background/rationale is covered in more detail in the RFC cover
+letters.  The TL;DR is:
+
+The goal is to enable userspace driver designs that use VFIO to export
+DMABUFs representing subsets of PCI device BARs, and "vend" those
+buffers from a primary process to other subordinate processes by fd.
+These processes then mmap() the buffers and their access to the device
+is isolated to the exported ranges.  This is an improvement on sharing
+the VFIO device fd to subordinate processes, which would allow
+unfettered access .
+
+This is achieved by enabling mmap() of vfio-pci DMABUFs.  Second, a
+new ioctl()-based revocation mechanism is added to allow the primary
+process to forcibly revoke access to previously-shared BAR spans, even
+if the subordinate processes haven't cleanly exited.
+
+(The related topic of safe delegation of iommufd control to the
+subordinate processes is not addressed here, and is follow-up work.)
+
+As well as isolation and revocation, another advantage to accessing a
+BAR through a VMA backed by a DMABUF is that it's straightforward to
+create the buffer with access attributes, such as write-combining.
+
+
+Notes on patches
+================
+
+Feedback from the RFCs requested that, instead of creating
+DMABUF-specific vm_ops and .fault paths, to go the whole way and
+migrate the existing VFIO PCI BAR mmap() to be backed by a DMABUF too,
+resulting in a common vm_ops and fault handler for mmap()s of both the
+VFIO device and explicitly-exported DMABUFs.  This has been done for
+vfio-pci, but not sub-drivers (nvgrace-gpu's special-case mappings are
+unchanged).
+
+
+ vfio/pci: Fix vfio_pci_dma_buf_cleanup() double-put
+
+   A bug fix to a related are, whose context is a depdency for later
+   patches.
+
+
+ vfio/pci: Add a helper to look up PFNs for DMABUFs
+ vfio/pci: Add a helper to create a DMABUF for a BAR-map VMA
+
+   The first is for a DMABUF VMA fault handler to determine
+   arbitrary-sized PFNs from ranges in DMABUF.  Secondly, refactor
+   DMABUF export for use by the existing export feature and a new
+   helper that creates a DMABUF corresponding to a VFIO BAR mmap()
+   request.
+
+
+ vfio/pci: Convert BAR mmap() to use a DMABUF
+
+   The vfio-pci core mmap() creates a DMABUF with the helper, and the
+   vm_ops fault handler uses the other helper to resolve the fault.
+   Because this depends on DMABUF structs/code, CONFIG_VFIO_PCI_CORE
+   needs to depend on CONFIG_DMA_SHARED_BUFFER.  The
+   CONFIG_VFIO_PCI_DMABUF still conditionally enables the export
+   support code.
+
+   NOTE: The user mmap()s a device fd, but the resulting VMA's vm_file
+   becomes that of the DMABUF which takes ownership of the device and
+   puts it on release.  This maintains the existing behaviour of a VMA
+   keeping the VFIO device open.
+
+   BAR zapping then happens via the existing vfio_pci_dma_buf_move()
+   path, which now needs to unmap PTEs in the DMABUF's address_space.
+
+
+ vfio/pci: Provide a user-facing name for BAR mappings
+
+   There was a request for decent debug naming in /proc/<pid>/maps
+   etc.  comparable to the existing VFIO names: since the VMAs are
+   DMABUFs, they have a "dmabuf:" prefix and can't be 100% identical
+   to before.  This is a user-visible change, but this patch at least
+   now gives us extra info on the BDF & BAR being mapped.
+
+
+ vfio/pci: Clean up BAR zap and revocation
+
+   In general (see NOTE!) the vfio_pci_zap_bars() is now obsolete,
+   since it unmaps PTEs in the VFIO device address_space which is now
+   unused.  This consolidates all calls (e.g. around reset) with the
+   neighbouring vfio_pci_dma_buf_move()s into new functions, to
+   revoke-zap/unrevoke.
+
+   NOTE: the nvgrace-gpu driver continues to use its own private
+   vm_ops, fault handler, etc. for its special memregions, and these
+   DO still add PTEs to the VFIO device address_space.  So, a
+   temporary flag, vdev->bar_needs_zap, maintains the old behaviour
+   for this use.  At least this patch's consolidation makes it easy
+   to remove the remaining zap when this need goes away.
+
+   A FIXME is added: if nvgrace-gpu is converted to DMABUFs, remove
+   the flag and final zap.
+
+
+ vfio/pci: Support mmap() of a VFIO DMABUF
+
+   Adds mmap() for a DMABUF fd exported from vfio-pci.
+
+   It was a goal to keep the VFIO device fd lifetime behaviour
+   unchanged with respect to the DMABUFs.  An application can close
+   all device fds, and this will revoke/clean up all DMABUFs; no
+   mappings or other access can be performed now.  When enabling
+   mmap() of the DMABUFs, this means access through the VMA is also
+   revoked.  This complicates the fault handler because whilst the
+   DMABUF exists, it has no guarantee that the corresponding VFIO
+   device is still alive.  Adds synchronisation ensuring the vdev is
+   available before vdev->memory_lock is touched.
+
+   (I decided against the alternative of preventing cleanup by holding
+   the VFIO device open if any DMABUFs exist, because it's both a
+   change of behaviour and less clean overall.)
+
+   I've added a chonky comment in place, happy to clarify more if you
+   have ideas.
+
+
+ vfio/pci: Permanently revoke a DMABUF on request
+
+   By weight, this is mostly a rename of revoked to an enum, status.
+   There are now 3 states for a buffer, usable and revoked
+   temporary/permanent.  A new VFIO device ioctl is added,
+   VFIO_DEVICE_PCI_DMABUF_REVOKE, which passes a DMABUF (exported from
+   that device) and permanently revokes it.  Thus a userspace driver
+   can guarantee any downstream consumers of a shared fd are prevented
+   from accessing a BAR range, and that range can be reused.
+
+   The code doing revocation in vfio_pci_dma_buf_move() is moved,
+   unchanged, to a common function for use by _move() and the new
+   ioctl path.
+
+   Q:  I can't think of a good reason to temporarily revoke/unrevoke
+   buffers from userspace, so didn't add a 'flags' field to the ioctl
+   struct.  Easy to add if people think it's worthwhile for future
+   use.
+
+
+ vfio/pci: Add mmap() attributes to DMABUF feature
+
+   Reserves bits [31:28] in vfio_device_feature_dma_buf to allow a
+   (CPU) mapping attribute to be specified for an exported set of
+   ranges.  The default is the current UC, and a new flag can specify
+   CPU access as WC.
+
+   Q:  I've taken 4 bits; the intention is for this field to be a
+   scalar not a bitmap (i.e. mutually-exclusive access properties).
+   Perhaps 4 is a bit too many?
+
+
+Testing
+=======
+
+(The [RFC ONLY] userspace test program, for QEMU edu-plus, has been
+dropped, but can be found in the GitHub branch below.)
+
+This code has been tested in mapping DMABUFs of single/multiple
+ranges, aliasing mmap()s, aliasing ranges across DMABUFs, vm_pgoff >
+0, revocation, shutdown/cleanup scenarios, and hugepage mappings seem
+to work correctly.  I've lightly tested WC mappings also (by observing
+resulting PTEs as having the correct attributes...).  No regressions
+observed on the VFIO selftests, or on our internal vfio-pci
+applications.
+
+
+End
+===
+
+This is based on -next (next-20260414 but will merge earlier), as it
+depends on Leon's series "vfio: Wait for dma-buf invalidation to
+complete":
+
+https://lore.kernel.org/linux-iommu/20260205-nocturnal-poetic-chamois-f566ad@houat/T/#m310cd07011e3a1461b6fda45e3f9b886ba76571a
+
+These commits are on GitHub, along with "[RFC ONLY] selftests: vfio: Add
+standalone vfio_dmabuf_mmap_test":
+
+https://github.com/metamev/linux/compare/next-20260414...metamev:linux:dev/mev/vfio-dmabuf-mmap
+
+
+Thanks for reading,
+
+
+Matt
+
+
+================================================================================
+Change log:
+
+
+v1:
+
+ - Cleanup of the common DMABUF-aware VMA vm_ops fault handler and
+   export code.
+ - Fixed a lot of races, particularly faults racing with DMABUF
+   cleanup (if the VFIO device fds close, for example).
+ - Added nicer human-readable names for VFIO mmap() VMAs
+
+
+RFCv2:  Respin based on the feedback/suggestions:
+https://lore.kernel.org/kvm/20260312184613.3710705-1-mattev@meta.com/
+
+ - Transform the existing VFIO BAR mmap path to also use DMABUFs
+   behind the scenes, and then simply share that code for
+   explicitly-mapped DMABUFs.  Jason wanted to go that direction to
+   enable iommufd VFIO type 1 emulation to pick up a DMABUF for an IO
+   mapping.
+
+ - Revoke buffers using a VFIO device fd ioctl
+
+RFCv1:
+https://lore.kernel.org/all/20260226202211.929005-1-mattev@meta.com/
+
+
+Matt Evans (9):
+  vfio/pci: Fix vfio_pci_dma_buf_cleanup() double-put
+  vfio/pci: Add a helper to look up PFNs for DMABUFs
+  vfio/pci: Add a helper to create a DMABUF for a BAR-map VMA
+  vfio/pci: Convert BAR mmap() to use a DMABUF
+  vfio/pci: Provide a user-facing name for BAR mappings
+  vfio/pci: Clean up BAR zap and revocation
+  vfio/pci: Support mmap() of a VFIO DMABUF
+  vfio/pci: Permanently revoke a DMABUF on request
+  vfio/pci: Add mmap() attributes to DMABUF feature
+
+ drivers/vfio/pci/Kconfig            |   3 +-
+ drivers/vfio/pci/Makefile           |   3 +-
+ drivers/vfio/pci/nvgrace-gpu/main.c |   5 +
+ drivers/vfio/pci/vfio_pci_config.c  |  30 +-
+ drivers/vfio/pci/vfio_pci_core.c    | 224 ++++++++++---
+ drivers/vfio/pci/vfio_pci_dmabuf.c  | 500 +++++++++++++++++++++++-----
+ drivers/vfio/pci/vfio_pci_priv.h    |  49 ++-
+ include/linux/vfio_pci_core.h       |   1 +
+ include/uapi/linux/vfio.h           |  42 ++-
+ 9 files changed, 690 insertions(+), 167 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  pci/tph: Export pcie_tph_get_st_modes() for external use
+[PATCH v2 RESEND 1/5] pci/tph: Export pcie_tph_get_st_modes() for external use
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Export the helper to retrieve supported PCIe TPH steering tag modes so
+that drivers like VFIO can query and expose device capabilities to
+userspace.
+
+And also add pcie_tph_get_st_table_size() and
+pcie_tph_get_st_table_loc() stub implementation in the !CONFIG_PCI_TPH
+case.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 13 +++++++++++--
+ include/linux/pci-tph.h |  7 +++++++
+ 2 files changed, 18 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add PCIe TPH support
+[PATCH v2 RESEND 0/5] vfio/pci: Add PCIe TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+This series adds support for PCIe TLP Processing Hints (TPH) to
+vfio-pci, allowing userspace to manage device steering tags for
+improved performance and QoS in virtualized deployments.
+
+The implementation follows a clean incremental structure:
+- Patch 1: Export pcie_tph_get_st_modes()
+- Patch 2: Introduce UAPI ABI and implement capability query to
+  let userspace discover supported TPH modes, ST table presence
+  and size.
+- Patch 3: Add TPH enable/disable with mode selection.
+- Patch 4: Add interface to batch get per-CPU steering tags for
+  device-specific mode without standard ST table.
+- Patch 5: Add interface to batch program steering tag table
+  entries for standard TPH modes.
+
+All user API definitions are finalized in the first patch and
+remain stable across the series. The design follows existing
+VFIO conventions and relies on kernel pcie-tph infrastructure.
+
+This series addresses the TPH management requirements discussed
+in the RFC "Proposal: Add sysfs interface for PCIe TPH Steering
+Tag retrieval and configuration".
+
+Instead of introducing a sysfs interface, we choose to implement
+TPH management via a VFIO-specific ioctl for these reasons:
+1. VFIO is the standard userspace interface for PCI devices.
+2. An ioctl approach provides better type safety, batch support
+   and stable ABI compared to sysfs for configuration.
+3. VFIO properly isolates TPH operations to the assigned device,
+   avoiding conflicts with other kernel management paths.
+
+Based on earlier RFC work by Wathsala Vithanage.
+
+v2:
+- Export pcie_tph_get_st_modes()
+- Add detailed comment for UAPI structures and operations
+- Add batch entry limit VFIO_TPH_MAX_ENTRIES
+- Improve robustness and error handling
+
+Chengwen Feng (5):
+  pci/tph: Export pcie_tph_get_st_modes() for external use
+  vfio/pci: Add PCIe TPH interface with capability query
+  vfio/pci: Add PCIe TPH enable/disable support
+  vfio/pci: Add PCIe TPH GET_ST interface
+  vfio/pci: Add PCIe TPH SET_ST interface
+
+ drivers/pci/tph.c                |  13 +-
+ drivers/vfio/pci/vfio_pci_core.c | 213 +++++++++++++++++++++++++++++++
+ include/linux/pci-tph.h          |   7 +
+ include/uapi/linux/vfio.h        | 131 +++++++++++++++++++
+ 4 files changed, 362 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v2 RESEND 1/5] pci/tph: Export pcie_tph_get_st_modes() for external use
+ Skip: [PATCH v2 1/5] pci/tph: Export pcie_tph_get_st_modes() for external use
+Exist: [PATCH v2 RESEND 0/5] vfio/pci: Add PCIe TPH support
+ Skip: [PATCH v2 0/5] vfio/pci: Add PCIe TPH support
+New:  vfio/nvgrace-gpu: Add Blackwell-Next GPU readiness check via CXL DVSEC
+[PATCH v3 1/1] vfio/nvgrace-gpu: Add Blackwell-Next GPU readiness check via CXL DVSEC
+Author: Ankit Agrawal <ankita@nvidia.com>
+
+Add a CXL DVSEC-based readiness check for Blackwell-Next GPUs alongside
+the existing legacy BAR0 polling path. On probe and after reset, the
+driver reads the CXL Device DVSEC capability to determine whether the
+GPU memory is valid. This is checked by polling on the Memory_Active bit
+based on the Memory_Active_Timeout. Also check if MEM_INFO_VALID is set
+within 1 second per CXL spec 4.0 Tables 8-13. If not, return error.
+
+A static inline wrapper dispatches to the appropriate readiness check
+based on whether the CXL DVSEC capability is present.
+
+Add PCI_DVSEC_CXL_MEM_ACTIVE_TIMEOUT to pci_regs.h for the timeout
+field encoding.
+
+cc: Kevin Tian <kevin.tian@intel.com>
+Suggested-by: Alex Williamson <alex@shazbot.org>
+Signed-off-by: Ankit Agrawal <ankita@nvidia.com>
+---
+ drivers/vfio/pci/nvgrace-gpu/main.c | 96 ++++++++++++++++++++++++++---
+ include/uapi/linux/pci_regs.h       |  1 +
+ 2 files changed, 89 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 3e703f115 to e7601ccbe
+KVM mailing list update from 3e703f115 to e7601ccbe
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
