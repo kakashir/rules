@@ -1,0 +1,418 @@
+
+On /root/mail/repo:
+From af9e282a7 to c299347af
+KVM mailing list update from af9e282a7 to c299347af
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      4 redhat.com
+      2 google.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      4  Paolo Bonzini <pbonzini@redhat.com>
+      2  Sean Christopherson <seanjc@google.com>
+      1  Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86: use again the flush argument of __link_shadow_page()
+[PATCH] KVM: x86: use again the flush argument of __link_shadow_page()
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Except in the case of parentless nested-TDP pages, mmu_page_zap_pte()
+clears the SPTE but leaves the invalid_list empty.  In this case, using
+kvm_flush_remote_tlbs() as kvm_mmu_remote_flush_or_zap() does is overkill.
+Avoid flushing the entirety of the remote TLBs unless the invalid_list
+was populated: instead, use a more efficient gfn-targeting flush (if
+available) and skip it altogether if the caller guarantees that a TLB
+flush is not necessary.
+
+Based-on: <20260503201029.106481-1-pbonzini@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Do IRR scan in __kvm_apic_update_irr even if PIR is empty
+[PATCH 1/2] KVM: x86: Do IRR scan in __kvm_apic_update_irr even if PIR is empty
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Fall back to apic_find_highest_vector() when PID.ON is set but PIR
+turns out to be empty, to correctly report the highest pending interrupt
+from the existing IRR.
+
+In a nested VM stress test, the following WARNING fires in
+vmx_check_nested_events() when kvm_cpu_has_interrupt() reports a pending
+interrupt but the subsequent kvm_apic_has_interrupt() (which invokes
+vmx_sync_pir_to_irr() again) returns -1:
+
+  WARNING: CPU: 99 PID: 57767 at arch/x86/kvm/vmx/nested.c:4449 vmx_check_nested_events+0x6bf/0x6e0 [kvm_intel]
+  Call Trace:
+   kvm_check_and_inject_events
+   vcpu_enter_guest.constprop.0
+   vcpu_run
+   kvm_arch_vcpu_ioctl_run
+   kvm_vcpu_ioctl
+   __x64_sys_ioctl
+   do_syscall_64
+   entry_SYSCALL_64_after_hwframe
+
+The root cause is a race between vmx_sync_pir_to_irr() on the target vCPU
+and __vmx_deliver_posted_interrupt() on a sender vCPU.  The sender
+performs two individually-atomic operations that are not a single
+transaction:
+
+  1. pi_test_and_set_pir(vector)  -- sets the PIR bit
+  2. pi_test_and_set_on()         -- sets PID.ON
+
+The following interleaving triggers the bug:
+
+  Sender vCPU (IPI):              Target vCPU (1st sync_pir_to_irr):
+  B1: set PIR[vector]
+                                  A1: pi_clear_on()
+                                  A2: pi_harvest_pir() -> sees B1 bit
+                                  A3: xchg() -> consumes bit, PIR=0
+                                      (1st sync returns correct max_irr)
+  B2: set PID.ON = 1
+
+                                  Target vCPU (2nd sync_pir_to_irr):
+                                  C1: pi_test_on() -> TRUE (from B2)
+                                  C2: pi_clear_on() -> ON=0
+                                  C3: pi_harvest_pir() -> PIR empty
+                                  C4: *max_irr = -1, early return
+                                      IRR NOT SCANNED
+
+The interrupt is not lost (it resides in the IRR from the first sync and
+is recovered on the next vcpu_enter_guest() iteration), but the incorrect
+max_irr causes a spurious WARNING and a wasted L2 VM-Enter/VM-Exit cycle.
+
+Fixes: b41f8638b9d3 ("KVM: VMX: Isolate pure loads from atomic XCHG when processing PIR")
+Reported-by: Farrah Chen <farrah.chen@intel.com>
+Analyzed-by: Chenyi Qiang <chenyi.qiang@intel.com>
+Cc: stable@vger.kernel.org
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/lapic.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Fix and clarify PIR->IRR transfer
+[PATCH 0/2] KVM: x86: Fix and clarify PIR->IRR transfer
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+The first patch fixes a WARN in vmx_check_nested_events() due to
+a specific interleaving of vmx_sync_pir_to_irr() on the target
+vCPU and __vmx_deliver_posted_interrupt() on a sender vCPU.
+In this case vmx_sync_pir_to_irr() sees an interrupt even before
+__vmx_deliver_posted_interrupt() sets PID.ON; while this is harmless and in
+fact intended, the problem is that a later call to kvm_apic_has_interrupt()
+is incorrectly told that no interrupt is pending, just because PID.ON=1
+but no bit set in PIR.
+
+See original discussion at https://lore.kernel.org/kvm/20260428070349.1633238-1-chenyi.qiang@intel.com/T/.
+
+Paolo Bonzini (1):
+  KVM: x86: Do IRR scan in __kvm_apic_update_irr even if PIR is empty
+
+Sean Christopherson (1):
+  KVM: x86: Fix misleading variable names and add more comments for
+    PIR=>IRR flow
+
+ arch/x86/kvm/lapic.c   | 24 +++++++++++++-----------
+ arch/x86/kvm/vmx/vmx.c | 40 ++++++++++++++++++++++++++++++++--------
+ 2 files changed, 45 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+[PATCH] KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+
+The shadow MMU computes GFNs for direct shadow pages using sp->gfn plus
+the SPTE index. This assumption breaks for shadow paging if the guest
+page tables are modified between VM entries (similar to commit
+aad885e77496, "KVM: x86/mmu: Drop/zap existing present SPTE even
+when creating an MMIO SPTE", 2026-03-27).  The flow is as follows:
+
+- a PDE is installed for a 2MB mapping, and a page in that area is
+  accessed.  KVM creates a kvm_mmu_page consisting of 512 4KB pages;
+  the kvm_mmu_page is marked by FNAME(fetch) as direct-mapped because
+  the guest's mapping is a huge page (and thus contiguous).
+
+- the PDE mapping is changed from outside the guest.
+
+- the guest accesses another page in the same 2MB area.  KVM installs
+  a new leaf SPTE and rmap entry; the SPTE uses the "correct" GFN
+  (i.e. based on the new mapping, as changed in the previous step) but
+  that GFN is outside of the [sp->gfn, sp->gfn + 511] range; therefore
+  the rmap entry cannot be found and removed when the kvm_mmu_page
+  is zapped.
+
+- the memslot that covers the first 2MB mapping is deleted, and the
+  kvm_mmu_page for the now-invalid GPA is zapped.  However, rmap_remove()
+  only looks at the [sp->gfn, sp->gfn + 511] range established in step 1,
+  and fails to find the rmap entry that was recorded by step 3.
+
+- any operation that causes an rmap walk for the same page accessed
+  by step 3 then walks a stale rmap and dereferences a freed kvm_mmu_age.
+  This includes dirty logging or MMU notifier invalidations (e.g., from
+  MADV_DONTNEED).
+
+The underlying issue is that KVM's walking of shadow PTEs assumes that
+if a SPTE is present when KVM wants to install a non-leaf SPTE, then the
+existing kvm_mmu_page must be for the correct gfn.  Because the only way
+for the gfn to be wrong is if KVM messed up and failed to zap a SPTE...
+which shouldn't happen, but *actually* only happens in response to a
+guest write.
+
+That bug dates back literally forever, as even the first version of KVM
+assumes that the GFN matches and walks into the "wrong" shadow page.
+However, that was only an imprecision until 2032a93d66fa ("KVM: MMU:
+Don't allocate gfns page for direct mmu pages") came along.
+
+Fix it by checking for a target gfn mismatch and zapping the existing
+SPTE.  That way the old SP and rmap entries are gone, KVM installs
+the rmap in the right location, and everyone is happy.
+
+Fixes: 2032a93d66fa ("KVM: MMU: Don't allocate gfns page for direct mmu pages")
+Fixes: 6aa8b732ca01 ("kvm: userspace interface")
+Reported-by: Alexander Bulekov <bkov@amazon.com>
+Reported-by: Fred Griffoul <fgriffo@amazon.co.uk>
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 35 ++++++++++++++---------------------
+ 1 file changed, 14 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: check for nEPT/nNPT in slow flush hypercalls
+[PATCH] KVM: x86: check for nEPT/nNPT in slow flush hypercalls
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Checking is_guest_mode(vcpu) is incorrect, because translate_nested_gpa()
+is only valid if an L2 guest is running *with nested EPT/NPT enabled*.
+Instead use the same condition as translate_nested_gpa() itself.
+
+Cc: stable@vger.kernel.org
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Fixed: 3e300570b42a ("KVM: x86: check for nEPT/nNPT in slow flush hypercalls", 2026-05-03)
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/hyperv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86/virt: Fix RCU lockdep splat in emergency virt callback path
+[PATCH] x86/virt: Fix RCU lockdep splat in emergency virt callback path
+Author: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+
+x86_virt_invoke_kvm_emergency_callback() reaches rcu_dereference()
+through machine_crash_shutdown() with IRQs disabled but with RCU not
+necessarily watching, which triggers a suspicious RCU usage splat on
+debug kernels (CONFIG_PROVE_RCU=y) during panic/kdump:
+
+WARNING: suspicious RCU usage
+arch/x86/virt/hw.c:52 suspicious rcu_dereference_check() usage!
+
+other info that might help us debug this:
+
+rcu_scheduler_active = 2, debug_locks = 1
+1 lock held by tee/11119:
+ #0: ffff8881fa32c440 (sb_writers#3){.+.+}-{0:0}, at: ksys_write
+
+Call Trace:
+ <TASK>
+ dump_stack_lvl+0x84/0xd0
+ lockdep_rcu_suspicious.cold+0x37/0x8f
+ x86_virt_invoke_kvm_emergency_callback+0x5f/0x70
+ x86_svm_emergency_disable_virtualization_cpu+0x2a/0x30
+ x86_virt_emergency_disable_virtualization_cpu+0x6b/0x90
+ native_machine_crash_shutdown+0x72/0x170
+ __crash_kexec+0x137/0x280
+ panic+0xce/0xd0
+ sysrq_handle_crash+0x1f/0x20
+ __handle_sysrq.cold+0x192/0x335
+ write_sysrq_trigger+0x8c/0xc0
+ proc_reg_write+0x1c3/0x3c0
+ vfs_write+0x1d0/0xf80
+ ksys_write+0x116/0x250
+ do_syscall_64+0x11c/0x1480
+ entry_SYSCALL_64_after_hwframe+0x76/0x7e
+ </TASK>
+
+The RCU usage is correct: writers
+(x86_virt_{register,unregister}_emergency_callback()) serialize via
+rcu_assign_pointer() + synchronize_rcu(), while the reader on the
+emergency path runs with IRQs disabled (the only caller is
+x86_virt_emergency_disable_virtualization_cpu(), which has
+lockdep_assert_irqs_disabled()), which is a valid classic-RCU read-side
+critical section.
+
+Use rcu_dereference_check() with irqs_disabled() to silence the splat
+without weakening the protection.
+
+Reproducible on a debug kernel (CONFIG_PROVE_LOCKING=y, CONFIG_PROVE_RCU=y)
+with kvm_amd or kvm_intel loaded by triggering kdump:
+
+  echo c > /proc/sysrq-trigger
+
+Fixes: 428afac5a8ea ("KVM: x86: Move bulk of emergency virtualizaton logic to virt subsystem")
+Signed-off-by: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+---
+ arch/x86/virt/hw.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 6989fc2c6 to 518523efa
+KVM mailing list update from 6989fc2c6 to 518523efa
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     14  Eric Auger <eric.auger@redhat.com>
+      4  Cornelia Huck <cohuck@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+[PATCH v4 01/17] scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and outputs the list of ID regs in target/arm/cpu-sysregs.h.inc
+under the form of DEF(<name>, <op0>, <op1>, <crn>, <crm>, <op2>).
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+[CH: note correct op1 range, don't skip CCSIDR]
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Message-ID: <20251208163751.611186-2-eric.auger@redhat.com>
+---
+ scripts/update-aarch64-cpu-sysregs-header.py | 134 +++++++++++++++++++
+ 1 file changed, 134 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  kvm/arm: Introduce a customizable aarch64 KVM host model
+[PATCH v4 00/17] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields.
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+
+The end goal is to get more flexibility when migrating guests
+between different host hardware.
+
+QEMU retrieves the writable ID fields from KVM UAPI [1] and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file [3] . It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction.
+
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+The list of SYSREG_ID properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion [2].
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v4
+
+References:
+
+[1]
+KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES
+KVM_ARM_GET_REG_WRITABLE_MASKS
+Documentation/virt/kvm/api.rst
+
+[2]
+qemu-system-aarch64 -qmp unix:/home/augere/TEST/QEMU/qmp-sock,server,nowait -M virt --enable-kvm -cpu custom
+sudo build/run qmp-shell /home/augere/TEST/QEMU/qmp-sock
+Welcome to the QMP low-level shell!
+Connected to QEMU 11.0.50
+(QEMU) query-cpu-model-expansion type=full model={"name":"host"}
+
+[3]
+linux/arch/arm64/tools/sysreg and gen-sysreg.awk
+./tools/include/generated/asm/sysreg-defs.h
+
+
+Cornelia Huck (4):
+  target/arm/kvm: Introduce kvm_get_writable_id_regs
+  arm/cpu: accessors for writable id registers
+  arm-qmp-cmds: introspection for ID register props
+  arm/cpu-features: document ID reg properties
+
+Eric Auger (13):
+  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+  target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  scripts: Introduce scripts/aarch64_sysreg_helpers module
+  scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+  target/arm/cpu-sysreg-properties.c: Generate code with new script
+  arm/kvm: Allow reading all the writable ID registers
+  arm/kvm: write back modified ID regs to KVM
+  target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+  target/arm/kvm: Special case REVIDR_EL1 and AIDR_EL1
+  target/arm/kvm: Special case ID_AA64ISAR0_EL1 RES0 [24, 27] bits
+  arm/cpu: Expose writable ID reg field properties on the kvm host vcpu
+    model
+
+ docs/system/arm/cpu-features.rst              | 104 ++-
+ scripts/aarch64_sysreg_helpers.py             | 109 +++
+ .../update-aarch64-cpu-sysreg-properties.py   | 169 +++++
+ scripts/update-aarch64-cpu-sysregs-header.py  |  51 ++
+ target/arm/arm-qmp-cmds.c                     |  19 +
+ target/arm/cpu-idregs.h                       |  59 ++
+ target/arm/cpu-sysreg-properties.c            | 673 ++++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |  57 +-
+ target/arm/cpu.c                              |  12 +
+ target/arm/cpu.h                              |  36 +
+ target/arm/cpu64.c                            |  26 +-
+ target/arm/kvm-stub.c                         |   3 +-
+ target/arm/kvm.c                              | 313 +++++++-
+ target/arm/kvm_arm.h                          |  19 +-
+ target/arm/meson.build                        |   3 +-
+ target/arm/trace-events                       |   6 +
+ 16 files changed, 1622 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+

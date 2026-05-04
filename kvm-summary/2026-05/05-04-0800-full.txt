@@ -1,0 +1,766 @@
+
+On /root/mail/repo:
+From af9e282a7 to c299347af
+KVM mailing list update from af9e282a7 to c299347af
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      4 redhat.com
+      2 google.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      4  Paolo Bonzini <pbonzini@redhat.com>
+      2  Sean Christopherson <seanjc@google.com>
+      1  Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: x86: use again the flush argument of __link_shadow_page()
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Except in the case of parentless nested-TDP pages, mmu_page_zap_pte()
+clears the SPTE but leaves the invalid_list empty.  In this case, using
+kvm_flush_remote_tlbs() as kvm_mmu_remote_flush_or_zap() does is overkill.
+Avoid flushing the entirety of the remote TLBs unless the invalid_list
+was populated: instead, use a more efficient gfn-targeting flush (if
+available) and skip it altogether if the caller guarantees that a TLB
+flush is not necessary.
+
+Based-on: <20260503201029.106481-1-pbonzini@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] KVM: x86: Fix misleading variable names and add more comments for PIR=>IRR flow
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+
+Rename kvm_apic_update_irr()'s "irr_updated" and vmx_sync_pir_to_irr()'s
+"got_posted_interrupt" to a more accurate "max_irr_is_from_pir", as neither
+"irr_updated" nor "got_posted_interrupt" is accurate.
+__kvm_apic_update_irr() and thus kvm_apic_update_irr() specifically return
+true if and only if the highest priority IRQ, i.e. max_irr, is a "new"
+pending IRQ from the PIR.  I.e. it's possible for the IRR to be updated,
+i.e. for a posted IRQ to be "got", *without* the APIs returning true.
+
+Expand vmx_sync_pir_to_irr()'s comment to explain why it's necessary to
+set KVM_REQ_EVENT only if a "new" IRQ was found, and to explain why it's
+safe to do so only if a new IRQ is also the highest priority pending IRQ.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/lapic.c   | 16 ++++++++--------
+ arch/x86/kvm/vmx/vmx.c | 40 ++++++++++++++++++++++++++++++++--------
+ 2 files changed, 40 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: x86: Do IRR scan in __kvm_apic_update_irr even if PIR is empty
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Fall back to apic_find_highest_vector() when PID.ON is set but PIR
+turns out to be empty, to correctly report the highest pending interrupt
+from the existing IRR.
+
+In a nested VM stress test, the following WARNING fires in
+vmx_check_nested_events() when kvm_cpu_has_interrupt() reports a pending
+interrupt but the subsequent kvm_apic_has_interrupt() (which invokes
+vmx_sync_pir_to_irr() again) returns -1:
+
+  WARNING: CPU: 99 PID: 57767 at arch/x86/kvm/vmx/nested.c:4449 vmx_check_nested_events+0x6bf/0x6e0 [kvm_intel]
+  Call Trace:
+   kvm_check_and_inject_events
+   vcpu_enter_guest.constprop.0
+   vcpu_run
+   kvm_arch_vcpu_ioctl_run
+   kvm_vcpu_ioctl
+   __x64_sys_ioctl
+   do_syscall_64
+   entry_SYSCALL_64_after_hwframe
+
+The root cause is a race between vmx_sync_pir_to_irr() on the target vCPU
+and __vmx_deliver_posted_interrupt() on a sender vCPU.  The sender
+performs two individually-atomic operations that are not a single
+transaction:
+
+  1. pi_test_and_set_pir(vector)  -- sets the PIR bit
+  2. pi_test_and_set_on()         -- sets PID.ON
+
+The following interleaving triggers the bug:
+
+  Sender vCPU (IPI):              Target vCPU (1st sync_pir_to_irr):
+  B1: set PIR[vector]
+                                  A1: pi_clear_on()
+                                  A2: pi_harvest_pir() -> sees B1 bit
+                                  A3: xchg() -> consumes bit, PIR=0
+                                      (1st sync returns correct max_irr)
+  B2: set PID.ON = 1
+
+                                  Target vCPU (2nd sync_pir_to_irr):
+                                  C1: pi_test_on() -> TRUE (from B2)
+                                  C2: pi_clear_on() -> ON=0
+                                  C3: pi_harvest_pir() -> PIR empty
+                                  C4: *max_irr = -1, early return
+                                      IRR NOT SCANNED
+
+The interrupt is not lost (it resides in the IRR from the first sync and
+is recovered on the next vcpu_enter_guest() iteration), but the incorrect
+max_irr causes a spurious WARNING and a wasted L2 VM-Enter/VM-Exit cycle.
+
+Fixes: b41f8638b9d3 ("KVM: VMX: Isolate pure loads from atomic XCHG when processing PIR")
+Reported-by: Farrah Chen <farrah.chen@intel.com>
+Analyzed-by: Chenyi Qiang <chenyi.qiang@intel.com>
+Cc: stable@vger.kernel.org
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/lapic.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: x86: Fix and clarify PIR->IRR transfer
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+The first patch fixes a WARN in vmx_check_nested_events() due to
+a specific interleaving of vmx_sync_pir_to_irr() on the target
+vCPU and __vmx_deliver_posted_interrupt() on a sender vCPU.
+In this case vmx_sync_pir_to_irr() sees an interrupt even before
+__vmx_deliver_posted_interrupt() sets PID.ON; while this is harmless and in
+fact intended, the problem is that a later call to kvm_apic_has_interrupt()
+is incorrectly told that no interrupt is pending, just because PID.ON=1
+but no bit set in PIR.
+
+See original discussion at https://lore.kernel.org/kvm/20260428070349.1633238-1-chenyi.qiang@intel.com/T/.
+
+Paolo Bonzini (1):
+  KVM: x86: Do IRR scan in __kvm_apic_update_irr even if PIR is empty
+
+Sean Christopherson (1):
+  KVM: x86: Fix misleading variable names and add more comments for
+    PIR=>IRR flow
+
+ arch/x86/kvm/lapic.c   | 24 +++++++++++++-----------
+ arch/x86/kvm/vmx/vmx.c | 40 ++++++++++++++++++++++++++++++++--------
+ 2 files changed, 45 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+
+The shadow MMU computes GFNs for direct shadow pages using sp->gfn plus
+the SPTE index. This assumption breaks for shadow paging if the guest
+page tables are modified between VM entries (similar to commit
+aad885e77496, "KVM: x86/mmu: Drop/zap existing present SPTE even
+when creating an MMIO SPTE", 2026-03-27).  The flow is as follows:
+
+- a PDE is installed for a 2MB mapping, and a page in that area is
+  accessed.  KVM creates a kvm_mmu_page consisting of 512 4KB pages;
+  the kvm_mmu_page is marked by FNAME(fetch) as direct-mapped because
+  the guest's mapping is a huge page (and thus contiguous).
+
+- the PDE mapping is changed from outside the guest.
+
+- the guest accesses another page in the same 2MB area.  KVM installs
+  a new leaf SPTE and rmap entry; the SPTE uses the "correct" GFN
+  (i.e. based on the new mapping, as changed in the previous step) but
+  that GFN is outside of the [sp->gfn, sp->gfn + 511] range; therefore
+  the rmap entry cannot be found and removed when the kvm_mmu_page
+  is zapped.
+
+- the memslot that covers the first 2MB mapping is deleted, and the
+  kvm_mmu_page for the now-invalid GPA is zapped.  However, rmap_remove()
+  only looks at the [sp->gfn, sp->gfn + 511] range established in step 1,
+  and fails to find the rmap entry that was recorded by step 3.
+
+- any operation that causes an rmap walk for the same page accessed
+  by step 3 then walks a stale rmap and dereferences a freed kvm_mmu_age.
+  This includes dirty logging or MMU notifier invalidations (e.g., from
+  MADV_DONTNEED).
+
+The underlying issue is that KVM's walking of shadow PTEs assumes that
+if a SPTE is present when KVM wants to install a non-leaf SPTE, then the
+existing kvm_mmu_page must be for the correct gfn.  Because the only way
+for the gfn to be wrong is if KVM messed up and failed to zap a SPTE...
+which shouldn't happen, but *actually* only happens in response to a
+guest write.
+
+That bug dates back literally forever, as even the first version of KVM
+assumes that the GFN matches and walks into the "wrong" shadow page.
+However, that was only an imprecision until 2032a93d66fa ("KVM: MMU:
+Don't allocate gfns page for direct mmu pages") came along.
+
+Fix it by checking for a target gfn mismatch and zapping the existing
+SPTE.  That way the old SP and rmap entries are gone, KVM installs
+the rmap in the right location, and everyone is happy.
+
+Fixes: 2032a93d66fa ("KVM: MMU: Don't allocate gfns page for direct mmu pages")
+Fixes: 6aa8b732ca01 ("kvm: userspace interface")
+Reported-by: Alexander Bulekov <bkov@amazon.com>
+Reported-by: Fred Griffoul <fgriffo@amazon.co.uk>
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 35 ++++++++++++++---------------------
+ 1 file changed, 14 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: check for nEPT/nNPT in slow flush hypercalls
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Checking is_guest_mode(vcpu) is incorrect, because translate_nested_gpa()
+is only valid if an L2 guest is running *with nested EPT/NPT enabled*.
+Instead use the same condition as translate_nested_gpa() itself.
+
+Cc: stable@vger.kernel.org
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Fixed: 3e300570b42a ("KVM: x86: check for nEPT/nNPT in slow flush hypercalls", 2026-05-03)
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/hyperv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] x86/virt: Fix RCU lockdep splat in emergency virt callback path
+Author: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+
+x86_virt_invoke_kvm_emergency_callback() reaches rcu_dereference()
+through machine_crash_shutdown() with IRQs disabled but with RCU not
+necessarily watching, which triggers a suspicious RCU usage splat on
+debug kernels (CONFIG_PROVE_RCU=y) during panic/kdump:
+
+WARNING: suspicious RCU usage
+arch/x86/virt/hw.c:52 suspicious rcu_dereference_check() usage!
+
+other info that might help us debug this:
+
+rcu_scheduler_active = 2, debug_locks = 1
+1 lock held by tee/11119:
+ #0: ffff8881fa32c440 (sb_writers#3){.+.+}-{0:0}, at: ksys_write
+
+Call Trace:
+ <TASK>
+ dump_stack_lvl+0x84/0xd0
+ lockdep_rcu_suspicious.cold+0x37/0x8f
+ x86_virt_invoke_kvm_emergency_callback+0x5f/0x70
+ x86_svm_emergency_disable_virtualization_cpu+0x2a/0x30
+ x86_virt_emergency_disable_virtualization_cpu+0x6b/0x90
+ native_machine_crash_shutdown+0x72/0x170
+ __crash_kexec+0x137/0x280
+ panic+0xce/0xd0
+ sysrq_handle_crash+0x1f/0x20
+ __handle_sysrq.cold+0x192/0x335
+ write_sysrq_trigger+0x8c/0xc0
+ proc_reg_write+0x1c3/0x3c0
+ vfs_write+0x1d0/0xf80
+ ksys_write+0x116/0x250
+ do_syscall_64+0x11c/0x1480
+ entry_SYSCALL_64_after_hwframe+0x76/0x7e
+ </TASK>
+
+The RCU usage is correct: writers
+(x86_virt_{register,unregister}_emergency_callback()) serialize via
+rcu_assign_pointer() + synchronize_rcu(), while the reader on the
+emergency path runs with IRQs disabled (the only caller is
+x86_virt_emergency_disable_virtualization_cpu(), which has
+lockdep_assert_irqs_disabled()), which is a valid classic-RCU read-side
+critical section.
+
+Use rcu_dereference_check() with irqs_disabled() to silence the splat
+without weakening the protection.
+
+Reproducible on a debug kernel (CONFIG_PROVE_LOCKING=y, CONFIG_PROVE_RCU=y)
+with kvm_amd or kvm_intel loaded by triggering kdump:
+
+  echo c > /proc/sysrq-trigger
+
+Fixes: 428afac5a8ea ("KVM: x86: Move bulk of emergency virtualizaton logic to virt subsystem")
+Signed-off-by: Mikhail Gavrilov <mikhail.v.gavrilov@gmail.com>
+---
+ arch/x86/virt/hw.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 6989fc2c6 to 518523efa
+KVM mailing list update from 6989fc2c6 to 518523efa
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     14  Eric Auger <eric.auger@redhat.com>
+      4  Cornelia Huck <cohuck@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v4 17/17] arm/cpu-features: document ID reg properties
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Add some documentation for how individual ID registers can be
+configured with the host cpu model.
+
+[CH: adapt to removal of the 'custom' model, added some more
+ explanations about using the ID register props]
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ docs/system/arm/cpu-features.rst | 104 ++++++++++++++++++++++++++++---
+ 1 file changed, 96 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/17] arm-qmp-cmds: introspection for ID register props
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Implement the capability to query available ID register values by
+adding SYSREG_* options and values to the cpu model expansion for the
+host model, if available.
+
+Excerpt:
+(QEMU) query-cpu-model-expansion type=full model={"name":"host"}
+{"return": {"model": {"name": "host", "props":
+{"SYSREG_ID_AA64PFR0_EL1_EL3": 1224979098931106066,
+"SYSREG_ID_AA64ISAR2_EL1_CLRBHB": 0,
+../..
+
+So this allows the upper stack to detect available writable ID
+regs and the "host passthrough model" values.
+
+[CH: moved SYSREG_* values to host model]
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+TODO: Add the moment there is no way to test changing a given
+ID reg field value. ie:
+
+(QEMU) query-cpu-model-expansion type=full model={"name":"host", "prop":{"SYSREG_ID_AA64ISAR0_EL1_DP":0x13}}
+---
+ target/arm/arm-qmp-cmds.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/17] arm/cpu: Expose writable ID reg field properties on the kvm host vcpu model
+Author: Eric Auger <eric.auger@redhat.com>
+
+If the host supports KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES and
+KVM_ARM_GET_REG_WRITABLE_MASKS ioctl successfully retrieved the mask
+of writable fields for all ID regs, expose uint64 SYSREG properties
+for all the writable ID reg fields exposed by the host kernel which
+can be matched in target/arm/cpu-sysreg-properties.c.
+
+Properties are named  SYSREG_<REG>_<FIELD> with REG and FIELD
+being those used in linux arch/arm64/tools/sysreg or in the AARCHMRS
+Registers.json.
+
+This is achieved by matching the writable fields retrieved from the
+host kernel against the generated description of ID regs and their
+fields in target/arm/cpu-sysreg-properties.c.
+
+An example of invocation is:
+-cpu host,SYSREG_ID_AA64ISAR0_EL1_DP=0x0
+which sets DP field of ID_AA64ISAR0_EL1 to 0.
+
+[CH: add properties to the host model instead of introducing a new
+"custom" model]
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ target/arm/cpu.c   | 12 ++++++++++++
+ target/arm/cpu64.c | 23 ++++++++++++++++++++++-
+ 2 files changed, 34 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/17] target/arm/kvm: Special case ID_AA64ISAR0_EL1 RES0 [24, 27] bits
+Author: Eric Auger <eric.auger@redhat.com>
+
+RES0 [24, 27] bits seem to be reported as writable by the kernel.
+This corresponds to former TME field that was turned to RES0 after
+FEAT_TME removal from the architecture.
+
+See kernel commit d65bf6e317e7b ("KVM: arm64: Remove all traces
+of FEAT_TME") for additional info. However the kernel still exposes
+it at writable. Until this gets fixed, Let's ignore those bits.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c | 11 +++++++----
+ 1 file changed, 7 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/17] target/arm/kvm: Special case REVIDR_EL1 and AIDR_EL1
+Author: Eric Auger <eric.auger@redhat.com>
+
+Special case REVIDR_EL1 and AIDR_EL1 which are writable but
+does not expose named fields. They will need to be handled
+separately
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/17] target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+Author: Eric Auger <eric.auger@redhat.com>
+
+This helper decode the ID reg writable mask, matches it against
+ID reg fields defined in target/arm/cpu-sysreg-properties.c and
+for each writable named field, generates a uint64 property.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c        | 134 ++++++++++++++++++++++++++++++++++++++++
+ target/arm/kvm_arm.h    |  10 +++
+ target/arm/trace-events |   4 ++
+ 3 files changed, 148 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/17] arm/kvm: write back modified ID regs to KVM
+Author: Eric Auger <eric.auger@redhat.com>
+
+We want to give a chance to override the value of host ID regs.
+In a previous patch we made sure all their values could be fetched
+through kvm_get_one_reg() calls before their modification. After
+their potential modification we need to make sure we write back
+the values through kvm_set_one_reg() calls.
+
+Make sure the cpreg_list is modified with updated values and
+transfer those values back to kvm.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ target/arm/kvm.c        | 59 ++++++++++++++++++++++++++++++++++++++++-
+ target/arm/trace-events |  1 +
+ 2 files changed, 59 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/17] arm/kvm: Allow reading all the writable ID registers
+Author: Eric Auger <eric.auger@redhat.com>
+
+At the moment kvm_arm_get_host_cpu_features() reads a subset of the
+ID regs. As we want to introduce properties for all writable ID reg
+fields, we want more genericity and read more default host register
+values.
+
+Introduce a new get_host_cpu_idregs() helper and add a new exhaustive
+boolean parameter to kvm_arm_get_host_cpu_features() and
+kvm_arm_set_cpu_features_from_host() to select the right behavior.
+The host cpu model will keep the legacy behavior unless the writable
+id register interface is available.
+
+A writable_map IdRegMap is introduced in the CPU object. A subsequent
+patch will populate it.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ target/arm/cpu.h        |  3 ++
+ target/arm/cpu64.c      |  2 +-
+ target/arm/kvm-stub.c   |  3 +-
+ target/arm/kvm.c        | 77 +++++++++++++++++++++++++++++++++++++++--
+ target/arm/kvm_arm.h    |  6 +++-
+ target/arm/trace-events |  1 +
+ 6 files changed, 86 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/17] arm/cpu: accessors for writable id registers
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Introduce ARM_FEATURE_ID_RANGE_IDX macro that converts opcodes
+into the index used to access the 3 * 8 * 8 feature id array.
+
+KVM_ARM_GET_REG_WRITABLE_MASKS populates writable masks with
+that indexing.
+
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu.h | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/17] target/arm/kvm: Introduce kvm_get_writable_id_regs
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Add an helper to retrieve the writable id reg bitmask. The
+status of the query is stored in the CPU struct so that an
+an error, if any, can be reported on vcpu realize().
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ target/arm/cpu.h     | 26 ++++++++++++++++++++++++++
+ target/arm/kvm.c     | 32 ++++++++++++++++++++++++++++++++
+ target/arm/kvm_arm.h |  3 +++
+ 3 files changed, 61 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/17] target/arm/cpu-sysreg-properties.c: Generate code with new script
+Author: Eric Auger <eric.auger@redhat.com>
+
+Generate the code with scripts/update-aarch64-cpu-sysreg-properties.py
+based on AARCHMRS_OPENSOURCE_A_profile_FAT-2026-03 Registers.json
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ .../update-aarch64-cpu-sysreg-properties.py   |  24 +-
+ target/arm/cpu-sysreg-properties.c            | 663 +++++++++++++++++-
+ 2 files changed, 664 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/17] scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and automates the generation of system register properties definitions.
+
+generates target/arm/cpu-sysreg-properties.c containing
+definitions for feature ID registers.
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ .../update-aarch64-cpu-sysreg-properties.py   | 171 ++++++++++++++++++
+ 1 file changed, 171 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/17] scripts: Introduce scripts/aarch64_sysreg_helpers module
+Author: Eric Auger <eric.auger@redhat.com>
+
+We plan to reuse get_opcode() and extract_idregs_from_registers_json()
+functions in another script. So let's move them into a module
+
+No functional change intended.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ scripts/aarch64_sysreg_helpers.py            | 109 +++++++++++++++++++
+ scripts/update-aarch64-cpu-sysregs-header.py |  85 +--------------
+ 2 files changed, 110 insertions(+), 84 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/17] arm/cpu: Add infra to handle generated ID register definitions
+Author: Eric Auger <eric.auger@redhat.com>
+
+The known ID regs are populated in a new initialization function
+named initialize_cpu_sysreg_properties(). That code will be
+automatically generated from AARCHMRS Registers.json. For the
+time being let's just describe a single id reg, CTR_EL0. In this
+description we only care about non RES/RAZ fields, ie. named fields.
+
+The registers are populated in an array indexed by ARMIDRegisterIdx
+and their fields are added in a sorted list.
+
+[CH: adapted to reworked register storage]
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ target/arm/cpu-idregs.h            | 59 ++++++++++++++++++++++++++++++
+ target/arm/cpu-sysreg-properties.c | 30 +++++++++++++++
+ target/arm/cpu64.c                 |  3 ++
+ target/arm/meson.build             |  3 +-
+ 4 files changed, 94 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/17] target/arm/cpu-sysregs.h.inc: Update with automatic generation
+Author: Eric Auger <eric.auger@redhat.com>
+
+Generated definitions with scripts/update-aarch64-cpu-sysregs-header.py
+based on "AARCHMRS containing the JSON files for Arm A-profile
+architecture (2026-03)" Registers.json file.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Message-ID: <20251208163751.611186-4-eric.auger@redhat.com>
+---
+ target/arm/cpu-sysregs.h.inc | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/17] target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+Author: Eric Auger <eric.auger@redhat.com>
+
+target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+
+Sort by register name alphabetical order. This will allow to
+easily diff with the future content, automatically generated.
+
+No functional change intended.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Message-ID: <20251208163751.611186-3-eric.auger@redhat.com>
+---
+ target/arm/cpu-sysregs.h.inc | 43 ++++++++++++++++++------------------
+ 1 file changed, 22 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/17] scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and outputs the list of ID regs in target/arm/cpu-sysregs.h.inc
+under the form of DEF(<name>, <op0>, <op1>, <crn>, <crm>, <op2>).
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+[CH: note correct op1 range, don't skip CCSIDR]
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Message-ID: <20251208163751.611186-2-eric.auger@redhat.com>
+---
+ scripts/update-aarch64-cpu-sysregs-header.py | 134 +++++++++++++++++++
+ 1 file changed, 134 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/17] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields.
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+
+The end goal is to get more flexibility when migrating guests
+between different host hardware.
+
+QEMU retrieves the writable ID fields from KVM UAPI [1] and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file [3] . It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction.
+
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+The list of SYSREG_ID properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion [2].
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v4
+
+References:
+
+[1]
+KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES
+KVM_ARM_GET_REG_WRITABLE_MASKS
+Documentation/virt/kvm/api.rst
+
+[2]
+qemu-system-aarch64 -qmp unix:/home/augere/TEST/QEMU/qmp-sock,server,nowait -M virt --enable-kvm -cpu custom
+sudo build/run qmp-shell /home/augere/TEST/QEMU/qmp-sock
+Welcome to the QMP low-level shell!
+Connected to QEMU 11.0.50
+(QEMU) query-cpu-model-expansion type=full model={"name":"host"}
+
+[3]
+linux/arch/arm64/tools/sysreg and gen-sysreg.awk
+./tools/include/generated/asm/sysreg-defs.h
+
+
+Cornelia Huck (4):
+  target/arm/kvm: Introduce kvm_get_writable_id_regs
+  arm/cpu: accessors for writable id registers
+  arm-qmp-cmds: introspection for ID register props
+  arm/cpu-features: document ID reg properties
+
+Eric Auger (13):
+  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+  target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  scripts: Introduce scripts/aarch64_sysreg_helpers module
+  scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+  target/arm/cpu-sysreg-properties.c: Generate code with new script
+  arm/kvm: Allow reading all the writable ID registers
+  arm/kvm: write back modified ID regs to KVM
+  target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+  target/arm/kvm: Special case REVIDR_EL1 and AIDR_EL1
+  target/arm/kvm: Special case ID_AA64ISAR0_EL1 RES0 [24, 27] bits
+  arm/cpu: Expose writable ID reg field properties on the kvm host vcpu
+    model
+
+ docs/system/arm/cpu-features.rst              | 104 ++-
+ scripts/aarch64_sysreg_helpers.py             | 109 +++
+ .../update-aarch64-cpu-sysreg-properties.py   | 169 +++++
+ scripts/update-aarch64-cpu-sysregs-header.py  |  51 ++
+ target/arm/arm-qmp-cmds.c                     |  19 +
+ target/arm/cpu-idregs.h                       |  59 ++
+ target/arm/cpu-sysreg-properties.c            | 673 ++++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |  57 +-
+ target/arm/cpu.c                              |  12 +
+ target/arm/cpu.h                              |  36 +
+ target/arm/cpu64.c                            |  26 +-
+ target/arm/kvm-stub.c                         |   3 +-
+ target/arm/kvm.c                              | 313 +++++++-
+ target/arm/kvm_arm.h                          |  19 +-
+ target/arm/meson.build                        |   3 +-
+ target/arm/trace-events                       |   6 +
+ 16 files changed, 1622 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
