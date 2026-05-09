@@ -1,0 +1,962 @@
+
+On /root/mail/repo:
+From 6cf1475ba to bc484c874
+KVM mailing list update from 6cf1475ba to bc484c874
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     15 kernel.org
+     15 google.com
+      8 huawei.com
+      6 amazon.co.uk
+      5 tu-dortmund.de
+      4 redhat.com
+      2 loongson.cn
+      2 infradead.org
+      1 linux.ibm.com
+      1 amd.com
+      1 amazon.com
+
+Top 15 contributors (Based on Email Body)
+
+     15  "Kiryl Shutsemau (Meta)" <kas@kernel.org>
+     11  Sean Christopherson <seanjc@google.com>
+      8  Chengwen Feng <fengchengwen@huawei.com>
+      6  David Woodhouse <dwmw@amazon.co.uk>
+      5  Simon Schippers <simon.schippers@tu-dortmund.de>
+      4  Stefano Garzarella <sgarzare@redhat.com>
+      4  Jim Mattson <jmattson@google.com>
+      2  Bibo Mao <maobibo@loongson.cn>
+      1  Peter Zijlstra <peterz@infradead.org>
+      1  David Woodhouse <dwmw2@infradead.org>
+      1  Costas Argyris <costas.argyris@amd.com>
+      1  Carsten Stollmaier <stollmc@amazon.com>
+      1  Amit Machhiwal <amachhiw@linux.ibm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  perf/x86/intel: Ensure guest PEBS path doesn't set
+[PATCH v3 1/9] perf/x86/intel: Ensure guest PEBS path doesn't set
+Author: Sean Christopherson <seanjc@google.com>
+
+When reinstating PEBS counters into PERF_GLOBAL_CTRL for a KVM guest, mask
+the value with perf's desired/original PERF_GLOBAL_CTRL value to ensure
+KVM doesn't unintentionally enable counters.  This _should_ be a nop, as
+arr[pebs_enable].guest is derived from cpuc->pebs_enabled, which should be
+a subset of x86_pmu.intel_ctrl, but paranoia is cheap in this case.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/events/intel/core.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  perf/x86: Don't write PEBS_ENABLED on KVM transitions
+[PATCH v3 0/9] perf/x86: Don't write PEBS_ENABLED on KVM transitions
+Author: Sean Christopherson <seanjc@google.com>
+
+Rework the handling of PEBS_ENABLED (and related PEBS MSRs) to *never* touch
+PEBS_ENABLED if the CPU provides PEBS isolation, in which case disabling
+counters via PERF_GLOBAL_CTRL is sufficient to prevent generation of unwanted
+PEBS records.  For vCPUs without PEBS enabled, this saves upwards of 7 MSR
+writes on each roundtrip between the guest and host (KVM performs an immediate
+WRMSR to zero out PEBS_ENABLED if it's in the load list).  For vCPUS with PEBS,
+this saves 3 MSR writes per roundtrip.
+
+E.g. without PEBS activity in the host, for a guest with a vPMU, this reduces
+the roundtrip time for a fastpath exit from ~1120 => ~860 cycles on EMR.  With
+host PEBS active, the reduction is ~1450 => ~900 cycles.
+
+However, performance isn't the underlying motiviation (well, at least, it
+didn't start that way).  Jim, Mingwei, and Stephane have been chasing issues
+where PEBS_ENABLED bits can get "stuck" in a '1' state when running KVM guests
+while profiling the host with PEBS events.  The working theory is that perf
+throttles PEBS events in NMI context, and thus clears bits in cpuc->pebs_enabled
+and PEBS_ENABLED, after generating the list of PMU MSRs to context switch but
+before VM-Entry.  And so when the host's PEBS_ENABLED is loaded on VM-Exit, the
+CPU ends up with a stale PEBS_ENABLED that doesn't get reset until something
+triggers an explicit reload in perf.
+
+Note, as Peter pointed out, more than likely KVM needs to zero PERF_GLOBAL_CTRL
+before invoking perf_guest_get_msrs(), as that's the only way to guarantee
+stable output.  I deliberately didn't include that here, as I want to keep this
+series focused on PEBS.  I also wanted to let Jim and company bottom out on
+their investigation (still ongoing) before pursuing fixes that we'll probably
+want to send to stable@.
+
+v3:
+ - Ensure guest PEBS_ENABLE is a subset of intel_ctrl. [Jim]
+ - Rename intel_ctrl_{guest,host}_mask to be less confusing. [Jim]
+ - Do even more cleanup of the cross-mapped handling, and specifically avoid
+   overhead when PEBS isn't in use. [Sashiko]
+ - Leave behind a FIXME regarding the "disable guest PEBS if host is using
+   PEBS" code.  I still don't know for sure why that restriction is in place,
+   and I'm too scared too change it. :-)
+
+v2:
+ - https://lore.kernel.org/all/20260423150340.463896-1-seanjc@google.com
+ - "Load" the host value for the guest when an MSR should remain unchanged,
+    instead of omitting the MSR from the list entirely, as KVM may need to
+    _remove_ the MSR from the list. [Sashiko, Jim]
+ - Collect Jim's reviews. [Jim]
+ - Call out that the bug being fixed is theoretical at this point.
+ - Dropping PEBS_ENABLED from the lists save three MSR writes, not two, as
+   KVM performs an explicit WRMSR prior to VM-Entry to guarantee PEBS is
+   quiesced.
+
+v1: https://lore.kernel.org/all/20260414191425.2697918-1-seanjc@google.com
+
+
+Sean Christopherson (9):
+  perf/x86/intel: Ensure guest PEBS path doesn't set unwanted
+    PERF_GLOBAL_CTRL bits
+  perf/x86/intel: Don't write PEBS_ENABLED on host<=>guest xfers if CPU
+    has isolation
+  perf/x86/intel: Don't context switch DS_AREA (and PEBS config) if PEBS
+    is unused
+  perf/x86/intel: Make @data a mandatory param for
+    intel_guest_get_msrs()
+  perf/x86/intel: Invert names of intel_ctrl_{guest,host}_mask
+  perf/x86: KVM: Have perf define a dedicated struct for getting guest
+    PEBS data
+  perf/x86/intel: KVM: Handle cross-mapped PEBS PMCs entirely within KVM
+  KVM: VMX: Drop a redundant pmu->global_ctrl check when processing
+    pebs_enable
+  KVM: VMX: Only tell perf to enable PEBS counters for fully enabled
+    PMCs
+
+ arch/x86/events/core.c            |  5 +-
+ arch/x86/events/intel/core.c      | 92 +++++++++++++++++++------------
+ arch/x86/events/intel/lbr.c       |  2 +-
+ arch/x86/events/perf_event.h      |  7 ++-
+ arch/x86/include/asm/kvm_host.h   |  9 ---
+ arch/x86/include/asm/perf_event.h | 11 +++-
+ arch/x86/kvm/vmx/pmu_intel.c      | 28 +++++++---
+ arch/x86/kvm/vmx/vmx.c            | 10 ++--
+ arch/x86/kvm/vmx/vmx.h            | 15 ++++-
+ 9 files changed, 114 insertions(+), 65 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  locking/rt: Use raw_spin_lock_irqsave() in __rwbase_read_unlock()
+[PATCH 1/7] locking/rt: Use raw_spin_lock_irqsave() in __rwbase_read_unlock()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+__rwbase_read_unlock() uses raw_spin_lock_irq()/raw_spin_unlock_irq()
+which unconditionally disables and re-enables interrupts. When
+read_unlock() is called from hardirq context (e.g. after a successful
+read_trylock() in a timer callback), the raw_spin_unlock_irq()
+incorrectly re-enables interrupts within the hardirq handler.
+
+This causes lockdep warnings ('hardirqs_on_prepare' from hardirq
+context) and can lead to IRQ state corruption.
+
+Using read_trylock() in hardirq context on PREEMPT_RT is safe because
+it does not record the lock owner. The read_unlock() acquires the
+wait_lock which is hardirq safe. This change additionally allows
+rwlock_t during early boot.
+
+Switch to raw_spin_lock_irqsave()/raw_spin_unlock_irqrestore() to
+preserve the caller's IRQ state.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Sebastian Andrzej Siewior <bigeasy@linutronix.de>
+---
+ kernel/locking/rwbase_rt.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/xen: Fix Xen / GPC / PREEMPT_RT issues with rwlock_t
+[PATCH 0/7] KVM: x86/xen: Fix Xen / GPC / PREEMPT_RT issues with rwlock_t
+Author: David Woodhouse <dwmw2@infradead.org>
+
+This series fixes sleeping-in-hardirq bugs in KVM's Xen emulation on
+PREEMPT_RT, and then cleans up the now-unnecessary IRQ disabling in GPC
+lock usage throughout KVM.
+  
+The core issue is that kvm_xen_set_evtchn_fast() and the Xen timer
+callback are called from hardirq/atomic context, but on PREEMPT_RT the
+GPC rwlock_t is a sleeping lock.
+  
+Patch 1 fixes a related RT locking bug in the rwlock core where
+__rwbase_read_unlock() unconditionally re-enables IRQs regardless of
+the caller's saved state.
+  
+Patch 2 converts record_steal_time() to use gfn_to_pfn_cache, replacing
+the kvm_map_gfn()/kvm_unmap_gfn() interface.
+  
+Patch 3 is the main fix: it switches the hardirq/atomic GPC users to
+read_trylock() with -EWOULDBLOCK fallback. There is always a slow path
+for the case where the GPC is invalid and needs to be refreshed.
+  
+Patches 4-6 remove the now-unnecessary irqsave/irqrestore from all
+remaining GPC lock users, since no hardirq path holds the lock any more.
+This simplifies the locking throughout xen.c, x86.c, and pfncache.c.
+  
+Patch 7 subsumes Xen timer injection into kvm_xen_inject_pending_events()
+and calls it from vcpu_enter_guest(), reducing deferred timer delivery
+latency from ~10ms (scheduler tick dependent) to sub-microsecond.
+  
+Tested on bare metal (c7i.metal-48xl) with both non-RT and PREEMPT_RT
+kernels, including the xen_shinfo_test selftest and QEMU with Xen
+emulation (xen-version=0x40010,kernel-irqchip=split).
+
+Carsten Stollmaier (1):
+      KVM: x86: Use gfn_to_pfn_cache for record_steal_time
+
+David Woodhouse (6):
+      locking/rt: Use raw_spin_lock_irqsave() in __rwbase_read_unlock()
+      KVM: x86/xen: Use read_trylock() for GPC locks in hardirq/atomic paths
+      KVM: x86/xen: Remove unnecessary irqsave from GPC lock usage in xen.c
+      KVM: x86: Remove unnecessary irqsave from kvm_setup_guest_pvclock()
+      KVM: Remove unnecessary IRQ disabling from GPC lock in pfncache.c
+      KVM: x86/xen: Handle pending Xen timer events in vcpu_enter_guest()
+
+ arch/x86/include/asm/kvm_host.h |   2 +-
+ arch/x86/kvm/irq.c              |   4 --
+ arch/x86/kvm/x86.c              | 138 +++++++++++++++++++++-------------------
+ arch/x86/kvm/xen.c              | 117 +++++++++++++++++-----------------
+ arch/x86/kvm/xen.h              |  21 +-----
+ kernel/locking/rwbase_rt.c      |   5 +-
+ virt/kvm/pfncache.c             |  28 ++++----
+ 7 files changed, 152 insertions(+), 163 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Remove supports_cpuid_fault() helper
+[PATCH v2 1/3] KVM: x86: Remove supports_cpuid_fault() helper
+Author: Jim Mattson <jmattson@google.com>
+
+The function, supports_cpuid_fault(), tests specifically for guest support
+of Intel's CPUID faulting feature. It does not test for guest support of
+AMD's CPUID faulting feature.
+
+To avoid confusion, remove the helper.
+
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/cpuid.h | 5 -----
+ arch/x86/kvm/x86.c   | 2 +-
+ 2 files changed, 1 insertion(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Virtualize AMD CPUID faulting
+[PATCH v2 0/3] KVM: x86: Virtualize AMD CPUID faulting
+Author: Jim Mattson <jmattson@google.com>
+
+AMD's "disable CPUID in usermode" feature is analogous to Intel's "CPUID
+faulting" feature, but it is advertised and activated differently.  The AMD
+feature is advertised via CPUID.80000021H:EAX.CpuidUserDis[bit 17] and
+activated by setting HWCR.CpuidUserDis[bit 35].
+
+Add virtualization support for the AMD feature.
+
+v1 -> v2:
+* Remove supports_cpuid_fault() instead of renaming it [Sean]
+
+v1: https://lore.kernel.org/kvm/20260402223108.650572-1-jmattson@google.com/
+
+Jim Mattson (3):
+  KVM: x86: Remove supports_cpuid_fault() helper
+  KVM: x86: Virtualize AMD CPUID faulting
+  KVM: selftests: Update hwcr_msr_test for CPUID faulting bit
+
+ arch/x86/kvm/cpuid.c                          |  2 +-
+ arch/x86/kvm/cpuid.h                          | 11 ++++------
+ arch/x86/kvm/emulate.c                        | 14 +++++++------
+ arch/x86/kvm/x86.c                            | 21 ++++++++++++-------
+ .../testing/selftests/kvm/x86/hwcr_msr_test.c | 10 ++++-----
+ 5 files changed, 32 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: fix length and offset in tap skb for split packets
+[PATCH net 1/2] vsock/virtio: fix length and offset in tap skb for split packets
+Author: Stefano Garzarella <sgarzare@redhat.com>
+
+
+virtio_transport_build_skb() builds a new skb to be delivered to the
+vsockmon tap device. To build the new skb, it uses the original skb
+data length as payload length, but as the comment notes, the original
+packet stored in the skb may have been split in multiple packets, so we
+need to use the length in the header, which is correctly updated before
+the packet is delivered to the tap, and the offset for the data.
+
+This was also similar to what we did before commit 71dc9ec9ac7d
+("virtio/vsock: replace virtio_vsock_pkt with sk_buff") where we probably
+missed something during the skb conversion.
+
+Also update the comment above, which was left stale by the skb
+conversion and still mentioned a buffer pointer that no longer exists.
+
+Fixes: 71dc9ec9ac7d ("virtio/vsock: replace virtio_vsock_pkt with sk_buff")
+Signed-off-by: Stefano Garzarella <sgarzare@redhat.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: fix vsockmon tap skb construction
+[PATCH net 0/2] vsock/virtio: fix vsockmon tap skb construction
+Author: Stefano Garzarella <sgarzare@redhat.com>
+
+While reviewing the patch posted by Yiqi Sun [1] to fix an issue in
+virtio_transport_build_skb(), I discovered another issue related to
+the offset and length of the payload to be copied in the new skb.
+This was introduced when we did the skb conversion, and fixed by
+patch 1.
+
+Patch 2 fixes the issue found by Yiqi Sun in a different way: using
+iov_iter_kvec() to properly initialize all the iov_iter fields and
+removing the linear vs non-linear split like we alredy do in
+vhost-vsock.
+
+It could have been a single patch, but since there were two affected
+commits, I decided to keep the fixes separate.
+
+[1] https://lore.kernel.org/netdev/20260430071110.380509-1-sunyiqixm@gmail.com/
+
+Stefano Garzarella (2):
+  vsock/virtio: fix length and offset in tap skb for split packets
+  vsock/virtio: fix empty payload in tap skb for non-linear buffers
+
+ net/vmw_vsock/virtio_transport_common.c | 47 +++++++++----------------
+ 1 file changed, 16 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: decouple protnone helpers from CONFIG_NUMA_BALANCING
+[PATCH v2 01/14] mm: decouple protnone helpers from CONFIG_NUMA_BALANCING
+Author: Kiryl Shutsemau (Meta) <kas@kernel.org>
+
+pte_protnone() and pmd_protnone() detect present-but-inaccessible page
+table entries. This capability is useful beyond NUMA balancing -- for
+example, userfaultfd working set tracking uses protnone PTEs to track
+page access without unmapping pages.
+
+Introduce CONFIG_ARCH_HAS_PTE_PROTNONE to decouple the protnone PTE
+infrastructure from CONFIG_NUMA_BALANCING. The six architectures that
+support protnone PTEs (x86_64, arm64, powerpc, s390, riscv, loongarch)
+now select this option, and CONFIG_NUMA_BALANCING depends on it.
+
+No functional change -- the same set of architectures continues to have
+working protnone support, but the infrastructure is now available
+independently of NUMA balancing.
+
+Signed-off-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Acked-by: SeongJae Park <sj@kernel.org>
+Acked-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ arch/arm64/Kconfig                           |  1 +
+ arch/arm64/include/asm/pgtable.h             |  7 ++---
+ arch/loongarch/Kconfig                       |  1 +
+ arch/loongarch/include/asm/pgtable.h         |  4 +--
+ arch/powerpc/include/asm/book3s/64/pgtable.h |  8 ++---
+ arch/powerpc/platforms/Kconfig.cputype       |  1 +
+ arch/riscv/Kconfig                           |  1 +
+ arch/riscv/include/asm/pgtable.h             |  7 ++---
+ arch/s390/Kconfig                            |  1 +
+ arch/s390/include/asm/pgtable.h              |  4 +--
+ arch/x86/Kconfig                             |  1 +
+ arch/x86/include/asm/pgtable.h               |  8 ++---
+ include/linux/pgtable.h                      | 32 ++++++++++++++------
+ init/Kconfig                                 |  8 +++++
+ mm/debug_vm_pgtable.c                        |  4 +--
+ 15 files changed, 52 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  userfaultfd: working set tracking for VM guest memory
+[PATCH v2 00/14] userfaultfd: working set tracking for VM guest memory
+Author: Kiryl Shutsemau (Meta) <kas@kernel.org>
+
+This series adds userfaultfd support for tracking the working set of
+VM guest memory, so a VMM can identify cold pages and evict them to
+tiered or remote storage.
+
+v1: https://lore.kernel.org/all/20260427114607.4068647-1-kas@kernel.org/
+
+== Changes since v1 ==
+
+Review feedback from Mike Rapoport, SeongJae Park, and the sashiko AI
+review (https://sashiko.dev/#/patchset/20260427114607.4068647-1-kas@kernel.org).
+
+  Per-patch:
+
+  - 01/14 (decouple protnone): rephrased the !ARCH_HAS_PTE_PROTNONE
+    comment to keep the original pte_protnone() semantics description
+    (Mike Rapoport). Acked-by Mike Rapoport, SeongJae Park.
+  - 02/14 (rename uffd-wp PTE bit macros): Reviewed-by Mike Rapoport.
+  - 03/14 (rename uffd-wp PTE accessors): Reviewed-by Mike Rapoport.
+  - 04/14 (VM_UFFD_RWP VMA flag): __VMA_UFFD_FLAGS now includes
+    VMA_UFFD_RWP_BIT so RWP deregistration cleanly merges adjacent
+    non-uffd VMAs. The VM_COPY_ON_FORK note no longer singles out
+    VM_UFFD_WP (sashiko).
+  - 06/14 (preserve RWP marker): __copy_present_ptes() snapshots
+    pte_write() before the RWP-disarm pte_modify(), and the COW
+    wrprotect uses the snapshot. Without it a fork() without
+    UFFD_FEATURE_EVENT_FORK could leave the parent writable over a
+    folio shared with the child. hugetlb_install_folio() (the
+    pinned-fork hugetlb fallback) now uses userfaultfd_protected()
+    and applies PAGE_NONE on userfaultfd_rwp(vma), mirroring
+    copy_present_page() (sashiko).
+  - 08/14 (UFFDIO_REGISTER_MODE_RWP plumbing): MM_CP_TRY_CHANGE_WRITABLE
+    is set per-VMA inside the iteration loop, gated on
+    vma_wants_manual_pte_write_upgrade(). RWP register accepts
+    PROT_READ-only mappings, so the flat outer flag would have
+    tripped the WARN_ON_ONCE in maybe_change_pte_writable() on
+    resolve (sashiko).
+  - 10/14 (PAGE_IS_ACCESSED in PAGEMAP_SCAN): pagemap_scan_test_walk()
+    now returns -EINVAL when PM_SCAN_WP_MATCHING is set on a
+    VM_UFFD_RWP VMA, instead of silently skipping the range
+    (sashiko).
+  - 12/14 (UFFDIO_SET_MODE): added userfaultfd_features() helper
+    wrapping READ_ONCE(ctx->features); converted lockless readers
+    (userfaultfd_is_initialized, userfaultfd_wp_async_ctx,
+    userfaultfd_rwp_async_ctx, userfaultfd_wp_unpopulated, fdinfo).
+    Hot-path fault-handler reads stay plain since the SET_MODE drain
+    excludes them (sashiko).
+  - 13/14 (selftests): rwp-sync and rwp-async-toggle tests join the
+    fault-handler thread before reading the minor_faults counter, so
+    the last fault's increment is always visible. The async-toggle
+    test stops the handler between Phase 2 and Phase 3 so a
+    regression that erroneously delivers a sync fault in async mode
+    is no longer silently masked. rwp-fork-pin now requires
+    UFFD_FEATURE_EVENT_FORK (and runs a fork_event_consumer), so the
+    child genuinely inherits the marker; otherwise userfaultfd_reset_ctx()
+    would clear it and the test would pass for the wrong reason.
+    rwp-wp-exclusive now requires UFFD_FEATURE_WP_HUGETLBFS_SHMEM so
+    it skips cleanly on kernels without WP-marker support for
+    shmem/hugetlbfs. Tightened the GUP test's pipe write down to a
+    single byte. Stale "WP and RWP coexisting" comment removed
+    (sashiko).
+  - 14/14 (Documentation): VMM workflow rewritten to use a second
+    mapping of the same memfd for VMM-side I/O, so pwrite() does not
+    fault on the protnone-protected PTE. madvise(MADV_DONTNEED)
+    replaced with fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE)
+    -- DONTNEED only zaps PTEs and does not free shmem pages. Added
+    explicit UFFDIO_WAKE after fallocate() since neither PUNCH_HOLE
+    nor DONTNEED iterates ctx->fault_pending_wqh (sashiko).
+
+== Problem ==
+
+A VMM managing guest memory needs to:
+
+  1. detect which pages are still being touched (working-set
+     tracking);
+  2. safely evict cold pages to slower tiered or remote storage;
+  3. fetch them back on demand when accessed again.
+
+== Approach ==
+
+UFFDIO_REGISTER_MODE_RWP is a new userfaultfd registration mode, in
+parallel with the existing MODE_MISSING / MODE_WP / MODE_MINOR. It
+uses the same mechanism on every backing -- anon, shmem, hugetlbfs:
+
+  - PAGE_NONE on the PTE (the same primitive NUMA balancing uses)
+    makes the page inaccessible while keeping it resident;
+  - the uffd PTE bit (the one MODE_WP already owns) marks the entry
+    as "userfaultfd-tracked" so the protnone fault path can tell an
+    RWP fault apart from an mprotect(PROT_NONE) or NUMA hinting
+    fault.
+
+VM_UFFD_WP and VM_UFFD_RWP are mutually exclusive per VMA, so the
+same PTE bit safely carries both meanings depending on the
+registered VMA flag.
+
+In sync mode, the kernel delivers a UFFD_PAGEFAULT_FLAG_RWP message
+to the registered handler, and the handler resolves the fault with
+UFFDIO_RWPROTECT clearing MODE_RWP. In async mode
+(UFFD_FEATURE_RWP_ASYNC), the fault is auto-resolved in-place: the
+kernel restores the original PTE permissions and the faulting thread
+continues without a userfaultfd message ever being delivered.
+Userspace then learns which pages were touched by reading
+PAGE_IS_ACCESSED out of PAGEMAP_SCAN -- pages whose uffd bit is
+still set were not re-accessed since the last RWP cycle.
+
+UFFDIO_RWPROTECT is the protect/unprotect ioctl, mirroring
+UFFDIO_WRITEPROTECT.
+
+UFFDIO_SET_MODE flips RWP_ASYNC <-> sync at runtime under
+mmap_write_lock(), so a VMM can run in async mode for detection and
+switch to sync for race-free eviction without re-registering the
+userfaultfd.
+
+== Typical VMM workflow ==
+
+  /* arm */
+  UFFDIO_API(features = RWP | RWP_ASYNC)
+  UFFDIO_REGISTER(MODE_RWP)
+
+  /* detection cycle */
+  UFFDIO_RWPROTECT(range, RWP)
+  sleep(interval)
+  PAGEMAP_SCAN(!PAGE_IS_ACCESSED) -> cold pages
+
+  /* eviction */
+  UFFDIO_SET_MODE(disable = RWP_ASYNC)                  /* sync */
+  pwrite(cold) + fallocate(FALLOC_FL_PUNCH_HOLE, cold)  /* races trapped */
+  UFFDIO_SET_MODE(enable  = RWP_ASYNC)                  /* resume */
+
+== Series layout ==
+
+Patches 1 to 3 are preparatory:
+
+  1: decouple protnone helpers from CONFIG_NUMA_BALANCING.
+  2-3: rename _PAGE_BIT_UFFD_WP, pte_uffd_wp() and friends to drop
+       the _WP suffix, since the bit now carries WP and RWP meaning
+       depending on the VMA flag. The SCAN_PTE_UFFD enum's ftrace
+       output string is intentionally kept as "pte_uffd_wp" so
+       trace-based tooling does not silently break.
+
+Patches 4 to 7 add the in-kernel mechanism:
+
+  4: VM_UFFD_RWP VMA flag and CONFIG_USERFAULTFD_RWP.
+  5: MM_CP_UFFD_RWP change_protection() primitive (PAGE_NONE +
+     uffd bit, plus a RESOLVE counterpart).
+  6: marker preservation across swap, device-exclusive, migration,
+     fork, mremap, UFFDIO_MOVE, hugetlb copy, and mprotect().
+  7: handle VM_UFFD_RWP in khugepaged, rmap, and GUP.
+
+Patches 8 to 12 wire the userspace surface:
+
+   8: UFFDIO_REGISTER_MODE_RWP and UFFDIO_RWPROTECT plumbing.
+   9: RWP fault delivery and exposure of UFFDIO_REGISTER_MODE_RWP.
+  10: PAGE_IS_ACCESSED in PAGEMAP_SCAN.
+  11: UFFD_FEATURE_RWP_ASYNC for async fault resolution.
+  12: UFFDIO_SET_MODE for runtime sync/async toggle.
+
+Patches 13 and 14 are tests and documentation.
+
+Kiryl Shutsemau (Meta) (14):
+  mm: decouple protnone helpers from CONFIG_NUMA_BALANCING
+  mm: rename uffd-wp PTE bit macros to uffd
+  mm: rename uffd-wp PTE accessors to uffd
+  mm: add VM_UFFD_RWP VMA flag
+  mm: add MM_CP_UFFD_RWP change_protection() flag
+  mm: preserve RWP marker across PTE rewrites
+  mm: handle VM_UFFD_RWP in khugepaged, rmap, and GUP
+  userfaultfd: add UFFDIO_REGISTER_MODE_RWP and UFFDIO_RWPROTECT
+    plumbing
+  mm/userfaultfd: add RWP fault delivery and expose
+    UFFDIO_REGISTER_MODE_RWP
+  mm/pagemap: add PAGE_IS_ACCESSED for RWP tracking
+  userfaultfd: add UFFD_FEATURE_RWP_ASYNC for async fault resolution
+  userfaultfd: add UFFDIO_SET_MODE for runtime sync/async toggle
+  selftests/mm: add userfaultfd RWP tests
+  Documentation/userfaultfd: document RWP working set tracking
+
+ Documentation/admin-guide/mm/pagemap.rst     |  13 +-
+ Documentation/admin-guide/mm/userfaultfd.rst | 236 +++++-
+ Documentation/filesystems/proc.rst           |   1 +
+ arch/arm64/Kconfig                           |   1 +
+ arch/arm64/include/asm/pgtable-prot.h        |   8 +-
+ arch/arm64/include/asm/pgtable.h             |  47 +-
+ arch/loongarch/Kconfig                       |   1 +
+ arch/loongarch/include/asm/pgtable.h         |   4 +-
+ arch/powerpc/include/asm/book3s/64/pgtable.h |   8 +-
+ arch/powerpc/platforms/Kconfig.cputype       |   1 +
+ arch/riscv/Kconfig                           |   1 +
+ arch/riscv/include/asm/pgtable-bits.h        |  12 +-
+ arch/riscv/include/asm/pgtable.h             |  59 +-
+ arch/s390/Kconfig                            |   1 +
+ arch/s390/include/asm/hugetlb.h              |  12 +-
+ arch/s390/include/asm/pgtable.h              |   4 +-
+ arch/x86/Kconfig                             |   1 +
+ arch/x86/include/asm/pgtable.h               |  56 +-
+ arch/x86/include/asm/pgtable_types.h         |  16 +-
+ fs/proc/task_mmu.c                           | 108 ++-
+ fs/userfaultfd.c                             | 264 ++++++-
+ include/asm-generic/hugetlb.h                |  18 +-
+ include/asm-generic/pgtable_uffd.h           |  32 +-
+ include/linux/huge_mm.h                      |   7 +
+ include/linux/leafops.h                      |   4 +-
+ include/linux/mm.h                           |  46 +-
+ include/linux/mm_inline.h                    |   4 +-
+ include/linux/pgtable.h                      |  32 +-
+ include/linux/swapops.h                      |   4 +-
+ include/linux/userfaultfd_k.h                |  76 +-
+ include/trace/events/huge_memory.h           |   2 +-
+ include/trace/events/mmflags.h               |   7 +
+ include/uapi/linux/fs.h                      |   1 +
+ include/uapi/linux/userfaultfd.h             |  54 +-
+ init/Kconfig                                 |   8 +
+ mm/Kconfig                                   |   9 +
+ mm/debug_vm_pgtable.c                        |   4 +-
+ mm/huge_memory.c                             | 145 +++-
+ mm/hugetlb.c                                 | 146 +++-
+ mm/internal.h                                |   4 +-
+ mm/khugepaged.c                              |  38 +-
+ mm/memory.c                                  | 123 ++-
+ mm/migrate.c                                 |  20 +-
+ mm/migrate_device.c                          |   8 +-
+ mm/mprotect.c                                |  62 +-
+ mm/mremap.c                                  |  17 +-
+ mm/page_table_check.c                        |   8 +-
+ mm/rmap.c                                    |  18 +-
+ mm/swapfile.c                                |   9 +-
+ mm/userfaultfd.c                             | 113 ++-
+ tools/include/uapi/linux/fs.h                |   1 +
+ tools/testing/selftests/mm/uffd-unit-tests.c | 774 +++++++++++++++++++
+ 52 files changed, 2235 insertions(+), 413 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  tun/tap: add ptr_ring consume helper with netdev queue wakeup
+[PATCH net-next v11 1/4] tun/tap: add ptr_ring consume helper with netdev queue wakeup
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+Introduce tun_ring_consume() that wraps ptr_ring_consume() and calls
+__tun_wake_queue(). The latter wakes the stopped netdev subqueue once
+half of the ring capacity has been consumed, tracked via the new
+cons_cnt field in tun_file. As a safety net, the queue is also woken on
+the last consumed entry if it leaves the ring empty. The point is to
+allow the queue to be stopped when it gets full, which is required for
+traffic shaping - implemented by the following "avoid ptr_ring tail-drop
+when a qdisc is present".
+
+Some implementation details:
+- tun_ring_recv() replaces ptr_ring_consume() with tun_ring_consume()
+  to properly wake the queue on purge.
+- tun_queue_purge() also replaces ptr_ring_consume()
+  with tun_ring_consume().
+- __tun_detach() locks the tx_ring.consumer_lock to avoid races with
+  the consumer on the queue_index.
+- Reset cons_cnt in tun_attach() so the half-ring wake threshold is
+  valid for the new ring size after ptr_ring_resize().
+- The upcoming patch explains the pairing of the smp_mb() of
+  __tun_wake_queue().
+- tun_queue_resize() wakes all queues after resizing with the proper
+  tx_ring.consumer_lock and resets the cons_cnt to avoid a possible
+  stale queue.
+
+Without the corresponding queue stopping, this patch alone causes no
+regression for a tap setup sending to a qemu VM: 1.132 Mpps
+to 1.134 Mpps.
+
+Details: AMD Ryzen 5 5600X at 4.3 GHz, 3200 MHz RAM, isolated QEMU
+threads, pktgen sender; Avg over 50 runs @ 100,000,000 packets;
+SRSO and spectre v2 mitigations disabled.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ drivers/net/tun.c | 73 +++++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 64 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+[PATCH net-next v11 0/4] tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch series deals with tun/tap & vhost-net which drop incoming
+SKBs whenever their internal ptr_ring buffer is full. Instead, with this 
+patch series, the associated netdev queue is stopped - but only when a
+qdisc is attached. If no qdisc is present the existing behavior is
+preserved. The XDP transmit path is not affected. This patch series
+touches tun/tap and vhost-net, as they share common logic and must be
+updated together. Modifying only one of them would break the other.
+
+By applying proper backpressure, this change allows the connected qdisc to 
+operate correctly, as reported in [1], and significantly improves
+performance in real-world scenarios, as demonstrated in our paper [2]. For 
+example, we observed a 36% TCP throughput improvement for an OpenVPN 
+connection between Germany and the USA.
+
+Synthetic pktgen benchmarks indicate a slight regression, and packet
+loss is reduced to near zero. Pktgen benchmarks are provided per commit,
+with the final commit showing the overall performance.
+
+Thanks!
+
+[1] Link: https://unix.stackexchange.com/questions/762935/traffic-shaping-ineffective-on-tun-device
+[2] Link: https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+
+---
+Changelog:
+v11:
+- Renamed __ptr_ring_produce_peek() to __ptr_ring_check_produce()
+  (Sashiko)
+- Add return code -EINVAL to __ptr_ring_check_produce() which lets
+  tun_net_xmit() stop the queue only on -ENOSPC. (MST)
+- Resolve race on tfile->queue_index by locking tx_ring.consumer_lock
+  in __tun_detach(). (Sashiko)
+- Wake the queue in tun_queue_resize() to avoid possible stalls.
+- Other minor adjustments & reran the benchmarks.
+
+v10: https://lore.kernel.org/netdev/20260506141033.180450-1-simon.schippers@tu-dortmund.de/
+- Changed the term "Transmitted" to "Received" in the benchmarks,
+  as correctly pointed out by MST, and reran the benchmarks.
+
+Addressed the Sashiko AI review:
+- Avoid a data race on tfile->cons_cnt by always locking.
+- Correctly count the number of consumed packets for vhost-net.
+- Corrected a typo in the commit message of commit 3.
+- Added a missing barrier on the consumer side.
+--> The barriers now follow the "store buffering" principle.
+- No longer return NETDEV_TX_BUSY at all, because it is unsafe.
+--> Result: There are still a few drops with multiple senders, which
+            would be avoided by disabling LLTX.
+
+V9: https://lore.kernel.org/netdev/20260428123859.19578-1-simon.schippers@tu-dortmund.de/
+- Addressed minor nit by MST in patches 1 and 2.
+- Rebased patch 3 because of commit d748047
+  ("ptr_ring: disable KCSAN warnings").
+- Documented the pair of the smp_mb__after_atomic() in tun_net_xmit()
+  with tun_ring_consume().
+  --> It simply pairs with the test_and_clear_bit() inside of
+      netif_wake_subqueue().
+- Use 1 ptr_ring consumer spinlock instead of 2.
+- Ran pktgen benchmarks with pg_set SHARED for 50 iterations on
+  latest kernel
+  --> No significant performance difference noticed
+
+V8: https://lore.kernel.org/netdev/20260312130639.138988-1-simon.schippers@tu-dortmund.de/
+- Drop code changes in drivers/net/tap.c; The code there deals with
+  ipvtap/macvtap which are unrelated to the goal of this patch series
+  and I did not realize that before
+-> Greatly simplified logic, 4 instead of 9 commits
+-> No more duplicated logics and distinction in vhost required
+- Only wake after the queue stopped and half of the ring was consumed
+  as suggested by MST
+-> Performance improvements for TAP, but still slightly slower
+- Better benchmarking with pinned threads, XDP drop program for
+  tap+vhost-net and disabling CPU mitigations (and newer Ryzen 5 5600X
+  processor) as suggested by Jason Wang
+
+V7: https://lore.kernel.org/netdev/20260107210448.37851-1-simon.schippers@tu-dortmund.de/
+- Switch to an approach similar to veth (excluding the recently fixed 
+variant), as suggested by MST, with minor adjustments discussed in V6
+- Rename the cover-letter title
+- Add multithreaded pktgen and iperf3 benchmarks, as suggested by Jason 
+Wang
+- Rework __ptr_ring_consume_created_space() so it can also be used after 
+batched consume
+
+...
+
+---
+
+Simon Schippers (4):
+  tun/tap: add ptr_ring consume helper with netdev queue wakeup
+  vhost-net: wake queue of tun/tap after ptr_ring consume
+  ptr_ring: move free-space check into separate helper
+  tun/tap & vhost-net: avoid ptr_ring tail-drop when a qdisc is present
+
+ drivers/net/tun.c        | 121 +++++++++++++++++++++++++++++++++++----
+ drivers/vhost/net.c      |  21 +++++--
+ include/linux/if_tun.h   |   3 +
+ include/linux/ptr_ring.h |  20 ++++++-
+ 4 files changed, 146 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/kvm/vmx: Move IRQ/NMI dispatch from KVM into x86
+[PATCH v3 1/2] x86/kvm/vmx: Move IRQ/NMI dispatch from KVM into x86
+Author: Peter Zijlstra <peterz@infradead.org>
+
+
+Move the VMX interrupt dispatch magic into the x86 core code. This
+isolates KVM from the FRED/IDT decisions and reduces the amount of
+EXPORT_SYMBOL_FOR_KVM().
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Tested-by: "Verma, Vishal L" <vishal.l.verma@intel.com>
+---
+Changes since v2:
+ - one more IS_ENABLED(CONFIG_KVM_INTEL) (Yan Zhao)
+ - fixed idt_do_interrupt_irqoff() prototype (Binbin Wu)
+
+ arch/x86/entry/Makefile             |    2 -
+ arch/x86/entry/common.c             |   48 ++++++++++++++++++++++++++++++++++++
+ arch/x86/entry/entry.S              |   46 ++++++++++++++++++++++++++++++++++
+ arch/x86/entry/entry_64_fred.S      |    1 
+ arch/x86/include/asm/desc.h         |    4 +++
+ arch/x86/include/asm/desc_defs.h    |    2 -
+ arch/x86/include/asm/entry-common.h |    2 +
+ arch/x86/include/asm/fred.h         |    1 
+ arch/x86/kernel/idt.c               |   15 +++++++++++
+ arch/x86/kernel/nmi.c               |    1 
+ arch/x86/kvm/vmx/vmenter.S          |   46 ----------------------------------
+ arch/x86/kvm/vmx/vmx.c              |   20 ++-------------
+ 12 files changed, 120 insertions(+), 68 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add PCIe TPH support
+[PATCH v8 0/7] vfio/pci: Add PCIe TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+This patchset enables userspace control over PCIe TPH steering tags,
+motivated by the following considerations:
+
+1. Why userspace needs the capability to control steering tags:
+   When PCIe devices are fully owned by userspace workloads such as DPDK
+   and SPDK, only userspace has full knowledge of core binding policies
+   and traffic distribution strategies. Without this series, userspace
+   cannot enable TPH or configure steering tags, leaving built-in PCIe
+   performance optimizations unused in high-throughput polling I/O
+   scenarios.
+
+2. Why this interface must be implemented in VFIO:
+   VFIO is the standard, secure community solution for granting full
+   PCIe device ownership to userspace. Existing kernel TPH interfaces
+   are designed purely for in-kernel drivers. For user-owned devices,
+   VFIO provides the only isolated and correct path to expose per-device
+   TPH management.
+
+TPH supports both IV and DS modes. Since device-specific (DS) TPH mode
+introduces cross-VM isolation risks such as untrusted guests programming
+arbitrary steering tags to impact other domains, so a new module parameter
+`enable_unsafe_tph_ds_mode` is added. It defaults to off, and blocks all
+unsafe DS-mode TPH operations when disabled.
+
+To restrict abuse of SET_ST and prevent arbitrary steering tag programming
+from userspace, the interface only accepts explicit CPU ID, memory type
+and index inputs. The kernel resolves the corresponding steering tag
+internally before programming, limiting userspace to controlled,
+index-based configuration.
+
+Based on earlier RFC work by Wathsala Vithanage
+
+v8:
+- Make GET_ST op could retrieve CPU's steer tags for DS mode.
+  note: the original impl could for DS mode + No ST Table, the
+  backgroud is that we found one netcard defined ST table with DS
+  mode, but also need to config set ST by device-specific way.
+- Support verify index when SET_ST.
+- Fix Sashiko review comments:
+  1. Add fix pcie_tph_get_st_table_size for msi-x table commit
+  2. Add argsz validation for GET/SET_ST copy st
+  3. Verify mem-type when SET_ST with cpu=U32_MAX
+v7:
+- Address Bjorn's comment on [1/6] commit.
+- Don't report ds mode defaultly (enable_unsafe_tph_ds_mode=0)
+- Fix Sashiko review comments:
+  1. pcie_tph_get_st_table_loc()'s stub return 0
+  2. Tph ioctl argsz validation wrong use offsetofend
+  3. Disable TPH when device was taken-over/close to/by userspace
+  4. Serialize all TPH operations under vdev->igate to prevent hardware
+     control and bitfield races.
+  5. Check unused ioctl field to be zero.
+v6:
+- Address Alex's comment on [1/6] commit.
+- Fix Sashiko review comments:
+  Add tph_cap validation for pcie_tph_get_st_modes/st_table_loc.
+  Add argsz validation for each op cmd.
+  Move disable tph from ioctl-reset to register.
+  Verify reserved field for get/set ST op.
+  Fix ABI mismatch due to pointer arithmetic of get/st ST op.
+
+Chengwen Feng (7):
+  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+  PCI/TPH: Export pcie_tph_get_st_modes() for external use
+  PCI/TPH: Fix pcie_tph_get_st_table_size() for MSI-X table location
+  vfio/pci: Add PCIe TPH interface with capability query
+  vfio/pci: Add PCIe TPH enable/disable support
+  vfio/pci: Add PCIe TPH GET_ST interface
+  vfio/pci: Add PCIe TPH SET_ST interface
+
+ drivers/pci/tph.c                |  31 ++--
+ drivers/vfio/pci/vfio_pci.c      |  13 +-
+ drivers/vfio/pci/vfio_pci_core.c | 270 ++++++++++++++++++++++++++++++-
+ include/linux/pci-tph.h          |   7 +
+ include/linux/vfio_pci_core.h    |   3 +-
+ include/uapi/linux/vfio.h        | 133 +++++++++++++++
+ 6 files changed, 444 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+[PATCH v8 1/7] PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+pcie_tph_get_st_table_loc() incorrectly uses FIELD_GET(), which shifts the
+field value to bit 0. But the function is designed to return raw
+PCI_TPH_LOC_* values as defined in the function comment.
+
+This causes incorrect ST table location detection. Fix it by using bitwise
+AND with PCI_TPH_CAP_LOC_MASK to return the unshifted field value matching
+the function specification.
+
+This doesn't make a difference to mlx5_st_create(), the lone external
+caller, because it only checks for PCI_TPH_LOC_NONE (0), but will be needed
+for callers that check for PCI_TPH_LOC_CAP or PCI_TPH_LOC_MSIX.
+
+Fixes: d2e8a34876ce ("PCI/TPH: Add Steering Tag support")
+Cc: stable@vger.kernel.org
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Reviewed-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/tph.c | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Check guest memfd validity with flags
+[PATCH] KVM: selftests: Check guest memfd validity with flags
+Author: Bibo Mao <maobibo@loongson.cn>
+
+The type of guest_memfd in structure kvm_userspace_memory_region2
+is __u32, it is not correct to assign it with -1 and check whether
+it is smaller than 0. Here check flags with KVM_MEM_GUEST_MEMFD
+set.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Move some variable declaration to file paravirt.h
+[PATCH] LoongArch: KVM: Move some variable declaration to file paravirt.h
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Some variables relative with paravirt feature are declared in header file
+asm/qspinlock.h, however this file can be included only when option
+CONFIG_SMP is on. There is compiling warning if CONFIG_SMP is off since
+it is not declared.
+
+Move these variable declaration to header file asm/paravirt.h to avoid
+compiling warning.
+
+Fixes: c43dce6f13fb ("LoongArch: KVM: Make vcpu_is_preempted() as a macro rather than function")
+Reported-by: kernel test robot <lkp@intel.com>
+Closes: https://lore.kernel.org/oe-kbuild-all/202605061313.O8Hswm2b-lkp@intel.com/
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/include/asm/paravirt.h  | 4 ++++
+ arch/loongarch/include/asm/qspinlock.h | 5 +----
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From eed47e7e1 to 0e54e9153
+KVM mailing list update from eed47e7e1 to 0e54e9153
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
