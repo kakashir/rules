@@ -1,0 +1,2135 @@
+
+On /root/mail/repo:
+From bc484c874 to 8d2a05a08
+KVM mailing list update from bc484c874 to 8d2a05a08
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     27 amazon.co.uk
+     10 google.com
+      6 intel.com
+      4 rivosinc.com
+      3 linux.alibaba.com
+      3 amazon.com
+      1 loongson.cn
+      1 iscas.ac.cn
+      1 infradead.org
+      1 bytedance.com
+
+Top 15 contributors (Based on Email Body)
+
+     27  David Woodhouse <dwmw@amazon.co.uk>
+     10  Sean Christopherson <seanjc@google.com>
+      4  Rick Edgecombe <rick.p.edgecombe@intel.com>
+      4  Clément Léger <cleger@rivosinc.com>
+      3  Jack Allister <jalliste@amazon.com>
+      3  Bin Guo <guobin@linux.alibaba.com>
+      2  Yan Zhao <yan.y.zhao@intel.com>
+      1  Zishun Yi <vulab@iscas.ac.cn>
+      1  Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+      1  David Woodhouse <dwmw2@infradead.org>
+      1  Bibo Mao <maobibo@loongson.cn>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v4 16/30] KVM: x86: Restructure kvm_guest_time_update() for TSC upscaling
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Restructure kvm_guest_time_update() so that kernel_ns/host_tsc are
+always "now" when doing TSC catchup, then swap in the master clock
+reference values afterward for the hv_clock.
+
+This makes the TSC upscaling code considerably simpler: the catchup
+adjustment is computed as the delta between what the guest TSC *should*
+be at "now" and what it actually is, rather than mixing "now" and
+"master clock reference" timestamps.
+
+The seqcount loop now also contains the kvm_get_time_and_clockread()
+call (matching get_kvmclock's pattern), with the same WARN for
+unexpected failure.
+
+Based on a suggestion by Sean Christopherson.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 67 ++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 47 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/30] KVM: x86: Fold __get_kvmclock() into get_kvmclock()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+There is no need for the separate __get_kvmclock() helper; just inline
+its body into get_kvmclock() within the seqcount retry loop.
+
+No functional change.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 63 +++++++++++++++++++++-------------------------
+ 1 file changed, 28 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/30] KVM: x86/xen: Do not corrupt KVM clock in kvm_xen_shared_info_init()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The KVM clock is an interesting thing. It is defined as "nanoseconds
+since the guest was created", but in practice it runs at two *different*
+rates — or three different rates, if you count implementation bugs.
+
+Definition A is that it runs synchronously with the CLOCK_MONOTONIC_RAW
+of the host, with a delta of kvm->arch.kvmclock_offset.
+
+But that version doesn't actually get used in the common case, where the
+host has a reliable TSC and the guest TSCs are all running at the same
+rate and in sync with each other, and kvm->arch.use_master_clock is set.
+
+In that common case, definition B is used: There is a reference point in
+time at kvm->arch.master_kernel_ns (again a CLOCK_MONOTONIC_RAW time),
+and a corresponding host TSC value kvm->arch.master_cycle_now. This
+fixed point in time is converted to guest units (the time offset by
+kvmclock_offset and the TSC Value scaled and offset to be a guest TSC
+value) and advertised to the guest in the pvclock structure. While in
+this 'use_master_clock' mode, the fixed point in time never needs to be
+changed, and the clock runs precisely in time with the guest TSC, at the
+rate advertised in the pvclock structure.
+
+The third definition C is implemented in kvm_get_wall_clock_epoch() and
+__get_kvmclock(), using the master_cycle_now and master_kernel_ns fields
+but converting the *host* TSC cycles directly to a value in nanoseconds
+instead of scaling via the guest TSC.
+
+One might naïvely think that all three definitions are identical, since
+CLOCK_MONOTONIC_RAW is not skewed by NTP frequency corrections; all
+three are just the result of counting the host TSC at a known frequency,
+or the scaled guest TSC at a known precise fraction of the host's
+frequency. The problem is with arithmetic precision, and the way that
+frequency scaling is done in a division-free way by multiplying by a
+scale factor, then shifting right. In practice, all three ways of
+calculating the KVM clock will suffer a systemic drift from each other.
+
+Eventually, definition C should just be eliminated. Commit 451a707813ae
+("KVM: x86/xen: improve accuracy of Xen timers") worked around it for
+the specific case of Xen timers, which are defined in terms of the KVM
+clock and suffered from a continually increasing error in timer expiry
+times. That commit notes that get_kvmclock_ns() is non-trivial to fix
+and says "I'll come back to that", which remains true.
+
+Definitions A and B do need to coexist, the former to handle the case
+where the host or guest TSC is suboptimally configured. But KVM should
+be more careful about switching between them, and the discontinuity in
+guest time which could result.
+
+In particular, KVM_REQ_MASTERCLOCK_UPDATE will take a new snapshot of
+time as the reference in master_kernel_ns and master_cycle_now, yanking
+the guest's clock back to match definition A at that moment.
+
+When invoked from in 'use_master_clock' mode, kvm_update_masterclock()
+should probably *adjust* kvm->arch.kvmclock_offset to account for the
+drift, instead of yanking the clock back to definition A. But in the
+meantime there are a bunch of places where it just doesn't need to be
+invoked at all.
+
+To start with: there is no need to do such an update when a Xen guest
+populates the shared_info page. This seems to have been a hangover from
+the very first implementation of shared_info which automatically
+populated the vcpu_info structures at their default locations, but even
+then it should just have raised KVM_REQ_CLOCK_UPDATE on each vCPU
+instead of using KVM_REQ_MASTERCLOCK_UPDATE. And now that userspace is
+expected to explicitly set the vcpu_info even in its default locations,
+there's not even any need for that either.
+
+Fixes: 629b5348841a ("KVM: x86/xen: update wallclock region")
+Reviewed-by: Paul Durrant <paul@xen.org>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/30] UAPI: x86: Move pvclock-abi to UAPI for x86 platforms
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A subsequent commit will provide a new KVM interface for performing a
+fixup/correction of the KVM clock against the reference TSC. The
+KVM_[GS]ET_CLOCK_GUEST API requires a pvclock_vcpu_time_info, as such
+the caller must know about this definition.
+
+Move the definition to the UAPI folder so that it is exported to
+usermode and also change the type definitions to use the standard for
+UAPI exports.
+
+Signed-off-by: Jack Allister <jalliste@amazon.com>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ MAINTAINERS                                   |  4 +--
+ arch/x86/include/{ => uapi}/asm/pvclock-abi.h | 27 ++++++++++---------
+ 2 files changed, 17 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 22/30] KVM: x86: Allow KVM master clock mode when TSCs are offset from each other
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+There is no reason why the KVM clock cannot be in masterclock mode when
+the TSCs are not in sync, as long as they are at the same *frequency*.
+
+Running at a different frequency would lead to a systemic skew between
+the clock(s) as observed by different vCPUs due to arithmetic precision
+in the scaling. So that should indeed force the clock to be based on the
+host's CLOCK_MONOTONIC_RAW instead of being in masterclock mode where it
+is defined by the guest TSC.
+
+But when the vCPUs merely have a different TSC *offset*, that's not a
+problem. The offset is applied to that vCPU's kvmclock->tsc_timestamp
+field, and it all comes out in the wash.
+
+Track frequency matching separately from full TSC matching. Use
+frequency match for master clock eligibility, and full TSC match
+(including offset) only for PVCLOCK_TSC_STABLE_BIT, which tells the
+guest it is safe to skip cross-vCPU monotonicity enforcement.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/x86.c              | 27 +++++++++++++++++++++------
+ 2 files changed, 22 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/30] KVM: x86: Add KVM_VCPU_TSC_SCALE and fix the documentation on TSC migration
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The documentation on TSC migration using KVM_VCPU_TSC_OFFSET is woefully
+inadequate. It ignores TSC scaling, and ignores the fact that the host
+TSC may differ from one host to the next (and in fact because of the way
+the kernel calibrates it, it generally differs from one boot to the next
+even on the same hardware).
+
+Add KVM_VCPU_TSC_SCALE to extract the actual scale ratio and frac_bits,
+and attempt to document the process that userspace needs to follow to
+preserve the TSC across migration.
+
+Only enumerate KVM_VCPU_TSC_SCALE when kvm_caps.has_tsc_control is true,
+since the scaling ratio is only meaningful when hardware TSC scaling is
+supported.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 36 ++++++++++++++++++++++++-
+ arch/x86/include/uapi/asm/kvm.h         |  6 +++++
+ arch/x86/kvm/x86.c                      | 22 +++++++++++++++
+ 3 files changed, 63 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 19/30] KVM: x86: Improve synchronization in kvm_synchronize_tsc()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When synchronizing to an existing TSC (either by explicitly writing
+zero, or the legacy hack where the TSC is written within one second's
+worth of the previously written TSC), the last_tsc_write and
+last_tsc_nsec values were being misrecorded by __kvm_synchronize_tsc().
+The *unsynchronized* value of the TSC (perhaps even zero) was being
+recorded, along with the current time at which kvm_synchronize_tsc()
+was called. This could cause *subsequent* writes to fail to synchronize
+correctly.
+
+Fix that by resetting {data, ns} to the previous values before passing
+them to __kvm_synchronize_tsc() when synchronization is detected.
+Except in the case where the TSC is unstable and *has* to be synthesised
+from the host clock, in which case attempt to create a nsec/tsc pair
+which is on the correct line.
+
+Furthermore, there were *three* different TSC reads used for calculating
+the "current" time, all slightly different from each other. Fix that by
+using kvm_get_time_and_clockread() where possible and using the same
+host_tsc value in all cases.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/x86.c | 32 ++++++++++++++++++++++++++++----
+ 1 file changed, 28 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 24/30] KVM: x86: Avoid gratuitous global clock updates
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Eliminate three sources of unnecessary KVM_REQ_GLOBAL_CLOCK_UPDATE:
+
+1. kvm_write_system_time(): The global clock update was a workaround for
+   ever-drifting clocks based on the host's CLOCK_MONOTONIC subject to
+   NTP skew. On booting or resuming a guest, it just leads to running
+   kvm_guest_time_update() twice for each vCPU for no good reason. Use
+   KVM_REQ_CLOCK_UPDATE on the vCPU itself, and only when the clock is
+   being enabled, not disabled.
+
+2. kvm_arch_vcpu_load(): Use KVM_REQ_CLOCK_UPDATE instead of
+   KVM_REQ_GLOBAL_CLOCK_UPDATE. There is no need to update all vCPUs'
+   clocks when one vCPU is loaded.
+
+3. kvm_gen_kvmclock_update(): Skip the periodic global update entirely
+   when in master clock mode, since the clock is defined precisely by
+   the guest TSC and doesn't drift.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/x86.c | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 30/30] x86/xen: Obtain TSC frequency from CPUID if present
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The Xen CPUID leaf 3, sub-leaf 0, ECX provides the guest TSC frequency
+in kHz directly. Use it when available instead of reverse-calculating
+the frequency from the pvclock tsc_to_system_mul and tsc_shift values,
+which loses precision.
+
+This mirrors the equivalent change for KVM guests using the generic
+0x40000010 timing leaf.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c  |  3 +--
+ arch/x86/xen/time.c | 12 ++++++++++++
+ 2 files changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/30] KVM: x86: Add WARN and restructure get_kvmclock()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Add the same WARN_ON_ONCE for unexpected kvm_get_walltime_and_clockread()
+failure as in kvm_get_wall_clock_epoch().
+
+Move get/put_cpu inside the use_master_clock branch since they are only
+needed there (for RDTSC and get_cpu_tsc_khz() to be on the same CPU).
+
+Also simplify the use_master_clock condition: the open-coded
+CONSTANT_TSC || cpu_tsc_khz check is unnecessary since use_master_clock
+can only be true when the TSC is usable.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 24 +++++++++++++++---------
+ 1 file changed, 15 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 27/30] KVM: x86: Add KVM_VCPU_TSC_EFFECTIVE_FREQ attribute
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Add a read-only per-vCPU attribute that reports the effective TSC and
+APIC bus frequencies as seen by the guest, after hardware TSC scaling
+is applied.
+
+This allows userspace to populate CPUID leaf 0x40000010 (the "generic"
+timing information leaf used by FreeBSD, XNU, and VMware) with correct
+values, without KVM needing to modify guest CPUID at runtime.
+
+The effective TSC frequency differs from what userspace requested via
+KVM_SET_TSC_KHZ due to the granularity of hardware scaling and the
+host kernel's measurement of its own TSC frequency.
+
+The relationship between the attributes in KVM_VCPU_TSC_CTRL:
+
+  KVM_VCPU_TSC_OFFSET: the offset added to the scaled host TSC
+  KVM_VCPU_TSC_SCALE: the raw hardware scaling ratio and frac_bits,
+    for VMClock and precise arithmetic
+  KVM_VCPU_TSC_EFFECTIVE_FREQ: the resulting frequencies in kHz,
+    for populating CPUID leaves
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 33 +++++++++++++++++++++++++
+ arch/x86/include/uapi/asm/kvm.h         |  6 +++++
+ arch/x86/kvm/x86.c                      | 23 +++++++++++++++++
+ 3 files changed, 62 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/30] KVM: x86: Add KVM_[GS]ET_CLOCK_GUEST for accurate KVM clock migration
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+In the common case (where kvm->arch.use_master_clock is true), the KVM
+clock is defined as a simple arithmetic function of the guest TSC, based
+on a reference point stored in kvm->arch.master_kernel_ns and
+kvm->arch.master_cycle_now.
+
+The existing KVM_[GS]ET_CLOCK functionality does not allow for this
+relationship to be precisely saved and restored by userspace. All it can
+currently do is set the KVM clock at a given UTC reference time, which
+is necessarily imprecise.
+
+So on live update, the guest TSC can remain cycle accurate at precisely
+the same offset from the host TSC, but there is no way for userspace to
+restore the KVM clock accurately.
+
+Even on live migration to a new host, where the accuracy of the guest
+time-keeping is fundamentally limited by the accuracy of wallclock
+synchronization between the source and destination hosts, the clock jump
+experienced by the guest's TSC and its KVM clock should at least be
+*consistent*. Even when the guest TSC suffers a discontinuity, its KVM
+clock should still remain the *same* arithmetic function of the guest
+TSC, and not suffer an *additional* discontinuity.
+
+To allow for accurate migration of the KVM clock, add per-vCPU ioctls
+which save and restore the actual PV clock info in
+pvclock_vcpu_time_info.
+
+The restoration in KVM_SET_CLOCK_GUEST works by creating a new reference
+point in time just as kvm_update_masterclock() does, and calculating the
+corresponding guest TSC value. This guest TSC value is then passed
+through the user-provided pvclock structure to generate the *intended*
+KVM clock value at that point in time, and through the *actual* KVM
+clock calculation. Then kvm->arch.kvmclock_offset is adjusted to
+eliminate the difference.
+
+Where kvm->arch.use_master_clock is false (because the host TSC is
+unreliable, or the guest TSCs are configured strangely), the KVM clock
+is *not* defined as a function of the guest TSC so KVM_GET_CLOCK_GUEST
+returns an error. In this case, as documented, userspace shall use the
+legacy KVM_GET_CLOCK ioctl. The loss of precision is acceptable in this
+case since the clocks are imprecise in this mode anyway.
+
+On *restoration*, if kvm->arch.use_master_clock is false, an error is
+returned for similar reasons and userspace shall fall back to using
+KVM_SET_CLOCK. This does mean that, as documented, userspace needs to
+use *both* KVM_GET_CLOCK_GUEST and KVM_GET_CLOCK and send both results
+with the migration data (unless the intent is to refuse to resume on a
+host with bad TSC).
+
+Co-developed-by: David Woodhouse <dwmw@amazon.co.uk>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Signed-off-by: Jack Allister <jalliste@amazon.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+Cc: Dongli Zhang <dongli.zhang@oracle.com>
+---
+ Documentation/virt/kvm/api.rst |  37 ++++++++
+ arch/x86/kvm/x86.c             | 151 +++++++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h       |   3 +
+ 3 files changed, 191 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/30] KVM: x86: Avoid NTP frequency skew for KVM clock on 32-bit host
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Commit 53fafdbb8b21 ("KVM: x86: switch KVMCLOCK base to monotonic raw
+clock") did so only for 64-bit hosts, by capturing the boot offset from
+within the existing clocksource notifier update_pvclock_gtod().
+
+That notifier was added in commit 16e8d74d2da9 ("KVM: x86: notifier for
+clocksource changes") but only on x86_64, because its original purpose
+was just to disable the "master clock" mode which is only supported on
+x86_64.
+
+Now that the notifier is used for more than disabling master clock mode,
+enable it for the 32-bit build too so that get_kvmclock_base_ns() can be
+unaffected by NTP sync on 32-bit too.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/x86.c | 19 ++++++-------------
+ 1 file changed, 6 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 23/30] KVM: x86: Factor out kvm_use_master_clock()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Both kvm_track_tsc_matching() and pvclock_update_vm_gtod_copy() make a
+decision about whether the KVM clock should be in master clock mode.
+They used *different* criteria for the decision though. This isn't
+really a problem; it only has the potential to cause unnecessary
+invocations of KVM_REQ_MASTERCLOCK_UPDATE if the masterclock was
+disabled due to TSC going backwards, or the guest using the old MSR.
+But it isn't pretty.
+
+Factor the decision out to a single function. And document the
+historical reason why it's disabled for guests that use the old
+MSR_KVM_SYSTEM_TIME.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/x86.c | 33 ++++++++++++++++++++++++++-------
+ 1 file changed, 26 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 20/30] KVM: x86: Kill last_tsc_{nsec,write,offset} fields
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+These pointlessly duplicate the cur_tsc_{nsec,write,offset} values.
+The only place they were used was where the TSC is stable and a new
+vCPU is being synchronized to the previous setting, in which case the
+cur_tsc_* value is definitely identical.
+
+Rename last_tsc_khz and last_tsc_scaling_ratio to cur_tsc_khz and
+cur_tsc_scaling_ratio respectively, since they are properties of the
+current TSC generation.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/include/asm/kvm_host.h |  7 ++-----
+ arch/x86/kvm/x86.c              | 32 ++++++++++++++------------------
+ 2 files changed, 16 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 25/30] KVM: x86/xen: Prevent runstate times from becoming negative
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When kvm_xen_update_runstate() is invoked to set a vCPU's runstate, the
+time spent in the previous runstate is accounted. This is based on the
+delta between the current KVM clock time, and the previous value stored
+in vcpu->arch.xen.runstate_entry_time.
+
+If the KVM clock goes backwards, that delta will be negative. Or, since
+it's an unsigned 64-bit integer, very *large*. Linux guests deal with
+that particularly badly, reporting 100% steal time for ever more (well,
+for *centuries* at least, until the delta has been consumed).
+
+So when a negative delta is detected, just refrain from updating the
+runstates until the KVM clock catches up with runstate_entry_time again.
+
+Also clamp steal_ns to delta_ns to prevent steal time from exceeding
+the total elapsed time, and handle negative steal_ns (which can happen
+if run_delay goes backwards across a scheduler update).
+
+The userspace APIs for setting the runstate times do not allow them to
+be set past the current KVM clock, but userspace can still adjust the
+KVM clock *after* setting the runstate times, which would cause this
+situation to occur.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/xen.c | 19 ++++++++++++++-----
+ 1 file changed, 14 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 29/30] x86/kvm: Obtain TSC frequency from CPUID if present
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+In https://lore.kernel.org/all/1222881242.9381.17.camel@alok-dev1/
+a proposal was made for generic CPUID conventions across hypervisors.
+It was mostly shot down in flames, but the leaf at 0x40000010
+containing timing information didn't die.
+
+It's used by XNU and FreeBSD guests under all hypervisors to determine
+the TSC frequency, and also exposed by the EC2 Nitro hypervisor and
+VMware. Use it under KVM to obtain the TSC frequency more accurately,
+instead of reverse-calculating the frequency from the mul/shift values
+in the KVM clock.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_para.h      |  1 +
+ arch/x86/include/uapi/asm/kvm_para.h | 11 +++++++++++
+ arch/x86/kernel/kvm.c                | 10 ++++++++++
+ arch/x86/kernel/kvmclock.c           |  7 ++++++-
+ 4 files changed, 28 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/30] KVM: x86: Simplify and comment kvm_get_time_scale()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The kvm_get_time_scale() function was entirely opaque. Add comments
+explaining what it does: compute a fixed-point multiplier and shift for
+converting TSC ticks to nanoseconds via pvclock_scale_delta().
+
+Rename the local variables from the cryptic tps64/tps32/scaled64 to
+base_hz_u64/base32/scaled_hz_u64 to make the code self-documenting.
+The "tps32" name stood for "Ticks Per Second" but was misleading since
+it held the shifted base frequency, not a tick count.
+
+No functional change.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/x86.c | 55 +++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 40 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/30] KVM: selftests: Add KVM/PV clock selftest to prove timer correction
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A VM's KVM/PV clock has an inherent relationship to its TSC. When either
+the host system live-updates or the VM is live-migrated this pairing of
+the two clock sources should stay the same. In reality this is not the
+case without some correction taking place.
+
+The KVM_GET_CLOCK_GUEST/KVM_SET_CLOCK_GUEST ioctls can be used to
+perform a correction on the PVTI (PV time information) structure held by
+KVM to effectively fix up the kvmclock_offset prior to the guest VM
+resuming in either a live-update/migration scenario.
+
+This test proves that without the necessary fixup there is a perceived
+change in the guest TSC and KVM/PV clock relationship before and after a
+simulated LU/LM takes place, and that the correction eliminates it.
+
+The test:
+  1. Snapshots the PVTI at boot (PVTI0).
+  2. Induces a change in PVTI data (KVM_REQ_MASTERCLOCK_UPDATE).
+  3. Snapshots the PVTI after the change (PVTI1).
+  4. Requests correction via KVM_SET_CLOCK_GUEST using PVTI0.
+  5. Snapshots the PVTI after correction (PVTI2).
+
+Then samples the TSC at a single point in time and calculates the KVM
+clock using each PVTI snapshot. The corrected clock should match the
+boot clock to within ±1ns.
+
+The test enumerates multiple TSC frequencies from 1GHz to 5GHz at 500MHz
+steps, crossing the 32-bit boundary, to exercise the scaling path at
+various ratios. The sleep duration between snapshots is configurable via
+the -s/--sleep command line option.
+
+Co-developed-by: David Woodhouse <dwmw@amazon.co.uk>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Signed-off-by: Jack Allister <jalliste@amazon.com>
+Reviewed-by: Paul Durrant <paul@xen.org>
+Cc: Dongli Zhang <dongli.zhang@oracle.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/x86/pvclock_test.c  | 415 ++++++++++++++++++
+ 2 files changed, 416 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4] 00/30] Cleaning up the KVM clock mess
+Author: David Woodhouse <dwmw2@infradead.org>
+
+This is v4 of the series to clean up the KVM clock, addressing review
+feedback from Sean Christopherson and Paul Durrant on v3, rebased to
+the current kernel, and incorporating related work from Dongli Zhang.
+
+The KVM clock has historically suffered from three problems:
+
+ 1. Imprecision: get_kvmclock_ns() computed the clock from the *host*
+    TSC without applying guest TSC scaling, causing systemic drift from
+    the values the guest computes from its own TSC.
+
+ 2. Unnecessary discontinuities: gratuitous KVM_REQ_MASTERCLOCK_UPDATE
+    requests caused the master clock reference point to be re-snapshotted,
+    yanking the guest's clock due to arithmetic precision differences.
+
+ 3. No precise migration API: the existing KVM_[GS]ET_CLOCK only allows
+    setting the clock at a given UTC reference time, which is necessarily
+    imprecise. There was no way to preserve the exact arithmetic
+    relationship between guest TSC and KVM clock across live migration.
+
+This series addresses all three, and adds new APIs for precise clock
+migration and TSC frequency reporting.
+
+Changes since v3:
+ - Rebased to v7.1-rc2
+ - Split patch 09 (__get_kvmclock fix) into 6 incremental patches per
+   Sean's review
+ - Split patch 10 (TSC upscaling) into 2 patches per Sean's review
+ - Split patch 15 (offset TSCs) into frequency-match vs offset-match
+ - Addressed Sean's review: hw_tsc_hz overflow (u64), KVM_VCPU_TSC_SCALE
+   gated on has_tsc_control, pvclock_gtod_notifier unregister path,
+   kvm_get_time_scale() readability, and many more
+ - Incorporated Dongli Zhang's masterclock drift mitigation, reworked as
+   a proper deduplication of redundant updates via request clearing under
+   the tsc_write_lock
+ - Added KVM_VCPU_TSC_EFFECTIVE_FREQ attribute for userspace to populate
+   CPUID timing leaves without KVM modifying guest CPUID at runtime
+ - Removed runtime Xen TSC CPUID modification (was updating wrong leaf)
+ - Added guest-side patches to use CPUID 0x40000010 for TSC frequency
+   under both KVM and Xen
+ - Selftest covers clock correction at multiple TSC frequencies,
+   PVCLOCK_TSC_STABLE_BIT behaviour, and multi-vCPU offset scenarios
+ - Fixed RCU splat in KVM_GET_CLOCK_GUEST (needs srcu_read_lock)
+
+The series can be broadly grouped as:
+
+Patches 1-5: Core clock fixes and new KVM_[GS]ET_CLOCK_GUEST API
+Patches 6-8: TSC scaling prerequisites
+Patches 9-14: Fix get_kvmclock() precision (split per review)
+Patches 15-16: Fix kvm_guest_time_update() for TSC upscaling
+Patches 17-20: Code cleanup and simplification
+Patches 21-22: Allow master clock with offset TSCs
+Patches 23-24: Eliminate gratuitous clock updates
+Patch 25: Xen runstate negative time fix
+Patch 26: Deduplicate redundant masterclock updates
+Patches 27-28: TSC frequency reporting for CPUID
+Patches 29-30: Guest-side CPUID frequency consumption
+
+David Woodhouse (27):
+      KVM: x86/xen: Do not corrupt KVM clock in kvm_xen_shared_info_init()
+      KVM: x86: Improve accuracy of KVM clock when TSC scaling is in force
+      KVM: x86: Explicitly disable TSC scaling without CONSTANT_TSC
+      KVM: x86: Add KVM_VCPU_TSC_SCALE and fix the documentation on TSC migration
+      KVM: x86: Avoid NTP frequency skew for KVM clock on 32-bit host
+      KVM: x86: WARN if kvm_get_walltime_and_clockread() fails unexpectedly
+      KVM: x86: Fold __get_kvmclock() into get_kvmclock()
+      KVM: x86: Add WARN and restructure get_kvmclock()
+      KVM: x86: Use get_kvmclock_base_ns() as fallback in get_kvmclock()
+      KVM: x86: Fix KVM clock precision in get_kvmclock() with TSC scaling
+      KVM: x86: Use get_kvmclock() in kvm_get_wall_clock_epoch()
+      KVM: x86: Fix compute_guest_tsc() to handle negative time deltas
+      KVM: x86: Restructure kvm_guest_time_update() for TSC upscaling
+      KVM: x86: Simplify and comment kvm_get_time_scale()
+      KVM: x86: Remove implicit rdtsc() from kvm_compute_l1_tsc_offset()
+      KVM: x86: Improve synchronization in kvm_synchronize_tsc()
+      KVM: x86: Kill last_tsc_{nsec,write,offset} fields
+      KVM: x86: Replace nr_vcpus_matched_tsc count with all_vcpus_matched_tsc bool
+      KVM: x86: Allow KVM master clock mode when TSCs are offset from each other
+      KVM: x86: Factor out kvm_use_master_clock()
+      KVM: x86: Avoid gratuitous global clock updates
+      KVM: x86/xen: Prevent runstate times from becoming negative
+      KVM: x86: Avoid redundant masterclock updates from multiple vCPUs
+      KVM: x86: Add KVM_VCPU_TSC_EFFECTIVE_FREQ attribute
+      KVM: x86: Remove runtime Xen TSC frequency CPUID update
+      x86/kvm: Obtain TSC frequency from CPUID if present
+      x86/xen: Obtain TSC frequency from CPUID if present
+
+Jack Allister (3):
+      UAPI: x86: Move pvclock-abi to UAPI for x86 platforms
+      KVM: x86: Add KVM_[GS]ET_CLOCK_GUEST for accurate KVM clock migration
+      KVM: selftests: Add KVM/PV clock selftest to prove timer correction
+
+ Documentation/virt/kvm/api.rst                 |  37 ++
+ Documentation/virt/kvm/devices/vcpu.rst        |  69 ++-
+ MAINTAINERS                                    |   4 +-
+ arch/x86/include/asm/kvm_host.h                |  13 +-
+ arch/x86/include/asm/kvm_para.h                |   1 +
+ arch/x86/include/uapi/asm/kvm.h                |  12 +
+ arch/x86/include/uapi/asm/kvm_para.h           |  11 +
+ arch/x86/include/{ => uapi}/asm/pvclock-abi.h  |  27 +-
+ arch/x86/kernel/kvm.c                          |  10 +
+ arch/x86/kernel/kvmclock.c                     |   7 +-
+ arch/x86/kvm/cpuid.c                           |  16 -
+ arch/x86/kvm/svm/svm.c                         |   3 +-
+ arch/x86/kvm/vmx/vmx.c                         |   2 +-
+ arch/x86/kvm/x86.c                             | 735 ++++++++++++++++++-------
+ arch/x86/kvm/xen.c                             |  21 +-
+ arch/x86/kvm/xen.h                             |  13 -
+ arch/x86/xen/time.c                            |  12 +
+ include/uapi/linux/kvm.h                       |   3 +
+ tools/testing/selftests/kvm/Makefile.kvm       |   1 +
+ tools/testing/selftests/kvm/x86/pvclock_test.c | 415 ++++++++++++++
+ 20 files changed, 1157 insertions(+), 255 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 21/30] KVM: x86: Replace nr_vcpus_matched_tsc count with all_vcpus_matched_tsc bool
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Using a count and comparing with kvm->online_vcpus was always racy
+because a new vCPU could be created while kvm_track_tsc_matching() was
+running and comparing with kvm->online_vcpus. That variable is only
+atomic with respect to itself; kvm_arch_vcpu_create() runs before
+kvm->online_vcpus is incremented for the new vCPU.
+
+Replace the count with a boolean that is set in kvm_track_tsc_matching()
+after comparing the count, and cleared when a new TSC generation starts.
+The boolean is consumed by pvclock_update_vm_gtod_copy() under the
+tsc_write_lock, which serializes against __kvm_synchronize_tsc().
+
+Keep the count for now as it's still used in the trace event.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/x86.c              | 13 +++++++------
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 18/30] KVM: x86: Remove implicit rdtsc() from kvm_compute_l1_tsc_offset()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Let the callers pass the host TSC value in as an explicit parameter.
+This leaves some fairly obviously stupid code, which is using this
+function to compare the guest TSC at some *other* time, with the
+newly-minted TSC value from rdtsc(). Unless it's being used to measure
+*elapsed* time, that isn't very sensible.
+
+In this case, "obviously stupid" is an improvement over being
+non-obviously so.
+
+No functional change intended.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/x86.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/30] KVM: x86: Use get_kvmclock() in kvm_get_wall_clock_epoch()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Now that get_kvmclock() correctly handles TSC scaling and captures both
+wallclock and kvmclock from the same TSC reading,
+kvm_get_wall_clock_epoch()
+can simply call it instead of duplicating the pvclock computation.
+
+This eliminates the last instance of the "definition C" kvmclock
+calculation that computed nanoseconds directly from the host TSC
+without accounting for guest TSC scaling.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 58 +++++++---------------------------------------
+ 1 file changed, 8 insertions(+), 50 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/30] KVM: x86: Fix compute_guest_tsc() to handle negative time deltas
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The compute_guest_tsc() function computes the guest TSC at a given
+kernel_ns timestamp. When the master clock reference point
+(master_kernel_ns) is earlier than vcpu->arch.this_tsc_nsec, the delta
+is negative. Since pvclock_scale_delta() takes a u64, the negative
+value wraps to a huge positive number, producing a wildly wrong result.
+
+Change the return type to s64 and handle negative deltas explicitly by
+negating the delta, scaling it, and subtracting from this_tsc_write.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 22 ++++++++++++++++------
+ 1 file changed, 16 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/30] KVM: x86: Fix KVM clock precision in get_kvmclock() with TSC scaling
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When in master clock mode, the KVM clock is defined in terms of the
+guest TSC. But get_kvmclock() was computing it from the host TSC
+without applying TSC scaling, leading to a systemic drift from the
+values the guest computes from its own TSC.
+
+Store the VM's TSC scaling ratio in kvm_arch and precompute the
+guest-TSC-based mul/shift in pvclock_update_vm_gtod_copy(). Use these
+in get_kvmclock() to scale the host TSC delta to guest TSC before
+converting to nanoseconds.
+
+This avoids "definition C" of the KVM clock described in the
+earlier commit "KVM: x86/xen: Do not corrupt KVM clock in
+kvm_xen_shared_info_init()".
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  4 +++
+ arch/x86/kvm/x86.c              | 50 +++++++++++++++++++++++++++++----
+ 2 files changed, 49 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/30] KVM: x86: Use get_kvmclock_base_ns() as fallback in get_kvmclock()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+If kvm_get_walltime_and_clockread() fails unexpectedly (the WARN case),
+restart the seqcount loop rather than falling back to a raw rdtsc()
+which would set KVM_CLOCK_TSC_STABLE without KVM_CLOCK_REALTIME.
+
+That code path could never actually be reached in practice: on 64-bit
+hosts, use_master_clock can only be true when the clocksource is
+TSC-based, and on 32-bit hosts, use_master_clock is never set. But
+the fallback to raw rdtsc() was misleading and the resulting flags
+combination was inconsistent.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 28/30] KVM: x86: Remove runtime Xen TSC frequency CPUID update
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Remove the code in kvm_cpuid() that dynamically updates the Xen TSC
+info CPUID leaf at runtime. This code was updating the wrong sub-leaf
+anyway (0x40000x03/2 EAX is the *host* TSC frequency per the Xen ABI,
+not the guest frequency which belongs in 0x40000x03/0 ECX).
+
+Userspace now has all the information it needs to populate the Xen TSC
+info leaves (and the generic 0x40000010 timing leaf) at vCPU setup time:
+
+  - KVM_GET_CLOCK_GUEST returns the pvclock_vcpu_time_info structure
+    containing tsc_to_system_mul and tsc_shift (Xen leaf index 1)
+  - KVM_VCPU_TSC_EFFECTIVE_FREQ returns the effective TSC and bus
+    frequencies in kHz (Xen leaf index 2, and 0x40000010)
+  - KVM_VCPU_TSC_SCALE returns the raw hardware scaling ratio for
+    precise arithmetic (VMClock)
+
+This eliminates the last instance of KVM modifying guest CPUID entries
+at runtime for timing information.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/cpuid.c | 16 ----------------
+ arch/x86/kvm/xen.h   | 13 -------------
+ 2 files changed, 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/30] KVM: x86: Explicitly disable TSC scaling without CONSTANT_TSC
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+KVM does make an attempt to cope with non-constant TSC, and has
+notifiers to handle host TSC frequency changes. However, it *only*
+adjusts the KVM clock, and doesn't adjust TSC frequency scaling when
+the host changes.
+
+This is presumably because non-constant TSCs were fixed in hardware
+long before TSC scaling was implemented, so there should never be real
+CPUs which have TSC scaling but *not* CONSTANT_TSC.
+
+Such a combination could potentially happen in some odd L1 nesting
+environment, but it isn't worth trying to support it. Just make the
+dependency explicit.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Reviewed-by: Paul Durrant <paul@xen.org>
+---
+ arch/x86/kvm/svm/svm.c | 3 ++-
+ arch/x86/kvm/vmx/vmx.c | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/30] KVM: x86: Improve accuracy of KVM clock when TSC scaling is in force
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The kvm_guest_time_update() function scales the host TSC frequency to
+the guest's using kvm_scale_tsc() and the v->arch.l1_tsc_scaling_ratio
+scaling ratio previously calculated for that vCPU. Then calculates the
+scaling factors for the KVM clock itself based on that guest TSC
+frequency.
+
+However, it uses kHz as the unit when scaling, and then multiplies by
+1000 only at the end.
+
+With a host TSC frequency of 3000MHz and a guest set to 2500MHz, the
+result of kvm_scale_tsc() will actually come out at 2,499,999kHz. So
+the KVM clock advertised to the guest is based on a frequency of
+2,499,999,000 Hz.
+
+By using Hz as the unit from the beginning, the KVM clock would be based
+on a more accurate frequency of 2,499,999,999 Hz in this example.
+
+Use u64 for the hw_tsc_hz field since an unsigned int would overflow for
+TSC frequencies above 4GHz. Use div_u64() for the Xen CPUID leaf to
+play nice with 32-bit kernels.
+
+Fixes: 78db6a503796 ("KVM: x86: rewrite handling of scaled TSC for kvmclock")
+Reviewed-by: Paul Durrant <paul@xen.org>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/cpuid.c            |  2 +-
+ arch/x86/kvm/x86.c              | 17 +++++++++--------
+ 3 files changed, 11 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/30] KVM: x86: WARN if kvm_get_walltime_and_clockread() fails unexpectedly
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The master clock depends on the pvclock being based on TSC, so the only
+way kvm_get_walltime_and_clockread() can fail when use_master_clock is
+true is if the clocksource changed and use_master_clock is stale, in
+which case a seqcount retry should be pending.
+
+Add a WARN_ON_ONCE if the seqcount has not been invalidated, to catch
+any case where the failure is genuinely unexpected.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 26/30] KVM: x86: Avoid redundant masterclock updates from multiple vCPUs
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When a masterclock update is triggered (e.g. by the clocksource change
+notifier), KVM_REQ_MASTERCLOCK_UPDATE is set on all vCPUs. Without this
+fix, each vCPU independently processes the request and redundantly
+re-executes the entire pvclock_update_vm_gtod_copy() sequence, serialized
+only by tsc_write_lock. Each redundant re-snapshot of the master clock
+reference point introduces potential clock drift.
+
+Fix this by having __kvm_start_pvclock_update() check, after acquiring
+the lock, whether the requesting vCPU's KVM_REQ_MASTERCLOCK_UPDATE is
+still set. If another vCPU already did the update and cleared it, bail
+out. Otherwise, clear the request on all other vCPUs before proceeding.
+
+The caller in vcpu_enter_guest() now uses kvm_test_request() (non-clearing)
+since the clearing is done inside __kvm_start_pvclock_update() under the
+lock.
+
+Suggested-by: Dongli Zhang <dongli.zhang@oracle.com>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 56 ++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 44 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 5/5] selftests/riscv: add SSE test module
+Author: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+
+
+This module, once loaded, will execute a series of tests using the SSE
+framework. The provided script will check for any error reported by the
+test module.
+
+Add stress={0,1,2} modes so the same module can cover repeated handler
+entry, SBI calls from a handler, PMU activity and re-injection.  Also make
+the tests tolerate events that are already registered, and keep the
+attribute read buffer lifetime local to the SBI call.
+
+Signed-off-by: Clément Léger <cleger@rivosinc.com>
+Co-developed-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+Signed-off-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+---
+ MAINTAINERS                                   |   1 +
+ tools/testing/selftests/riscv/Makefile        |   2 +-
+ tools/testing/selftests/riscv/sse/Makefile    |   5 +
+ .../selftests/riscv/sse/module/Makefile       |  16 +
+ .../riscv/sse/module/riscv_sse_test.c         | 769 ++++++++++++++++++
+ .../selftests/riscv/sse/run_sse_test.sh       |  48 ++
+ 6 files changed, 840 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 4/5] perf: RISC-V: add support for SSE event
+Author: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+
+
+In order to use SSE within PMU drivers, register an SSE handler for the
+local PMU event. Reuse the existing overflow IRQ handler and pass
+appropriate pt_regs. Add a config option RISCV_PMU_SBI_SSE to select event
+delivery via SSE events.
+
+When the SSE path is used, also honor the return value from
+perf_event_overflow(). If perf core throttles or disables an event, do not
+immediately restart the overflowed counters from the SSE handler.
+
+Signed-off-by: Clément Léger <cleger@rivosinc.com>
+Co-developed-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+Signed-off-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+---
+ drivers/perf/Kconfig           | 10 +++++
+ drivers/perf/riscv_pmu.c       | 23 +++++++++++
+ drivers/perf/riscv_pmu_sbi.c   | 78 ++++++++++++++++++++++++++++++++-----
+ include/linux/perf/riscv_pmu.h |  5 +++
+ 4 files changed, 104 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/5] riscv: add support for SBI Supervisor Software Events extension
+Author: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+
+
+The SBI SSE extension allows the supervisor software to be notified by
+the SBI of specific events that are not maskable. The context switch is
+handled partially by the firmware which will save registers a6 and a7.
+When entering kernel we can rely on these 2 registers to setup the stack
+and save all the registers.
+
+Since SSE events can be delivered at any time to the kernel, including
+during exception handling, we need a way to locate the current_task for
+context tracking. On RISC-V, it is stored in scratch when in user space
+or tp when in kernel space (in which case SSCRATCH is zero). But at the
+beginning of exception handling, SSCRATCH is used to swap tp and
+check the origin of the exception. If interrupted at that point, then,
+there is no way to reliably know where is located the current
+task_struct. Even checking the interruption location won't work as SSE
+event can be nested on top of each other so the original interruption
+site might be lost at some point. In order to retrieve it reliably,
+store the current task in an additional __sse_entry_task per_cpu array.
+This array is then used to retrieve the current task based on the
+hart ID that is passed to the SSE event handler in a6.
+
+That being said, the way the current task struct is stored should
+probably be reworked to find a better reliable alternative.
+
+Since each event (and each CPU for local events) have their own
+context and can preempt each other, allocate a stack (and a shadow stack
+if needed) for each of them (and for each cpu for local events).
+
+The SSE handler runs as a synthetic handler episode, but completion must
+resume the context that was interrupted by the SSE event.  Preserve stvec
+and, when the hypervisor extension is present, hstatus across do_sse() so
+the handler episode does not leak trap-vector or virtualization state into
+the interrupted context.
+
+When completing the event, if we were coming from kernel with interrupts
+disabled, simply return there. If coming from userspace or kernel with
+interrupts enabled, simulate an interrupt exception by setting IE_SIE in
+CSR_IP to allow delivery of signals to user task. For instance this can
+happen when a RAS event has been generated by a user application and a
+SIGBUS has been sent to a task.
+
+Signed-off-by: Clément Léger <cleger@rivosinc.com>
+Co-developed-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+Signed-off-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+---
+ arch/riscv/include/asm/asm.h         |  14 +-
+ arch/riscv/include/asm/scs.h         |   7 +
+ arch/riscv/include/asm/sse.h         |  47 +++++++
+ arch/riscv/include/asm/switch_to.h   |  14 ++
+ arch/riscv/include/asm/thread_info.h |   1 +
+ arch/riscv/kernel/Makefile           |   1 +
+ arch/riscv/kernel/asm-offsets.c      |  14 ++
+ arch/riscv/kernel/sbi_sse.c          | 162 +++++++++++++++++++++++
+ arch/riscv/kernel/sbi_sse_entry.S    | 187 +++++++++++++++++++++++++++
+ 9 files changed, 444 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 1/5] riscv: add SBI SSE extension definitions
+Author: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+
+
+Add needed definitions for SBI Supervisor Software Events extension [1].
+This extension enables the SBI to inject events into supervisor software
+much like ARM SDEI.
+
+[1] https://lists.riscv.org/g/tech-prs/message/515
+
+Signed-off-by: Clément Léger <cleger@rivosinc.com>
+Co-developed-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+Signed-off-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+---
+ arch/riscv/include/asm/sbi.h | 61 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 0/5] riscv: add SBI Supervisor Software Events support
+Author: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+
+
+This series continues Clément's SBI Supervisor Software Events (SSE)
+Linux support. Most of the framework is still Clément's work; many
+thanks to him for bringing the series this far. Clément reached out and
+suggested that I could continue the upstream work, so I am picking up
+the series from here.
+
+SSE gives the SBI a firmware-to-S/HS-mode event delivery path that does
+not depend on ordinary S-mode interrupt delivery. This is useful for
+NMI-style platform events and for PMU overflow delivery through firmware.
+
+This respin mainly fixes two issues:
+
+  - KVM Context Corruption
+
+    An SSE can interrupt HS-mode code around guest execution, run a
+    synthetic SSE handler, and then complete back through firmware.  The
+    handler episode must be transparent to Linux-owned trap and
+    virtualization state.  This version folds the stvec and hstatus
+    preservation into the Linux SSE entry wrapper, rather than relying on
+    OpenSBI to keep extra hidden resume state. This follows the earlier
+    discussion [1].
+
+  - SSE Handler's SSTATUS Leakage
+
+    With CONFIG_RISCV_PMU_SBI_SSE, perf can use the local PMU overflow
+    SSE event instead of the ordinary PMU interrupt. This makes the PMU
+    overflow handler a real hot path for SSE: workloads such as
+    "perf top" can enter the SSE handler and completion paths at a high
+    rate. The previous code did not preserve the interrupted
+    sstatus.SIE/SPIE/SPP state separately from the synthetic handler
+    trap-return state, so high-frequency PMU-SSE delivery could quickly
+    expose the leakage. One observed failure mode was an "environment
+    call from U-mode" panic. This series addresses that by making the
+    SSE entry wrapper preserve the live sstatus state around the handler
+    before completing the event.
+
+The selftest has also been extended to cover the high-frequency PMU-SSE
+patterns that exposed these bugs.  The new stress modes exercise repeated
+handler entry and completion, SBI calls from a handler, PMU stop/start
+activity, and re-injection.
+
+How to test:
+
+  Build a kernel with at least:
+
+    CONFIG_RISCV_SBI_SSE=y
+    CONFIG_RISCV_PMU_SBI=y
+    CONFIG_RISCV_PMU_SBI_SSE=y
+
+  Build the selftest module against that kernel and run the smoke test:
+
+    ./run_sse_test.sh
+
+  Then run the stress layers.  Use stress=1 to run them after the smoke
+  test, or stress=2 to run only the stress layers:
+
+    ./run_sse_test.sh stress={0,1,2}
+
+Known limitations and follow-up work:
+
+SSE is a relatively large extension which builds synthetic supervisor
+contexts and then resumes the interrupted context through firmware. This
+series fixes the issues found so far in that entry/completion path, but I
+think it still needs more testing and review. There may still be corner
+cases in the constructed handler context or in the state restored after
+completion that this series does not cover yet.
+
+The next planned area is virtualization support. Follow-up work is
+expected to distinguish host and guest PMU-SSE samples, and to support
+delivering SSE events to guests, i.e. the KVM-SSE work from earlier
+revisions.
+
+[1] https://lore.kernel.org/r/9290f53d-3545-4299-9781-c1c558f71158@rivosinc.com
+
+---
+
+Changes in v9:
+  - Picked up Clément's v8 series and rebased it onto the current RISC-V
+    for-next branch.
+  - Fixed KVM Context Corruption by keeping stvec and hstatus stable across
+    the synthetic SSE handler episode.
+  - Fixed SSE Handler's SSTATUS Leakage, where interrupted
+    sstatus.SIE/SPIE/SPP state could be confused with the handler
+    trap-return state under high-frequency PMU-SSE delivery.
+  - Extended the SSE selftest with stress={0,1,2} modes that cover repeated
+    handler entry, SBI calls, PMU activity and re-injection, and fixed event
+    registration and attribute-buffer lifetime corner cases.
+  - Updated MAINTAINERS for the RISC-V SSE driver.
+
+Previous versions:
+  v8:
+    https://lore.kernel.org/r/20251105082639.342973-1-cleger@rivosinc.com
+
+Clément Léger (5):
+  riscv: add SBI SSE extension definitions
+  riscv: add support for SBI Supervisor Software Events extension
+  drivers: firmware: add riscv SSE support
+  perf: RISC-V: add support for SSE event
+  selftests/riscv: add SSE test module
+
+ MAINTAINERS                                   |  17 +
+ arch/riscv/include/asm/asm.h                  |  14 +-
+ arch/riscv/include/asm/sbi.h                  |  61 ++
+ arch/riscv/include/asm/scs.h                  |   7 +
+ arch/riscv/include/asm/sse.h                  |  47 ++
+ arch/riscv/include/asm/switch_to.h            |  14 +
+ arch/riscv/include/asm/thread_info.h          |   1 +
+ arch/riscv/kernel/Makefile                    |   1 +
+ arch/riscv/kernel/asm-offsets.c               |  14 +
+ arch/riscv/kernel/sbi_sse.c                   | 162 ++++
+ arch/riscv/kernel/sbi_sse_entry.S             | 187 +++++
+ drivers/firmware/Kconfig                      |   1 +
+ drivers/firmware/Makefile                     |   1 +
+ drivers/firmware/riscv/Kconfig                |  15 +
+ drivers/firmware/riscv/Makefile               |   3 +
+ drivers/firmware/riscv/riscv_sbi_sse.c        | 694 ++++++++++++++++
+ drivers/perf/Kconfig                          |  10 +
+ drivers/perf/riscv_pmu.c                      |  23 +
+ drivers/perf/riscv_pmu_sbi.c                  |  71 +-
+ include/linux/perf/riscv_pmu.h                |   5 +
+ include/linux/riscv_sbi_sse.h                 |  57 ++
+ tools/testing/selftests/riscv/Makefile        |   2 +-
+ tools/testing/selftests/riscv/sse/Makefile    |   5 +
+ .../selftests/riscv/sse/module/Makefile       |  16 +
+ .../riscv/sse/module/riscv_sse_test.c         | 769 ++++++++++++++++++
+ .../selftests/riscv/sse/run_sse_test.sh       |  48 ++
+ 26 files changed, 2231 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] riscv: KVM: Fix missing TLB flush on HENVCFG.PMM updates
+Author: Zishun Yi <vulab@iscas.ac.cn>
+
+According to the RISC-V Privileged ISA specification, if henvcfg.PMM is
+changed from or to a value where (XLEN-PMLEN) is less than the GPA width
+supported by the hgatp translation mode of that guest, hypervisors must
+execute an HFENCE.GVMA with rs1=x0.
+
+Currently, when a guest dynamically changes pointer masking mode via the
+SBI FWFT extension, kvm_sbi_fwft_set_pointer_masking_pmlen() directly
+modifies the hardware CSR_HENVCFG from the non-one-reg-access path
+without issuing the required TLB invalidation
+
+Fix this by adding an unconditional HFENCE.GVMA after the CSR write.
+
+This vulnerability was discovered and reported by my SpecHunter, an
+AI-driven architecture specification analysis tool.
+
+Link: https://github.com/yizishun/rv-isa-sec/blob/master/output/riscv-isa-manual/pr-2494/linux.txt
+Fixes: 48d67106f4a7 ("RISC-V: KVM: Implement ONE_REG interface for SBI FWFT state")
+Assisted-by: DeepSeek:DeepSeek-V4-Pro
+Signed-off-by: Zishun Yi <vulab@iscas.ac.cn>
+---
+ arch/riscv/kvm/vcpu_sbi_fwft.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 15/15] KVM: TDX: Move external page table freeing to TDX code
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Move the freeing of external page tables into the reclaim operation that
+lives in TDX code.
+
+The TDP MMU supports traversing the TDP without holding locks. Page tables
+need to be freed via RCU to prevent walking one that gets freed.
+
+While none of these lockless walk operations actually happen for the mirror
+page table, the TDP MMU nonetheless frees the mirror page table in the same
+way, and (because it's a handy place to plug it in) the external page table
+as well.
+
+However, the external page table definitely can't be walked once the page
+table pages are reclaimed from the TDX module. The TDX module releases the
+page for the host VMM to use, so this RCU-time free is unnecessary for the
+external page table.
+
+So move the free_page() call to TDX code. Create an
+tdp_mmu_free_unused_sp() to allow for freeing external page tables that
+have never left the TDP MMU code (i.e. don't need freed in a special way).
+
+Link: https://lore.kernel.org/kvm/aYpjNrtGmogNzqwT@google.com/
+Not-yet-Signed-off-by: Sean Christopherson <seanjc@google.com>
+[Based on a diff by Sean, added log]
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Fixed typos in the patch log. (Yan, Kai)
+- Still kept "Not-yet-Signed-off-by" tag. Sean, please change it to SoB if
+  the patch looks good to you.
+- Updated the code comment in tdx_sept_free_private_spt(): invoking
+  free_page() to free S-EPT page in tdx_sept_free_private_spt() is only
+  because RCU-time free is unnecessary, not because it can't be performed
+  from RCU callbacks. (Yan)
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 16 +++++++++++-----
+ arch/x86/kvm/vmx/tdx.c     | 11 ++++++++++-
+ 2 files changed, 21 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 14/15] KVM: x86: Move error handling inside free_external_spt()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Move the logic for TDX's specific need to leak pages when reclaim
+fails inside the free_external_spt() op, so this can be done in TDX
+specific code and not the generic MMU.
+
+Do this by passing the "sp" in instead of the external page table pointer.
+This way TDX code can set sp->external_spt to NULL. Since the error is now
+handled internally in TDX code (by triggering KVM_BUG_ON() or
+TDX_BUG_ON_3(), which warn and stop the VM on any error), change the op to
+return void. This way it also operates like a normal free in that success
+is guaranteed from the caller's perspective.
+
+Opportunistically, drop the unused level and gfn args while adjusting the
+sp arg.
+
+[ Rick: Re-wrote log and massaged op name ]
+[ Yan: Updated patch log/function comment, dropped unused param in op ]
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Fixed typo in the patch log. (Binbin)
+- Dropped unused param gfn. (Binbin)
+- Mentioned that failure is not handled silently in the patch log. (Binbin)
+- Added expected lock and valid scenarios in function comment of
+  tdx_sept_free_private_spt(). (Yan/Rick)
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  2 +-
+ arch/x86/include/asm/kvm_host.h    |  3 +--
+ arch/x86/kvm/mmu/tdp_mmu.c         | 13 ++-----------
+ arch/x86/kvm/vmx/tdx.c             | 28 ++++++++++++++--------------
+ 4 files changed, 18 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 13/15] KVM: TDX: Rename tdx_sept_remove_private_spte() to show it's for leaf SPTEs
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+Rename tdx_sept_remove_private_spte() to tdx_sept_remove_leaf_spte() to
+clearly show that this function is for removal of leaf SPTEs.
+
+No functional change intended.
+
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- New patch.
+---
+ arch/x86/kvm/vmx/tdx.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 12/15] KVM: TDX: Drop kvm_x86_ops.remove_external_spte()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Drop kvm_x86_ops.remove_external_spte(), and instead handle the removal of
+leaf SPTEs in the S-EPT (a.k.a. external page table) in
+kvm_x86_ops.set_external_spte(). This will also allow extending
+tdx_sept_set_private_spte() to support splitting a huge S-EPT entry without
+needing yet another kvm_x86_ops hook.
+
+Now all changes for removing leaf mirror SPTEs are propagated through
+kvm_x86_ops.set_external_spte().
+- When removing leaf mirror SPTEs under shared mmu_lock (though currently
+  no path can trigger this scenario and TDX does not support this
+  scenario), tdx_sept_remove_private_spte() may produce a warning due to
+  lockdep_assert_held_write() or may return -EIO and trigger TDX_BUG_ON()
+  due to concurrent BLOCK, TRACK, REMOVE.
+- When removing leaf mirror SPTEs under exclusive mmu_lock, all errors are
+  unexpected. If any error occurs in this scenario,
+  tdx_sept_remove_private_spte() will return -EIO and trigger KVM_BUG_ON().
+  A redundant KVM_BUG_ON() call will also be triggered in TDP MMU core in
+  handle_changed_spte(), which is benign (the WARN will fire if and only if
+  the VM isn't already bugged).
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Added expected lock and valid scenarios in function comment of
+  tdx_sept_set_private_spte(). (Yan/Rick)
+- Updated patch title (was "Handle removal of leaf SPTEs in
+  .set_private_spte()"), since atomic zaps of leaf SPTEs are already
+  handled in kvm_x86_ops.set_external_spte() before this patch. (Yan).
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  1 -
+ arch/x86/include/asm/kvm_host.h    |  3 ---
+ arch/x86/kvm/mmu/tdp_mmu.c         | 37 +++-------------------------
+ arch/x86/kvm/vmx/tdx.c             | 39 +++++++++++++++++++++---------
+ 4 files changed, 31 insertions(+), 49 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 11/15] KVM: TDX: Hoist tdx_sept_remove_private_spte() above set_private_spte()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Arrange tdx_sept_remove_private_spte() (and its tdx_track() helper) to be
+above tdx_sept_set_private_spte() in anticipation of routing all S-EPT
+writes (with the exception of reclaiming non-leaf pages) through the "set"
+API.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+-Made the patch log description more generic to match the diff. (Kai, Rick)
+-Kept tdx_sept_free_private_spt() below tdx_sept_set_private_spte(). (Yan)
+---
+ arch/x86/kvm/vmx/tdx.c | 80 +++++++++++++++++++++---------------------
+ 1 file changed, 40 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 10/15] KVM: x86/mmu: Drop KVM_BUG_ON() on shared lock to zap child external PTEs
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Drop the KVM_BUG_ON() in the KVM MMU core before zapping child external
+PTEs, since requiring zapping PTEs to be protected by exclusive mmu_lock is
+TDX's specific requirement.
+
+No need to plumb the shared/exclusive info into the remove_external_spte()
+op or move the KVM_BUG_ON() to TDX, because
+- There's already an assertion of exclusive mmu_lock protection in TDX.
+- The KVM_BUG_ON() is a bit redundant given that if there's any bug causing
+  zapping of leaf PTEs in S-EPT under shared mmu_lock, SEAMCALL failures
+  due to contention would result in TDX_BUG_ON() in TDX.
+
+Link: https://lore.kernel.org/kvm/aYUarHf3KEwHGuJe@google.com/
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Updated commit log and title. (Yan)
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 09/15] KVM: x86/tdp_mmu: Centrally propagate to-present/atomic zap updates to external PTEs
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Move propagation of to-present changes and atomic zap changes to external
+PTEs from function __tdp_mmu_set_spte_atomic() to function
+__handle_changed_spte(), which centrally handles changes of SPTEs.
+
+When setting a PTE to present in the mirror page tables, the update needs
+to be propagated to the external page tables (in TDX parlance the S-EPT).
+Today this is handled by special mirror page tables branching in
+__tdp_mmu_set_spte_atomic(), which is the only place where present PTEs are
+set for TDX.
+
+This keeps things running, but is a bit hacked on. The hook for setting
+present leaf PTEs is added only where TDX happens to need it. For example,
+TDX does not support any of the operations that use the non-atomic variant,
+tdp_mmu_set_spte() to set present PTEs. Since the hook is missing there, it
+is very hard to understand the code from a non-TDX lens. If the reader
+doesn't know the TDX specifics it could look like the external update is
+missing.
+
+In addition to being confusing, it also litters the TDP MMU with "external"
+update callbacks. This is especially unfortunate because there is already a
+central place to react to TDP updates, handle_changed_spte().
+
+Begin the process of moving towards a model where all mirror page table
+updates are forwarded to TDX code where the TDX-specific logic can live
+with a more proper separation of concerns. Do this by adding a helper
+__handle_changed_spte() and teaching it how to return error codes, such
+that it can propagate the failures that may come from TDX external page
+table updates. Make the original handle_changed_spte() a no-fail version of
+__handle_changed_spte(), so it handles no-fail changes which are under
+exclusive mmu_lock or under the no-fail path handle_removed_pt(),
+triggering KVM_BUG_ON() on error returns.
+
+Instead of having __tdp_mmu_set_spte_atomic() do the frozen mirror SPTE
+dance and trigger propagation to external PTEs, make
+__tdp_mmu_set_spte_atomic() a simple helper of try_cmpxchg64() and hoist
+the frozen mirror SPTE dance up a level to tdp_mmu_set_spte_atomic(). Then,
+the propagation of changes to present to the external PTEs can be
+centralized to __handle_changed_spte(). Aging external SPTEs is not yet
+supported for the mirror page table, so just warn on mirror usage in
+kvm_tdp_mmu_age_spte() and invoke __tdp_mmu_set_spte_atomic() directly
+without frozen dance. No need to warn on installing FROZEN_SPTE as a
+long-term value in kvm_tdp_mmu_age_spte() since removing accessed bit is
+mutually exclusive with installing FROZEN_SPTE (FROZEN_SPTE is with
+accessed bit in all x86 platforms).
+
+Since tdp_mmu_set_spte_atomic() can also be invoked to atomically zap SPTEs
+(though there's no path to trigger atomic zap on the mirror page table up
+to now), also leverage set_external_spte() op to propagate the atomic zaps
+when tdp_mmu_set_spte_atomic() zaps leaf SPTEs directly. (When
+tdp_mmu_set_spte_atomic() zaps a non-leaf SPTE, zaps of the child leaf
+SPTEs are propagated via the remove_external_spte() op).
+
+Note: tdp_mmu_set_spte_atomic() invokes __handle_changed_spte() to handle
+changes to new_spte while the mirror SPTE is frozen, so
+(1) the update of the external PTEs and statistics, or
+(2) the update of child mirror SPTEs, child external PTEs and corresponding
+    statistics,
+now occur before the mirror SPTE is actually set to new_spte.
+(1) is ok since if it fails, the mirror SPTE will be restored to its
+original value. (2) is also ok since handle_removed_pt() is no-fail.
+
+Link: https://lore.kernel.org/lkml/aYYn0nf2cayYu8e7@google.com/
+Not-yet-Signed-off-by: Sean Christopherson <seanjc@google.com>
+[Rick: Based on a diff by Sean Chrisopherson]
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+[Yan: added atomic zap case ]
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Updated comments and patch log (Yan, Binbin).
+- Split the "KVM: x86/mmu: Plumb "sp" _pointer_ into the TDP MMU's
+  handle_changed_spte()" out (which was in Sean's original series but
+  had SPTE instead of "sp" in patch title). (Yan)
+- Also invoke set_external_spte() op to propagate changes for atomic zap of
+  leaf SPTEs. (Yan).
+- Kept the "Not-yet-Signed-off-by" in v1
+  https://lore.kernel.org/all/20260327201421.2824383-8-rick.p.edgecombe@intel.com.
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 124 +++++++++++++++++++++++--------------
+ 1 file changed, 79 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 08/15] KVM: x86/mmu: Plumb "sp" _pointer_ into the TDP MMU's handle_changed_spte()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Plumb the "sp" pointer into handle_changed_spte() to allow checking of
+is_mirror_sp(sp) in handle_changed_spte() in the next patch. This is a
+preparation to consolidate all S-EPT updates into a single kvm_x86_ops
+hook.
+
+[Yan: Remove unused "as_id" param in tdp_mmu_set_spte() ]
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+-Split out and added back this patch.
+ (The patch was in Sean's original series, and had "SPTE" instead of "sp"
+ in title). (Yan)
+- Remove unused "as_id" param in tdp_mmu_set_spte(). (Yan).
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 35 ++++++++++++++++++-----------------
+ 1 file changed, 18 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 07/15] KVM: x86/tdp_mmu: Morph !is_frozen_spte() check into a KVM_MMU_WARN_ON()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Remove the conditional logic for handling the setting of mirror page table
+to frozen in __tdp_mmu_set_spte_atomic() and add it as a warning for both
+mirror and direct cases.
+
+The mirror page table needs to propagate PTE changes to the external page
+table. This presents a problem for atomic updates which can't update both
+page tables at once. So a special value, FROZEN_SPTE, is used as a
+temporary state during these updates to prevent concurrent operations on
+the PTE. If the TDP MMU tried to install FROZEN_SPTE as a long-term value,
+it would confuse these updates.
+
+On the other hand, it would also confuse other threads if FROZEN_SPTE is
+installed as a long-term value for direct page tables (e.g., causing
+another thread working on atomic zap to wait for a !FROZEN_SPTE value
+endlessly).
+
+Therefore, add the warning for installing FROZEN_SPTE as a long-term value
+in __tdp_mmu_set_spte_atomic() without differentiating whether it's a
+mirror or direct page table.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Updated the comment for "KVM_MMU_WARN_ON(is_frozen_spte(new_spte))".
+  (Yan)
+- Explained why the warning also applies to direct page tables. (Yan)
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 06/15] KVM: TDX: Move lockdep assert in __tdp_mmu_set_spte_atomic() to TDX code
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Move the MMU lockdep assert in __tdp_mmu_set_spte_atomic() into the TDX
+specific op because the assert is TDX specific in intention.
+
+The TDP MMU has many lockdep asserts for various scenarios, and in fact
+the callchains that are used for TDX already have a lockdep assert which
+covers the case in __tdp_mmu_set_spte_atomic(). However, these asserts are
+for management of the TDP root owned by KVM. In the
+__tdp_mmu_set_spte_atomic() assert case, it is helping with a scheme to
+avoid contention in the TDX module during zap operations. That is very
+TDX specific.
+
+One option would be to just remove the assert in
+__tdp_mmu_set_spte_atomic() and rely on the other ones in the TDP MMU. But
+that assert is for a different intention, and too far away from the
+SEAMCALL that needs it. So just move it to TDX code.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 2 --
+ arch/x86/kvm/vmx/tdx.c     | 2 ++
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 05/15] KVM: TDX: Move KVM_BUG_ON()s in __tdp_mmu_set_spte_atomic() to TDX code
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Drop some KVM_BUG_ON()s that are guarding against TDP MMU attempting to
+propagate unsupported changes to the external page table through
+__tdp_mmu_set_spte_atomic(). Have TDX code trigger them instead.
+
+Now that TDP MMU logically allows propagating atomic zapping operation to
+the external page table through the set_external_spte() op in
+__tdp_mmu_set_spte_atomic(). TDX code will trigger the KVM_BUG_ON() on the
+atomic zapping request instead. (Note: non-atomic zapping is not propagated
+via the set_external_spte() op yet).
+
+Despite the generic naming, external page table ops are designed completely
+around TDX. They hook the bare minimum of what is needed, and exclude the
+operations that are not supported by TDX. To help wrangle which operations
+are handleable by various operations, warnings and KVM_BUG_ON()s exist in
+the code. These warnings and KVM_BUG_ON()s put the burden of understanding
+which operations should be forwarded to TDX code on TDP MMU developers, who
+often read the code without TDX context.
+
+Future changes will transition the encapsulation of this domain knowledge
+to TDX code by funneling the external page table updates through a central
+update mechanism. In this paradigm, the central update mechanism can
+encapsulate the special knowledge, but will not have as much knowledge
+about what operation is in progress.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Moved this patch after "KVM: TDX: Drop kvm_x86_ops.link_external_spt()"
+  and "KVM: x86/mmu: Plumb param "old_spte" into
+  kvm_x86_ops.set_external_spte()".  (Yan)
+- Added a replacement KVM_BUG_ON() in TDX for the dropped
+  KVM_BUG_ON(was_present, kvm) in __tdp_mmu_set_spte_atomic(). (Yan).
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 10 ----------
+ arch/x86/kvm/vmx/tdx.c     |  3 +++
+ 2 files changed, 3 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 04/15] KVM: x86/mmu: Plumb param "old_spte" into kvm_x86_ops.set_external_spte()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+If tdp_mmu_set_spte_atomic() triggers an atomic zap on a mirror SPTE
+(though currently no paths trigger it), the change is propagated via the
+set_external_spte() op. Plumb the old SPTE into the set_external_spte() op,
+so TDX code rather than TDP MMU core can warn if the atomic zap isn't
+allowed.
+
+Rename mirror_spte to new_spte to follow the TDP MMU's naming, and to make
+it more obvious what value the parameter holds.
+
+Opportunistically tweak the ordering of parameters to match the pattern of
+most TDP MMU functions, which do "old, new, level".
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Moved this patch to before dropping the warning of
+  "KVM_BUG_ON(was_present, kvm)" in __tdp_mmu_set_spte_atomic(). So TDX's
+  tdx_sept_set_private_spte() can later warn instead if atomic zap is
+  propagated via the set_external_spte() op (as allowed by
+  tdp_mmu_set_spte_atomic() if it occurs).  (Yan)
+---
+ arch/x86/include/asm/kvm_host.h |  4 ++--
+ arch/x86/kvm/mmu/tdp_mmu.c      |  4 ++--
+ arch/x86/kvm/vmx/tdx.c          | 22 +++++++++++-----------
+ 3 files changed, 15 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 03/15] KVM: x86/mmu: Fold set_external_spte_present() into its sole caller
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Fold set_external_spte_present() into __tdp_mmu_set_spte_atomic() in
+anticipation of propagating all changes (like atomic zap) triggered by
+tdp_mmu_set_spte_atomic() to the external PTEs.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Moved to the front of the series and updated the patch log to indicate
+  the propagation of changes for atomic zap. (Yan)
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 72 ++++++++++++++++----------------------
+ 1 file changed, 31 insertions(+), 41 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 02/15] KVM: TDX: Wrap mapping of leaf and non-leaf S-EPT entries into helpers
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Add a helper, tdx_sept_map_leaf_spte(), to wrap and isolate PAGE.ADD and
+PAGE.AUG operations. Rename tdx_sept_link_private_spt() to
+tdx_sept_map_nonleaf_spte() to wrap SEPT.ADD for symmetry.
+
+Thus, transition tdx_sept_set_private_spte() into a "dispatch" routine for
+setting/writing S-EPT entries.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Renamed tdx_sept_link_private_spt() to tdx_sept_map_nonleaf_spte(). (Yan)
+---
+ arch/x86/kvm/vmx/tdx.c | 24 +++++++++++++++---------
+ 1 file changed, 15 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 01/15] KVM: TDX: Drop kvm_x86_ops.link_external_spt()
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+
+Drop the dedicated .link_external_spt() for linking S-EPT pages, and
+instead funnel everything through .set_external_spte() for mapping S-EPT
+entries. Using separate hooks doesn't help prevent TDP MMU details from
+bleeding into TDX, and vice versa; to the contrary, dedicated callbacks
+will result in _more_ pollution when hugepage support is added, e.g. will
+require the TDP MMU to know details about the splitting rules for TDX that
+aren't all that relevant to the TDP MMU.
+
+Ideally, KVM would provide a single pair of hooks to set S-EPT entries,
+one hook for setting SPTEs under write-lock and another for setting SPTEs
+under read-lock (e.g. to ensure the entire operation is "atomic", to allow
+for failure, etc.).  Sadly, TDX's requirement that all child S-EPT entries
+are removed before the parent makes that impractical: the TDP MMU
+deliberately prunes non-leaf SPTEs and _then_ processes its children, thus
+making it quite important for the TDP MMU to differentiate between zapping
+leaf and non-leaf S-EPT entries.
+
+However, that's the _only_ case that's truly special, and even that case
+could be shoehorned into a single hook; it just wouldn't be a net positive.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+[Rick: add in trivial feedback]
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+MMU_refactors v2:
+- Moved this patch to the very beginning of the series so that when
+  warnings like "KVM_BUG_ON(!is_shadow_present_pte(new_spte), kvm)" are
+  removed from __tdp_mmu_set_spte_atomic() in TDP MMU in a later patch, the
+  atomic zap change can be propagated via the .set_external_spte() op.
+  (Yan).
+
+MMU_refactors v1:
+ - rename external_spt->sept_pt (Rick, Yan)
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  1 -
+ arch/x86/include/asm/kvm_host.h    |  3 --
+ arch/x86/kvm/mmu/tdp_mmu.c         | 29 +-------------
+ arch/x86/kvm/vmx/tdx.c             | 63 ++++++++++++++++++++----------
+ 4 files changed, 44 insertions(+), 52 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 00/15] TDX MMU refactors
+Author: Yan Zhao <yan.y.zhao@intel.com>
+
+Hi,
+
+This is v2 of the TDX MMU refactor series, based on Rick's v1 [1], which
+was extracted from the discussion on Sean's DPAMT/Huge page combined series
+[0].
+
+v2 is rebased onto v7.1.0-rc2 and the v2 struct page to PFN conversion
+series. v1's first 4 cleanup patches are dropped from v2 and kept in the
+base (see "Base" section for details). The full stack is available at [6].
+
+I feel v2 is in good shape at this point, so I'm posting it now, hoping it
+can get merged after Dave acks the struct page to PFN conversion series.
+
+
+v2 addressed all comments from v1, with below key changes:
+
+- Addressed the comment of how atomic zaps are handled before all changes
+  (except for reclaiming non-leaf pages) are propagated via the
+  set_external_spte() op (Issue #2 in [5]):
+
+  Move patches 1-4 to the beginning of the series, so after patch 5, TDP
+  MMU also allows propagation of changes for atomic zaps to TDX (via the
+  set_external_spte() op), while having TDX code warn on the atomic zapping
+  scenario.
+
+  In patch 9, __handle_changed_spte() centralizes propagation of both
+  atomic zap changes and to-present changes via the set_external_spte() op
+  before patch 12 centralizes propagation of all changes (except for
+  reclaiming non-leaf pages).
+
+- Explained why kvm_tdp_mmu_age_spte() does not warn about installing
+  FROZEN_SPTE as a long-term value (in patch 9's log) after patch 7 adds
+  the warning for this scenario, and explained why kvm_tdp_mmu_age_spte()
+  warns on mirror roots in the code comment.
+  
+- Extracted patch 8 from patch 9 to plumb "sp" pointer to
+  handle_changed_spte(). (patch 8 was originally in [0], and was somehow
+  merged into patch 9 in v1). 
+
+- Renamed tdx_sept_link_private_spt() to tdx_sept_map_nonleaf_spte(), and
+  tdx_sept_remove_private_spte() to tdx_sept_remove_leaf_spte() for
+  symmetry with tdx_sept_map_leaf_spte().
+
+- Added expected lock and valid scenarios in function comments of
+  tdx_sept_set_private_spte() and tdx_sept_free_private_spt().
+
+Note: Patches 9 and 15 still have the "Not-yet-Signed-off-by" tag.
+
+
+Patches layout
+--------------
+Part 1: Patches 1-9 (for to-present and atomic-zap-leaf-SPTE changes).
+
+        Patches 1-4 are preparation for patch 5. So when patch 5 drops
+        KVM_BUG_ON()s on zappings in __tdp_mmu_set_spte_atomic(), both
+        to-present changes and atomic-zap-leaf-SPTE changes are propagated
+	via the set_external_spte() op and TDX code can trigger
+	KVM_BUG_ON()s on the atomic zap scenario.
+
+        Patches 5-6 move asserts and KVM_BUG_ON()s from TDP MMU to TDX
+        code.
+
+        Patches 7-9: centralize external PTE propagation triggered by
+        tdp_mmu_set_spte_atomic() (for to-present and atomic-zap-leaf-SPTE
+	changes) to __handle_changed_spte().
+
+Part 2: Patches 10-13 (for zapping of leaf SPTEs).
+        Drop remove_external_spte() op and have __handle_changed_spte()
+        centralize propagation of leaf SPTE zapping in all scenarios.
+
+Part 3: Patches 14-15 (for zapping of non-leaf SPTEs).
+        Cleanup of the free_external_spt() op.
+
+
+Base
+----
+v2 is based on v7.1.0-rc2 (kvm/next, commit 6d35786de281) +
+the first 4 patches from Sean's DPAMT/Huge page combined series [0] +
+v2 of the struct page to PFN conversion series [2].
+
+Note: due to the instability of v7.1.0-rc2, I also applied series [3] and
+[4] to pass CI.
+
+
+Changelogs
+----------
+v1 [1] --> v2:
+- Dropped 4 cleanup patches that will be pulled separately into the base.
+- Fixed typos, code comments, updated commit messages, and removed unused
+  parameters.
+- Patch reordering and added back patch 8.
+- Renamed TDX functions to indicate map/remove leaf/non-leaf status.
+- Addressed the comment on how atomic zaps are handled before all changes
+  (except for reclaiming non-leaf pages) are propagated via the
+  set_external_spte() op in __handle_changed_spte().
+- Added expected lock and valid scenarios in function comments of
+  tdx_sept_set_private_spte() and tdx_sept_free_private_spt(). 
+- Explained why kvm_tdp_mmu_age_spte() does not warn about installing
+  FROZEN_SPTE as a long-term value and explained why it warns on mirror
+  roots.
+
+Sean's DPAMT/Huge page combined series [0] --> v1:
+- Went back to free_external_spt() name. Since free_external_sp() was
+  dropped from the changes, there was no similarly named function to
+  confuse.
+- Suggestions around dropping or moving KVM_BUG_ON/WARNs were turned into
+  patches.
+
+
+Thanks
+Yan
+
+[0] https://lore.kernel.org/kvm/20260129011517.3545883-1-seanjc@google.com
+[1] https://lore.kernel.org/all/20260327201421.2824383-1-rick.p.edgecombe@intel.com
+[2] https://lore.kernel.org/all/20260430014852.24183-1-yan.y.zhao@intel.com
+[3] https://lore.kernel.org/all/20260423155611.216805954@infradead.org
+[4] https://lore.kernel.org/all/20260428024746.1040531-1-binbin.wu@linux.intel.com
+[5] https://lore.kernel.org/lkml/aczYjEVkva3zOpwz@yzhao56-desk.sh.intel.com
+[6] https://github.com/intel-staging/tdx/tree/tdx_mmu_refactors_v2
+
+
+
+Rick Edgecombe (4):
+  KVM: TDX: Move KVM_BUG_ON()s in __tdp_mmu_set_spte_atomic() to TDX
+    code
+  KVM: TDX: Move lockdep assert in __tdp_mmu_set_spte_atomic() to TDX
+    code
+  KVM: x86/tdp_mmu: Morph !is_frozen_spte() check into a
+    KVM_MMU_WARN_ON()
+  KVM: x86/mmu: Drop KVM_BUG_ON() on shared lock to zap child external
+    PTEs
+
+Sean Christopherson (10):
+  KVM: TDX: Drop kvm_x86_ops.link_external_spt()
+  KVM: TDX: Wrap mapping of leaf and non-leaf S-EPT entries into helpers
+  KVM: x86/mmu: Fold set_external_spte_present() into its sole caller
+  KVM: x86/mmu: Plumb param "old_spte" into
+    kvm_x86_ops.set_external_spte()
+  KVM: x86/mmu: Plumb "sp" _pointer_ into the TDP MMU's
+    handle_changed_spte()
+  KVM: x86/tdp_mmu: Centrally propagate to-present/atomic zap updates to
+    external PTEs
+  KVM: TDX: Hoist tdx_sept_remove_private_spte() above
+    set_private_spte()
+  KVM: TDX: Drop kvm_x86_ops.remove_external_spte()
+  KVM: x86: Move error handling inside free_external_spt()
+  KVM: TDX: Move external page table freeing to TDX code
+
+Yan Zhao (1):
+  KVM: TDX: Rename tdx_sept_remove_private_spte() to show it's for leaf
+    SPTEs
+
+ arch/x86/include/asm/kvm-x86-ops.h |   4 +-
+ arch/x86/include/asm/kvm_host.h    |  13 +-
+ arch/x86/kvm/mmu/tdp_mmu.c         | 273 ++++++++++++-----------------
+ arch/x86/kvm/vmx/tdx.c             | 172 ++++++++++++------
+ 4 files changed, 233 insertions(+), 229 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] LoongArch: KVM: Remove timer interrupt injection with SW timer expired
+Author: Bibo Mao <maobibo@loongson.cn>
+
+The software timer emulation is to wake up vCPU when vCPU executes
+idle instruction and gives up host CPU, timer interrupt is injected
+in vCPU context switch on and guest CSR timer restore function.
+
+It is not necessary to inject timer interrupt when SW timer is expired.
+Here remove it.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/timer.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] kvm: fix kvm_irqchip_release_virq loop after swap-remove
+Author: Bin Guo <guobin@linux.alibaba.com>
+
+In kvm_irqchip_release_virq(), when an entry matching the target GSI is
+found, the code removes it by swapping in the last entry:
+
+    s->irq_routes->nr--;
+    *e = s->irq_routes->entries[s->irq_routes->nr];
+
+However, the loop then increments `i` unconditionally, which means the
+newly-swapped entry at position `i` is never re-checked. If that entry
+also has `gsi == virq`, it will be skipped and left in the routing
+table.
+
+Fix this by decrementing `i` after the swap, so the same index is
+re-examined in the next iteration.
+
+Signed-off-by: Bin Guo <guobin@linux.alibaba.com>
+---
+ accel/kvm/kvm-all.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] kvm: remove redundant check in kvm_close
+Author: Bin Guo <guobin@linux.alibaba.com>
+
+In kvm_close(), the condition `!kvm_state || kvm_state->fd == -1` is
+checked at the function entry, causing an early return if either is
+true. Later in the function, the same condition is redundantly checked
+again before closing vmfd and fd.
+
+Remove the redundant second check since it can never be true at that
+point.
+
+Signed-off-by: Bin Guo <guobin@linux.alibaba.com>
+---
+ accel/kvm/kvm-all.c | 11 +++++------
+ 1 file changed, 5 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] kvm: minor cleanups in kvm_close and kvm_irqchip_release_virq
+Author: Bin Guo <guobin@linux.alibaba.com>
+
+Two small cleanups in kvm-all.c:
+
+- Patch 1 removes a redundant null/fd check in kvm_close() that
+  can never be true once the early-return guard at function entry
+  has already passed.
+
+- Patch 2 fixes an off-by-one in kvm_irqchip_release_virq(): after
+  a swap-remove the newly placed entry at the same index was never
+  re-examined, so a duplicate GSI could be silently left in the
+  routing table.
+
+Bin Guo (2):
+  kvm: remove redundant check in kvm_close
+  kvm: fix kvm_irqchip_release_virq loop after swap-remove
+
+ accel/kvm/kvm-all.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 0e54e9153 to f185b38e9
+KVM mailing list update from 0e54e9153 to f185b38e9
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
