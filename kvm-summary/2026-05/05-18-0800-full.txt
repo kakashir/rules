@@ -1,0 +1,400 @@
+
+On /root/mail/repo:
+From cb58e7764 to a6446d1d5
+KVM mailing list update from cb58e7764 to a6446d1d5
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 163.com
+      1 loongson.cn
+      1 iscas.ac.cn
+
+Top 15 contributors (Based on Email Body)
+
+      6  Jinyu Tang <tjytimi@163.com>
+      1  Xianglai Li <lixianglai@loongson.cn>
+      1  Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 1/5] KVM: riscv: Rely on common MMU notifier locking
+Author: Jinyu Tang <tjytimi@163.com>
+
+The common KVM invalidation paths call kvm_unmap_gfn_range() with
+mmu_lock already held for write.
+
+For the standard MMU notifier path, the call chain is:
+
+  kvm_mmu_notifier_invalidate_range_start()
+    kvm_handle_hva_range()
+      kvm_unmap_gfn_range()
+
+kvm_mmu_notifier_invalidate_range_start() leaves range.lockless clear.
+kvm_handle_hva_range() therefore takes KVM_MMU_LOCK(kvm) before invoking
+the handler.
+
+The guest_memfd path has the same locking contract:
+
+  __kvm_gmem_invalidate_begin()
+    kvm_mmu_unmap_gfn_range()
+      kvm_unmap_gfn_range()
+
+__kvm_gmem_invalidate_begin() explicitly takes KVM_MMU_LOCK(kvm) before
+calling kvm_mmu_unmap_gfn_range().
+
+So remove the local trylock and make the common locking contract explicit 
+with lockdep_assert_held_write() like x86.
+
+Signed-off-by: Jinyu Tang <tjytimi@163.com>
+---
+ arch/riscv/kvm/mmu.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/5] KVM: riscv: Speed up dirty logging write faults
+Author: Jinyu Tang <tjytimi@163.com>
+
+This series speeds up the common dirty logging write fault path for
+RISC-V KVM.
+
+When dirty logging is enabled, guest writes to write-protected G-stage
+4K leaves currently go through the full fault path and take mmu_lock for
+write.  That is expensive once the leaf already exists and
+only needs its permission and dirty state updated.
+
+The series first makes the existing MMU notifier locking contract
+explicit, switches RISC-V KVM to KVM's rwlock form of mmu_lock, adds an
+atomic G-stage PTE update helper, uses it for existing permission
+updates, and finally handles dirty logging write faults under the read
+side of mmu_lock when a 4K G-stage leaf is already present.
+
+The locking and concurrency model follows existing KVM patterns from x86
+and arm64: use an rwlock mmu_lock, keep structural page-table changes on
+the write side, and use atomic PTE updates for permission-only changes
+that may race with another vCPU.
+
+The fast path marks the memslot page dirty before making the PTE writable
+again.  It also sets the PTE dirty bit, so systems that trap when D is
+clear do not fall back to the slow path for a writable-but-clean PTE.
+
+Performance was measured with KVM selftests inside a QEMU RISC-V host.
+
+  dirty_log_perf_test -m 19 -v 4 -b 1G -i 3
+    base dirty memory avg, iterations 2-3: 53.262493s
+    patch 1-4 dirty memory avg, iterations 2-3: 52.735675s
+    patch 1-5 dirty memory avg, iterations 2-3: 26.422964s
+    patch 1-5 improvement over base: 50.4%
+
+  dirty_log_perf_test -m 19 -v 4 -b 64M -i 3
+    base dirty memory avg, iterations 2-3: 3.203170s
+    patch 1-5 dirty memory avg, iterations 2-3: 1.762452s
+    improvement: 45.0%
+
+Patch 1-4 are prerequisites for the read-side fast path. The
+main speedup comes from patch 5 avoiding the full fault path 
+for dirty logging write faults.
+
+Jinyu Tang (5):
+  KVM: riscv: Rely on common MMU notifier locking
+  KVM: riscv: Use an rwlock for mmu_lock
+  KVM: riscv: Add a G-stage PTE cmpxchg helper
+  KVM: riscv: Update G-stage PTE permissions atomically
+  KVM: riscv: Fast-path dirty logging write faults
+
+ arch/riscv/include/asm/kvm_gstage.h |   4 ++
+ arch/riscv/include/asm/kvm_host.h   |   2 +
+ arch/riscv/kvm/gstage.c             |  35 +++++++---
+ arch/riscv/kvm/mmu.c                | 105 +++++++++++++++++++++++-----
+ 4 files changed, 122 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/5] KVM: riscv: Add a G-stage PTE cmpxchg helper
+Author: Jinyu Tang <tjytimi@163.com>
+
+Permission-only G-stage PTE updates can run in parallel once they are
+moved to the read side of mmu_lock. Plain set_pte() is not enough for
+that case because another CPU may update the same PTE first.
+
+x86 handles the same class of SPTE races with cmpxchg-based updates in
+its fast page fault and TDP MMU paths. Add a small RISC-V helper for
+atomic G-stage PTE updates. The helper reports contention to the caller
+and flushes the target range only when the PTE value actually changes.
+
+Signed-off-by: Jinyu Tang <tjytimi@163.com>
+---
+ arch/riscv/include/asm/kvm_gstage.h |  4 ++++
+ arch/riscv/kvm/gstage.c             | 14 ++++++++++++++
+ 2 files changed, 18 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 4/5] KVM: riscv: Update G-stage PTE permissions atomically
+Author: Jinyu Tang <tjytimi@163.com>
+
+When a fault hits an existing G-stage leaf with the same PFN, KVM only
+needs to update the PTE permissions. This path will be used by read-side
+fault handling, so it must not overwrite a concurrent PTE update.
+
+Use the cmpxchg helper when relaxing permissions on an existing leaf,
+following the same concurrency model used by x86 for atomic SPTE
+permission updates. Retry if another CPU changed the PTE first, and use
+cpu_relax() while spinning.
+
+Signed-off-by: Jinyu Tang <tjytimi@163.com>
+---
+ arch/riscv/kvm/gstage.c | 19 ++++++++++++-------
+ 1 file changed, 12 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/5] KVM: riscv: Fast-path dirty logging write faults
+Author: Jinyu Tang <tjytimi@163.com>
+
+With dirty logging enabled, guest writes often fault on an existing 4K
+G-stage leaf that was write-protected only for dirty tracking. The slow
+path still performs the full fault handling flow and takes mmu_lock for
+write, even though the page-table shape does not change.
+
+x86 handles the analogous case in its fast page fault path by atomically
+making a writable SPTE writable again when the fault is only a
+write-protection fault. Add the same style of fast path for RISC-V. If a
+write fault hits an existing 4K leaf in a writable dirty-log memslot,
+mark the page dirty and atomically set the PTE writable and dirty under
+the read side of mmu_lock.
+
+The dirty bitmap is updated before the PTE becomes writable again. The
+PTE D bit is also set so systems that trap on a clear D bit do not fall
+back to the slow path for a writable but clean PTE.
+
+Signed-off-by: Jinyu Tang <tjytimi@163.com>
+---
+ arch/riscv/kvm/mmu.c | 75 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 75 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 2/5] KVM: riscv: Use an rwlock for mmu_lock
+Author: Jinyu Tang <tjytimi@163.com>
+
+RISC-V KVM currently uses a spinlock for mmu_lock. That serializes all
+G-stage MMU operations, including permission-only updates that do not
+allocate or free page-table pages.
+
+Use KVM's rwlock form of mmu_lock, as x86 and arm64 already do. Keep the
+existing map, unmap and teardown paths on the write side. This prepares
+RISC-V for read-side handling of G-stage permission updates.
+
+Signed-off-by: Jinyu Tang <tjytimi@163.com>
+---
+ arch/riscv/include/asm/kvm_host.h |  2 ++
+ arch/riscv/kvm/gstage.c           |  2 +-
+ arch/riscv/kvm/mmu.c              | 24 ++++++++++++------------
+ 3 files changed, 15 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] RISC-V: KVM: Fix NULL pointer dereference in SBI v0.1 SEND_IPI handler
+Author: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+The SBI v0.1 SEND_IPI handler iterates over the hart mask and calls
+kvm_get_vcpu_by_id() to find the target vcpu for each set bit. When a
+guest provides a hart mask containing bits for non-existent vcpu_ids,
+kvm_get_vcpu_by_id() returns NULL, which is then unconditionally
+dereferenced by kvm_riscv_vcpu_set_interrupt(), causing a kernel crash.
+
+Fix this by adding a NULL check before dereferencing the return value.
+If the target vcpu is not found, skip it and continue processing the
+remaining valid harts.
+
+Fixes: a046c2d8578c ("RISC-V: KVM: Reorganize SBI code by moving SBI v0.1 to its own file")
+Signed-off-by: Jiakai Xu <jiakaiPeanut@gmail.com>
+Signed-off-by: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+Assisted-by: OpenClaw:DeepSeek-V3.2
+---
+V1 -> V2:
+- Changed break to continue when vcpu is not found, as suggested by
+  Anup Patel. Non-existent VCPUs in the hart mask should be ignored
+  rather than aborting the entire SEND_IPI operation.
+---
+ arch/riscv/kvm/vcpu_sbi_v01.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH V2 for 6.12] LoongArch: KVM: Compile switch.S directly into the kernel
+Author: Huacai Chen <chenhuacai@loongson.cn>
+
+
+commit 5203012fa6045aac4b69d4e7c212e16dcf38ef10 upstream.
+
+If we directly compile the switch.S file into the kernel, the address of
+the kvm_exc_entry function will definitely be within the DMW memory area.
+Therefore, we will no longer need to perform a copy relocation of the
+kvm_exc_entry.
+
+So this patch compiles switch.S directly into the kernel, and then remove
+the copy relocation execution logic for the kvm_exc_entry function.
+
+Signed-off-by: Xianglai Li <lixianglai@loongson.cn>
+Signed-off-by: Huacai Chen <chenhuacai@loongson.cn>
+---
+V2: Adjust context for 6.12.89
+
+ arch/loongarch/Kbuild                       |  2 +-
+ arch/loongarch/include/asm/asm-prototypes.h | 20 ++++++++++++
+ arch/loongarch/include/asm/kvm_host.h       |  3 --
+ arch/loongarch/kvm/Makefile                 |  3 +-
+ arch/loongarch/kvm/main.c                   | 35 ++-------------------
+ arch/loongarch/kvm/switch.S                 | 19 ++++++++---
+ 6 files changed, 40 insertions(+), 42 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From fba008ade to 27f2510b6
+KVM mailing list update from fba008ade to 27f2510b6
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      2 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  Michael Bommarito <michael.bommarito@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: arm64: vgic: free private_irqs when init fails after allocation
+Author: Michael Bommarito <michael.bommarito@gmail.com>
+
+Companion to commit 250f25367b58 ("KVM: arm64: Tear down vGIC on failed
+vCPU creation"), which added the missing kvm_vgic_vcpu_destroy() call
+to the kvm_share_hyp() failure path in kvm_arch_vcpu_create().  The
+kvm_vgic_vcpu_init() failure path immediately above it has the same
+shape and still needs the same cleanup.
+
+If kvm_vgic_vcpu_init() allocates per-vCPU private IRQs via
+vgic_allocate_private_irqs_locked() and then vgic_register_redist_iodev()
+fails (for example when kvm_io_bus_register_dev() runs out of MMIO-bus
+slots, or vgic_v3_check_base() rejects the configuration), the function
+returns the error without freeing the private-IRQ allocation.
+
+The caller kvm_arch_vcpu_create() returns this error directly, and
+kvm_vm_ioctl_create_vcpu() jumps to vcpu_free_run_page on
+kvm_arch_vcpu_create() failure, which does not invoke
+kvm_arch_vcpu_destroy().  The vCPU struct is then released via
+kmem_cache_free(kvm_vcpu_cache, ...), dropping the only reference to
+the leaked allocation.
+
+The comment block above __kvm_vgic_vcpu_destroy() explicitly anticipates
+this case ("vCPUs that failed creation are torn down outside of the
+kvm->arch.config_lock ... it is both safe and necessary to do so
+here"), but the caller never actually invokes the destroy primitive on
+the kvm_vgic_vcpu_init() error path.  Call it now, mirroring the shape
+of the kvm_share_hyp() cleanup added by 250f25367b58.
+
+Per-failure leak is VGIC_NR_PRIVATE_IRQS * sizeof(struct vgic_irq),
+roughly 3.8 KiB rounded up to 4 KiB by the kmalloc-cg-4k slab.  On
+systems whose /dev/kvm policy lets unprivileged users open the device
+this is reachable to any local user; reach is policy-dependent and
+varies by distro and packager.
+
+Confirmed with kmemleak on v7.1-rc1+: 50 failed KVM_CREATE_VCPU
+attempts (run with the per-VM MMIO bus pre-filled to NR_IOBUS_DEVS so
+vgic_register_redist_iodev() returns -ENOSPC) leave 49 unreferenced
+4096-byte blocks whose allocation backtrace is
+
+  __kmalloc_noprof+0x390/0x4d0
+  vgic_allocate_private_irqs_locked+0x68/0x1c8
+  kvm_vgic_vcpu_init+0x78/0xd8
+
+With this patch applied to the same tree, kmemleak reports zero
+unreferenced objects under the identical workload.
+
+Cc: stable@vger.kernel.org
+Cc: Will Deacon <will@kernel.org>
+Assisted-by: Claude:claude-opus-4-7
+
+Signed-off-by: Michael Bommarito <michael.bommarito@gmail.com>
+---
+ arch/arm64/kvm/arm.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: vgic-its: reject restored DTE with out-of-range num_eventid_bits
+Author: Michael Bommarito <michael.bommarito@gmail.com>
+
+Userspace can trigger a host-side denial of service via
+KVM_DEV_ARM_ITS_RESTORE_TABLES. A Device Table Entry whose Size
+field encodes num_eventid_bits > VITS_TYPER_IDBITS reaches
+scan_its_table() with a sign-extended ~18 EiB length, where the
+loop holds the per-ITS mutex and never calls cond_resched(),
+pinning a host CPU for a time linear in registered guest memslot
+size. The accessor is any process that can open /dev/kvm and
+create a VM. The same out-of-range value also disables a
+subsequent live bounds check on EventID, as described below.
+
+The MAPD command handler already rejects this case in the live
+path:
+
+  if (valid && num_eventid_bits > VITS_TYPER_IDBITS)
+          return E_ITS_MAPD_ITTSIZE_OOR;
+
+vgic_its_restore_dte() reconstructs num_eventid_bits from the DTE
+Size field but does not apply the same cap, so userspace can
+install device state that the live MAPD path is documented to
+reject. The restored value is stored in dev->num_eventid_bits and
+is then used by vgic_its_restore_itt():
+
+  size_t max_size = BIT_ULL(dev->num_eventid_bits) * ite_esz;
+  ret = scan_its_table(its, base, max_size, ite_esz, ...);
+
+scan_its_table() takes the size as int and assigns it to
+unsigned long in the callee:
+
+  static int scan_its_table(struct vgic_its *its, gpa_t base,
+                            int size, u32 esz, ...)
+  {
+          unsigned long len = size;
+
+For num_eventid_bits = 28 the size_t value 0x80000000 truncates to
+INT_MIN as int and sign-extends to ~18 EiB as unsigned long. The
+scan loop then walks the registered guest memslot one ite_esz at
+a time with the per-ITS mutex held and no cond_resched(). In a
+QEMU TCG arm64 guest at EL2 on v7.1-rc1, with an empty ITT, the
+ioctl returned -EFAULT after about 14 seconds with a 256 MiB
+memslot and about 56 seconds with a 1 GiB memslot (linear in
+memslot size). The per-iteration cost on native arm64 KVM
+hardware will differ; the loop shape, and so the linear scaling,
+will not.
+
+The same out-of-range num_eventid_bits also disables the live
+vgic_its_check_event_id() bounds check, because event_id is u32
+and BIT_ULL(32) is unreachable in that comparison, leaving
+subsequent MAPI/MAPTI handling without an effective EventID cap.
+
+Mirror the MAPD cap in vgic_its_restore_dte() before allocating
+the device, so out-of-range restored DTEs are rejected with
+-EINVAL up front rather than triggering the int-truncated scan or
+installing a device whose num_eventid_bits silently disables the
+live bounds check. Sizes within [1, VITS_TYPER_IDBITS] are
+unaffected.
+
+Fixes: 57a9a117154c ("KVM: arm64: vgic-its: Device table save/restore")
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Michael Bommarito <michael.bommarito@gmail.com>
+---
+ arch/arm64/kvm/vgic/vgic-its.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
