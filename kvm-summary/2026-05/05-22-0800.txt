@@ -1,0 +1,1330 @@
+
+On /root/mail/repo:
+From b78058b2f to c781b0fc4
+KVM mailing list update from b78058b2f to c781b0fc4
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     40 arm.com
+     21 google.com
+     13 kernel.org
+      9 redhat.com
+      6 linux.ibm.com
+      2 iscas.ac.cn
+      2 intel.com
+      1 tenstorrent.com
+      1 kylinos.cn
+
+Top 15 contributors (Based on Email Body)
+
+     40  Sascha Bischoff <Sascha.Bischoff@arm.com>
+     13  Sagi Shahar <sagis@google.com>
+     11  Kees Cook <kees@kernel.org>
+      6  Paolo Bonzini <pbonzini@redhat.com>
+      6  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      3  Lisa Wang <wyihan@google.com>
+      2  Yosry Ahmed <yosry@kernel.org>
+      2  Isaku Yamahata <isaku.yamahata@intel.com>
+      2  Erdem Aktas <erdemaktas@google.com>
+      2  Ackerley Tng <ackerleytng@google.com>
+      1  Stefano Garzarella <sgarzare@redhat.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Pengpeng Hou <pengpeng@iscas.ac.cn>
+      1  Markus Armbruster <armbru@redhat.com>
+      1  Marc-André Lureau <marcandre.lureau@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: selftests: Add macros to simplify creating VM
+[PATCH  v13 01/22] KVM: selftests: Add macros to simplify creating VM
+Author: Lisa Wang <wyihan@google.com>
+
+
+Add VM_TYPE() and __VM_TYPE() macros to create a vm_shape structure given
+a type (and mode), and use the macros to define VM_SHAPE_{SEV,SEV_ES,SNP}
+shapes for x86's SEV family of VM shapes.  Providing common infrastructure
+will avoid having to copy+paste vm_sev_create_with_one_vcpu() for TDX.
+
+Use the new SEV+ shapes and drop vm_sev_create_with_one_vcpu().
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sagi Shahar <sagis@google.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Ira Weiny <ira.weiny@intel.com>
+Signed-off-by: Lisa Wang <wyihan@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h     | 13 +++++++
+ .../testing/selftests/kvm/include/x86/processor.h  |  4 +++
+ tools/testing/selftests/kvm/include/x86/sev.h      |  2 --
+ tools/testing/selftests/kvm/lib/x86/sev.c          | 16 ---------
+ tools/testing/selftests/kvm/x86/sev_smoke_test.c   | 40 +++++++++++-----------
+ 5 files changed, 37 insertions(+), 38 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  TDX KVM selftests
+[PATCH v13 00/22] TDX KVM selftests
+Author: Lisa Wang <wyihan@google.com>
+
+This patch series focuses on setting up a TDX VM and adding all code
+necessary to run a basic lifecycle test.
+
+Unlike standard KVM selftests can set up the VM through guest registers,
+TDX module protects TDs' register state from the host. This feature of
+TDX causes problems on VM boot state initialization and the ucall
+implementation.
+
+In standard KVM selftests, the host directly initializes the guest state
+by manipulating Special Registers (SREGs) and General Purpose Registers
+(GPRs) via IOCTLs (KVM_SET_SREGS, etc.) before the first KVM_RUN.
+
+To bypass direct register initialization by the host, we utilize the
+standard x86 reset vector as the default entry point.
+
+The mechanism works as follows:
+1. The host places register values into a specific memory region and
+   inserts boot code at the VM's default starting point.
+2. When the VM starts, it executes this boot code to "pull" values from
+   memory and manually set up its own SREGs and GPRs.
+3. Once the environment is ready, the boot code jumps to the guest code.
+
+The standard x86 ucall() implementation uses PIO, but it does not
+actually transmit data through the 4-byte PIO data. Instead, it relies
+on the host reading the ucall address directly from the guest's RDI
+register.
+
+TDX selftests cannot utilize the standard x86 ucall implementation,
+because the host is unable to access the guest's RDI register. Based on
+this restriction, we considered these potential solutions for the TDX
+ucall implementation.
+
+1. TDCALL PIO with RCX-bits Passthrough
+We first considered passing the RDI value through RCX bits to bypass the
+hardware's register protection, which could be the closest approach to
+the non-TDX implementation as per Sean's suggestion[1]. However, this
+approach is blocked by the software-side implementation: KVM_GET_REGS
+currently does not support TDX VMs and returns -EINVAL. To make this
+work, the KVM ioctl would need a test-only hack.
+
+2. TDCALL PIO with buffer indexing
+To keep a PIO-based approach and unify the get_ucall implementation for
+both TDX and non-TDX VMs, we considered TDCALL PIO with buffer indexing.
+Since the ucall buffer is initialized prior to execution, the VM could
+just pass a buffer index rather than an 8-byte ucall address to fit
+within the 4-byte PIO data limit. The host, already knowing the ucall
+buffer's base address, could then resolve the ucall content via this
+index. We abandoned this solution because it would require changes to
+the common ucall structure and impact other non-x86 architectures.
+
+3. TDCALL MMIO (Selected solution)
+We ultimately selected TDCALL with an 8-byte MMIO data. This method only
+requires initializing an MMIO GPA and adding TDCALL MMIO implementation
+for TDX under the original x86 ucall path. While this diverges from the
+non-TDX PIO, it provides the cleanest implementation with minimal
+disruption to the overall ucall architecture.
+
+4. A note on #VE and x86 ucall simplification
+It is worth noting that the use of a Virtualization Exception (#VE)
+is orthogonal to the PIO vs. MMIO discussion; rather, it is a question
+of how much we want to simplify the x86 ucall implementation. A #VE
+handler is one option to allow VMs use PIO/MMIO identical to the
+non-TDX case. Alternatively, having an MMIO_WRITE wrapper macro, as Sean
+suggested[2], is another option. Either way, discussion for this is
+likely a premature optimization right now, since the PIO/MMIO call is
+only used under ucall_arch_do_ucall(), and standard and TDX VMs use
+different ones now. We should optimize this in the future, but for now,
+invoking TDCALL directly is more robust and concise.
+
+v13 revision for TDX KVM selftests based on kvm/next and guest_memfd:
+In-place conversion support[3]. For ease of testing, this series is also
+available at: https://github.com/googleprodkernel/linux-cc/commits/tdx-selftests-v13
+
+Changes from v12[4]:
+1. Fixed some bugs, including typo, commit order and commit messages.
+2. Inlined the TDCALL to tdx.c file.
+3. Refactored the Makefile to use pattern rules for generic source
+   compilation while ensuring build artifacts are directed to the target
+   output directory.
+
+Series is organized by:
+1. Patches 1 - 4: Initialize the TDX VM
+2. Patches 5 - 8: Add the TDX boot code
+3. Patches 9 - 13: Set up the boot region
+4. Patches 14 - 17: Set up the vCPU
+5. Patches 18 - 19: Finalize the TDX VM
+6. Patches 20 - 22: Implement the ucall and run the TDX test
+
+[1]: https://lore.kernel.org/kvm/aQTcDH9LRezI30dm@google.com/
+[2]: https://lore.kernel.org/kvm/aQTSdk3JtFu1qOMj@google.com/
+[3]: https://lore.kernel.org/all/20260507-gmem-inplace-conversion-v6-0-91ab5a8b19a4@google.com/T/
+[4]: https://lore.kernel.org/kvm/20251028212052.200523-1-sagis@google.com/
+
+Signed-off-by: Lisa Wang <wyihan@google.com>
+---
+Ackerley Tng (2):
+      KVM: selftests: Add helpers to init TDX memory and finalize VM
+      KVM: selftests: Add ucall support for TDX
+
+Erdem Aktas (2):
+      KVM: selftests: Add TDX boot code
+      KVM: selftests: Implement MMIO WRITE for the TDX VM
+
+Isaku Yamahata (2):
+      KVM: selftests: Update kvm_init_vm_address_properties() for TDX
+      KVM: selftests: TDX: Use KVM_TDX_CAPABILITIES to validate TDs' attribute configuration
+
+Lisa Wang (2):
+      KVM: selftests: Back the first memory region with guest_memfd for TDX
+      KVM: selftests: Set first memory region as shared if guest_memfd
+
+Sagi Shahar (13):
+      KVM: selftests: Initialize the TDX VM
+      KVM: selftests: Expose segment definitions to assembly files
+      tools: include: Add kbuild.h for assembly structure offsets
+      KVM: selftests: Introduce structures for TDX guest boot parameters
+      KVM: selftests: Expose functions to get default sregs values
+      KVM: selftests: Set up TDX boot code region
+      KVM: selftests: Set up TDX boot parameters region
+      KVM: selftests: Expose function to allocate vCPU stack
+      KVM: selftests: Call KVM_TDX_INIT_VCPU when creating a new TDX vcpu
+      KVM: selftests: Load per-vCPU guest stack in TDX boot parameters
+      KVM: selftests: Set entry point for TDX guest code
+      KVM: selftests: Finalize TD memory as part of kvm_arch_vm_finalize_vcpus
+      KVM: selftests: Add TDX lifecycle test
+
+Sean Christopherson (1):
+      KVM: selftests: Add macros to simplify creating VM shapes for non-default types
+
+ tools/include/linux/kbuild.h                       |  11 +
+ tools/testing/selftests/kvm/.gitignore             |   3 +-
+ tools/testing/selftests/kvm/Makefile.kvm           |  33 +-
+ tools/testing/selftests/kvm/include/kvm_util.h     |  13 +
+ .../testing/selftests/kvm/include/x86/processor.h  |  40 +++
+ .../selftests/kvm/include/x86/processor_asm.h      |  12 +
+ tools/testing/selftests/kvm/include/x86/sev.h      |   2 -
+ .../selftests/kvm/include/x86/tdx/td_boot.h        |  74 +++++
+ .../selftests/kvm/include/x86/tdx/td_boot_asm.h    |  16 +
+ tools/testing/selftests/kvm/include/x86/tdx/tdx.h  |  16 +
+ .../selftests/kvm/include/x86/tdx/tdx_util.h       |  80 +++++
+ tools/testing/selftests/kvm/include/x86/ucall.h    |   6 -
+ tools/testing/selftests/kvm/lib/kvm_util.c         |  18 +-
+ tools/testing/selftests/kvm/lib/x86/processor.c    | 107 ++++---
+ tools/testing/selftests/kvm/lib/x86/sev.c          |  16 -
+ tools/testing/selftests/kvm/lib/x86/tdx/td_boot.S  |  60 ++++
+ .../selftests/kvm/lib/x86/tdx/td_boot_offsets.c    |  21 ++
+ tools/testing/selftests/kvm/lib/x86/tdx/tdx.c      |  30 ++
+ tools/testing/selftests/kvm/lib/x86/tdx/tdx_util.c | 334 +++++++++++++++++++++
+ tools/testing/selftests/kvm/lib/x86/ucall.c        |  30 ++
+ tools/testing/selftests/kvm/x86/sev_smoke_test.c   |  40 +--
+ tools/testing/selftests/kvm/x86/tdx_vm_test.c      |  33 ++
+ 22 files changed, 907 insertions(+), 88 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  riscv: vector: refactor vector context operations
+[PATCH v3 1/4] riscv: vector: refactor vector context operations
+Author: Andy Chiu <tchiu@tenstorrent.com>
+
+Lift riscv_v_{enable,disable} out of __*vstate_{save,restore,discard} so
+that we can reuse some functions without repeatedly turning on/off
+vector.
+
+Also, refactor and document about the user context save in preempt_v to
+make code more readable.
+
+Signed-off-by: Andy Chiu <tchiu@tenstorrent.com>
+---
+Changelog v3:
+ - new patch since v3
+---
+ arch/riscv/include/asm/kvm_vcpu_vector.h |  8 +++++--
+ arch/riscv/include/asm/vector.h          | 15 +++++++------
+ arch/riscv/kernel/kernel_mode_vector.c   | 27 +++++++++++++++++++-----
+ arch/riscv/kvm/vcpu_vector.c             |  8 +++----
+ 4 files changed, 40 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  target/i386/sev: fix MemoryRegion reference leaks in gpa2hva callers
+[PATCH] target/i386/sev: fix MemoryRegion reference leaks in gpa2hva callers
+Author: marcandre.lureau <marcandre.lureau@redhat.com>
+
+
+gpa2hva() returns a referenced MemoryRegion via its p_mr out-parameter
+(inherited from memory_region_find()), but both SEV callers were failing
+to release it.
+
+Fixes: c7f7e6970d3b ("sev: add sev-inject-launch-secret")
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+---
+ include/system/memory.h | 2 ++
+ target/i386/sev.c       | 4 ++--
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  irqchip/gic-v5: Allow KVM setup without a
+[PATCH v2 01/39] irqchip/gic-v5: Allow KVM setup without a
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+GICv5 does not require a virtual CPU interface maintenance interrupt
+for native GCIE operation. The interrupt is only needed when
+FEAT_GCIE_LEGACY is present, as the legacy GICv3 interface still
+relies on maintenance IRQ delivery.
+
+Stop rejecting KVM setup solely because the maintenance interrupt is
+absent. Parse the interrupt if present, but if none is described and
+the system does not advertise FEAT_GCIE_LEGACY, tell KVM that no
+maintenance interrupt is required.
+
+This lets native GICv5 KVM support be registered on systems that do
+not provide a maintenance interrupt, while requiring a maintenance
+interrupt for GICv3-capable systems.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ drivers/irqchip/irq-gic-v5.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add GICv5 IRS support
+[PATCH v2 00/39] KVM: arm64: Add GICv5 IRS support
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Hi all,
+
+This series builds on the initial vGICv5 support [1] and adds support
+for the GICv5 IRS, as described by the GICv5 (EAC0) specification [2].
+With this, a GICv5 guest is no longer restricted to PPIs, and can
+make use of SPIs and LPIs as well.
+
+With SPIs and LPIs available, this series makes it possible to boot a
+full Linux guest on the Arm FVP model [3], using the setup described
+in Lorenzo's GICv5 Linux software enablement guide [4]. In addition,
+GICv5 IPIs are typically implemented as LPIs, so LPI support is what
+makes guests with more than one vCPU possible.
+
+The corresponding kvmtool changes are available separately [5]. With
+these changes, `--irqchip=3Dgicv5` works now. The `--irqchip=3Dgicv5-its`
+configuration does not work with this series, as ITS/MSI support is not
+included here.
+
+The IRS is created as part of the vgic-v5 device, and is not a
+separate KVM device. This is because implementing the CPU interface
+alone would limit a guest to a single vCPU and PPIs only. Hence, the
+IRS is bundled into the VGIC, much like the distributor for GICv3.
+
+The series adds the host-side plumbing needed for KVM to interact with
+the physical IRS, including VM and VPE table management, VPE residency,
+and VPE doorbells. It also adds an emulated IRS MMIO interface for the
+guest, together with the UAPI needed for userspace to configure the IRS
+address and to save/restore the IRS and IST state.
+
+The main pieces are:
+
+* Host IRS capability discovery and configuration frame plumbing.
+
+* Allocation and management of the GICv5 VM table, VPE table, VMTEs,
+  VPEs, and guest IST backing storage.
+
+* VPE residency and doorbell handling, allowing the IRS to select SPIs
+  and LPIs for resident VPEs and wake non-resident VPEs when required.
+
+* Emulation of the GICv5 IRS MMIO CONFIG_FRAME for guests.
+  Virtualisation, MPAM, MEC, SWERR are not supported and are RAZ/WI.
+
+* SPI injection support using GIC VDPEND, together with tracking of
+  in-flight SPIs so that deactivation notifiers can still be handled.
+
+* Save/restore support for GICv5 EL1 system registers, IRS MMIO state,
+  and guest ISTs.
+
+* Documentation for the new VGICv5 IRS userspace interfaces and the
+  required save/restore ordering.
+
+Please pay close attention to the save/restore interface and ordering,
+in particular to make sure that no guest state has been omitted.
+
+LPIs are explicitly driven by the guest through the IRS/IST state. This
+series does not add direct LPI injection support, and does not add MSI
+support. It also does not add GICv5 ITS emulation.
+
+These changes are based on v7.1-rc4. They presume the existence of the
+still-under-review changes in [6]. I've pushed the full set of changes
+to a branch at [7].
+
+Changes since v1 [8]:
+
+* Added native GICv5 KVM setup without a maintenance IRQ, plus ACPI KVM
+  probing for GICv5 hosts.
+
+* Completed and moved IRS MMIO register definitions earlier in the
+  series.
+
+* Reworked IRS capability discovery around the irqchip-provided config
+  frame.
+
+* Kept GICv5-host vCPU limits per VGIC model: native vGICv5 uses IRS
+  VPE capacity, while legacy vGICv3 keeps its fixed limit.
+
+* Consolidated VMTE, VPE, IST, and doorbell lifecycle handling.
+
+* Reworked VPE residency and doorbell programming around WFI and the
+  effective priority mask.
+
+* Tightened GICv5 SPI sizing and routing, including the 32-SPI minimum
+  and SPI/irqfd validation.
+
+* Hardened in-flight SPI handling, including irqsave IRS MMIO locking
+  and allocation-free state foldback.
+
+* Reworked IRS/IST save/restore semantics and documented the migration
+  ordering.
+
+Thanks for taking the time to look at these changes. Apologies for the
+size of the series, but this is a rather hard set to disentangle and
+review separately!
+
+Thanks,
+Sascha
+
+[1] https://lore.kernel.org/all/20260319154937.3619520-1-sascha.bischoff@ar=
+m.com/
+[2] https://developer.arm.com/documentation/aes0070/latest
+[3] https://developer.arm.com/documentation/108086/latest
+[4] https://linaro.atlassian.net/wiki/x/CQAF-wY
+[5] https://lore.kernel.org/all/20260116182606.61856-1-sascha.bischoff@arm.=
+com/
+[6] https://lore.kernel.org/all/20260520091949.542365-1-maz@kernel.org/
+[7] https://gitlab.arm.com/linux-arm/linux-sb/-/tree/gicv5_kvm_irs_support_=
+v2
+[8] https://lore.kernel.org/all/20260427160547.3129448-1-sascha.bischoff@ar=
+m.com/
+
+Sascha Bischoff (39):
+  irqchip/gic-v5: Allow KVM setup without a maintenance IRQ
+  irqchip/gic-v5: Provide OF IRS config frame attrs to KVM
+  irqchip/gic-v5: Setup gic_kvm_info on ACPI hosts
+  KVM: arm64: gic-v5: Define remaining IRS MMIO registers
+  arm64/sysreg: Add GICv5 GIC VDPEND and VDRCFG encodings
+  arm64/sysreg: Update ICC_CR0_EL1 with LINK and LINK_IDLE fields
+  KVM: arm64: gic-v5: Extract host IRS caps from IRS config frame
+  KVM: arm64: gic-v5: Add VPE doorbell domain
+  KVM: arm64: gic-v5: Create & manage VM and VPE tables
+  KVM: arm64: gic-v5: Introduce guest IST alloc and management
+  KVM: arm64: gic-v5: Implement VMT/vIST IRS MMIO Ops
+  KVM: arm64: gic-v5: Keep GICv5 vCPU limit model-specific
+  KVM: arm64: gic-v5: Implement VPE IRS MMIO Ops
+  KVM: arm64: gic-v5: Set up VMTEs and VPE doorbells
+  KVM: arm64: gic-v5: Add resident/non-resident hyp calls
+  KVM: arm64: gic-v5: Request doorbells when VPEs enter WFI
+  KVM: arm64: gic-v5: Introduce struct vgic_v5_irs and IRS base address
+  KVM: arm64: gic-v5: Add IRS IODEV support to MMIO handlers
+  KVM: arm64: gic-v5: Add KVM_VGIC_V5_ADDR_TYPE_IRS to UAPI
+  KVM: arm64: gic-v5: Add GICv5 IRS IODEV and MMIO emulation
+  KVM: arm64: gic-v5: Initialise per-VM IRS state
+  KVM: arm64: gic-v5: Register the IRS IODEV
+  KVM: arm64: gic-v5: Set IRICHPPIDIS based on IRS enable state
+  KVM: arm64: selftests: Update vGICv5 selftest to set IRS address
+  KVM: arm64: gic-v5: Introduce SPI AP list
+  KVM: arm64: gic-v5: Add GIC VDPEND and GIC VDRCFG hyp calls
+  KVM: arm64: gic-v5: Track SPI state for in-flight SPIs
+  KVM: arm64: gic: Introduce set_pending_state() to irq_op
+  KVM: arm64: gic-v5: Support SPI injection
+  Documentation: KVM: Extend VGICv5 docs for KVM_VGIC_V5_ADDR_TYPE_IRS
+  KVM: arm64: gic-v5: Add GICv5 SPI injection to irqfd
+  KVM: arm64: gic-v5: Mask per-vcpu PPI state in
+    vgic_v5_finalize_ppi_state()
+  KVM: arm64: gic-v5: Add GICv5 EL1 sysreg userspace accessors
+  KVM: arm64: gic-v5: Handle userspace accesses to IRS MMIO region
+  KVM: arm64: gic-v5: Implement save/restore mechanisms for ISTs
+  Documentation: KVM: Document KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS for
+    VGICv5
+  Documentation: KVM: Add KVM_DEV_ARM_VGIC_GRP_IRS_REGS to VGICv5 docs
+  Documentation: KVM: Add docs for KVM_DEV_ARM_VGIC_GRP_IST
+  Documentation: KVM: Add the VGICv5 IRS save/restore sequences
+
+ .../virt/kvm/devices/arm-vgic-v5.rst          |  237 ++-
+ arch/arm64/include/asm/kvm_asm.h              |    4 +
+ arch/arm64/include/asm/kvm_hyp.h              |    4 +
+ arch/arm64/include/asm/sysreg.h               |   18 +-
+ arch/arm64/include/uapi/asm/kvm.h             |    7 +
+ arch/arm64/kvm/Makefile                       |    3 +-
+ arch/arm64/kvm/arm.c                          |    2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |   34 +
+ arch/arm64/kvm/hyp/vgic-v5-sr.c               |   55 +
+ arch/arm64/kvm/sys_regs.c                     |    6 +-
+ arch/arm64/kvm/vgic-sys-reg-v5.c              |  519 +++++
+ arch/arm64/kvm/vgic/vgic-init.c               |  112 +-
+ arch/arm64/kvm/vgic/vgic-irqfd.c              |   20 +-
+ arch/arm64/kvm/vgic/vgic-irs-v5.c             | 1056 ++++++++++
+ arch/arm64/kvm/vgic/vgic-kvm-device.c         |  252 ++-
+ arch/arm64/kvm/vgic/vgic-mmio.c               |    6 +
+ arch/arm64/kvm/vgic/vgic-mmio.h               |    2 +
+ arch/arm64/kvm/vgic/vgic-v5-tables.c          | 1831 +++++++++++++++++
+ arch/arm64/kvm/vgic/vgic-v5-tables.h          |  113 +
+ arch/arm64/kvm/vgic/vgic-v5.c                 | 1191 ++++++++++-
+ arch/arm64/kvm/vgic/vgic.c                    |   39 +-
+ arch/arm64/kvm/vgic/vgic.h                    |   21 +-
+ arch/arm64/tools/sysreg                       |    4 +-
+ drivers/irqchip/irq-gic-v5-irs.c              |   19 +-
+ drivers/irqchip/irq-gic-v5.c                  |  117 +-
+ include/kvm/arm_vgic.h                        |  165 +-
+ include/linux/irqchip/arm-gic-v5.h            |  220 +-
+ include/linux/irqchip/arm-vgic-info.h         |    5 +
+ tools/arch/arm64/include/uapi/asm/kvm.h       |    7 +
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   |    6 +
+ .../selftests/kvm/include/arm64/gic_v5.h      |    3 +
+ 31 files changed, 5928 insertions(+), 150 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Fix TOCTOU race in SBI system suspend handler
+[PATCH] RISC-V: KVM: Fix TOCTOU race in SBI system suspend handler
+Author: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+The SBI SUSP handler kvm_sbi_ext_susp_handler() checks that all other
+vCPUs are stopped before entering system suspend, but it does not hold
+mp_state_lock during the iteration. A concurrent HSM HART_START from
+another vCPU can start a target vCPU after the SUSP handler has already
+checked it, violating the invariant that all vCPUs must be stopped
+before suspend.
+
+Fix this with a two-phase approach:
+1. Set a VM-wide suspend_in_progress flag before the iteration to block
+   concurrent HSM HART_START. The HSM start handler checks this flag
+   under its existing mp_state_lock, closing the race.
+2. Hold mp_state_lock during each per-vCPU stopped check so that
+   mp_state reads are ordered against concurrent power_on/power_off
+   writes on the other side of the lock.
+
+The flag is self-clearing: it resets when any vCPU re-enters
+kvm_arch_vcpu_ioctl_run after the suspend-resume cycle completes.
+
+Fixes: 023c15151fbb ("RISC-V: KVM: Add SBI system suspend support")
+Signed-off-by: Jiakai Xu <jiakaiPeanut@gmail.com>
+Signed-off-by: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+Assisted-by: YuanSheng:DeepSeek-V3.2
+---
+ arch/riscv/include/asm/kvm_host.h |  3 +++
+ arch/riscv/kvm/vcpu.c             |  8 ++++++++
+ arch/riscv/kvm/vcpu_sbi_hsm.c     | 11 +++++++++++
+ arch/riscv/kvm/vcpu_sbi_system.c  | 10 ++++++++++
+ 4 files changed, 32 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  Convert moduleparams to seq_buf
+[PATCH 00/11] Convert moduleparams to seq_buf
+Author: Kees Cook <kees@kernel.org>
+
+Hi,
+
+I tried to trim the CC list here, but it's still pretty huge...
+
+We've had a long-standing issue with "write to a string pointer" callbacks
+that don't bounds check the destination (and for which the bounds is
+also not part of the callback prototype, even if it is "known" to be
+PAGE_SIZE, which sysfs_emit() depends on). Both moduleparams and sysfs
+use this pattern. As a first step, and to test the migration method,
+migrate moduleparams first.
+
+There are 2 "mechanical" treewide patches that are handled by Coccinelle:
+- treewide: Convert struct kernel_param_ops initializers to DEFINE_KERNEL_PARAM_OPS
+- treewide: Convert custom kernel_param_ops .get callbacks to seq_buf via cocci
+
+The last treewide patch is manual, and may need to be broken up into
+per-subsystem patches, though I'd prefer to avoid this, as it would
+extend the migration from 1 relase to at least 2 releases. (1 to
+release the migration infrastructure, then 1 release to collect all the
+subsystem changes, and possibly 1 more release to remove the migration
+infrastructure.)
+
+Thoughts, questions?
+
+-Kees
+
+Kees Cook (10):
+  panic: Replace panic_print_get() with generic helper
+  moduleparam: Add DEFINE_KERNEL_PARAM_OPS macro family
+  treewide: Convert struct kernel_param_ops initializers to
+    DEFINE_KERNEL_PARAM_OPS
+  moduleparam: Rename .get field to .get_str
+  moduleparam: Add seq_buf-based .get callback alongside .get_str
+  moduleparam: Route DEFINE_KERNEL_PARAM_OPS get pointer via _Generic
+  params: Convert generic kernel_param_ops .get helpers to seq_buf
+  treewide: Convert custom kernel_param_ops .get callbacks to seq_buf
+    via cocci
+  treewide: Manually convert custom kernel_param_ops .get callbacks
+  moduleparam: Drop legacy kernel_param_ops .get_str field and dispatch
+    logic
+
+Pengpeng Hou (1):
+  params: bound array element output to the caller's page buffer
+
+ include/linux/dynamic_debug.h                 |   8 +-
+ include/linux/moduleparam.h                   |  65 +++++++---
+ security/apparmor/include/lib.h               |   3 +-
+ mm/kfence/core.c                              |  15 ++-
+ arch/powerpc/kvm/book3s_hv.c                  |   5 +-
+ arch/s390/kernel/perf_cpum_sf.c               |  12 +-
+ arch/um/drivers/vfio_kern.c                   |   9 +-
+ arch/um/drivers/virtio_uml.c                  |  18 +--
+ arch/x86/kernel/msr.c                         |  11 +-
+ arch/x86/kvm/mmu/mmu.c                        |  28 ++--
+ arch/x86/kvm/svm/avic.c                       |  14 +-
+ arch/x86/kvm/vmx/vmx.c                        |  24 ++--
+ arch/x86/platform/uv/uv_nmi.c                 |  24 ++--
+ block/disk-events.c                           |   6 +-
+ drivers/acpi/button.c                         |  19 ++-
+ drivers/acpi/ec.c                             |  14 +-
+ drivers/acpi/sysfs.c                          | 114 ++++++++--------
+ drivers/block/loop.c                          |  12 +-
+ drivers/block/null_blk/main.c                 |  12 +-
+ drivers/block/rnbd/rnbd-srv.c                 |   6 +-
+ drivers/block/ublk_drv.c                      |  12 +-
+ drivers/char/ipmi/ipmi_msghandler.c           |  12 +-
+ drivers/char/ipmi/ipmi_watchdog.c             |  50 +++----
+ drivers/crypto/hisilicon/hpre/hpre_main.c     |  16 +--
+ drivers/crypto/hisilicon/sec2/sec_main.c      |  23 +---
+ drivers/crypto/hisilicon/zip/zip_crypto.c     |   5 +-
+ drivers/crypto/hisilicon/zip/zip_main.c       |  21 +--
+ drivers/dma/dmatest.c                         |  34 ++---
+ drivers/edac/i10nm_base.c                     |   6 +-
+ drivers/firmware/efi/efi-pstore.c             |   6 +-
+ drivers/firmware/qcom/qcom_scm.c              |  18 +--
+ drivers/firmware/qemu_fw_cfg.c                |  40 +++---
+ drivers/gpu/drm/drm_panic.c                   |  13 +-
+ drivers/gpu/drm/i915/i915_mitigations.c       |  31 ++---
+ drivers/gpu/drm/imagination/pvr_fw_trace.c    |   6 +-
+ drivers/hid/hid-cougar.c                      |   6 +-
+ drivers/hid/hid-steam.c                       |   6 +-
+ drivers/infiniband/hw/hfi1/driver.c           |  12 +-
+ drivers/infiniband/ulp/iser/iscsi_iser.c      |   6 +-
+ drivers/infiniband/ulp/isert/ib_isert.c       |   6 +-
+ drivers/infiniband/ulp/srp/ib_srp.c           |  12 +-
+ drivers/infiniband/ulp/srpt/ib_srpt.c         |   5 +-
+ drivers/input/misc/ati_remote2.c              |  23 ++--
+ drivers/input/mouse/psmouse-base.c            |  15 ++-
+ drivers/md/md.c                               |   5 +-
+ drivers/media/pci/tw686x/tw686x-core.c        |   6 +-
+ drivers/media/usb/uvc/uvc_driver.c            |  14 +-
+ drivers/misc/lis3lv02d/lis3lv02d.c            |   5 +-
+ drivers/net/wireless/ath/wil6210/main.c       |  10 +-
+ drivers/nvme/host/multipath.c                 |  17 +--
+ drivers/nvme/host/pci.c                       |  18 +--
+ drivers/nvme/target/rdma.c                    |   5 +-
+ drivers/nvme/target/tcp.c                     |   5 +-
+ drivers/pci/pcie/aspm.c                       |  17 ++-
+ drivers/platform/x86/acerhdf.c                |   5 +-
+ drivers/power/supply/bq27xxx_battery.c        |   6 +-
+ drivers/power/supply/test_power.c             | 122 +++++++++---------
+ drivers/scsi/fcoe/fcoe_transport.c            |  22 ++--
+ drivers/scsi/sg.c                             |   6 +-
+ drivers/target/target_core_user.c             |  25 ++--
+ .../processor_thermal_soc_slider.c            |  24 ++--
+ drivers/thermal/intel/intel_powerclamp.c      |  34 ++---
+ drivers/tty/hvc/hvc_iucv.c                    |  24 ++--
+ drivers/tty/sysrq.c                           |   6 +-
+ drivers/ufs/core/ufs-fault-injection.c        |  12 +-
+ drivers/ufs/core/ufs-mcq.c                    |  18 +--
+ drivers/ufs/core/ufs-txeq.c                   |   5 +-
+ drivers/ufs/core/ufshcd.c                     |  12 +-
+ drivers/usb/core/quirks.c                     |   6 +-
+ drivers/usb/gadget/legacy/serial.c            |   5 +-
+ drivers/usb/storage/usb.c                     |  25 ++--
+ drivers/vhost/scsi.c                          |  12 +-
+ drivers/virt/nitro_enclaves/ne_misc_dev.c     |   6 +-
+ drivers/virtio/virtio_mmio.c                  |  27 ++--
+ fs/ceph/super.c                               |  10 +-
+ fs/fuse/dir.c                                 |   5 +-
+ fs/nfs/namespace.c                            |  12 +-
+ fs/nfs/super.c                                |   6 +-
+ fs/ocfs2/dlmfs/dlmfs.c                        |   5 +-
+ fs/overlayfs/copy_up.c                        |   5 +-
+ fs/ubifs/super.c                              |   6 +-
+ kernel/locking/locktorture.c                  |  12 +-
+ kernel/panic.c                                |  11 +-
+ kernel/params.c                               | 122 +++++++++---------
+ kernel/power/hibernate.c                      |   6 +-
+ kernel/rcu/tree.c                             |  24 ++--
+ kernel/sched/ext.c                            |  11 +-
+ kernel/workqueue.c                            |  18 ++-
+ lib/dynamic_debug.c                           |  16 ++-
+ lib/test_dynamic_debug.c                      |  12 +-
+ mm/damon/lru_sort.c                           |  33 +++--
+ mm/damon/reclaim.c                            |  33 +++--
+ mm/damon/stat.c                               |  16 +--
+ mm/memory_hotplug.c                           |  30 +++--
+ mm/page_reporting.c                           |  11 +-
+ mm/shuffle.c                                  |   6 +-
+ mm/zswap.c                                    |  14 +-
+ net/batman-adv/bat_algo.c                     |   6 +-
+ net/ceph/ceph_common.c                        |  10 +-
+ net/ipv4/tcp_dctcp.c                          |   6 +-
+ net/sunrpc/auth.c                             |  12 +-
+ net/sunrpc/svc.c                              |   5 +-
+ net/sunrpc/xprtsock.c                         |  18 +--
+ samples/damon/mtier.c                         |   6 +-
+ samples/damon/prcl.c                          |   6 +-
+ samples/damon/wsse.c                          |   6 +-
+ security/apparmor/lib.c                       |  27 ++--
+ security/apparmor/lsm.c                       |  75 +++++------
+ sound/hda/controllers/intel.c                 |   5 +-
+ sound/usb/card.c                              |   7 +-
+ 110 files changed, 854 insertions(+), 1066 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  params: bound array element output to the caller's page buffer
+[PATCH 01/11] params: bound array element output to the caller's page buffer
+Author: Kees Cook <kees@kernel.org>
+
+
+param_array_get() appends each element's string representation into the
+shared sysfs page buffer by passing buffer + off to the element getter.
+
+That works for getters that only write a small bounded string, but
+param_get_charp() and similar helpers format against PAGE_SIZE from the
+pointer they receive. Once off is non-zero, an element getter can
+therefore write past the end of the original sysfs page buffer.
+
+Collect each element into a temporary PAGE_SIZE buffer first and then
+copy only the remaining space into the caller's page buffer.
+
+Cc: stable@vger.kernel.org
+Reviewed-by: Petr Pavlu <petr.pavlu@suse.com>
+Signed-off-by: Pengpeng Hou <pengpeng@iscas.ac.cn>
+Signed-off-by: Kees Cook <kees@kernel.org>
+---
+ kernel/params.c | 26 ++++++++++++++++++++------
+ 1 file changed, 20 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Track page size in struct guest_fault
+[PATCH v2 1/5] KVM: s390: Track page size in struct guest_fault
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Until now, the members of struct guest_fault are always accessed while
+holding the required locks, and thus the ptep and crstep pointers can
+be dereferenced safely.
+
+There will be some new cases where callers of kvm_s390_faultin_gfn()
+need to know the size of the page used to solve the fault, at which
+point no locks are held anymore, and dereferencing the crstep field
+is not possible.
+
+Introduce a new crste_region3 flag for struct guest_fault to indicate
+whether the crstep used to solve the fault was a region 3 entry with FC=1
+(large pud).
+
+This allows to disambiguate all three possible scenarios:
+* If ptep is not NULL, the fault was solved with a pte.
+* If ptep is NULL and crste_region3 is 0, a segment entry with FC=1
+  (large pmd) was used.
+* If ptep is NULL and crste_region3 is 1, a region 3 entry with FC=1
+  (large pud) was used.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/dat.h  | 1 +
+ arch/s390/kvm/gmap.c | 2 ++
+ 2 files changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Implement KVM_PRE_FAULT_MEMORY
+[PATCH v2 0/5] KVM: s390: Implement KVM_PRE_FAULT_MEMORY
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Implement KVM_PRE_FAULT_MEMORY on s390, and update documentation and
+selftests accordingly.
+
+Faulted-in pages will be marked as accessed, unlike x86, otherwise they
+will trigger a minor fault when accessed. Avoiding such faults is one of
+the points of KVM_PRE_FAULT_MEMORY.
+
+CCing x86 people due to changes in the documentation and the selftests
+
+v1->v2:
+* Add the crste_region3 flag in struct guest_fault to keep track of the
+  page size used to solve a fault.
+* Rewrite the s390 version of kvm_arch_vcpu_pre_fault_memory() so it
+  looks and behaves similarly to the x86 version. No more loops, better
+  handling of hugepage mappings, and more correct error handling.
+* Remove the assertion vcpu->run->exit_reason == KVM_EXIT_IO from the
+  selftest, as it is redundant and x86-specific.
+
+Claudio Imbrenda (5):
+  KVM: s390: Track page size in struct guest_fault
+  KVM: s390: Implement KVM_PRE_FAULT_MEMORY
+  KVM: s390: Update KVM_PRE_FAULT_MEMORY API documentation
+  KVM: selftests: Fix pre_fault_memory_test to run on s390
+  KVM: selftests: Enable pre_fault_memory_test for s390
+
+ Documentation/virt/kvm/api.rst                |  5 ++-
+ arch/s390/kvm/Kconfig                         |  1 +
+ arch/s390/kvm/dat.h                           |  1 +
+ arch/s390/kvm/gmap.c                          |  2 +
+ arch/s390/kvm/kvm-s390.c                      | 45 +++++++++++++++++++
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../selftests/kvm/pre_fault_memory_test.c     |  7 +--
+ 7 files changed, 54 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  add minimal tests for 32-bit guests
+[PATCH kvm-unit-tests v2 0/4] add minimal tests for 32-bit guests
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+VMX and SVM tests are only running 32-bit guests.  Add a minimal test
+that they can at least start a guest with both two-level and PAE
+page tables; for VMX only, check also the case where CR3 is bogus
+but the PDPTRs are stuffed correctly in the VMCS.
+
+Rebased on top of Sean's regs rework + the brown paper bag fix at
+https://lore.kernel.org/kvm/20260521092311.86030-1-pbonzini@redhat.com/.
+
+Paolo
+
+
+Paolo Bonzini (4):
+  vmx: add test for 32-bit guest
+  vmx: add test for 32-bit PAE guest
+  svm: add test for 32-bit guest
+  svm: add test for 32-bit PAE guest
+
+ x86/svm_tests.c | 159 +++++++++++++++++++++++++++++++++++++++
+ x86/vmx_tests.c | 192 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 351 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vmx: add test for 32-bit guest
+[PATCH kvm-unit-tests 1/4] vmx: add test for 32-bit guest
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ x86/vmx_tests.c | 125 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 125 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Add tracepoint for vCPU wait/yield paths
+[PATCH] KVM: x86: Add tracepoint for vCPU wait/yield paths
+Author: zhanghao <76824143@qq.com>
+
+From 0c8d4428390a1238a956f713c1ddced18eac83da Mon Sep 17 00:00:00 2001
+Date: Thu, 21 May 2026 16:30:37 +0800
+
+Add a KVM x86 tracepoint that reports when a vCPU reaches selected
+wait/yield handling paths in KVM.
+
+The tracepoint is informational only. It does not change KVM scheduling
+behavior, vCPU placement, directed-yield policy, or host scheduler state.
+It also does not report the outcome of scheduling decisions.
+
+In particular, the target field is the guest-supplied value when one
+exists. It does not imply that the target exists, is runnable, or that a
+directed yield succeeded.
+
+Report events for PAUSE-loop exiting after hardware has already delivered
+a PLE exit, guest HLT emulation, and paravirtual yield-style paths,
+including KVM_HC_SCHED_YIELD, Hyper-V long spin wait, and Xen sched yield.
+
+Use -1 as the target when there is no explicit guest-supplied target.
+
+Signed-off-by: Hao Zhang <zhanghao1@kylinos.cn>
+---
+ arch/x86/kvm/hyperv.c  |  2 ++
+ arch/x86/kvm/svm/svm.c |  2 ++
+ arch/x86/kvm/trace.h   | 46 ++++++++++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/vmx/vmx.c |  2 ++
+ arch/x86/kvm/x86.c     |  6 ++++++
+ arch/x86/kvm/xen.c     |  2 ++
+ 6 files changed, 60 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 237a68635 to 5e734f971
+KVM mailing list update from 237a68635 to 5e734f971
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     59 arm.com
+     14 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     40  Sascha Bischoff <Sascha.Bischoff@arm.com>
+     19  Mark Rutland <mark.rutland@arm.com>
+     14  Vincent Donnefort <vdonnefort@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  irqchip/gic-v5: Allow KVM setup without a
+[PATCH v2 01/39] irqchip/gic-v5: Allow KVM setup without a
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+GICv5 does not require a virtual CPU interface maintenance interrupt
+for native GCIE operation. The interrupt is only needed when
+FEAT_GCIE_LEGACY is present, as the legacy GICv3 interface still
+relies on maintenance IRQ delivery.
+
+Stop rejecting KVM setup solely because the maintenance interrupt is
+absent. Parse the interrupt if present, but if none is described and
+the system does not advertise FEAT_GCIE_LEGACY, tell KVM that no
+maintenance interrupt is required.
+
+This lets native GICv5 KVM support be registered on systems that do
+not provide a maintenance interrupt, while requiring a maintenance
+interrupt for GICv3-capable systems.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ drivers/irqchip/irq-gic-v5.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add GICv5 IRS support
+[PATCH v2 00/39] KVM: arm64: Add GICv5 IRS support
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Hi all,
+
+This series builds on the initial vGICv5 support [1] and adds support
+for the GICv5 IRS, as described by the GICv5 (EAC0) specification [2].
+With this, a GICv5 guest is no longer restricted to PPIs, and can
+make use of SPIs and LPIs as well.
+
+With SPIs and LPIs available, this series makes it possible to boot a
+full Linux guest on the Arm FVP model [3], using the setup described
+in Lorenzo's GICv5 Linux software enablement guide [4]. In addition,
+GICv5 IPIs are typically implemented as LPIs, so LPI support is what
+makes guests with more than one vCPU possible.
+
+The corresponding kvmtool changes are available separately [5]. With
+these changes, `--irqchip=3Dgicv5` works now. The `--irqchip=3Dgicv5-its`
+configuration does not work with this series, as ITS/MSI support is not
+included here.
+
+The IRS is created as part of the vgic-v5 device, and is not a
+separate KVM device. This is because implementing the CPU interface
+alone would limit a guest to a single vCPU and PPIs only. Hence, the
+IRS is bundled into the VGIC, much like the distributor for GICv3.
+
+The series adds the host-side plumbing needed for KVM to interact with
+the physical IRS, including VM and VPE table management, VPE residency,
+and VPE doorbells. It also adds an emulated IRS MMIO interface for the
+guest, together with the UAPI needed for userspace to configure the IRS
+address and to save/restore the IRS and IST state.
+
+The main pieces are:
+
+* Host IRS capability discovery and configuration frame plumbing.
+
+* Allocation and management of the GICv5 VM table, VPE table, VMTEs,
+  VPEs, and guest IST backing storage.
+
+* VPE residency and doorbell handling, allowing the IRS to select SPIs
+  and LPIs for resident VPEs and wake non-resident VPEs when required.
+
+* Emulation of the GICv5 IRS MMIO CONFIG_FRAME for guests.
+  Virtualisation, MPAM, MEC, SWERR are not supported and are RAZ/WI.
+
+* SPI injection support using GIC VDPEND, together with tracking of
+  in-flight SPIs so that deactivation notifiers can still be handled.
+
+* Save/restore support for GICv5 EL1 system registers, IRS MMIO state,
+  and guest ISTs.
+
+* Documentation for the new VGICv5 IRS userspace interfaces and the
+  required save/restore ordering.
+
+Please pay close attention to the save/restore interface and ordering,
+in particular to make sure that no guest state has been omitted.
+
+LPIs are explicitly driven by the guest through the IRS/IST state. This
+series does not add direct LPI injection support, and does not add MSI
+support. It also does not add GICv5 ITS emulation.
+
+These changes are based on v7.1-rc4. They presume the existence of the
+still-under-review changes in [6]. I've pushed the full set of changes
+to a branch at [7].
+
+Changes since v1 [8]:
+
+* Added native GICv5 KVM setup without a maintenance IRQ, plus ACPI KVM
+  probing for GICv5 hosts.
+
+* Completed and moved IRS MMIO register definitions earlier in the
+  series.
+
+* Reworked IRS capability discovery around the irqchip-provided config
+  frame.
+
+* Kept GICv5-host vCPU limits per VGIC model: native vGICv5 uses IRS
+  VPE capacity, while legacy vGICv3 keeps its fixed limit.
+
+* Consolidated VMTE, VPE, IST, and doorbell lifecycle handling.
+
+* Reworked VPE residency and doorbell programming around WFI and the
+  effective priority mask.
+
+* Tightened GICv5 SPI sizing and routing, including the 32-SPI minimum
+  and SPI/irqfd validation.
+
+* Hardened in-flight SPI handling, including irqsave IRS MMIO locking
+  and allocation-free state foldback.
+
+* Reworked IRS/IST save/restore semantics and documented the migration
+  ordering.
+
+Thanks for taking the time to look at these changes. Apologies for the
+size of the series, but this is a rather hard set to disentangle and
+review separately!
+
+Thanks,
+Sascha
+
+[1] https://lore.kernel.org/all/20260319154937.3619520-1-sascha.bischoff@ar=
+m.com/
+[2] https://developer.arm.com/documentation/aes0070/latest
+[3] https://developer.arm.com/documentation/108086/latest
+[4] https://linaro.atlassian.net/wiki/x/CQAF-wY
+[5] https://lore.kernel.org/all/20260116182606.61856-1-sascha.bischoff@arm.=
+com/
+[6] https://lore.kernel.org/all/20260520091949.542365-1-maz@kernel.org/
+[7] https://gitlab.arm.com/linux-arm/linux-sb/-/tree/gicv5_kvm_irs_support_=
+v2
+[8] https://lore.kernel.org/all/20260427160547.3129448-1-sascha.bischoff@ar=
+m.com/
+
+Sascha Bischoff (39):
+  irqchip/gic-v5: Allow KVM setup without a maintenance IRQ
+  irqchip/gic-v5: Provide OF IRS config frame attrs to KVM
+  irqchip/gic-v5: Setup gic_kvm_info on ACPI hosts
+  KVM: arm64: gic-v5: Define remaining IRS MMIO registers
+  arm64/sysreg: Add GICv5 GIC VDPEND and VDRCFG encodings
+  arm64/sysreg: Update ICC_CR0_EL1 with LINK and LINK_IDLE fields
+  KVM: arm64: gic-v5: Extract host IRS caps from IRS config frame
+  KVM: arm64: gic-v5: Add VPE doorbell domain
+  KVM: arm64: gic-v5: Create & manage VM and VPE tables
+  KVM: arm64: gic-v5: Introduce guest IST alloc and management
+  KVM: arm64: gic-v5: Implement VMT/vIST IRS MMIO Ops
+  KVM: arm64: gic-v5: Keep GICv5 vCPU limit model-specific
+  KVM: arm64: gic-v5: Implement VPE IRS MMIO Ops
+  KVM: arm64: gic-v5: Set up VMTEs and VPE doorbells
+  KVM: arm64: gic-v5: Add resident/non-resident hyp calls
+  KVM: arm64: gic-v5: Request doorbells when VPEs enter WFI
+  KVM: arm64: gic-v5: Introduce struct vgic_v5_irs and IRS base address
+  KVM: arm64: gic-v5: Add IRS IODEV support to MMIO handlers
+  KVM: arm64: gic-v5: Add KVM_VGIC_V5_ADDR_TYPE_IRS to UAPI
+  KVM: arm64: gic-v5: Add GICv5 IRS IODEV and MMIO emulation
+  KVM: arm64: gic-v5: Initialise per-VM IRS state
+  KVM: arm64: gic-v5: Register the IRS IODEV
+  KVM: arm64: gic-v5: Set IRICHPPIDIS based on IRS enable state
+  KVM: arm64: selftests: Update vGICv5 selftest to set IRS address
+  KVM: arm64: gic-v5: Introduce SPI AP list
+  KVM: arm64: gic-v5: Add GIC VDPEND and GIC VDRCFG hyp calls
+  KVM: arm64: gic-v5: Track SPI state for in-flight SPIs
+  KVM: arm64: gic: Introduce set_pending_state() to irq_op
+  KVM: arm64: gic-v5: Support SPI injection
+  Documentation: KVM: Extend VGICv5 docs for KVM_VGIC_V5_ADDR_TYPE_IRS
+  KVM: arm64: gic-v5: Add GICv5 SPI injection to irqfd
+  KVM: arm64: gic-v5: Mask per-vcpu PPI state in
+    vgic_v5_finalize_ppi_state()
+  KVM: arm64: gic-v5: Add GICv5 EL1 sysreg userspace accessors
+  KVM: arm64: gic-v5: Handle userspace accesses to IRS MMIO region
+  KVM: arm64: gic-v5: Implement save/restore mechanisms for ISTs
+  Documentation: KVM: Document KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS for
+    VGICv5
+  Documentation: KVM: Add KVM_DEV_ARM_VGIC_GRP_IRS_REGS to VGICv5 docs
+  Documentation: KVM: Add docs for KVM_DEV_ARM_VGIC_GRP_IST
+  Documentation: KVM: Add the VGICv5 IRS save/restore sequences
+
+ .../virt/kvm/devices/arm-vgic-v5.rst          |  237 ++-
+ arch/arm64/include/asm/kvm_asm.h              |    4 +
+ arch/arm64/include/asm/kvm_hyp.h              |    4 +
+ arch/arm64/include/asm/sysreg.h               |   18 +-
+ arch/arm64/include/uapi/asm/kvm.h             |    7 +
+ arch/arm64/kvm/Makefile                       |    3 +-
+ arch/arm64/kvm/arm.c                          |    2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |   34 +
+ arch/arm64/kvm/hyp/vgic-v5-sr.c               |   55 +
+ arch/arm64/kvm/sys_regs.c                     |    6 +-
+ arch/arm64/kvm/vgic-sys-reg-v5.c              |  519 +++++
+ arch/arm64/kvm/vgic/vgic-init.c               |  112 +-
+ arch/arm64/kvm/vgic/vgic-irqfd.c              |   20 +-
+ arch/arm64/kvm/vgic/vgic-irs-v5.c             | 1056 ++++++++++
+ arch/arm64/kvm/vgic/vgic-kvm-device.c         |  252 ++-
+ arch/arm64/kvm/vgic/vgic-mmio.c               |    6 +
+ arch/arm64/kvm/vgic/vgic-mmio.h               |    2 +
+ arch/arm64/kvm/vgic/vgic-v5-tables.c          | 1831 +++++++++++++++++
+ arch/arm64/kvm/vgic/vgic-v5-tables.h          |  113 +
+ arch/arm64/kvm/vgic/vgic-v5.c                 | 1191 ++++++++++-
+ arch/arm64/kvm/vgic/vgic.c                    |   39 +-
+ arch/arm64/kvm/vgic/vgic.h                    |   21 +-
+ arch/arm64/tools/sysreg                       |    4 +-
+ drivers/irqchip/irq-gic-v5-irs.c              |   19 +-
+ drivers/irqchip/irq-gic-v5.c                  |  117 +-
+ include/kvm/arm_vgic.h                        |  165 +-
+ include/linux/irqchip/arm-gic-v5.h            |  220 +-
+ include/linux/irqchip/arm-vgic-info.h         |    5 +
+ tools/arch/arm64/include/uapi/asm/kvm.h       |    7 +
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   |    6 +
+ .../selftests/kvm/include/arm64/gic_v5.h      |    3 +
+ 31 files changed, 5928 insertions(+), 150 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Reset page order in pKVM hyp_pool
+[PATCH v3 1/3] KVM: arm64: Reset page order in pKVM hyp_pool
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+New:  Fix __pkvm_init_vm error path
+[PATCH v3 0/3] Fix __pkvm_init_vm error path
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+Sashiko reported a potential refcount leak in the unlikely case where
+insert_vm_table_entry fails.
+
+While at it, I have added a fail-safe to __pkvm_hyp_donate_host to ensure this
+function doesn't allow leaking refcounted pages.
+
+Changes since v3:
+ 
+  * Enforce order-0 for external pages, making the vmemmap ->order field
+    completely private to hyp_pool.
+
+Changes since v2 (https://lore.kernel.org/all/20260521102149.804874-1-vdonnefort@google.com/):
+  
+  * Proactively init hyp_page order field in hyp_pool_init  
+
+v1 (https://lore.kernel.org/all/20260521081250.655226-1-vdonnefort@google.com/)
+
+Vincent Donnefort (3):
+  KVM: arm64: Reset page order in pKVM hyp_pool
+  KVM: arm64: Fix __pkvm_init_vm error path
+  KVM: arm64: Add fail-safe for refcounted pages in
+    __pkvm_hyp_donate_host
+
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |  1 +
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 35 +++++++++++++------
+ arch/arm64/kvm/hyp/nvhe/page_alloc.c          | 21 ++++++++---
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |  4 ++-
+ 4 files changed, 45 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Don't include <asm/fpsimdmacros.h>
+[PATCH 01/18] KVM: arm64: Don't include <asm/fpsimdmacros.h>
+Author: Mark Rutland <mark.rutland@arm.com>
+
+There's no need for hyp/entry.S to include <asm/fpsimdmacros.h>.
+
+The fpsimd macros have never been used by code in hyp/entry.S, and were
+instead used by code in hyp/fpsimd.S.
+
+Remove the unnecessary include.
+
+There should be no functional change as a result of this patch.
+
+Signed-off-by: Mark Rutland <mark.rutland@arm.com>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Fuad Tabba <tabba@google.com>
+Cc: James Morse <james.morse@arm.com>
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Mark Brown <broonie@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Cc: Will Deacon <will@kernel.org>
+---
+ arch/arm64/kvm/hyp/entry.S | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  arm64+KVM: FPSIMD/SVE/SME cleanups
+[PATCH 00/18] arm64+KVM: FPSIMD/SVE/SME cleanups
+Author: Mark Rutland <mark.rutland@arm.com>
+
+Hi.
+
+This series cleans up low-level FPSIMD/SVE/SME state management code,
+making it easier to maintain and extend (e.g. adding SME support to
+KVM), and enabling better debugging (e.g. by making SVE/SME save/restore
+visible to KASAN and KCSAN).
+
+This is purely cleanup, there are NO bugs addressed by this series.
+
+The series aims to do a few key things:
+
+* Make it harder to mis-manage in-memory SVE state and SME state. These
+  are given opaque types (struct sve_state and struct sme_state), and
+  the (awkward) calling convention for saving/restoring SVE state is
+  simplified to take a pointer to the base of the state rather than a
+  pointer to the FFR within the state.
+
+* Minimize duplications between KVM and the rest of the kernel. The
+  FPSIMD/SVE/SME routines are moved to inline assembly such that the
+  same helper functions can be used everywhere, without the need to wrap
+  assembly macros.
+
+* Make the code easier to follow. Assembly sequences are minimized to
+  avoid address generation and control-flow that can be written more
+  clearly in C. Awkward assembly macros are removed where possible.
+
+* Make it easier to debug state management. Explicit instrumentation is
+  added to the save/restore functions so that KASAN and KCSAN can detect
+  memory safety issues and concurrency issues.
+
+  This instrumentation is inhibited for nVHE hyp objects, and does not
+  adversely affect KVM. I've confirmed by looking at compiler flags
+  during the build, and disassembling the relevant object files.
+
+* Remove unnecessary code. By relying on assembler support for SVE and
+  SME we can remove awkward assembly macros, making the code
+  significantly simpler and easier to read.
+
+I've compile-tested this with a variety of toolchains:
+
+* GCC  8.1.0 + binutils 2.30
+* GCC 11.1.0 + binutils 2.36.1
+* GCC 12.1.0 + binutils 2.38
+* GCC 15.2.0 + binutils 2.45
+* LLVM 15.0.7
+* LLVM 21.1.8
+
+I've boot-tested on an SVE+SME capable model, both with KASAN enabled
+and without KASAN enabled. All the FPSIMD/SVE/SME kselftests passed in
+both configurations, without any KASAN splats. Unfortunately, with KCSAN
+enabled, some tests hit timeouts (without any KCSAN splat), which I
+believe is simply due to the overhead of KCSAN rather than some adverse
+functional effect.
+
+I've boot-tested on an SVE+SME capable model, booting with KVM in each
+of:
+
+* VHE mode
+* hVHE mode
+* Protected mode
+
+In each case I've boot-tested a v7.0 defconfig guest, both with SVE and
+without SVE.
+
+Mark.
+
+Mark Rutland (18):
+  KVM: arm64: Don't include <asm/fpsimdmacros.h>
+  KVM: arm64: Don't override FFR save/restore argument
+  KVM: arm64: pkvm: Save host FPMR in host cpu context
+  KVM: arm64: pkvm: Remove struct cpu_sve_state
+  arm64: fpsimd: Fold sve_init_regs() into do_sve_acc()
+  arm64: fpsimd: Remove sve_set_vq() and sme_set_vq()
+  arm64: fpsimd: Use assembler for SVE instructions
+  arm64: fpsimd: Use assembler for baseline SME instructions
+  arm64: fpsimd: Move sve_get_vl() and sme_get_vl() inline
+  arm64: sysreg: Add FPCR and FPSR
+  arm64: fpsimd: Split FPSR/FPCR from SVE save/restore
+  arm64: fpsimd: Move fpsimd save/restore inline
+  arm64: fpsimd: Use opaque type for SVE state
+  arm64: fpsimd: Use opaque type for SME state
+  arm64: fpsimd: Move SVE save/restore inline
+  arm64: fpsimd: Move sve_flush_live() inline
+  arm64: fpsimd: Move SME save/restore inline
+  arm64: fpsimd: Remove <asm/fpsimdmacros.h>
+
+ arch/arm64/Kconfig                      |   5 +
+ arch/arm64/include/asm/fpsimd.h         | 369 ++++++++++++++++++++++--
+ arch/arm64/include/asm/fpsimdmacros.h   | 357 -----------------------
+ arch/arm64/include/asm/kvm_host.h       |  27 +-
+ arch/arm64/include/asm/kvm_hyp.h        |   5 -
+ arch/arm64/include/asm/kvm_pkvm.h       |   3 +-
+ arch/arm64/include/asm/processor.h      |   7 +-
+ arch/arm64/kernel/Makefile              |   2 +-
+ arch/arm64/kernel/entry-common.c        |   8 +-
+ arch/arm64/kernel/entry-fpsimd.S        | 134 ---------
+ arch/arm64/kernel/fpsimd.c              |  90 +++---
+ arch/arm64/kvm/arm.c                    |  16 +-
+ arch/arm64/kvm/guest.c                  |   4 +-
+ arch/arm64/kvm/hyp/entry.S              |   1 -
+ arch/arm64/kvm/hyp/fpsimd.S             |  33 ---
+ arch/arm64/kvm/hyp/include/hyp/switch.h |  23 +-
+ arch/arm64/kvm/hyp/nvhe/Makefile        |   2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c      |  20 +-
+ arch/arm64/kvm/hyp/nvhe/setup.c         |   4 +-
+ arch/arm64/kvm/hyp/vhe/Makefile         |   2 +-
+ arch/arm64/tools/sysreg                 |  45 +++
+ 21 files changed, 480 insertions(+), 677 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Fix meta-page unsharing in pKVM hyp tracing
+[PATCH v2 1/3] KVM: arm64: Fix meta-page unsharing in pKVM hyp tracing
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+New:  Fixes for hyp_trace.c
+[PATCH v2 0/3] Fixes for hyp_trace.c
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+While reviewing my v1, Sashiko found a couple of issues with the error path and
+more annoyingly a memory leak which I originally missed as the allocated
+decriptor isn't tracked by kmemleak.
+
+Changes since v2:
+  
+  - Fix rollback in hyp_trace_buffer_share_hyp()
+  - Fix memory leak in hyp_trace_unload() 
+
+v1 (https://lore.kernel.org/all/20260521090939.735108-1-vdonnefort@google.com/)
+
+Vincent Donnefort (3):
+  KVM: arm64: Fix meta-page unsharing in pKVM hyp tracing
+  KVM: arm64: Fix rollback in hyp_trace_buffer_share_hyp()
+  KVM: arm64: Fix memory leak in hyp_trace_unload()
+
+ arch/arm64/kvm/hyp_trace.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Reset page order in pKVM hyp_pool_init
+[PATCH v2 1/3] KVM: arm64: Reset page order in pKVM hyp_pool_init
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v3 0/3] Fix __pkvm_init_vm error path
+ Skip: [PATCH v2 0/3] Fix __pkvm_init_vm error path
+Exist: [PATCH v2 1/3] KVM: arm64: Fix meta-page unsharing in pKVM hyp tracing
+ Skip: [PATCH] KVM: arm64: Fix meta-page unsharing in pKVM hyp tracing
+New:  KVM: arm64: Fix __pkvm_init_vm error path
+[PATCH 1/2] KVM: arm64: Fix __pkvm_init_vm error path
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v3 0/3] Fix __pkvm_init_vm error path
+[PATCH 1/2] KVM: arm64: Fix __pkvm_init_vm error path
+ Skip: [PATCH 0/2] Fix __pkvm_init_vm error path
