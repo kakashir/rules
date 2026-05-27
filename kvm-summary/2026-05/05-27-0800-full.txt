@@ -1,0 +1,3684 @@
+
+On /root/mail/repo:
+From 54f710037 to 3326f410d
+KVM mailing list update from 54f710037 to 3326f410d
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     19 kernel.org
+      9 linux.intel.com
+      8 nvidia.com
+      8 linux.alibaba.com
+      8 intel.com
+      8 amazon.co.uk
+      7 loongson.cn
+      7 huawei.com
+      4 linux.ibm.com
+      3 google.com
+      2 uniontech.com
+      2 arndb.de
+      1 qq.com
+      1 kylinos.cn
+      1 iscas.ac.cn
+
+Top 15 contributors (Based on Email Body)
+
+     19  "Kiryl Shutsemau (Meta)" <kas@kernel.org>
+      9  "Kirill A. Shutemov" <kirill.shutemov@linux.intel.com>
+      8  Fangyu Yu <fangyu.yu@linux.alibaba.com>
+      8  David Woodhouse <dwmw@amazon.co.uk>
+      8  Alex Williamson <alex.williamson@nvidia.com>
+      7  Chengwen Feng <fengchengwen@huawei.com>
+      7  Bibo Mao <maobibo@loongson.cn>
+      5  Chenyi Qiang <chenyi.qiang@intel.com>
+      4  Douglas Freimuth <freimuth@linux.ibm.com>
+      3  Rick Edgecombe <rick.p.edgecombe@intel.com>
+      3  Josh Hilke <jrhilke@google.com>
+      2  Qiang Ma <maqianga@uniontech.com>
+      2  Arnd Bergmann <arnd@arndb.de>
+      1  Yufeng Wang <wangyufeng@kylinos.cn>
+      1  Xuanqing Shi <1356292400@qq.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2 05/10] selftests/vfio: igb: Extend memcpy completion
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The submitted driver waits at most 1 ms (100 * 10 us) for the last RX
+descriptor to be written back.  QEMU's emulated loopback is synchronous:
+by the time igb_memcpy_wait() runs, the receive descriptors are already
+written back.  Real 82576 hardware processes the descriptor ring at
+line rate.
+
+max_memcpy_size is (RING_SIZE - 1) * IGB_MAX_CHUNK_SIZE, approximately
+4 MB, split into 4095 1 KB frames.  At 1 Gb/s line rate (~125 MB/s),
+4 MB takes ~32 ms on the wire, plus per-frame preamble, SFD,
+inter-frame gap and FCS overhead (~3%) and descriptor fetch/writeback
+latency.  The 1 ms cap times out long before any valid transfer can
+complete.
+
+Wait up to ~200 ms (200 iterations * 1 ms) for descriptor writeback
+before returning -ETIMEDOUT.  ~6x the line-rate floor leaves comfortable
+headroom for host scheduling jitter while keeping the intentional
+invalid-DMA tests (mix_and_match) so they recover quickly on real faults.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../testing/selftests/vfio/lib/drivers/igb/igb.c  | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 10/10] selftests/vfio: igb: Use offical IGB headers in
+Author: Josh Hilke <jrhilke@google.com>
+
+Include the offical Intel network driver header files in
+tools/testing/selftests/vfio/lib/drivers/igb/igb.c and refactor the
+driver to directly utilize standard E1000_ prefixed registers and macros
+found from those headers.
+
+Delete tools/testing/selftests/vfio/lib/drivers/igb/registers.h as it
+only contains duplicate code found in the offical IGB header files.
+
+Assisted-by: Gemini:gemini-3.1-pro-preview
+Suggested-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+
+# Conflicts:
+#	tools/testing/selftests/vfio/lib/drivers/igb/igb.c
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 159 +++++++++---------
+ .../vfio/lib/drivers/igb/registers.h          | 127 --------------
+ tools/testing/selftests/vfio/lib/libvfio.mk   |   1 +
+ 3 files changed, 83 insertions(+), 204 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 09/10] selftests/vfio: igb: Recover after DMA-read faults
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The mix_and_match test intentionally submits a TX descriptor with an
+unmapped source IOVA so that the DMA read fails.  On real 82576
+hardware the resulting fault leaves the descriptor engine unable to
+service subsequent valid descriptors, so the next memcpy in the same
+test iteration times out.
+
+The 82576 datasheet (section 4.2.1.6.1) describes CTRL.RST as the
+software mechanism to recover from a hung device.  Empirically
+CTRL.RST alone is not sufficient in this state: the visible queue
+registers are reinitialized, but the next valid memcpy still posts
+descriptors without any TDH/TDT progress in the same process.  A
+fresh device open after the failure works, which points to a reset
+scope broader than CTRL.RST being required.  The 82576 advertises
+PCIe FLR; VFIO_DEVICE_RESET drives FLR and supplies that scope while
+preserving the selftest process and its DMA mappings.
+
+Add igb_error_reset_and_reinit() implementing the recovery sequence:
+issue VFIO_DEVICE_RESET, re-arm the kernel-side MSI-X trigger against
+the still-valid eventfd via vfio_pci_irq_reenable() (this does not
+touch the eventfd, which test fixtures may have cached), and
+re-program the device via igb_hw_init().  FLR clears EICR and leaves
+EIMS=0, so no explicit interrupt mask or cause writes are needed.
+igb_hw_init() resets tx_tail/rx_tail to 0 and igb_memcpy_start() zeros
+each descriptor before submission, so no ring memset is needed either.
+
+Call this from igb_memcpy_wait() on completion timeout, preceded by a
+10 ms delay so that PCIe/IOMMU/AER error handling triggered by the
+just-observed DMA fault can release the device lock VFIO_DEVICE_RESET
+contends for.  The delay is heuristic and tied to the fault path, so
+it lives at the call site rather than inside the reset helper.  The
+failed memcpy still returns -ETIMEDOUT; reset recovery only ensures
+the next operation starts from a usable device state.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 40 +++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 08/10] selftests/vfio: igb: Factor hardware programming
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Split the device register programming out of igb_init() into a new
+igb_hw_init() helper so that the same sequence can be re-run after a
+VFIO_DEVICE_RESET to restore the registers that CTRL.RST clears.  No
+functional change for the initial path.
+
+igb_init() now performs the one-shot setup: region size assertion, BAR
+mapping, CTRL.RST + IMC mask-all to put the device into a known state,
+and vfio_pci_msix_enable() to set up the kernel-side IRQ trigger.
+igb_hw_init() does the rest: ring pointer setup and IOVA calc,
+CTRL_EXT, PCI bus master, GCR, PHY loopback, descriptor rings, RCTL,
+TCTL, GPIE/EIAC/EIAM/EIMS/IVAR, and driver-state initialization.
+
+vfio_pci_msix_enable() moves from after RCTL/TCTL to before all
+device-side programming.  Its only side effects are the VFIO kernel
+IRQ trigger setup and the PCI MSI-X capability bits in config space;
+neither has any ordering dependency on the 82576 device register
+writes performed in igb_hw_init().  Performing it once in igb_init()
+keeps igb_hw_init() reusable from the reset recovery path (which uses
+vfio_pci_irq_reenable() to re-arm the existing trigger).
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 44 +++++++++++++------
+ 1 file changed, 31 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 07/10] selftests/vfio: Add vfio_pci_irq_reenable() helper
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Selftest drivers that recover from a fault by issuing VFIO_DEVICE_RESET
+need to re-arm device interrupts afterwards.  VFIO_DEVICE_RESET tears
+down the kernel-side IRQ trigger so a subsequent VFIO_DEVICE_SET_IRQS
+is required, but the user-side eventfds (and any fd cached in a test
+fixture) are still valid and must be preserved.
+
+vfio_pci_irq_enable() refuses to be called for vectors that already
+have an eventfd (VFIO_ASSERT_LT), and vfio_pci_irq_disable() closes
+all eventfds before resetting the trigger, so neither is suitable.
+
+Add vfio_pci_irq_reenable(device, index, vector, count) which asserts
+that the requested range has existing eventfds and re-issues
+VFIO_DEVICE_SET_IRQS using them.  Signature mirrors vfio_pci_irq_enable().
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../lib/include/libvfio/vfio_pci_device.h     |  2 ++
+ .../selftests/vfio/lib/vfio_pci_device.c      | 22 +++++++++++++++++++
+ 2 files changed, 24 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 06/10] selftests/vfio: igb: Disable PCIe completion timeout retries
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The mix_and_match test intentionally submits TX descriptors with an
+unmapped source IOVA so that the DMA read fails.  By default the 82576
+re-sends the request after a PCIe completion timeout (datasheet section
+8.6.1, GCR.Completion_Timeout_Resend, bit 16, initial value 1b).  On
+real hardware this turns a single fault into a stream of retried reads,
+keeping PCIe AER and IOMMU error handling busy and interfering with
+reset recovery.
+
+Clear GCR.Completion_Timeout_Resend during device initialization so a
+failed read fails once and stays failed.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ tools/testing/selftests/vfio/lib/drivers/igb/igb.c   | 12 ++++++++++++
+ .../selftests/vfio/lib/drivers/igb/registers.h       |  2 ++
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 04/10] selftests/vfio: igb: Program MSI-X interrupt routing
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The submitted driver writes only GPIE.EIAME (with a register value of
+0x10, which is actually GPIE.Multiple_MSIX, bit 4) and clears EICR by
+reading it.  On QEMU this works because the emulated loopback path is
+synchronous and EICR is implemented as read-to-clear unconditionally.
+Real 82576 hardware needs the full MSI-X programming sequence.
+
+Per 82576 datasheet section 7.3.2.11 Table 7-47, MSI-X mode requires:
+
+  GPIE.Multiple_MSIX (bit 4): route causes through IVAR.
+  GPIE.EIAME (bit 30): apply EIAM on MSI-X assertion.  Without EIAME,
+    section 7.3.2.11 specifies EIAM only takes effect on EICR
+    read/write, which is not the path used here.
+
+Configure auto-clear and auto-mask for vector 0:
+
+  EIAC (section 8.8.5): auto-clear of EICR cause bit on MSI-X assertion.
+  EIAM (section 8.8.6): with EIAME set, auto-mask of EIMS on MSI-X
+    assertion.  This guarantees one interrupt per memcpy batch and
+    prevents repeat delivery if the cause re-asserts before EIMS is
+    restored.
+
+Replace the read-to-clear of EICR with write-to-clear.  Section 8.8.5
+states "If any bits are set in EIAC, the EICR register should not be
+read", and section 7.3.4.3 cautions against read-to-clear in MSI-X
+mode in general.  Write-to-clear (section 7.3.4.2) is unconditional.
+
+Replace the magic '1' values written to EIMS/EIMC with IGB_EICR_VEC0,
+add the GPIE/EIAC/EIAM macros, and drop the wrong-valued IGB_GPIE_EIAME
+macro (the new definition lives next to IGB_GPIE_MULTIPLE_MSIX).
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 40 ++++++++++++++++---
+ .../vfio/lib/drivers/igb/registers.h          | 11 ++++-
+ 2 files changed, 43 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 03/10] selftests/vfio: igb: Use advanced TX and RX descriptors
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The submitted driver builds a partial legacy TX descriptor (just
+DTALEN | CMD_EOP) and never programs SRRCTL.DESCTYPE.  QEMU's emulated
+igb tolerates this by treating descriptors as advanced regardless of
+DESCTYPE, but real 82576 hardware does not.
+
+For receive, 82576 datasheet section 7.1.5.2 states: "SRRCTL[n].DESCTYPE
+must be set to a value other than 000b for the 82576 to write back the
+special descriptors."  struct igb_rx_desc matches the advanced
+one-buffer writeback layout, so the test polls rx.wb.status_error,
+which is only written in that layout.  Section 8.10.2 places DESCTYPE
+in SRRCTL bits 27:25; program it with 001b (advanced one-buffer).
+
+For transmit, datasheet section 7.2.2.3 describes the advanced data
+descriptor with DEXT (DCMD bit 5) marking the descriptor as advanced,
+DTYP=0011b selecting the data descriptor, IFCS (DCMD bit 1) asking the
+MAC to append the Ethernet FCS (without it the frame is dropped as
+malformed), EOP (DCMD bit 0) marking end of packet, and PAYLEN in
+olinfo_status[31:14] carrying the total payload size.  Build this
+descriptor in igb_memcpy_start().
+
+Remove the legacy CMD macros (IGB_TXD_CMD_EOP, IGB_TXD_CMD_IFCS,
+IGB_TXD_CMD_RS, IGB_TXD_CMD_SHIFT, IGB_TXD_CMD_LEGACY_FORMAT) that
+become unused, and add the SRRCTL register offset, DESCTYPE encoding,
+and advanced TX descriptor field macros.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 38 ++++++++++++++++---
+ .../vfio/lib/drivers/igb/registers.h          | 21 +++++++---
+ 2 files changed, 49 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 01/10] selftests/vfio: igb: Add driver for IGB QEMU device
+Author: Josh Hilke <jrhilke@google.com>
+
+Add a VFIO selftest driver for the Intel Gigabit Ethernet controller
+(IGB). IGB is fully virtualized in QEMU [1] which makes it easy to run
+VFIO selftests without needing any specific hardware.
+
+IGB does not have a default memcpy operation, and memcpy is required for
+all VFIO selftest drivers. However, IGB has a "loopback" mode which is
+used in this driver to implement memcpy. When IGB is in loopback mode,
+it doesn't send data out to the network. Instead, it sends data from the
+Tx queue directly to the Rx queue which points to the memcpy
+destination, instead of sending the data out to the network.
+
+This driver passes all of the VFIO selftests in
+tools/testing/selftests/vfio/ when running in QEMU. The driver has not
+been tested using a real IGB device since the main goal of writing this
+driver is to run VFIO selftests in QEMU without requiring any hardware.
+
+This command is used to test the driver. It runs
+./tools/testing/selftests/vfio/vfio_pci_driver_test using virtme-ng [2],
+which runs a kernel in a virtualized environment using QEMU that has a
+copy-on-write snapshot the host filesystem.
+
+vng \
+  --run arch/x86/boot/bzImage \
+  --user root \
+  --disable-microvm \
+  --memory 32G \
+  --cpus 8 \
+  --qemu-opts="-M q35,accel=kvm,kernel-irqchip=split" \
+  --qemu-opts="-device intel-iommu,intremap=on,caching-mode=on,device-iotlb=on" \
+  --qemu-opts="-netdev user,id=net0 -device igb,netdev=net0,addr=09.0" \
+  --append "console=ttyS0 earlyprintk=ttyS0 intel_iommu=on iommu=pt" \
+  --exec "modprobe vfio-pci && \
+          ./tools/testing/selftests/vfio/scripts/setup.sh 0000:00:09.0 && \
+          ./tools/testing/selftests/vfio/scripts/run.sh ./tools/testing/selftests/vfio/vfio_pci_driver_test"
+
+Code was written entirely by AI (Gemini) by feeding it the Intel IGB
+specification, the code for the real IGB driver, and the QEMU
+implementation of the IGB device. It took many iterations of prompting
+to get the driver to pass all of the tests, and lot's of de-slopping to
+remove unnecessary code and make the code readable.
+
+Code comments are also written by Gemini through iterative
+prompting.
+
+This patch is based on the kvm/queue branch.
+
+[1] https://www.qemu.org/docs/master/system/devices/igb.html
+[2] https://github.com/arighi/virtme-ng
+
+Assisted-by: Gemini:gemini-3-pro-preview
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 360 ++++++++++++++++++
+ .../vfio/lib/drivers/igb/registers.h          | 103 +++++
+ tools/testing/selftests/vfio/lib/libvfio.mk   |   1 +
+ .../selftests/vfio/lib/vfio_pci_driver.c      |   2 +
+ 4 files changed, 466 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 02/10] selftests/vfio: igb: Use PHY internal loopback on 82576
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The submitted driver waits for PHY autonegotiation and then enables MAC
+loopback via RCTL.LBM_MAC.  QEMU's emulated igb tolerates this, but the
+82576 datasheet rejects the MAC loopback path on real hardware:
+
+  Section 3.5.6.1 (Loopback Support / General): "Use PHY Loopback
+  instead of MAC Loopback on the 82576."
+
+  Section 3.5.6.2 (MAC Loopback): "MAC Loopback is not used on this
+  device."
+
+  Section 3.5.6.3.1 (Setting the 82576 to PHY loopback Mode): set PHY
+  control register bits 8 (duplex), 14 (loopback), clear bit 12
+  (autoneg enable), set the speed via bits 6 and 13.  For 1Gb/s the
+  register value is 0x4140.
+
+  Section 8.10.1 (RCTL register): "When using the internal PHY, LBM
+  should remain set to 00b and the PHY instead configured for
+  loopback through the MDIO interface."
+
+Replace igb_phy_setup_autoneg() with igb_setup_loopback() which:
+
+  - writes PHY register 0 with LOOPBACK | SPEED_1000 | FULL_DUPLEX
+  - forces the MAC into 1Gb/s full duplex via CTRL.FRCSPD, CTRL.FRCDPX,
+    CTRL.SPD_1000, CTRL.FD, CTRL.SLU; without forcing the MAC link
+    state, the descriptor engine does not run on real hardware
+
+PHY internal loopback (section 3.5.6.3) wraps data at the end of the
+PHY datapath before the MDI, so the physical link state and cable
+speed are irrelevant.  This matches the kernel ethtool selftest path
+in igb_integrated_phy_loopback()
+(drivers/net/ethernet/intel/igb/igb_ethtool.c).
+
+QEMU's igb emulation drives STATUS.LU exclusively from its autoneg-done
+timer or a network-backend link-state change; the guest cannot set
+STATUS.LU through CTRL.SLU.  Its receive path checks STATUS.LU
+(e1000x_hw_rx_enabled in hw/net/e1000x_common.c) and drops every
+loopback frame until LU is set.  Issue a one-shot autoneg-restart PHY
+write at the top of igb_setup_loopback() to kick the timer; the
+subsequent PHY write clears autoneg-enable, so on real hardware
+autoneg never starts and the write is a no-op.
+
+QEMU's igb also does not honor PHY register 0 bit 14 (PHY internal
+loopback) and relies on RCTL.LBM_MAC to wrap TX descriptors back to
+the RX queue.  Datasheet 8.10.1 advises that LBM remain 00b when
+using the internal PHY, but empirically setting LBM_MAC has no
+observable effect on real 82576 (MAC loopback is not implemented per
+3.5.6.2), so set it alongside PHY loopback as the actual loopback
+mechanism under QEMU.  With these two QEMU-only accommodations the
+selftest works in both environments without environment-specific code
+paths.
+
+The submitted driver also wrote bit 14 (link disable) to PHY register
+16 (port control).  Datasheet 3.5.6.3.1 describes this as required for
+10/100Mb/s but explicitly "not a must for 1G", and the kernel ethtool
+selftest omits it.  It is dropped here.  Flagging the removal in case a
+future regression bisects to this commit.
+
+Remove igb_read_phy() and the PHY status macros it served, which become
+unused: IGB_PHY_STATUS_REG_OFFSET, IGB_PHY_STATUS_AN_COMP.  Keep
+IGB_PHY_CTRL_AN_ENABLE and IGB_PHY_CTRL_AN_RESTART for the QEMU-only
+autoneg kick; add the PHY ctrl loopback and CTRL force-link macros.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 126 ++++++++++--------
+ .../vfio/lib/drivers/igb/registers.h          |  26 ++--
+ 2 files changed, 89 insertions(+), 63 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 00/10] selftests/vfio: igb: Add driver for Intel
+Author: Josh Hilke <jrhilke@google.com>
+
+This is v2 of a series which adds VFIO selftest driver for the Intel
+82576 Ethernet Gigabit Controller (IGB). This device is emulated in QEMU
+and is also ubiquitous on many systems which makes it a good candidate
+device for running VFIO selftests.
+
+v1: https://lore.kernel.org/kvm/20260511211839.2781731-1-jrhilke@google.com/
+
+Major changes in v2
+===================
+1. Patches 2 through 9 add Alex Williamson's series which adds support
+for the physical device since v1 only supported the QEMU-emulated
+device. 
+
+https://lore.kernel.org/kvm/20260515220330.565792-1-alex.williamson@nvidia.com/
+
+2. Patch 10 adds the official IGB header files to the driver, which
+eliminates duplicate register definitions.
+
+Testing
+=======
+- VFIO selftests builds clean at every commit
+- vfio_pci_driver_test passes using IGB driver + QEMU. Use the following
+  VNG command to run the tests:
+
+  vng \
+  --run arch/x86/boot/bzImage \
+  --user root \
+  --disable-microvm \
+  --memory 32G \
+  --cpus 8 \
+  --qemu-opts="-M q35,accel=kvm,kernel-irqchip=split" \
+  --qemu-opts="-device intel-iommu,intremap=on,caching-mode=on,device-iotlb=on" \
+  --qemu-opts="-netdev user,id=net0 -device igb,netdev=net0,addr=09.0" \
+  --append "console=ttyS0 earlyprintk=ttyS0 intel_iommu=on iommu=pt" \
+  --exec "modprobe vfio-pci && \
+          ./tools/testing/selftests/vfio/scripts/setup.sh 0000:00:09.0 && \
+          ./tools/testing/selftests/vfio/scripts/run.sh ./tools/testing/selftests/vfio/vfio_pci_driver_test"
+
+Future work
+===========
+Modify QEMU's implementation of IGB loopback data transfer to be
+asynchronous. Alex noted that QEMU's emulation of transmitting data in
+loopback mode is synchronous, i.e by the time memcpy_start() returns,
+the data is already in the Rx queue. This won't work for testing
+continuous DMA (memcpy) across Live Update + kexec.
+
+One solution is to simulate the line rate in QEMU. This would allow us
+to slow down the rate of DMA, so that it continues for the duration of
+Live Update.
+
+Assistance
+==========
+- Claude Opus 4.7 with additional assistance from GPT 5.5 for Alex's
+  patches
+- Gemini 3.1 Pro Preview for my patches
+
+--------
+Changelog:
+
+v1 -> v2
+- Removed the chunking loop in igb_memcpy_start() (David)
+- Removed redundant writes to status_error and hdr_addr (David)
+- Include official IGB header files (David)
+
+Alex Williamson (8):
+  selftests/vfio: igb: Use PHY internal loopback on 82576
+  selftests/vfio: igb: Use advanced TX and RX descriptors
+  selftests/vfio: igb: Program MSI-X interrupt routing
+  selftests/vfio: igb: Extend memcpy completion timeout for line-rate
+    hardware
+  selftests/vfio: igb: Disable PCIe completion timeout retries
+  selftests/vfio: Add vfio_pci_irq_reenable() helper
+  selftests/vfio: igb: Factor hardware programming into igb_hw_init()
+  selftests/vfio: igb: Recover after DMA-read faults
+
+Josh Hilke (2):
+  selftests/vfio: igb: Add driver for IGB QEMU device
+  selftests/vfio: igb: Use offical IGB headers in selftest driver
+
+ .../selftests/vfio/lib/drivers/igb/igb.c      | 524 ++++++++++++++++++
+ .../lib/include/libvfio/vfio_pci_device.h     |   2 +
+ tools/testing/selftests/vfio/lib/libvfio.mk   |   2 +
+ .../selftests/vfio/lib/vfio_pci_device.c      |  22 +
+ .../selftests/vfio/lib/vfio_pci_driver.c      |   2 +
+ 5 files changed, 552 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 4/8] KVM: x86: Use ktime_get_snapshot_id() for master clock
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Replace the KVM-private vgettsc()/do_kvmclock_base()/do_monotonic()/
+do_realtime() timekeeping reimplementation with calls to the generic
+ktime_get_snapshot_id() interface.
+
+The snapshot provides both the system time and the raw_cycles (TSC)
+atomically paired. When raw_cycles is zero, the clocksource could not
+provide a raw hardware counter value, which is equivalent to the
+previous vgettsc() returning VDSO_CLOCKMODE_NONE.
+
+For kvm_get_time_and_clockread(), the kvmclock base time is
+CLOCK_MONOTONIC_RAW + offs_boot. The snapshot provides the raw time
+atomically paired with the TSC; offs_boot is added separately as it
+only changes at suspend/resume boundaries.
+
+This is a step towards eliminating the pvclock_gtod_data private copy
+of timekeeping state and the associated notifier callback.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ arch/x86/kvm/x86.c | 50 ++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 39 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 8/8] ptp: vmclock: Use raw_cycles from snapshot for precise TSC pairing
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When the system clocksource is kvmclock or Hyper-V (not the TSC
+directly), vmclock_get_crosststamp() previously fell through to a
+separate get_cycles() call, losing the atomic pairing between the
+system time snapshot and the TSC reading.
+
+Now that ktime_get_snapshot_id() populates raw_cycles with the
+underlying TSC value for derived clocksources, use it when available.
+This gives a perfect (system_time, tsc) pairing for the device time
+calculation.
+
+The SUPPORT_KVMCLOCK wrapper is still needed to convert the TSC into
+kvmclock nanoseconds for system_counter->cycles, because otherwise
+get_device_system_crosststamp() can't interpret the result.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ drivers/ptp/ptp_vmclock.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 1/8] timekeeping: Add clocksource read_raw() method and raw_cycles to snapshot
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Add a read_raw() callback to struct clocksource which returns the
+derived clocksource value while also providing the underlying hardware
+counter reading. This allows ktime_get_snapshot_id() to populate a new
+raw_cycles field in struct system_time_snapshot.
+
+For clocksources that are derived from an underlying counter (e.g.,
+Hyper-V TSC page scales TSC to 10MHz, kvmclock scales TSC to 1GHz), this
+provides atomic access to both the derived value needed for timekeeping
+calculations, and the raw hardware counter needed by consumers like
+KVM's master clock and the vmclock PTP driver.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ include/linux/clocksource.h |  8 ++++++++
+ include/linux/timekeeping.h |  6 ++++++
+ kernel/time/timekeeping.c   | 30 +++++++++++++++++++++++++++++-
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 5/8] KVM: x86: Compute kvmclock base without pvclock_gtod_data
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+get_kvmclock_base_ns() needs CLOCK_MONOTONIC_RAW + offs_boot. Compute
+this directly rather than reading offs_boot from the pvclock_gtod_data
+private copy. offs_boot only changes at suspend/resume so does not
+need to be atomically paired with the raw clock read.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ arch/x86/kvm/x86.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 3/8] x86/kvmclock: Implement read_raw() for kvmclock clocksource
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Implement the read_raw() callback for the kvmclock clocksource.
+This returns the kvmclock nanosecond value (for timekeeping) while
+also providing the raw TSC value that was used to compute it.
+
+The TSC is read inside the pvclock seqlock-protected region,
+ensuring the raw TSC and derived kvmclock value are atomically
+paired.
+
+This enables ktime_get_snapshot_id() to provide the raw TSC to consumers
+like the vmclock PTP driver, which currently has to do a separate call
+to get_cycles() to obtain the value to feed through the vmclock
+calculation.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ arch/x86/kernel/kvmclock.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 6/8] KVM: x86: Replace pvclock_gtod_data vclock_mode with boolean
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The remaining users of pvclock_gtod_data only need to know whether
+the host clocksource is TSC-based. Replace all vclock_mode checks
+with a simple kvm_host_has_tsc_clocksource boolean, updated by the
+pvclock_gtod_notify callback.
+
+This is inherently racy (as it always was — kvm_track_tsc_matching
+never held the gtod seqcount), relying on eventual consistency: the
+notifier fires on every timekeeping update and will correct any
+transient inconsistency within one tick.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ arch/x86/kvm/x86.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 7/8] KVM: x86: Remove pvclock_gtod_data and private timekeeping code
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Remove the now-unused KVM-private timekeeping infrastructure:
+
+ - struct pvclock_clock and struct pvclock_gtod_data
+ - update_pvclock_gtod() and its seqcount-protected state copy
+ - read_tsc() (KVM's private TSC reader with cycle_last clamping)
+ - vgettsc() (KVM's private clocksource interpolation)
+ - do_kvmclock_base(), do_monotonic(), do_realtime()
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ arch/x86/kvm/x86.c | 175 ---------------------------------------------
+ 1 file changed, 175 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 2/8] clocksource/hyperv: Implement read_raw() for TSC page clocksource
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Implement the read_raw() callback for the Hyper-V TSC page
+clocksource. This returns the derived 10MHz reference time (for
+timekeeping) while also providing the raw TSC value that was used
+to compute it.
+
+When the TSC page is valid, hv_read_tsc_page_tsc() atomically
+captures both values from a single RDTSC inside the sequence-counter
+protected read. When the TSC page is invalid (sequence == 0), raw is
+set to zero indicating no value is available.
+
+This enables ktime_get_snapshot_id() to provide the raw TSC to
+consumers like KVM's master clock when running nested on Hyper-V.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: Kiro:claude-opus-4.6-1m
+---
+ drivers/clocksource/hyperv_timer.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: VMX: Use _safe MSR accessors in LBR handler
+Author: xuanqingshi <1356292400@qq.com>
+
+
+intel_pmu_handle_lbr_msrs_access() uses rdmsrq()/wrmsrq() to directly
+access LBR-related MSRs on the physical CPU. If the guest provides an
+out-of-range or otherwise invalid MSR index, the unchecked access
+triggers a #GP fault, resulting in an "unchecked MSR access error"
+warning and a host crash when panic_on_warn is enabled.
+
+The crash was observed in a nested virtualization setup where a
+VMCS-targeted fuzzer triggered a WRMSR to MSR 0x1c8 (LBR_SELECT)
+that propagated through the PMU emulation path to the physical host:
+
+  unchecked MSR access error: WRMSR to 0x1c8
+  (tried to write 0x0000000000004000)
+  Call Trace:
+   ? native_write_msr+0x4/0x30
+   ? intel_pmu_handle_lbr_msrs_access+0xff/0x120 [kvm_intel]
+   intel_pmu_set_msr+0x4e0/0x7f0 [kvm_intel]
+   kvm_pmu_set_msr+0x17e/0x1c0 [kvm]
+   kvm_set_msr_common+0xc76/0x1440 [kvm]
+   vmx_set_msr+0x5e6/0x1570 [kvm_intel]
+   kvm_emulate_wrmsr+0x54/0x1d0 [kvm]
+   vmx_handle_exit+0x7fc/0x970 [kvm_intel]
+
+Replace rdmsrq()/wrmsrq() with their _safe variants so that invalid
+MSR accesses are caught gracefully and reported back to the guest as
+errors instead of crashing the host.
+
+Found by a VMCS-targeted fuzzer based on syzkaller.
+
+Fixes: 1b5ac3226a1a ("KVM: vmx/pmu: Pass-through LBR msrs when the guest LBR event is ACTIVE")
+Signed-off-by: Xuanqing Shi <1356292400@qq.com>
+---
+ arch/x86/kvm/vmx/pmu_intel.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 18/18] Documentation/userfaultfd: document RWP working set tracking
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Add an admin-guide section covering UFFDIO_REGISTER_MODE_RWP:
+
+  - sync and async fault models;
+  - UFFDIO_RWPROTECT semantics;
+  - UFFD_FEATURE_RWP_ASYNC;
+  - UFFDIO_SET_MODE runtime mode flips.
+
+It also covers typical VMM working-set-tracking workflow from detection
+loop through sync-mode eviction and back to async.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+---
+ Documentation/admin-guide/mm/userfaultfd.rst | 238 ++++++++++++++++++-
+ 1 file changed, 232 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 17/18] selftests/mm: add userfaultfd RWP tests
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Coverage for UFFDIO_REGISTER_MODE_RWP and UFFDIO_RWPROTECT:
+
+  rwp-async          async mode — touch pages, verify permissions are
+                     auto-restored without a message
+  rwp-sync           sync mode — access blocks, handler resolves via
+                     UFFDIO_RWPROTECT
+  rwp-pagemap        PAGEMAP_SCAN reports still-cold pages via
+                     inverted PAGE_IS_ACCESSED
+  rwp-mprotect       RWP survives mprotect(PROT_NONE) ->
+                     mprotect(PROT_READ|PROT_WRITE) round-trip
+  rwp-gup            GUP walks through a protnone RWP PTE (pipe
+                     write/read drives the GUP path)
+  rwp-async-toggle   UFFDIO_SET_MODE flips between sync and async
+                     without re-registering
+  rwp-close          closing the uffd restores page permissions
+  rwp-fork           RWP survives fork() with EVENT_FORK; child's
+                     PTEs keep the uffd bit
+  rwp-fork-pin       RWP survives fork() on an RO-longterm-pinned
+                     anon page (forces copy_present_page()); child
+                     read auto-resolves and clears the bit, proving
+                     PAGE_NONE was in place
+  rwp-wp-exclusive   register with MODE_WP|MODE_RWP returns -EINVAL
+
+All tests run against anon, shmem, shmem-private, hugetlb, and
+hugetlb-private memory, except rwp-fork-pin which is anon-only —
+copy_present_page() is the private-anon pinned-exclusive fork path.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ tools/testing/selftests/mm/uffd-unit-tests.c | 765 +++++++++++++++++++
+ 1 file changed, 765 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 16/18] userfaultfd: add UFFDIO_SET_MODE for runtime sync/async toggle
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Add an ioctl to toggle async mode at runtime without re-registering
+the userfaultfd. This allows a VMM to switch between sync and async
+RWP modes on-the-fly -- for example, starting in async mode for
+working set scanning, then switching to sync mode to intercept faults
+during page eviction.
+
+UFFDIO_SET_MODE takes an enable/disable bitmask of UFFD_FEATURE_*
+flags. Only UFFD_FEATURE_RWP_ASYNC is toggleable today; the ioctl
+rejects any other bit with -EINVAL. Enabling RWP_ASYNC also requires
+RWP to have been negotiated at UFFDIO_API time, mirroring the
+UFFDIO_API invariant.
+
+Fault-path readers of ctx->features run under mmap_read_lock or a
+per-VMA lock; the RMW takes mmap_write_lock and calls
+vma_start_write() on every UFFD-armed VMA, so those readers are fully
+excluded. userfaultfd_show_fdinfo(), however, reads ctx->features
+without any lock, so the RMW is written as a single WRITE_ONCE and
+fdinfo reads it with READ_ONCE. That keeps the lockless observer from
+seeing a mid-RMW intermediate and removes the audit burden when new
+toggleable bits are added later.
+
+When switching to async, pending sync waiters are woken so they retry
+and auto-resolve under the new mode.
+
+Signed-off-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ include/uapi/linux/userfaultfd.h |  14 +++
+ mm/userfaultfd.c                 | 150 +++++++++++++++++++++++++------
+ 2 files changed, 136 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 15/18] userfaultfd: add UFFD_FEATURE_RWP_ASYNC for async fault resolution
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Sync RWP delivers a message and blocks the faulting thread until the
+handler resolves the fault. For working-set tracking the VMM does not
+need the message: it just needs to know, at scan time, which pages
+were touched. Async RWP serves that use case — the kernel restores
+access in-place and the faulting thread continues without blocking.
+
+The VMM reconstructs the access pattern after the fact via
+PAGEMAP_SCAN: pages whose uffd bit is still set (inverted
+PAGE_IS_ACCESSED) were not re-accessed since the last RWP cycle.
+
+Worth calling out: async resolution upgrades writable private anon
+PTEs via pte_mkwrite() when can_change_pte_writable() allows, mirroring
+do_numa_page(). Without it, every re-access of an RWP'd writable page
+would COW-fault a second time.
+
+UFFD_FEATURE_RWP_ASYNC requires UFFD_FEATURE_RWP.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Acked-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ include/linux/userfaultfd_k.h    |  6 ++++++
+ include/uapi/linux/userfaultfd.h | 11 ++++++++++-
+ mm/huge_memory.c                 | 25 ++++++++++++++++++++++++-
+ mm/hugetlb.c                     | 32 +++++++++++++++++++++++++++++++-
+ mm/memory.c                      | 27 +++++++++++++++++++++++++--
+ mm/userfaultfd.c                 | 19 ++++++++++++++++++-
+ 6 files changed, 114 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 14/18] mm/pagemap: add PAGE_IS_ACCESSED for RWP tracking
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+PAGEMAP_SCAN already reports PAGE_IS_WRITTEN from the inverted uffd
+PTE bit, targeting the UFFDIO_WRITEPROTECT workflow. UFFDIO_RWPROTECT
+reuses the same PTE bit as a marker for read-write protection, but
+"has been written" and "has been accessed" are distinct semantic
+signals — they happen to share one PTE bit today only because the two
+implementations share infrastructure.
+
+Give RWP its own pagemap category so the UAPI does not conflate them:
+
+  PAGE_IS_WRITTEN   reported on VM_UFFD_WP VMAs,  !pte_uffd(pte)
+  PAGE_IS_ACCESSED  reported on VM_UFFD_RWP VMAs, !pte_uffd(pte)
+
+Both still read the same PTE bit today, but each is scoped to the VMA
+whose registered mode makes the bit meaningful. If a future
+implementation moves RWP to a separate PTE bit, only PAGE_IS_ACCESSED
+switches over.
+
+This is a UAPI narrowing. Outside VM_UFFD_WP VMAs the uffd bit is
+always clear, so PAGEMAP_SCAN used to flag PAGE_IS_WRITTEN on every
+present PTE there — a meaningless duplicate of PAGE_IS_PRESENT. Now
+PAGE_IS_WRITTEN fires only inside VM_UFFD_WP VMAs.
+
+pagemap_hugetlb_category() now takes the vma like its PTE/PMD peers.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Acked-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ Documentation/admin-guide/mm/pagemap.rst | 13 +++-
+ fs/proc/task_mmu.c                       | 75 ++++++++++++++++++------
+ include/uapi/linux/fs.h                  |  1 +
+ tools/include/uapi/linux/fs.h            |  1 +
+ 4 files changed, 69 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 13/18] mm/userfaultfd: add RWP fault delivery and expose UFFDIO_REGISTER_MODE_RWP
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Wire the fault side of read-write protection tracking and turn the
+userspace interface on.
+
+An RWP-protected PTE is PAGE_NONE with the uffd bit set. The
+PROT_NONE triggers a fault on any access; the uffd bit distinguishes
+it from plain mprotect(PROT_NONE) or NUMA hinting.
+
+Fault dispatch, per level:
+
+  PTE     handle_pte_fault()    -> do_uffd_rwp()
+  PMD     __handle_mm_fault()   -> do_huge_pmd_uffd_rwp()
+  hugetlb hugetlb_fault()       -> hugetlb_handle_userfault()
+
+The RWP branches gate on userfaultfd_pte_rwp() / userfaultfd_huge_pmd_rwp()
+(VM_UFFD_RWP plus the uffd bit) and fall through to do_numa_page() /
+do_huge_pmd_numa_page() otherwise. Each delivers a
+UFFD_PAGEFAULT_FLAG_RWP message through handle_userfault(); the handler
+resolves it with UFFDIO_RWPROTECT clearing MODE_RWP.
+
+userfaultfd_must_wait() and userfaultfd_huge_must_wait() add matching
+protnone+uffd waiters so sync-mode fault handlers block correctly.
+
+Expose the UAPI:
+
+  UFFDIO_REGISTER_MODE_RWP   -> UFFD_API_REGISTER_MODES
+  UFFD_FEATURE_RWP           -> UFFD_API_FEATURES
+  _UFFDIO_RWPROTECT          -> UFFD_API_RANGE_IOCTLS
+                                UFFD_API_RANGE_IOCTLS_BASIC
+
+UFFD_FEATURE_RWP is masked out at UFFDIO_API time when PROT_NONE is
+not available or VM_UFFD_RWP aliases VM_NONE (32-bit), so userspace
+never sees an advertised-but-broken feature.
+
+Works on anonymous, shmem, and hugetlb memory.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ include/linux/huge_mm.h          |  7 +++++++
+ include/linux/userfaultfd_k.h    | 24 ++++++++++++++++++++++++
+ include/uapi/linux/userfaultfd.h | 12 ++++++++----
+ mm/huge_memory.c                 |  5 +++++
+ mm/hugetlb.c                     | 11 +++++++++++
+ mm/memory.c                      | 29 +++++++++++++++++++++++++++--
+ mm/userfaultfd.c                 | 32 ++++++++++++++++++++++++++++++--
+ 7 files changed, 112 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 12/18] userfaultfd: add UFFDIO_REGISTER_MODE_RWP and UFFDIO_RWPROTECT plumbing
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Add the userspace interface for read-write protection tracking:
+
+  - UFFDIO_REGISTER_MODE_RWP      register a range for RWP tracking
+  - UFFD_FEATURE_RWP              capability bit
+  - UFFDIO_RWPROTECT              install / remove RWP on a range
+
+Introduce CONFIG_USERFAULTFD_RWP, auto-selected on 64-bit kernels with
+ARCH_HAS_PTE_PROTNONE and HAVE_ARCH_USERFAULTFD_WP. The symbol gates
+VM_UFFD_RWP (previously aliased to VM_NONE) and the smaps/trace-flag
+hooks added in the preparatory patches; without it the UAPI bits added
+here have nothing to drive and would be unreachable.
+
+Registration sets VM_UFFD_RWP on the VMA. Combining MODE_WP with
+MODE_RWP is rejected because both modes claim the uffd PTE bit.
+
+UFFDIO_RWPROTECT is the bidirectional counterpart of
+UFFDIO_WRITEPROTECT:
+
+  - MODE_RWP              change_protection() with MM_CP_UFFD_RWP
+                          installs PAGE_NONE and sets the uffd bit on
+                          present PTEs
+  - !MODE_RWP             change_protection() with MM_CP_UFFD_RWP_RESOLVE
+                          restores vma->vm_page_prot and clears the bit
+
+userfaultfd_clear_vma() runs the same resolve pass on unregister so
+RWP state cannot outlive the uffd.
+
+Re-registering a range must not drop a mode that installs per-PTE
+markers (WP or RWP); doing so returns -EBUSY. This also closes a
+pre-existing window where re-registering without MODE_WP would strand
+uffd-wp markers: before, those caused extra write-faults but were
+otherwise benign; with RWP preservation in place, a subsequent
+mprotect() on a VM_UFFD_RWP VMA would silently promote the stale
+markers to RWP.
+
+The feature is not yet advertised. UFFDIO_REGISTER_MODE_RWP,
+UFFD_FEATURE_RWP, and _UFFDIO_RWPROTECT are intentionally absent from
+UFFD_API_REGISTER_MODES, UFFD_API_FEATURES, and UFFD_API_RANGE_IOCTLS,
+so UFFDIO_API masks them out and the register-mode validator rejects
+the bit. The follow-up patch adds fault dispatch and exposes the UAPI.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ Documentation/admin-guide/mm/userfaultfd.rst |  10 +
+ include/linux/userfaultfd_k.h                |   2 +
+ include/uapi/linux/userfaultfd.h             |  19 ++
+ mm/Kconfig                                   |   9 +
+ mm/userfaultfd.c                             | 189 ++++++++++++++++++-
+ 5 files changed, 226 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 11/18] mm: handle VM_UFFD_RWP in khugepaged, rmap, and GUP
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Three mm paths outside the fault handler gate on the uffd PTE bit
+today: khugepaged (skip collapse on ranges carrying markers), rmap
+(cap unmap batching), and GUP (force a fault through
+gup_can_follow_protnone). Extend each to treat VM_UFFD_RWP the same
+as VM_UFFD_WP; otherwise per-PTE RWP state is silently destroyed or
+bypassed.
+
+khugepaged: try_collapse_pte_mapped_thp() and
+file_backed_vma_is_retractable() already refuse to collapse or
+retract page tables on ranges carrying the uffd PTE bit. Broaden the
+VMA predicate from userfaultfd_wp() to userfaultfd_protected() so
+VM_UFFD_RWP ranges get the same protection. hpage_collapse_scan_pmd()
+needs no change — its existing pte_uffd() check already catches an
+RWP PTE because it carries the uffd bit.
+
+rmap: folio_unmap_pte_batch() caps batching at 1 for VM_UFFD_RWP so
+the restore path handles each PTE with its own marker.
+
+GUP: gup_can_follow_protnone() forces a fault on VM_UFFD_RWP VMAs
+regardless of FOLL_HONOR_NUMA_FAULT. RWP uses protnone as an
+access-tracking marker, not for NUMA hinting, so any GUP — read or
+write — must go through the userfaultfd fault path.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Acked-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ include/linux/mm.h | 10 +++++++++-
+ mm/khugepaged.c    | 18 +++++++++++-------
+ mm/rmap.c          |  2 +-
+ 3 files changed, 21 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 10/18] mm: preserve RWP marker across PTE rewrites
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+The uffd PTE bit must survive any kernel path that rewrites a PTE
+on a VM_UFFD_RWP VMA, otherwise the marker that carries PAGE_NONE
+semantics is silently dropped and the next access leaks past RWP
+tracking. Wire the preservation through every path that rewrites a
+VM_UFFD_RWP PTE.
+
+Swap and device-exclusive: do_swap_page(), restore_exclusive_pte(),
+and unuse_pte() (swapoff()) re-apply PAGE_NONE when the swap PTE
+carries the uffd bit and the VMA has VM_UFFD_RWP.
+
+Migration: remove_migration_pte() and remove_migration_pmd() do the
+same after the migration entry is replaced with a real PTE/PMD.
+
+Fork: __copy_present_ptes(), copy_present_page(), copy_nonpresent_pte(),
+copy_huge_pmd(), copy_huge_non_present_pmd(), and
+copy_hugetlb_page_range() keep the uffd bit on the child when the
+destination VMA has VM_UFFD_RWP, matching the existing VM_UFFD_WP
+handling. Add VM_UFFD_RWP to VM_COPY_ON_FORK so the flag itself
+propagates.
+
+mprotect(): change_pte_range() and change_huge_pmd() restore PAGE_NONE
+after pte_modify()/pmd_modify() have recomputed the base protection
+from a (possibly user-changed) vm_page_prot. pte_modify() preserves
+_PAGE_UFFD, so the bit stays; we just have to force PAGE_NONE back
+on top.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Acked-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ include/linux/mm.h |  3 ++-
+ mm/huge_memory.c   | 47 +++++++++++++++++++++++++++++++++++++----
+ mm/hugetlb.c       | 52 ++++++++++++++++++++++++++++++++++++++--------
+ mm/memory.c        | 49 ++++++++++++++++++++++++++++++++++++-------
+ mm/migrate.c       |  8 +++++++
+ mm/mprotect.c      | 10 +++++++++
+ mm/mremap.c        | 13 ++++++++++--
+ mm/swapfile.c      |  5 +++++
+ mm/userfaultfd.c   | 17 +++++++++++++++
+ 9 files changed, 181 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 09/18] mm: add MM_CP_UFFD_RWP change_protection() flag
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Preparatory patch. Add the change_protection() primitive that
+userfaultfd RWP will use.
+
+An RWP-protected PTE is PAGE_NONE with the uffd PTE bit set. The
+PROT_NONE half makes the CPU fault on any access; the uffd bit
+distinguishes an RWP fault from a plain mprotect(PROT_NONE) or NUMA
+hinting fault. MM_CP_UFFD_WP and MM_CP_UFFD_RWP share the same PTE
+bit, so the two cannot be used together on the same range.
+
+Two new change_protection() flags:
+
+  MM_CP_UFFD_RWP            install PAGE_NONE and set the uffd bit
+  MM_CP_UFFD_RWP_RESOLVE    restore vma->vm_page_prot, clear the uffd bit
+
+Both are wired through change_pte_range(), change_huge_pmd(), and
+hugetlb_change_protection() so anon, shmem, THP, and hugetlb all
+share the same semantics.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ include/linux/mm.h            |  5 ++++
+ include/linux/userfaultfd_k.h |  1 -
+ mm/huge_memory.c              | 30 +++++++++++++----------
+ mm/hugetlb.c                  | 25 ++++++++++++++-----
+ mm/mprotect.c                 | 46 +++++++++++++++++++++++++++--------
+ 5 files changed, 77 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 08/18] mm: add VM_UFFD_RWP VMA flag
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Preparatory patch for userfaultfd read-write protection (RWP). RWP
+extends userfaultfd protection from plain write-protection (WP) to
+full read-write protection: accesses to an RWP-protected range --
+reads as well as writes -- trap through userfaultfd.
+
+Reserve VM_UFFD_RWP, add the userfaultfd_rwp() and
+userfaultfd_protected() helpers, and wire up the smaps "ur" entry and
+the trace-flag table the rest of the series will use. The flag is
+gated on CONFIG_USERFAULTFD_RWP, which is introduced together with the
+UAPI in a later patch; until then VM_UFFD_RWP aliases VM_NONE and
+every downstream check folds to dead code.
+
+Nothing sets or queries the flag yet.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+Reviewed-by: SeongJae Park <sj@kernel.org>
+---
+ Documentation/filesystems/proc.rst |  1 +
+ fs/proc/task_mmu.c                 |  3 +++
+ include/linux/mm.h                 | 28 +++++++++++++++++----------
+ include/linux/userfaultfd_k.h      | 31 +++++++++++++++++++++++++-----
+ include/trace/events/mmflags.h     |  7 +++++++
+ 5 files changed, 55 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 07/18] mm: rename uffd-wp PTE accessors to uffd
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+Userfaultfd RWP will reuse the uffd-wp PTE bit to mark access-tracking
+PTEs, alongside the write-protected ones it already marks. The bit's
+meaning now depends on the VMA flag (WP or RWP), not on its name.
+
+Rename the kernel-internal names that describe the bit:
+
+  - pte/pmd/huge_pte accessors (and swap variants)
+  - pgtable_supports_uffd() capability query
+  - SCAN_PTE_UFFD khugepaged enum
+
+The ftrace string emitted by mm_khugepaged_scan_pmd for this enum is
+kept as "pte_uffd_wp" so existing trace-based tooling keeps matching.
+
+Pure mechanical rename -- no behavior change.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+Reviewed-by: SeongJae Park <sj@kernel.org>
+---
+ arch/arm64/include/asm/pgtable.h   | 28 +++++++--------
+ arch/riscv/include/asm/pgtable.h   | 38 ++++++++++----------
+ arch/s390/include/asm/hugetlb.h    | 12 +++----
+ arch/x86/include/asm/pgtable.h     | 24 ++++++-------
+ fs/proc/task_mmu.c                 | 44 +++++++++++------------
+ include/asm-generic/hugetlb.h      | 18 +++++-----
+ include/asm-generic/pgtable_uffd.h | 32 ++++++++---------
+ include/linux/leafops.h            |  4 +--
+ include/linux/mm_inline.h          |  4 +--
+ include/linux/swapops.h            |  4 +--
+ include/linux/userfaultfd_k.h      | 14 ++++----
+ include/trace/events/huge_memory.h |  2 +-
+ mm/huge_memory.c                   | 56 +++++++++++++++---------------
+ mm/hugetlb.c                       | 46 ++++++++++++------------
+ mm/internal.h                      |  4 +--
+ mm/khugepaged.c                    | 22 ++++++------
+ mm/memory.c                        | 34 +++++++++---------
+ mm/migrate.c                       | 12 +++----
+ mm/migrate_device.c                |  8 ++---
+ mm/mprotect.c                      | 12 +++----
+ mm/mremap.c                        |  4 +--
+ mm/page_table_check.c              |  8 ++---
+ mm/rmap.c                          | 16 ++++-----
+ mm/swapfile.c                      |  4 +--
+ mm/userfaultfd.c                   |  6 ++--
+ 25 files changed, 228 insertions(+), 228 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 06/18] mm: rename uffd-wp PTE bit macros to uffd
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+The uffd-wp PTE bit is about to gain a second consumer: userfaultfd
+RWP will use the same bit to mark access-tracking PTEs, distinct
+from mprotect(PROT_NONE) or NUMA-hinting PTEs. WP vs RWP semantics
+come from the VMA flag; the bit is just "uffd has claimed this
+entry." Drop the "_wp" suffix from the arch-private bit macros so
+they reflect that.
+
+  x86:   _PAGE_BIT_UFFD_WP  -> _PAGE_BIT_UFFD
+         _PAGE_UFFD_WP      -> _PAGE_UFFD
+         _PAGE_SWP_UFFD_WP  -> _PAGE_SWP_UFFD
+  arm64: PTE_UFFD_WP        -> PTE_UFFD
+         PTE_SWP_UFFD_WP    -> PTE_SWP_UFFD
+  riscv: _PAGE_UFFD_WP      -> _PAGE_UFFD
+         _PAGE_SWP_UFFD_WP  -> _PAGE_SWP_UFFD
+
+Pure mechanical rename -- no behavior change.
+
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Reviewed-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+Reviewed-by: SeongJae Park <sj@kernel.org>
+---
+ arch/arm64/include/asm/pgtable-prot.h |  8 ++++----
+ arch/arm64/include/asm/pgtable.h      | 12 ++++++------
+ arch/riscv/include/asm/pgtable-bits.h | 12 ++++++------
+ arch/riscv/include/asm/pgtable.h      | 14 +++++++-------
+ arch/x86/include/asm/pgtable.h        | 24 ++++++++++++------------
+ arch/x86/include/asm/pgtable_types.h  | 16 ++++++++--------
+ 6 files changed, 43 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 05/18] mm: decouple protnone helpers from CONFIG_NUMA_BALANCING
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+pte_protnone() and pmd_protnone() detect present-but-inaccessible page
+table entries. This capability is useful beyond NUMA balancing -- for
+example, userfaultfd working set tracking uses protnone PTEs to track
+page access without unmapping pages.
+
+Introduce CONFIG_ARCH_HAS_PTE_PROTNONE to decouple the protnone PTE
+infrastructure from CONFIG_NUMA_BALANCING. The six architectures that
+support protnone PTEs (x86_64, arm64, powerpc, s390, riscv, loongarch)
+now select this option, and CONFIG_NUMA_BALANCING depends on it.
+
+No functional change -- the same set of architectures continues to have
+working protnone support, but the infrastructure is now available
+independently of NUMA balancing.
+
+Signed-off-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Assisted-by: Claude:claude-opus-4-6
+Acked-by: SeongJae Park <sj@kernel.org>
+Acked-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ arch/arm64/Kconfig                           |  1 +
+ arch/arm64/include/asm/pgtable.h             |  7 ++---
+ arch/loongarch/Kconfig                       |  1 +
+ arch/loongarch/include/asm/pgtable.h         |  4 +--
+ arch/powerpc/include/asm/book3s/64/pgtable.h |  8 ++---
+ arch/powerpc/platforms/Kconfig.cputype       |  1 +
+ arch/riscv/Kconfig                           |  1 +
+ arch/riscv/include/asm/pgtable.h             |  7 ++---
+ arch/s390/Kconfig                            |  1 +
+ arch/s390/include/asm/pgtable.h              |  4 +--
+ arch/x86/Kconfig                             |  1 +
+ arch/x86/include/asm/pgtable.h               |  8 ++---
+ include/linux/pgtable.h                      | 32 ++++++++++++++------
+ init/Kconfig                                 |  8 +++++
+ mm/debug_vm_pgtable.c                        |  4 +--
+ 15 files changed, 52 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 03/18] userfaultfd: gate must_wait writability check on pte_present()
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+userfaultfd_must_wait() and userfaultfd_huge_must_wait() read the PTE
+without taking the page table lock and then apply pte_write() /
+huge_pte_write() to it. Those accessors decode bits from the present
+encoding only; on a swap or migration entry they read the offset bits
+that happen to share the same position and return an undefined result.
+
+The intent of the check is "is this fault still WP-blocked?". A
+non-marker swap entry means the page is in transit -- the userfault
+context the original fault delivered against is no longer the same,
+and the swap-in or migration completion path will re-deliver a fresh
+fault if userspace still needs to handle it. Worst case under the
+current code the garbage write bit says "wait", and the thread stays
+asleep until a UFFDIO_WAKE that may never arrive.
+
+Gate the writability check on pte_present() so the lockless re-check
+only inspects present-PTE bits when the entry is actually present.
+The non-present, non-marker case returns "don't wait" and lets the
+fault path retry.
+
+Fixes: 369cd2121be4 ("userfaultfd: hugetlbfs: userfaultfd_huge_must_wait for hugepmd ranges")
+Fixes: 63b2d4174c4a ("userfaultfd: wp: add the writeprotect API to userfaultfd ioctl")
+Cc: stable@vger.kernel.org
+Reported-by: Sashiko AI review <sashiko-bot@kernel.org>
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+---
+ mm/userfaultfd.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 04/18] mm: skip out-of-range bits in mk_vma_flags()
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+vma_flags_t is one unsigned long on 32-bit -- NUM_VMA_FLAG_BITS ==
+BITS_PER_LONG by design, so VM_xxx-declared bits sit in the first
+word and hit the single-long fast path. But the bit enum declares
+some bits unconditionally above BITS_PER_LONG (VMA_UFFD_MINOR_BIT
+== 41 today, with VM_UFFD_MINOR == VM_NONE on 32-bit so no VMA
+actually carries the bit).
+
+Passing such a bit to mk_vma_flags() goes through __set_bit(41,
+&one_long) and writes one word past the end. The compiler folds
+the OOB store with wraparound (1UL << (41 % 32) == bit 9) into
+the first word. Bit 9 is already in __VMA_UFFD_FLAGS so the mask
+happens to come out right today, but any high-numbered bit whose
+mod-BITS_PER_LONG position is otherwise unused would silently OR
+an extra bit into the mask.
+
+Add VMA_NO_BIT and have DECLARE_VMA_BIT() resolve any bitnum out
+of range to it. vma_flags_set_flag() drops negative bit values.
+The ternary collapses at compile time, the runtime check folds
+away when the bit is in range, and the common path is unchanged.
+
+Bits declared in the enum are now safe to pass to mk_vma_flags()
+regardless of arch.
+
+Fixes: 9ea35a25d51b ("mm: introduce VMA flags bitmap type")
+Cc: stable@vger.kernel.org
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+---
+ include/linux/mm.h | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 02/18] mm/huge_memory: preserve pmd_swp_uffd_wp on device-private PMD downgrade
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+change_non_present_huge_pmd() rewrites a writable device-private PMD
+swap entry into a readable one without carrying pmd_swp_uffd_wp()
+across. The PTE-level change_softleaf_pte() does this correctly;
+mirror that here, matching what copy_huge_pmd() does for the fork
+path. Without the carry, a plain mprotect() over a UFFD_WP-marked
+device-private THP strips the bit and the trap is bypassed on
+swap-in.
+
+Fixes: 368076f52ebe ("mm/huge_memory: add device-private THP support to PMD operations")
+Cc: stable@vger.kernel.org
+Reported-by: Sashiko AI review <sashiko-bot@kernel.org>
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+---
+ mm/huge_memory.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 00/18] userfaultfd: working set tracking for VM guest memory
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+This series adds userfaultfd support for tracking the working set of
+VM guest memory, so a VMM can identify cold pages and evict them to
+tiered or remote storage.
+
+v1: https://lore.kernel.org/all/20260427114607.4068647-1-kas@kernel.org/
+v2: https://lore.kernel.org/all/cover.1778254670.git.kas@kernel.org/
+v3: https://lore.kernel.org/all/20260522133857.552279-1-kirill@shutemov.name/
+v4: https://lore.kernel.org/all/20260525113737.1942478-1-kas@kernel.org/
+
+== Changes since v4 ==
+
+v5 mainly addresses Sashiko AI review feedback on v4.
+
+  - Patches 1-4 are new pre-existing fixes surfaced by that review
+    (each carries Fixes:/Cc: stable@).
+  - 05/18: LoongArch select of ARCH_HAS_PTE_PROTNONE gated on 64BIT.
+  - 10/18, 13/18: gate RWP disarm/rebuild paths on pte_uffd() so
+    NUMA-balancing PROT_NONE markers survive.
+  - 12/18: reject UFFDIO_REGISTER_MODE_RWP on PROT_NONE VMAs.
+  - 14/18: PM_SCAN_WP_MATCHING on a VM_UFFD_RWP VMA silently skips
+    instead of -EINVAL, preserving the atomic read-and-reset.
+  - 16/18: UFFDIO_SET_MODE feature check goes through
+    userfaultfd_features() for KCSAN clean read.
+  - 17/18: drop _UFFDIO_SET_MODE from the baseline UFFDIO_API check
+    so the test still passes on older kernels.
+  - 18/18: VMM example switches to sync before PAGEMAP_SCAN; names
+    uffdio_api so callers can read back negotiated features; fixes
+    a couple of stray identifiers in the eviction loop.
+
+113/113 of tools/testing/selftests/mm/uffd-unit-tests pass (46 new
+RWP cases + existing UFFD groups, no regressions from patches 1-4).
+
+== Problem ==
+
+A VMM managing guest memory needs to:
+
+  1. detect which pages are still being touched (working-set
+     tracking);
+  2. safely evict cold pages to slower tiered or remote storage;
+  3. fetch them back on demand when accessed again.
+
+== Approach ==
+
+UFFDIO_REGISTER_MODE_RWP is a new userfaultfd registration mode, in
+parallel with the existing MODE_MISSING / MODE_WP / MODE_MINOR. It
+uses the same mechanism on every backing -- anon, shmem, hugetlbfs:
+
+  - PAGE_NONE on the PTE (the same primitive NUMA balancing uses)
+    makes the page inaccessible while keeping it resident;
+  - the uffd PTE bit (the one MODE_WP already owns) marks the entry
+    as "userfaultfd-tracked" so the protnone fault path can tell an
+    RWP fault apart from an mprotect(PROT_NONE) or NUMA hinting
+    fault.
+
+VM_UFFD_WP and VM_UFFD_RWP are mutually exclusive per VMA, so the
+same PTE bit safely carries both meanings depending on the
+registered VMA flag.
+
+In sync mode, the kernel delivers a UFFD_PAGEFAULT_FLAG_RWP message
+to the registered handler, and the handler resolves the fault with
+UFFDIO_RWPROTECT clearing MODE_RWP. In async mode
+(UFFD_FEATURE_RWP_ASYNC), the fault is auto-resolved in-place: the
+kernel restores the original PTE permissions and the faulting thread
+continues without a userfaultfd message ever being delivered.
+Userspace then learns which pages were touched by reading
+PAGE_IS_ACCESSED out of PAGEMAP_SCAN -- pages whose uffd bit is
+still set were not re-accessed since the last RWP cycle.
+
+UFFDIO_RWPROTECT is the protect/unprotect ioctl, mirroring
+UFFDIO_WRITEPROTECT.
+
+UFFDIO_SET_MODE flips RWP_ASYNC <-> sync at runtime under
+mmap_write_lock() + vma_start_write(), so a VMM can run in async
+mode for detection and switch to sync for race-free eviction without
+re-registering the userfaultfd.
+
+== Typical VMM workflow ==
+
+  /* arm */
+  UFFDIO_API(features = RWP | RWP_ASYNC)
+  UFFDIO_REGISTER(MODE_RWP)
+
+  /* detection cycle (async) */
+  UFFDIO_RWPROTECT(range, RWP)
+  sleep(interval)
+
+  /* freeze the cold snapshot before scanning */
+  UFFDIO_SET_MODE(disable = RWP_ASYNC)                  /* sync */
+  PAGEMAP_SCAN(!PAGE_IS_ACCESSED) -> cold pages
+
+  /* eviction (sync mode traps races) */
+  pwrite(cold) + fallocate(FALLOC_FL_PUNCH_HOLE, cold)
+  UFFDIO_WAKE(cold)
+  UFFDIO_SET_MODE(enable  = RWP_ASYNC)                  /* resume */
+
+== Series layout ==
+
+Patches 1 to 4 are independent pre-existing fixes (Fixes:/Cc: stable@)
+that the RWP code shares paths with -- they can be picked separately
+if needed:
+
+  1: fs/proc/task_mmu: huge make_uffd_wp_huge_pte() prot-update race
+     -- missing huge_ptep_modify_prot_start() can lose hardware
+     Dirty/Accessed updates.
+  2: mm/huge_memory: change_non_present_huge_pmd() drops
+     pmd_swp_uffd_wp on the writable -> readable device-private
+     PMD rewrite; plain mprotect() silently strips the marker.
+  3: userfaultfd: must_wait() applies pte_write() to a locklessly
+     read PTE without checking pte_present() -- swap/migration
+     entries decode random offset bits and the thread can stay
+     parked on a stale fault.
+  4: mm: mk_vma_flags() OOBs into the first word of vma_flags_t on
+     32-bit when called with a bit >= BITS_PER_LONG. Harmless by
+     coincidence today (the wraparound lands on a bit that's
+     already in the mask), but any future high-numbered bit would
+     silently corrupt the result. Add VMA_NO_BIT and skip negative
+     bits in DECLARE_VMA_BIT().
+
+Patches 5 to 7 are preparatory:
+
+  5: decouple protnone helpers from CONFIG_NUMA_BALANCING.
+  6-7: rename _PAGE_BIT_UFFD_WP, pte_uffd_wp() and friends to drop
+       the _WP suffix, since the bit now carries WP and RWP meaning
+       depending on the VMA flag. The SCAN_PTE_UFFD enum's ftrace
+       output string is intentionally kept as "pte_uffd_wp" so
+       trace-based tooling does not silently break.
+
+Patches 8 to 11 add the in-kernel mechanism:
+
+  8: VM_UFFD_RWP VMA flag (aliased to VM_NONE until 12/18 introduces
+     CONFIG_USERFAULTFD_RWP together with the UAPI).
+  9: MM_CP_UFFD_RWP change_protection() primitive (PAGE_NONE +
+     uffd bit, plus a RESOLVE counterpart).
+ 10: marker preservation across swap, device-exclusive, migration,
+     fork, mremap, UFFDIO_MOVE, hugetlb copy, and mprotect().
+ 11: handle VM_UFFD_RWP in khugepaged, rmap, and GUP.
+
+Patches 12 to 16 wire the userspace surface:
+
+  12: UFFDIO_REGISTER_MODE_RWP and UFFDIO_RWPROTECT plumbing
+      (introduces CONFIG_USERFAULTFD_RWP).
+  13: RWP fault delivery and exposure of UFFDIO_REGISTER_MODE_RWP.
+  14: PAGE_IS_ACCESSED in PAGEMAP_SCAN.
+  15: UFFD_FEATURE_RWP_ASYNC for async fault resolution.
+  16: UFFDIO_SET_MODE for runtime sync/async toggle.
+
+Patches 17 and 18 are kernel tests and Documentation/. Matching
+userfaultfd(2) and ioctl_userfaultfd(2) man-page updates will be
+sent as a separate patchset against the kernel.org linux-man tree.
+
+Kiryl Shutsemau (Meta) (18):
+  fs/proc/task_mmu: fix make_uffd_wp_huge_pte() prot-update race
+  mm/huge_memory: preserve pmd_swp_uffd_wp on device-private PMD
+    downgrade
+  userfaultfd: gate must_wait writability check on pte_present()
+  mm: skip out-of-range bits in mk_vma_flags()
+  mm: decouple protnone helpers from CONFIG_NUMA_BALANCING
+  mm: rename uffd-wp PTE bit macros to uffd
+  mm: rename uffd-wp PTE accessors to uffd
+  mm: add VM_UFFD_RWP VMA flag
+  mm: add MM_CP_UFFD_RWP change_protection() flag
+  mm: preserve RWP marker across PTE rewrites
+  mm: handle VM_UFFD_RWP in khugepaged, rmap, and GUP
+  userfaultfd: add UFFDIO_REGISTER_MODE_RWP and UFFDIO_RWPROTECT
+    plumbing
+  mm/userfaultfd: add RWP fault delivery and expose
+    UFFDIO_REGISTER_MODE_RWP
+  mm/pagemap: add PAGE_IS_ACCESSED for RWP tracking
+  userfaultfd: add UFFD_FEATURE_RWP_ASYNC for async fault resolution
+  userfaultfd: add UFFDIO_SET_MODE for runtime sync/async toggle
+  selftests/mm: add userfaultfd RWP tests
+  Documentation/userfaultfd: document RWP working set tracking
+
+ Documentation/admin-guide/mm/pagemap.rst     |  13 +-
+ Documentation/admin-guide/mm/userfaultfd.rst | 248 +++++-
+ Documentation/filesystems/proc.rst           |   1 +
+ arch/arm64/Kconfig                           |   1 +
+ arch/arm64/include/asm/pgtable-prot.h        |   8 +-
+ arch/arm64/include/asm/pgtable.h             |  47 +-
+ arch/loongarch/Kconfig                       |   1 +
+ arch/loongarch/include/asm/pgtable.h         |   4 +-
+ arch/powerpc/include/asm/book3s/64/pgtable.h |   8 +-
+ arch/powerpc/platforms/Kconfig.cputype       |   1 +
+ arch/riscv/Kconfig                           |   1 +
+ arch/riscv/include/asm/pgtable-bits.h        |  12 +-
+ arch/riscv/include/asm/pgtable.h             |  59 +-
+ arch/s390/Kconfig                            |   1 +
+ arch/s390/include/asm/hugetlb.h              |  12 +-
+ arch/s390/include/asm/pgtable.h              |   4 +-
+ arch/x86/Kconfig                             |   1 +
+ arch/x86/include/asm/pgtable.h               |  56 +-
+ arch/x86/include/asm/pgtable_types.h         |  16 +-
+ fs/proc/task_mmu.c                           | 120 ++-
+ include/asm-generic/hugetlb.h                |  18 +-
+ include/asm-generic/pgtable_uffd.h           |  32 +-
+ include/linux/huge_mm.h                      |   7 +
+ include/linux/leafops.h                      |   4 +-
+ include/linux/mm.h                           |  61 +-
+ include/linux/mm_inline.h                    |   4 +-
+ include/linux/pgtable.h                      |  32 +-
+ include/linux/swapops.h                      |   4 +-
+ include/linux/userfaultfd_k.h                |  76 +-
+ include/trace/events/huge_memory.h           |   2 +-
+ include/trace/events/mmflags.h               |   7 +
+ include/uapi/linux/fs.h                      |   1 +
+ include/uapi/linux/userfaultfd.h             |  54 +-
+ init/Kconfig                                 |   8 +
+ mm/Kconfig                                   |   9 +
+ mm/debug_vm_pgtable.c                        |   4 +-
+ mm/huge_memory.c                             | 157 +++-
+ mm/hugetlb.c                                 | 158 +++-
+ mm/internal.h                                |   4 +-
+ mm/khugepaged.c                              |  40 +-
+ mm/memory.c                                  | 133 +++-
+ mm/migrate.c                                 |  20 +-
+ mm/migrate_device.c                          |   8 +-
+ mm/mprotect.c                                |  68 +-
+ mm/mremap.c                                  |  17 +-
+ mm/page_table_check.c                        |   8 +-
+ mm/rmap.c                                    |  18 +-
+ mm/swapfile.c                                |   9 +-
+ mm/userfaultfd.c                             | 407 +++++++++-
+ tools/include/uapi/linux/fs.h                |   1 +
+ tools/testing/selftests/mm/uffd-unit-tests.c | 765 +++++++++++++++++++
+ 51 files changed, 2321 insertions(+), 429 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 01/18] fs/proc/task_mmu: fix make_uffd_wp_huge_pte() prot-update race
+Author: Kiryl Shutsemau <kirill@shutemov.name>
+
+
+make_uffd_wp_huge_pte() arms the UFFD_WP bit on a present HugeTLB PTE by
+calling huge_ptep_modify_prot_commit() with a ptent snapshot that was
+fetched without the corresponding huge_ptep_modify_prot_start(). The
+start helper is what atomically clears the entry so the kernel-owned
+snapshot stays consistent until the commit; without it, the hardware
+may set Dirty or Accessed in the live PTE between the original read
+and the commit, and huge_ptep_modify_prot_commit() (whose generic
+implementation just calls set_huge_pte_at()) then writes the stale
+snapshot back over the live hardware bits, losing the update.
+
+The non-hugetlb sibling make_uffd_wp_pte() does this correctly via
+ptep_modify_prot_start() / ptep_modify_prot_commit(). Mirror that
+pattern for the present-PTE branch. The migration case stays as-is --
+migration entries are non-present, so there's no hardware update to
+race against.
+
+Fixes: 52526ca7fdb9 ("fs/proc/task_mmu: implement IOCTL to get and optionally clear info about PTEs")
+Cc: stable@vger.kernel.org
+Reported-by: Sashiko AI review <sashiko-bot@kernel.org>
+Signed-off-by: Kiryl Shutsemau <kas@kernel.org>
+---
+ fs/proc/task_mmu.c | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 4/6] LoongArch: KVM: Inject interrupt with batch method
+Author: Bibo Mao <maobibo@loongson.cn>
+
+With bitmask method, interrupt can be injected with batch mode, rather
+than one by one. Also remove unused array priority_to_irqp[] here.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/interrupt.c | 95 ++++++++++------------------------
+ 1 file changed, 28 insertions(+), 67 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 5/6] LoongArch: KVM: Add valid bit check when set ESTAT CSR register
+Author: Bibo Mao <maobibo@loongson.cn>
+
+When set ESTAT CSR register in function _kvm_setcsr(), valid bit check
+is added here. Also interrupt CPU_AVEC is checked by msgint feature.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/vcpu.c | 25 ++++++++++++++++---------
+ 1 file changed, 16 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 6/6] LoongArch: KVM: Deliver interrupt after IN_GUEST_MODE is set
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Interrupt delivery should be called after IN_GUEST_MODE is set. Other
+threads may be posting interrupt however does not send IPI to the
+vCPU, since the vCPU is not in IN_GUEST_MODE.
+
+here move function call with kvm_deliver_intr() after IN_GUEST_MODE
+is set, and set mode with OUTSIDE_GUEST_MODE with atomic method.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/vcpu.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 2/6] LoongArch: KVM: Check msgint feature in interrupt post
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Interrupt AVEC is valid only if VM has msgint feature, and this feature
+is checked in interrupt handling. Since interrupt handling is executing
+in VM context switch, and it is hot path, here move the feature checking
+in interrupt post rather than interrupt handling.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/interrupt.c |  5 -----
+ arch/loongarch/kvm/vcpu.c      | 14 +++++++++-----
+ 2 files changed, 9 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 1/6] LoongArch: KVM: Check irq validility in kvm_vcpu_ioctl_interrupt()
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Function kvm_vcpu_ioctl_interrupt() can be called from userspace, here
+add irq validility cheking in kvm_vcpu_ioctl_interrupt().
+
+Fixes: f45ad5b8aa93 ("LoongArch: KVM: Implement vcpu interrupt operations")
+Cc: stable@vger.kernel.org
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/vcpu.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 3/6] LoongArch: KVM: Use existing macro about interrupt bit mask
+Author: Bibo Mao <maobibo@loongson.cn>
+
+With interrupt post, register CSR_GINTC and CSR_ESTAT is used, and
+CSR_ESTAT is used for percpu interrupt injection and CSR_GINTC is for
+external hardware interrupt injection.
+
+Here use existing macro about interrupt bit of register CSR_GINTC and
+CSR_ESTAT, rather than hard coded constant value.
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/include/asm/kvm_vcpu.h | 43 ++++++++++++++++++---------
+ 1 file changed, 29 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 0/6] LoongArch: KVM: Small enhancement about interrupt injection
+Author: Bibo Mao <maobibo@loongson.cn>
+
+Here add illegal parameter check in kvm_vcpu_ioctl_interrupt() since this
+function is called from user mode. Also interrupt inject is handled with
+batch method, rather one by one.
+
+---
+v4 ... v5:
+  1. Replace constant 2 with macro GINTC_VIP_DELTA in patch 4.
+  2. Keep register CSR_GINTC bits unchanged except CPU_IP0 - CPU_IP7 in
+     function _kvm_setcsr().
+  3. Add new patch 6 which moves function call with kvm_deliver_intr()
+     after smp_store_mb(vcpu->mode, IN_GUEST_MODE).
+
+v3 ... v4:
+  1. change type of local variable vector with unsigned int rather than
+     int, and use abs() macro.
+  2. Remove last patch since kvm_vcpu_sync_intr() does not sync cached
+     AVEC interrupt to SW CSR_ISR state.
+  3. Replace kvm_set_sw_gcsr() with kvm_write_sw_gcsr() in patch 5,
+     since kvm_set_sw_gcsr() is ORed cached ESTAT interrupt bits,
+     kvm_write_sw_gcsr() is to overwrite the whole SW ESTAT register.
+  4. Modify typo issue about title and log message in patch 5, replace
+     GSTAT with ESTAT
+
+v2 ... v3:
+  1. Split patch 1 into two smaller patches, one is smaller bugfix patch
+     with irq validility check in kvm_vcpu_ioctl_interrupt(), so that it
+     is easy to porting to old kernel.
+
+v1 ... v2:
+  1. Add irq validility check in function kvm_vcpu_ioctl_interrupt().
+  2. Add valid bit check when set ESTAT CSR register.
+  3. Merge two patches about interrupt clear and set with batch method into
+     one.
+---
+Bibo Mao (6):
+  LoongArch: KVM: Check irq validility in kvm_vcpu_ioctl_interrupt()
+  LoongArch: KVM: Check msgint feature in interrupt post
+  LoongArch: KVM: Use existing macro about interrupt bit mask
+  LoongArch: KVM: Inject interrupt with batch method
+  LoongArch: KVM: Add valid bit check when set ESTAT CSR register
+  LoongArch: KVM: Deliver interrupt after IN_GUEST_MODE is set
+
+ arch/loongarch/include/asm/kvm_vcpu.h |  43 +++++++----
+ arch/loongarch/kvm/interrupt.c        | 100 ++++++++------------------
+ arch/loongarch/kvm/vcpu.c             |  46 ++++++++----
+ 3 files changed, 88 insertions(+), 101 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] s390: kvm: arm64: add HAS_IOMEM dependency
+Author: Arnd Bergmann <arnd@kernel.org>
+
+
+The arm64 kvm driver can only be enabled when MMIO support is part of
+the host kernel:
+
+arch/s390/kvm/arm64/../../../../virt/kvm/arm64/mmio.c:120:27: error: 'struct kvm_vcpu' has no member named 'mmio_needed'
+
+s390 does not support MMIO if PCI is disabled, but in practice one
+would not actually need kvm support in those configurations either.
+
+Signed-off-by: Arnd Bergmann <arnd@arndb.de>
+---
+This is currently needed for randconfig build testing the
+'sae' branch, it is not yet in linux-next
+---
+ arch/s390/kvm/arm64/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] kvm: rework memory prefault
+Author: Arnd Bergmann <arnd@kernel.org>
+
+
+When both s390 and arm64 KVM modules are enabled on s390,
+the latter fails to link against the s390 version of
+kvm_arch_vcpu_pre_fault_memory():
+
+ERROR: modpost: "kvm_arch_vcpu_pre_fault_memory" [arch/s390/kvm/arm64/kvm-arm64.ko] undefined!
+
+Change the logic to reference this based on a target
+specific macro rather than a global Kconfig symbol.
+
+Fixes: f67bba50ef56 ("KVM: s390: arm64: Enable KVM_ARM64 config and Kbuild")
+Fixes: 927ce4dee94f ("KVM: s390: Implement KVM_PRE_FAULT_MEMORY")
+
+Signed-off-by: Arnd Bergmann <arnd@arndb.de>
+---
+This is not yet an actual problem, but will be when both
+the experimental 'sae' branch and the 7.2 contents from
+current linux-next are merged.
+
+Not sure who should carry this patch in the meantime, but
+it would be possible to add it to kvm-next already in
+preparation for the upcoming sae support.
+---
+ arch/s390/include/asm/kvm_host_s390.h | 4 ++++
+ arch/s390/kvm/s390/Kconfig            | 1 -
+ arch/x86/include/asm/kvm_host.h       | 4 ++++
+ arch/x86/kvm/Kconfig                  | 1 -
+ include/linux/kvm_host.h              | 5 -----
+ virt/kvm/Kconfig                      | 3 ---
+ virt/kvm/kvm_main.c                   | 4 ++--
+ 7 files changed, 10 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 6/7] riscv: kexec: Add the relocate-trampoline wrapper
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+Add riscv_kexec_relocate_entry to .kexec.tramp.text and the two
+asm-visible globals (riscv_kexec_relocate_entry_pa and
+riscv_kexec_cc_buffer_pa) that the wrapper consumes.
+
+The wrapper performs the same two-step transition used by the crash
+path: switch to the trampoline pgd, jump to the PA of self, then drop
+the MMU with PC already on a PA. It finally jumps to the PA of
+control_code_buffer.
+
+machine_kexec_prepare() publishes the wrapper PA and the
+control_code_buffer PA via WRITE_ONCE for non-crash images.
+Nothing routes to the wrapper yet; the switchover happens in the
+follow-up patch.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/include/asm/kexec.h     |  1 +
+ arch/riscv/kernel/kexec_relocate.S | 37 ++++++++++++++++++++++++++++++
+ arch/riscv/kernel/machine_kexec.c  |  7 ++++++
+ 3 files changed, 45 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 7/7] riscv: kexec: Route normal kexec through the trampoline page table
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+riscv_kexec_relocate (copied into control_code_buffer) uses an stvec
+trick to drop the MMU and land on the PA of the next loop label.
+Under VS-mode KVM cannot emulate this single-step transition and the
+VCPU dies with "kvm run failed Operation not supported".
+
+Route normal kexec through riscv_kexec_relocate_entry, the trampoline
+wrapper added in the previous patch. It drops SATP with PC already on
+a PA, then hands off to control_code_buffer where the relocate body
+runs with SATP=0.
+
+Drop the stvec trick from the relocate body and pass first_ind_entry
+as a physical address since the body now starts with SATP=0. The
+".align 2" plus filler "nop" that ensured the PA of the loop top was
+4-byte aligned -- required because the legacy stvec trick wrote that
+PA into stvec.BASE, whose low two bits are MODE and are discarded by
+the hardware -- is no longer load-bearing and is removed as well.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/kernel/kexec_relocate.S | 26 ++++++--------------------
+ arch/riscv/kernel/machine_kexec.c  | 10 +++++++---
+ 2 files changed, 13 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 5/7] riscv: kexec: Always build the trampoline page table
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+The trampoline page table and the kexec_tramp_satp value are
+currently built only on the crash path. A follow-up patch needs
+the same infrastructure for the normal kexec path.
+
+Pull the trampoline build and the WRITE_ONCE() that publishes the
+SATP value out of the crash-only else branch in
+machine_kexec_prepare(). The crash path keeps recording its own
+riscv_kexec_norelocate_pa; the normal path keeps its existing
+control_code_buffer copy.
+
+No functional change.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/kernel/machine_kexec.c | 21 ++++++++++-----------
+ 1 file changed, 10 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/7] riscv: kexec: Switch to trampoline page table before norelocate
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+Make riscv_kexec_norelocate a two-pass trampoline so it can
+drop the kernel page tables while still executing from a
+mapped address.
+
+On the first entry, t3 is initialized to 0 by machine_kexec().
+Loads the physical address of riscv_kexec_norelocate and the
+trampoline SATP value, switches to the trampoline page table,
+and jumps to the trampoline VA(=PA).
+
+On the second entry, t3 contains the physical address of
+riscv_kexec_norelocate, so the PC comparison matches and
+execution continues under trampoline VA(=PA).
+
+Since the trampoline page table is already active, replace the
+previous stvec-based handoff with a direct jump to the target
+entry (jr a2).
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/kernel/kexec_relocate.S | 32 ++++++++++++++++++----
+ arch/riscv/kernel/machine_kexec.c  | 44 +++++++++++++++++++++++++++---
+ 2 files changed, 67 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/7] riscv: kexec: Build trampoline page tables for crash kernel entry
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+Crash kexec uses riscv_kexec_norelocate as a trampoline to jump into
+the crashkernel. Add a small helper to build dedicated 4KB page tables
+that map the trampoline page as executable.
+
+Two mappings are installed:
+  - VA(__kexec_tramp_text_start) -> PA(__kexec_tramp_text_start)
+  - PA(__kexec_tramp_text_start) -> PA(__kexec_tramp_text_start)
+
+This allows the trampoline to run regardless of whether it is entered
+via its linked virtual address or its physical address.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/kernel/machine_kexec.c | 67 +++++++++++++++++++++++++++++++
+ 1 file changed, 67 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/7] riscv: kexec: Place norelocate trampoline into .kexec.tramp.text
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+Move riscv_kexec_norelocate out of the generic .text section and into
+a dedicated executable trampoline section, .kexec.tramp.text.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/include/asm/kexec.h     | 4 ++++
+ arch/riscv/kernel/kexec_relocate.S | 2 +-
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/7] riscv: kexec: Fix VCPU crash on kexec/kdump under KVM
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+In a RISC-V kernel, both kexec and crashdump need to hand off execution
+to the next kernel after tearing down the current kernel address space.
+However, under virtualization the guest uses two-stage address
+translation, and pc does not jump to stvec after setting satp to zero,
+so the legacy single-step "csrw satp,0 + stvec redirect" sequence
+traps with "kvm run failed Operation not supported" and the VCPU dies.
+
+v1 (Link below) addressed the crash path only. v2 extends the same
+mechanism to the normal kexec path (kexec -l/-e) and reworks the
+trampoline as a shared piece of infrastructure between the two paths.
+
+This patch set introduces a dedicated kexec trampoline text section and
+builds a minimal trampoline page table for it. Both handoffs are then
+reworked into a two-pass trampoline:
+
+    1. First enter via the kernel VA, install the trampoline page table,
+       and jump to the trampoline VA(=PA) of the entry stub;
+    2. Continue execution with PC already on a PA, drop SATP with
+       csrw satp,0 (now safe because PC re-anchoring is moot), and
+       jump directly to the target -- either the crash kernel entry
+       (crash path) or the per-image control_code_buffer that runs
+       the relocate body with SATP=0 throughout (normal path).
+
+With this, both kexec and crashdump in RISC-V guests become robust
+against the two-stage translation.
+
+Tested on QEMU virt under two configurations:
+
+  * HS-mode bare (QEMU TCG) -- regression check
+      - normal kexec: kexec -l/-e succeeds, second kernel boots and
+                      prints the userspace SECOND BOOT marker.
+      - crash kdump: panic triggers crash kernel boot, /proc/vmcore
+                     opens cleanly in crash and shows the panic
+                     backtrace.
+
+  * VS-mode (L0 x86 + QEMU TCG -> L1 riscv64 + KVM -> L2)
+      Before this series, both paths die with
+          kvm run failed Operation not supported
+      and an all-zero M-mode register dump on the SATP transition.
+      After this series, both paths succeed end-to-end and the
+      vmcore opens cleanly in crash.
+
+---
+Changes in v2:
+    - Extend the trampoline mechanism to the normal kexec path; the
+      legacy stvec trick in riscv_kexec_relocate (csrw satp,0 followed
+      by jr s6 to land at PA) is replaced by a small wrapper
+      riscv_kexec_relocate_entry in .kexec.tramp.text that performs
+      the same two-step transition used by the crash path and then
+      hands off to the PA of control_code_buffer.   
+    - Page-align both ends of the .kexec.tramp.text section so no
+      .rodata neighbour can leak into the identity-mapped executable
+      trampoline page, and assert the section fits within one page.
+    - In machine_kexec() pin t3 = 0 and the call arguments (a0..a4)
+      to their ABI registers via local register asm variables and
+      perform the final jr inside the inline asm block, so the
+      compiler can never insert a scratch use of t3 between the
+      argument setup and the trampoline entry. The bare
+      "asm volatile ("li t3, 0" ::: "t3")" placebo used in v1 is
+      not actually a guarantee.
+    - Link to v1:
+      https://lore.kernel.org/linux-riscv/20260324114527.91494-1-fangyu.yu@linux.alibaba.com/
+
+Fangyu Yu (7):
+  riscv: Add kexec trampoline text section to vmlinux.lds.S
+  riscv: kexec: Place norelocate trampoline into .kexec.tramp.text
+  riscv: kexec: Build trampoline page tables for crash kernel entry
+  riscv: kexec: Switch to trampoline page table before norelocate
+  riscv: kexec: Always build the trampoline page table
+  riscv: kexec: Add the relocate-trampoline wrapper
+  riscv: kexec: Route normal kexec through the trampoline page table
+
+ arch/riscv/include/asm/kexec.h     |   5 ++
+ arch/riscv/kernel/image-vars.h     |  14 ++++
+ arch/riscv/kernel/kexec_relocate.S |  97 +++++++++++++++++------
+ arch/riscv/kernel/machine_kexec.c  | 123 +++++++++++++++++++++++++++--
+ arch/riscv/kernel/vmlinux.lds.S    |   1 +
+ 5 files changed, 209 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/7] riscv: Add kexec trampoline text section to vmlinux.lds.S
+Author: fangyu.yu <fangyu.yu@linux.alibaba.com>
+
+
+When CONFIG_KEXEC_CORE is enabled, add a dedicated .kexec.tramp.text
+area to the RISC-V kernel linker script.
+
+This introduces a KEXEC_TRAMP_TEXT linker snippet in image-vars.h and
+uses it from vmlinux.lds.S to:
+  - align both the start and the end to PAGE_SIZE
+  - define __kexec_tramp_text_start/__kexec_tramp_text_end
+  - KEEP all .kexec.tramp.text* input sections
+  - ASSERT the trampoline text fits within one page
+
+The end-of-section page alignment guarantees that the trampoline page,
+which is later identity-mapped as PAGE_KERNEL_EXEC, contains nothing but
+the trampoline code and padding (no shared neighbour data).
+
+When kexec is disabled, KEXEC_TRAMP_TEXT expands to nothing.
+
+Signed-off-by: Fangyu Yu <fangyu.yu@linux.alibaba.com>
+---
+ arch/riscv/kernel/image-vars.h  | 14 ++++++++++++++
+ arch/riscv/kernel/vmlinux.lds.S |  1 +
+ 2 files changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost/net: fix clear_user start address in VHOST_GET_FEATURES_ARRAY
+Author: rom.wang <r4o5m6e8o@163.com>
+
+
+The clear_user() call in VHOST_GET_FEATURES_ARRAY incorrectly starts
+at argp, which is the beginning of the features array, overwriting the
+data just written by copy_to_user(). It should start after the copied
+elements at argp + copied * sizeof(u64) to only zero the trailing
+unused space.
+
+Fixes: 333c515d1896 ("vhost-net: allow configuring extended features")
+Signed-off-by: Yufeng Wang <wangyufeng@kylinos.cn>
+---
+ drivers/vhost/net.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Fix timer state restore
+Author: Qiang Ma <maqianga@uniontech.com>
+
+The KVM_REG_RISCV_TIMER_REG(state) one-reg write passes the value
+written by userspace to kvm_riscv_vcpu_timer_next_event() when
+re-enabling the timer.
+
+That value is the timer state, KVM_RISCV_TIMER_STATE_ON, not the
+timer compare value. During migration or state restore, userspace
+restores the compare register separately, which stores the target
+cycle in t->next_cycles. Re-arming the timer with the state value
+schedules the next event at cycle 1 instead of the restored compare
+value, causing the virtual timer to fire too early.
+
+Use the restored compare value from t->next_cycles when turning the
+timer back on.
+
+Fixes: 3a9f66cb25e1 ("RISC-V: KVM: Add timer functionality")
+
+Signed-off-by: Qiang Ma <maqianga@uniontech.com>
+---
+ arch/riscv/kvm/vcpu_timer.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] LoongArch: KVM: Check return values for put_user
+Author: Qiang Ma <maqianga@uniontech.com>
+
+put_user() may return -EFAULT, so, when the user space address
+is invalid, it should return -EFAULT.
+
+Signed-off-by: Qiang Ma <maqianga@uniontech.com>
+---
+ arch/loongarch/kvm/vcpu.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 1/6] PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+pcie_tph_get_st_table_loc() incorrectly uses FIELD_GET(), which shifts the
+field value to bit 0. But the function is designed to return raw
+PCI_TPH_LOC_* values as defined in the function comment.
+
+This causes incorrect ST table location detection. Fix it by using bitwise
+AND with PCI_TPH_CAP_LOC_MASK to return the unshifted field value matching
+the function specification.
+
+This doesn't make a difference to mlx5_st_create(), the lone external
+caller, because it only checks for PCI_TPH_LOC_NONE (0), but will be needed
+for callers that check for PCI_TPH_LOC_CAP or PCI_TPH_LOC_MSIX.
+
+Fixes: d2e8a34876ce ("PCI/TPH: Add Steering Tag support")
+Cc: stable@vger.kernel.org
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Reviewed-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/tph.c | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 2/6] PCI/TPH: Export pcie_tph_get_st_modes() for external use
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Export the helper to retrieve supported PCIe TPH steering tag modes so
+that drivers like VFIO can query and expose device capabilities to
+userspace.
+
+Add stub functions for pcie_tph_get_st_table_size() and
+pcie_tph_get_st_table_loc() when !CONFIG_PCIE_TPH.
+
+Add tph_cap validation for pcie_tph_get_st_modes() and
+pcie_tph_get_st_table_loc() to prevent invalid PCI configuration
+space access when TPH is not supported.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Acked-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/tph.c       | 23 +++++++++++++++++++----
+ include/linux/pci-tph.h |  7 +++++++
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 5/6] vfio/pci: Add VFIO_DEVICE_FEATURE_TPH_ST for PCIe TPH steering tag management
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add new userspace device feature to access and maintain PCIe TPH Steering
+Tag table entries, supporting two mutually exclusive operation modes:
+1. Raw table read/write: Operate shadow ST table, sync updates to hardware
+   TPH capability or MSI-X table. Failed batch write triggers entry
+   rollback to keep hardware consistent.
+2. CPU ID lookup: Query translated steering tag by specified memory type,
+   pure read-only without modifying ST table.
+
+Introduce enable_unsafe_tph module parameter to gate this non-isolated TPH
+related feature. All operations are protected by per-device mutex, shadow
+table lifecycle is managed along device init/release.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci.c      |  13 ++-
+ drivers/vfio/pci/vfio_pci_core.c | 176 ++++++++++++++++++++++++++++++-
+ include/linux/vfio_pci_core.h    |   6 +-
+ include/uapi/linux/vfio.h        |  49 +++++++++
+ 4 files changed, 240 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 0/6] vfio/pci: Add PCIe TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+This patchset enables userspace control over PCIe TPH steering tags,
+motivated by the following considerations:
+
+1. Why userspace needs the capability to control steering tags:
+   When PCIe devices are fully owned by userspace workloads such as DPDK
+   and SPDK, only userspace has full knowledge of core binding policies
+   and traffic distribution strategies. Without this series, userspace
+   cannot enable TPH or configure steering tags, leaving built-in PCIe
+   performance optimizations unused in high-throughput polling I/O
+   scenarios.
+
+2. Why this interface must be implemented in VFIO:
+   VFIO is the standard, secure community solution for granting full
+   PCIe device ownership to userspace. Existing kernel TPH interfaces
+   are designed purely for in-kernel drivers. For user-owned devices,
+   VFIO provides the only isolated and correct path to expose per-device
+   TPH management.
+
+TPH supports both IV and DS modes. Since both modes could introduces
+cross-VM isolation risks such as untrusted guests programming arbitrary
+steering tags to impact other domains:
+1. If ST location in MSI-X table, untrusted guests may program the
+   MSI-X table.
+2. If ST don't locate in MSI-X or CAP, untrusted guests may program the
+   device-specific register.
+So a new module parameter `enable_unsafe_tph` is added. It defaults to
+off, and blocks all unsafe TPH operations when disabled.
+
+Based on earlier RFC work by Wathsala Vithanage
+
+---
+v12:
+- Fix Alex's comments:
+  - Support enable NS_MODE from userspace
+  - Remove restriction of get/st operation must enable TPH by impl
+    shadow ST table scheme
+  - Refine uAPI definition
+v11:
+- Fix Sashiko review comments:
+  Add tph_lock for protect all tph operations from vfio user
+  Fix memory-leak when copy_to_user failed
+v10:
+- Fix Sashiko review comments:
+  - Fix TPH virtualization write return negetive val of 4/5 commit
+  - Fix don't support probe feature of 5/5 commit
+  - Fix return positive val if copy_to_user fail of 5/5 commit
+
+Chengwen Feng (6):
+  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+  PCI/TPH: Export pcie_tph_get_st_modes() for external use
+  PCI/TPH: Add pcie_tph_enabled_mode() helper
+  PCI/TPH: Move tph_req_type initialization into pci_tph_init
+  vfio/pci: Add VFIO_DEVICE_FEATURE_TPH_ST for PCIe TPH steering tag
+    management
+  vfio/pci: Add PCIe TPH control register virtualization
+
+ drivers/pci/tph.c                  |  77 +++++++-----
+ drivers/vfio/pci/vfio_pci.c        |  13 ++-
+ drivers/vfio/pci/vfio_pci_config.c |  38 ++++++
+ drivers/vfio/pci/vfio_pci_core.c   | 182 ++++++++++++++++++++++++++++-
+ include/linux/pci-tph.h            |  10 ++
+ include/linux/vfio_pci_core.h      |   6 +-
+ include/uapi/linux/vfio.h          |  49 ++++++++
+ 7 files changed, 344 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 6/6] vfio/pci: Add PCIe TPH control register virtualization
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Implement virtualized handling for PCIe TPH capability control register
+writes. Validate and mediate user write requests to accept only valid TPH
+mode configurations. Synchronize shadow steering tag table to hardware when
+TPH gets enabled successfully.
+
+Automatically disable TPH feature during device ownership handover and
+userspace file descriptor closing, ensuring hardware state consistency
+after device release.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c | 38 ++++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c   |  8 ++++++-
+ 2 files changed, 45 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 3/6] PCI/TPH: Add pcie_tph_enabled_mode() helper
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add a helper to query enabled TPH mode on a PCI device. This is useful for
+drivers like VFIO-PCI that need to validate TPH state before allowing
+access to steering tag tables.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 14 ++++++++++++++
+ include/linux/pci-tph.h |  3 +++
+ 2 files changed, 17 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 4/6] PCI/TPH: Move tph_req_type initialization into pci_tph_init
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Relocate tph_req_type resolution logic from pcie_enable_tph() to
+pci_tph_init(). The request type is fixed per device and root port topology
+at probe time, no need recalculation on each TPH enable.
+
+Also drop redundant tph_req_type reset in pcie_disable_tph(), the value
+remains valid across disable/enable cycles.
+
+This change allows pcie_tph_get_cpu_st() to work properly and retrieve
+valid steering tag values even when TPH is not enabled on the device.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c | 33 ++++++++++++++++-----------------
+ 1 file changed, 16 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH v2 4/4] nVMX: Validate DEBUGCTLMSR_LBR states during VMX transitions
+Author: Chenyi Qiang <chenyi.qiang@intel.com>
+
+Add tests to verify that DEBUGCTLMSR_LBR state is correctly
+handled during VMX transitions on top of the shared helper.
+
+Signed-off-by: Chenyi Qiang <chenyi.qiang@intel.com>
+---
+ x86/unittests.cfg |  9 +++++++++
+ x86/vmx_tests.c   | 19 +++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH v2 3/4] nVMX: Validate DEBUGCTLMSR_RTM_DEBUG states during VMX transitions
+Author: Chenyi Qiang <chenyi.qiang@intel.com>
+
+Add tests to verify that DEBUGCTLMSR_RTM_DEBUG state is correctly
+handled during VMX transitions on top of the shared helper.
+
+Signed-off-by: Chenyi Qiang <chenyi.qiang@intel.com>
+---
+ lib/x86/msr.h     |  1 +
+ x86/unittests.cfg |  8 ++++++++
+ x86/vmx_tests.c   | 14 ++++++++++++++
+ 3 files changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH v2 2/4] nVMX: Validate DEBUGCTLMSR_BUS_LOCK_DETECT states during VMX transitions
+Author: Chenyi Qiang <chenyi.qiang@intel.com>
+
+Add tests to verify that DEBUGCTLMSR_BUS_LOCK_DETECT state is correctly
+handled during VMX transitions.
+
+Wrap the VM-entry/VM-exit DEBUGCTL transition flow into a shared helper so
+follow-up DEBUGCTL feature tests can reuse the same checks.
+
+The following behaviors are verified in the helper:
+
+1. Guest states are loaded from VMCS iff "Load debug controls" VM-Entry control is set.
+2. Guest states are saved to VMCS iff "Save debug controls" VM-Exit control is set.
+3. DEBUGCTL MSR is cleared after VM exits.
+
+Signed-off-by: Chenyi Qiang <chenyi.qiang@intel.com>
+---
+ lib/x86/msr.h     |  1 +
+ x86/unittests.cfg |  8 ++++
+ x86/vmx_tests.c   | 96 +++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 105 insertions(+)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH v2 1/4] nVMX: Remove the IA32_DEBUGCTLMSR access in debugctls test
+Author: Chenyi Qiang <chenyi.qiang@intel.com>
+
+"debug controls" test was added by commit dc5c01f17b1a ("VMX: Test
+behavior on set and cleared save/load debug controls") to verify that
+"VM-Entry load debug controls" and "VM-Exit save debug controls" are
+correctly emulated by KVM for nested VMX. But due to the limitation that
+KVM didn't support MSR_IA32_DEBUGCTL for guest at that time, the test
+commented out all the value comparison of MSR_IA32_DEBUGCTL and leave
+it to future when KVM supports the MSR.
+
+The test doesn't check the functionality of save/restore guest
+MSR_IA32_DEBUGCTL on vm-exit/entry, but it keeps the write of
+MSR_IA32_DEBUGCTL. It leads to
+
+  kvm_intel: kvm [18663]: vcpu0, guest rIP: 0x407de7 Unhandled WRMSR(0x1d9) = 0x1
+  kvm_intel: kvm [18663]: vcpu0, guest rIP: 0x0 Unhandled WRMSR(0x1d9) = 0x2
+  kvm_intel: kvm [18663]: vcpu0, guest rIP: 0x40936f Unhandled WRMSR(0x1d9) = 0x3
+  kvm_intel: kvm [18663]: vcpu0, guest rIP: 0x40cf09 Unhandled WRMSR(0x1d9) = 0x1
+  kvm_intel: kvm [18663]: vcpu0, guest rIP: 0x40940d Unhandled WRMSR(0x1d9) = 0x3
+
+to the kernel log. Though it doesn't break the test, the log confuses
+people to think something wrong happened in the test case.
+
+Current KVM doesn't support some bits of MSR_IA32_DEBUGCTL but they
+depend on the vcpu model exposed. To simplify the case and eliminate
+the confusing "Unhandled WRMSR(0x1d9)" log, remove the MSR_IA32_DEBUGCTL
+logic in the test and make it concentrate only on DR7. Following patch
+will bring back MSR_IA32_DEBUGCTL separately.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Signed-off-by: Chenyi Qiang <chenyi.qiang@intel.com>
+
+---
+Changes in v2:
+  - Rewrite of commit message by Xiaoyao.
+  - Add RB from Xiaoyao.
+---
+ x86/vmx_tests.c | 46 ++++++++++++++--------------------------------
+ 1 file changed, 14 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH v2 0/4] nVMX: Improve IA32_DEBUGCTLMSR test on debug controls
+Author: Chenyi Qiang <chenyi.qiang@intel.com>
+
+Current nested debugctls test focuses on DR7 value and fakes the result of
+IA32_DEBUGCTLMSR in comment. Although the test can pass because DR7 is the
+only criterion to determine the result, there are some error messages
+appearing in dmesg due to accessing to BTF | LBR bits in IA32_DEBUGCTLMSR
+with report_ignored_msrs KVM parameter enabled.
+
+Clean up the old test so that it focuses on DR7, then add separate tests for
+DEBUGCTLMSR bits that are actually supported and can be validated during VMX
+transitions.
+
+Tested on:
+  Emerald Rapids:
+    vmx_bus_lock_detect_test  PASS
+    vmx_rtm_test              PASS
+    vmx_legacy_lbr_test       SKIP
+
+  Skylake:
+    vmx_bus_lock_detect_test  SKIP
+    vmx_rtm_test              PASS
+    vmx_legacy_lbr_test       PASS
+
+Changes since v1:
+- Modify the commit message in patch 1 (Xiaoyao)
+- Add dedicated tests (for BUS_LOCK_DETECT and LBR) covering the DEBUGCTL
+  reads and writes during VMX transitions (Sean)
+- Add one additional test for RTM_DEBUG bit that was not mentioned in v1.
+- https://lore.kernel.org/kvm/20250811063035.12626-1-chenyi.qiang@intel.com/
+
+Chenyi Qiang (4):
+  nVMX: Remove the IA32_DEBUGCTLMSR access in debugctls test
+  nVMX: Validate DEBUGCTLMSR_BUS_LOCK_DETECT states during VMX
+    transitions
+  nVMX: Validate DEBUGCTLMSR_RTM_DEBUG states during VMX transitions
+  nVMX: Validate DEBUGCTLMSR_LBR states during VMX transitions
+
+ lib/x86/msr.h     |   2 +
+ x86/unittests.cfg |  25 +++++++
+ x86/vmx_tests.c   | 175 +++++++++++++++++++++++++++++++++++++---------
+ 3 files changed, 170 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Fix NULL pointer dereference in AIA IMSIC functions
+Author: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+
+Fuzzer reported a NULL pointer dereference in 
+kvm_riscv_vcpu_aia_imsic_put() when a VCPU's imsic_state was NULL while 
+kvm_riscv_aia_initialized() returned true.
+
+The global initialized flag is set per-VM in aia_init(), but imsic_state 
+is allocated per-VCPU in kvm_riscv_vcpu_aia_imsic_init(). If a VCPU is 
+created after aia_init() has already run, its imsic_state remains NULL 
+while the global flag is true. When this VCPU is preempted, kvm_sched_out()
+calls kvm_arch_vcpu_put() -> kvm_riscv_vcpu_aia_put() ->
+kvm_riscv_vcpu_aia_imsic_put() which dereferences NULL.
+
+Add NULL pointer guards to kvm_riscv_vcpu_aia_imsic_put(), consistent with 
+the NULL checks already present in all other functions in the same file.
+
+Also add a NULL guard to kvm_riscv_vcpu_aia_imsic_release() and 
+kvm_riscv_vcpu_aia_imsic_has_interrupt() for the same reason.
+
+Fixes: 4cec89db80ba ("RISC-V: KVM: Move HGEI[E|P] CSR access to IMSIC virtualization")
+Signed-off-by: Jiakai Xu <jiakaiPeanut@gmail.com>
+Signed-off-by: Jiakai Xu <xujiakai2025@iscas.ac.cn>
+Assisted-by: YuanSheng:DeepSeek-V3.2
+---
+ arch/riscv/kvm/aia_imsic.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 10/11] x86/virt/tdx: Enable Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The Physical Address Metadata Table (PAMT) holds TDX metadata for
+physical memory and must be allocated by the kernel during TDX module
+initialization. Dynamic PAMT is a TDX module feature that can reduce this
+memory use by allocating part of the PAMT dynamically.
+
+All pieces are in place to Enable Dynamic PAMT if it is supported.
+Determine if the TDX module supports it by checking the 'features0' bit
+exposed by the TDX module.
+
+The TDX module also exposes information about whether the *system* (and
+not the module) supports Dynamic PAMT.
+
+The TDX module documentation describes how PAMT works internally. To allow
+the last level to be dynamically allocated, it uses a 3 level tree
+structure, not unlike page tables. Like page tables, it has a maximum
+address space that it can cover. This address space can be covered in 48
+bits. If the host physical address space is higher than this, than the
+TDX module can't guarantee the tree will be able to cover the TDX memory.
+
+The TDX module exposes this system support via metadata stating the
+minimum number of HKIDs that need to be available in order for Dynamic
+PAMT to be usable. The reasoning appears to be that more HKIDs can shrink
+the "real" addressable physical address bits enough to make the 48 bit
+Dynamic PAMT limit workable on high physical address width HW. However,
+the docs also clearly explain the 48 bit limit and how this fits into the
+Dymamic PAMT tree constraints.
+
+The handy x86_phys_bits value is already read and adjusted for keyid bits.
+So just compare that against 48 instead of reading more metadata and
+burdening the code with the more tenuous connection to minimum HKID bits.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - After Nikolai pointed out that the TDX docs actually have the Dynamic
+   PAMT pages-per-2MB region fixed at 2 instead of variable sized, I
+   checked over the docs more closely looking for anything else that might
+   have been missed. Spotted this 48 bit physical address bit check in the
+   docs, so added it.
+---
+ arch/x86/include/asm/tdx.h  | 11 ++++++++++-
+ arch/x86/virt/vmx/tdx/tdx.c | 11 +++++++++--
+ arch/x86/virt/vmx/tdx/tdx.h |  3 ---
+ 3 files changed, 19 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 09/11] KVM: TDX: Get/put PAMT pages when (un)mapping private memory
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Add Dynamic PAMT support to KVM's S-EPT MMU by "getting" a PAMT page when
+adding guest memory (PAGE.ADD or PAGE.AUG), and "putting" the page when
+removing guest memory (PAGE.REMOVE).
+
+To access the per-vCPU PAMT caches without plumbing @vcpu throughout the
+TDP MMU, begrudgingly use kvm_get_running_vcpu() to get the vCPU, and bug
+the VM if KVM attempts to set an S-EPT leaf without an active vCPU.  KVM
+only supports creating _new_ mappings in page (pre)fault paths, all of
+which require an active vCPU.
+
+The PAMT memory holds metadata for TDX-protected memory. With Dynamic
+PAMT, PAMT_4K is allocated on demand. The kernel supplies the TDX module
+with a few pages that cover 2M of host physical memory.
+
+Releases are balanced via tdx_pamt_put(): every control-page free goes
+through tdx_free_control_page(), and guest data pages are put directly on
+the successful tdh_mem_page_remove() path and in the
+tdx_mem_page_add/aug() error path.
+
+Assisted-by: Sashiko:claude-opus-4-6 GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Don't have topup op take a min param (Yan, Sean)
+ - Make log match style of the rest of the series
+ - Adjustments from dropping error helper patches
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  2 +
+ arch/x86/kvm/mmu/mmu.c             |  4 ++
+ arch/x86/kvm/vmx/tdx.c             | 65 ++++++++++++++++++++++++++----
+ arch/x86/kvm/vmx/tdx.h             |  2 +
+ 5 files changed, 66 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 11/11] Documentation/x86: Add documentation for TDX's Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Expand TDX documentation to include information on the Dynamic PAMT
+feature.
+
+The new section explains PAMT support in the TDX module and how Dynamic
+PAMT affects the kernel memory use.
+
+Assisted-by: Sashiko:claude-opus-4-6 GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Add missing word (Binbin)
+ - Use "::" instead of ":"
+ - Make format of dmesg example accurate
+
+v3:
+ - Trim down docs to be about things that user cares about, instead
+   of development history and other details like this.
+---
+ Documentation/arch/x86/tdx.rst | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 07/11] KVM: TDX: Allocate PAMT memory for TD and vCPU control structures
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Use control page helpers for allocating and freeing TD control structures,
+such these operations can work for Dynamic PAMT.
+
+The TDX module tracks some state for each page of physical memory that it
+might use. It calls this state the PAMT. It includes separate state for
+each page size a physical page could be utilized at within the TDX module
+(1GB, 2MB, 4KB). In Dynamic PAMT, only the 4KB page size state is
+allocated dynamically. So the kernel must install PAMT backing for each 4KB
+page before gifting it to the TDX module, and tear it down after the page
+is reclaimed.
+
+TD-scoped control pages (TDR, TDCS) and vCPU-scoped control pages (TDVPR,
+TDCX) are all handed to the TDX module at 4KB page size and are therefore
+subject to this requirement. Replace the raw alloc_page()/__free_page()
+calls for these pages with tdx_alloc/free_control_page().
+
+Switching between special Dynamic PAMT operations or normal page
+alloc/free operations is handled internally in
+tdx_alloc/free_control_page(). So don't check for Dynamic PAMT around these
+calls. Just call them unconditionally. Similarly, drop the NULL checks
+before freeing, as tdx_free_control_page() handles NULL internally.
+
+No functional change intended when Dynamic PAMT is not in use.
+
+Assisted-by: GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+[sean: handle alloc+free+reclaim in one patch]
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+[Rick: enhance log]
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+ arch/x86/kvm/vmx/tdx.c | 35 ++++++++++++++---------------------
+ 1 file changed, 14 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 08/11] x86/tdx: Add APIs to support Dynamic PAMT ops from KVM's fault path
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+When handling an EPT violation, KVM holds a spinlock while manipulating
+the EPT. Before entering the spinlock it doesn't know how many EPT page
+tables will need to be installed or whether a huge page will be used. For
+this reason it allocates a worst case number of page tables that it might
+need as part of servicing the EPT violation.
+
+Under Dynamic PAMT these pre-allocated pages will potentially need to have
+Dynamic PAMT backing pages installed for them. KVM already has helpers to
+manage topping up page caches before taking the MMU lock, but they cannot be
+passed from KVM to arch/x86 code.
+
+The problem of how and when to install the DPAMT backing pages for the
+pages given to the TDX module during the fault path has had a lot of
+design attempts.
+ - Extracting KVM's MMU caches requires too much inlined code added to
+   headers.
+ - A few varieties of installing Dynamic PAMT backing when allocating the
+   S-EPT page tables. [0][1]
+ - Using mempool_t to transfer the pages between KVM and arch/x86 doesn't
+   work because it is the component is designed more around maintaining a
+   pool of pages, rather than topping up a continually drained cache.
+
+So don't do these as they all had various problems. Instead just create a
+small simple data structure to use for handing a pre-allocated list of
+pages between KVM and arch/x86 code. Model this on KVM's existing MMU
+memory caches.
+
+Add a tdx_pamt_cache arg to tdx_pamt_get() so it can draw pages from a
+cache when needed. Not all DPAMT page installations will happen under
+spinlock, for example control pages. So have tdx_pamt_get() maintain the
+existing behavior of allocating from the page allocator when NULL is
+passed for the struct tdx_pamt_cache arg. This prevents excess allocations
+for cases where it can be avoided.
+
+Export the new helpers for KVM.
+
+Assisted-by: GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Link: https://lore.kernel.org/kvm/de05853257e9cc66998101943f78a4b7e6e3d741.camel@intel.com/ [0]
+Link: https://lore.kernel.org/kvm/aYprxnSHKHUtk7pt@google.com/ [1]
+---
+v6:
+ - Filled out log from Sean's series
+---
+ arch/x86/include/asm/tdx.h  | 17 ++++++++++
+ arch/x86/virt/vmx/tdx/tdx.c | 65 +++++++++++++++++++++++++++++++++----
+ 2 files changed, 76 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 05/11] x86/virt/tdx: Handle concurrent callers in tdx_pamt_get/put()
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+tdx_pamt_get()/tdx_pamt_put() unconditionally add or remove Dynamic PAMT
+backing for the 2MB region covering the passed pfn. However, multiple
+callers can concurrently operate on 4KB pages that fall within the same
+2MB region. When this happens only one Dynamic PAMT page pair needs to be
+installed to cover the 2MB range. And when one page is freed, the Dynamic
+PAMT backing cannot be freed until all pages in the range are no longer in
+use. Make the helpers handle these races internally.
+
+Use the per-2MB refcounts from previous changes to track how many 4KB
+pages are in use within each region. Gate the actual Dynamic PAMT add and
+remove on refcount transitions (0->1 and 1->0). Serialize the refcount
+check and SEAMCALL with a global spinlock so the read-decide-act sequence
+is atomic. This also avoids TDX module BUSY errors, as Dynamic PAMT add
+and remove SEAMCALLs take an internal TDX module locks at 2MB granularity,
+so simultaneous attempts on the same region would conflict.
+
+The lock is global and heavyweight. Use simple conditional logic to keep
+correctness obvious. This will be optimized in a later change.
+
+Assisted-by: GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Split from "x86/virt/tdx: Add tdx_alloc/free_control_page() helpers"
+ - Return 0 instead of ret to be clearer (Binbin)
+ - Clarify log (Nikolay)
+ - Justify why the patch is not optimized in response to comments by
+   (Nikolay)
+ - Move tdx_find_pamt_refcount() to faciliate patch re-order
+ - Adjustments from dropping error helper patches
+ - Log tweaks
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 72 ++++++++++++++++++++++++++++---------
+ 1 file changed, 56 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 06/11] x86/virt/tdx: Optimize tdx_pamt_get/put()
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The Dynamic PAMT get/put helpers use a global spinlock to serialize all
+refcount updates and SEAMCALL invocations. This gives correct behavior for
+concurrent callers, but leads to contention. It is especially bad from the
+KVM side, which is designed to allow faulting in EPT under a shared lock.
+With the global spinlock, not only is the lock an exclusive one, but it is
+for all TDs instead of just a single one.
+
+But taking the global lock each time is actually unnecessary. Only the 0->1
+and 1->0 refcount transitions actually need the lock (to pair with
+SEAMCALLs that actually add and remove with the Dynamic PAMT pages). The
+common case of incrementing or decrementing a non-zero refcount can be
+done locklessly.
+
+So create a fast and slow path. Check the refcount outside the lock and
+only take it for the slowpath (0->1 and 1->0 transitions).
+
+On the put side make the refcount adjustment and lock taking atomic so if
+a 'get' happens between them, it doesn't cause the Dynamic PAMT to be
+freed incorrectly. On the get side there is no technique for doing the
+refcount adjustment and lock atomically, so check the refcount again
+inside the lock.
+
+Assisted-by: GitHub Copilot:claude-opus-4-6
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Fix "tdx_pamt_add()" typo to "tdx_pamt_get()" in lost-race comment
+ - Fix error path bug: set ret = -EIO and use WARN_ON_ONCE() instead of
+   pr_err() for unexpected PAMT.ADD failures (Sean)
+ - Use "set the refcount 0->1" wording to match atomic_set() usage
+ - Wrap comments to 80 columns
+ - Switch to atomic_dec_and_lock() and remove handling of races that are
+   no longer needed as a result. Adjust comments as appropriate. (Dave)
+ - Adjustments from dropping error helper patches
+v4:
+ - Use atomic_set() in the HPA_RANGE_NOT_FREE case (Kiryl)
+ - Log, comment typos (Binbin)
+ - Move PAMT page allocation after refcount check in tdx_pamt_get() to
+   avoid an alloc/free in the common path.
+
+v3:
+ - Split out optimization from “x86/virt/tdx: Add tdx_alloc/free_page() helpers”
+ - Remove edge case handling that I could not find a reason for
+ - Write log
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 102 +++++++++++++++++++++---------------
+ 1 file changed, 61 insertions(+), 41 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 03/11] x86/virt/tdx: Add tdx_alloc/free_control_page() helpers
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Add helpers to use when allocating or preparing pages that are handed to
+the TDX-Module for use as control/S-EPT pages, and thus need Dynamic PAMT
+adjustments.
+
+The TDX module tracks some state for each page of physical memory that it
+might use. It calls this state the PAMT. It includes separate state for
+each page size a physical page could be utilized at within the TDX module
+(1GB, 2MB, 4KB). In Dynamic PAMT, only the 4KB page size state is
+allocated dynamically. So for pages that TDX will use as 2MB physically
+contiguous pages, Dynamic PAMT backing is not needed.
+
+KVM will need to hand pages to the TDX module that it will use at 4KB
+granularity. So these pages will need Dynamic PAMT backing added before
+they are used by the TDX module, and removed afterwards.
+
+Add tdx_alloc_control_page() and tdx_free_control_page() to handle both
+page allocation and Dynamic PAMT installation. Make them behave like
+normal alloc/free functions where allocation can fail in the case of no
+memory, but free (with any necessary Dynamic PAMT release) always
+succeeds. Do this so they can support the existing TDX flows that require
+teardowns to succeed.
+
+Also create tdx_pamt_get/put() to handle installing Dynamic PAMT 4KB
+backing for pages that are already allocated (such as KVM's use of S-EPT
+page tables or guest private memory). Have them take a pfn instead of a
+struct page, as future changes will want to use these helpers for guest
+pages which are tracked by PFN.
+
+Don't CLFLUSH the Dynamic PAMT pages handed to the TDX module, as is done
+for some other SEAMCALLs, as the TDX docs specify that this is only
+needed on "TD private memory or TD control structure page".
+
+Since these allocations will be easily user triggerable, account the
+memory.
+
+Leave logic to handle concurrency issues for future changes.
+
+Assisted-by: GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7 Sashiko:claude-opus-4-6
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+The major change was to split out the concurrency stuff into a future
+patch. It makes it easier to explain in the log. This one is the basic
+functionality. Then the simple version of the concurrency and why in the
+next patch. Also, to get rid of the dynamically sized DPAMT backing
+support which was not based on a formal spec.
+
+Details:
+ - Split out concurrency stuff into next patch because the log was too long
+ - Switch to fixed size pamt page arrays (Nikolay)
+ - Rename tdx_alloc_page()/tdx_free_page() to tdx_alloc_control_page()/
+   tdx_free_control_page() to reflect control/S-EPT purpose (Sean)
+ - Take gfp from the caller in tdx_alloc_control_page() (Sean)
+ - Narrow external API: make tdx_pamt_get()/tdx_pamt_put() static and
+   export only tdx_alloc_control_page()/tdx_free_control_page() (note:
+   dropped inline helpers since the discussion on Sean's series resulted
+   in them not being needed)
+ - Switch EXPORT_SYMBOL_GPL to EXPORT_SYMBOL_FOR_KVM (Sean)
+ - Use WARN_ON_ONCE() instead of pr_err() for TDX module failures (Sean)
+ - Fold alloc_pamt_array()/free_pamt_array() helpers back in and fix the
+   error-unwind index bug (dpamt_pages[i] -> [j])
+ - Adjustments after struct page->pfn
+ - Adjustments from dropping error helper patches
+ - Make the free error paths more normal
+ - Drop gfp_t arg in tdx_alloc_control_page(). In the Sean mega v5, it
+   was really needed because the kvm_mmu_memory_cache had a gfp_t it
+   needed something to do with. But this was still weird because that
+   version didn't handle allocating the DPAMT pages as the gfp_t. And in
+   the end all the callers pass GFP_KERNEL_ACCOUNT. So just drop the arg.
+ - Log tweaks
+---
+ arch/x86/include/asm/tdx.h  |   7 ++
+ arch/x86/virt/vmx/tdx/tdx.c | 159 ++++++++++++++++++++++++++++++++++++
+ arch/x86/virt/vmx/tdx/tdx.h |   2 +
+ 3 files changed, 168 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 04/11] x86/virt/tdx: Allocate ref counts for Dynamic PAMT memory
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The PAMT memory holds metadata for all possible TDX protected memory. Each
+physical address range is covered by PAMT entries at three levels (1GB,
+2MB, 4KB). With Dynamic PAMT, the 4KB range of PAMT is allocated on
+demand. The kernel supplies the TDX module with page pairs to store the
+4KB entries, which cover 2MB of host physical memory. The kernel must
+provide this page pair before using pages from the range for TDX. If this
+is not done, SEAMCALLs that give the pages to be protected by the TDX module
+will fail.
+
+Allocate reference counters for every 2MB range to track TDX memory usage.
+This can be used to handle concurrent get/put callers, in order to
+accurately determine when the dynamic 4KB level of Dynamic PAMT needs to
+be allocated and when it can be freed.
+
+This allocation will currently consume 2 MB for every 1 TB of address
+space from 0 to max_pfn. The allocation size will depend on how the RAM is
+physically laid out. In a worst case scenario where the entire 52-bit
+address space is covered this would be 8GB. Then the DPAMT refcount
+allocations could hypothetically cause the savings from Dynamic PAMT to go
+negative on exotic platforms with sparse, small amounts of memory.
+
+Future changes could reduce this refcount overhead to be only allocating
+refcounts for physical ranges that contain memory that TDX can use.
+However, this is left for future work.
+
+Assisted-by: Sashiko:claude-opus-4-6 GitHub Copilot:claude-opus-4-6 Sashiko:claude-opus-4-6
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Remove confusing reference to allocating PAMT memory in
+   pamt_refcounts comment. (Yan)
+ - Rename "metadata" function names that really deal with refcounts, as
+   metadata already has a different meaning in TDX.
+ - Move tdx_find_pamt_refcount() to this patch to aid in reviewability
+
+v4:
+ - Log typo (Binbin)
+ - round correctly when computing PAMT refcount size (Binbin)
+ - Zero refcount vmalloc allocation (Note: This got replaced in
+   optimization patch with a zero-ed allocation, but this showed up in
+   testing with the optimization patches removed. Since it's fixed
+   before this code is exercised, it's not a bisectability issue, but fix
+   it anyway.)
+
+v3:
+ - Split out lazily populate optimization to next patch (Dave)
+ - Add comment around pamt_refcounts (Dave)
+ - Improve log
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 54 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 53 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 02/11] x86/virt/tdx: Allocate page bitmap for Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The TDX Physical Address Metadata Table (PAMT) holds data about the
+physical memory used by TDX, and must be allocated by the kernel during
+TDX module initialization.
+
+The exact size of the required PAMT memory is determined by the TDX module
+and may vary between TDX module versions. Currently it is approximately
+0.4% of the system memory. This is a significant commitment, especially if
+it is not known upfront whether the machine will run any TDX guests.
+
+Each memory region that the TDX module might use needs three separate PAMT
+allocations. One for each supported page size (1GB, 2MB, 4KB). The
+TDX module supports a new feature designed to reduce PAMT overhead called
+Dynamic PAMT. At a high level, Dynamic PAMT still has the 1GB and 2MB
+levels allocated on TDX module initialization, but the 4KB level is
+allocated dynamically during runtime.
+
+However, in the details, Dynamic PAMT still needs some smaller per 4KB
+page scoped data (currently it is 1 bit per page). The TDX module exposes
+the number of bits as a separate piece of metadata than the 4KB static
+allocation for regular PAMT. Although the size is enumerated differently,
+it is handed to the TDX module in the same way the 4KB page size PAMT
+allocation is for regular, non-dynamic PAMT.
+
+Begin to implement Dynamic PAMT in the kernel by reading the bits-per-page
+needed for Dynamic PAMT. Calculate the size needed for the bitmap,
+and use it instead of the 4KB size determined for normal PAMT, in the case
+of Dynamic PAMT.
+
+Unlike the existing metadata reading code, this code is not generated by a
+script. So adjust the comment to be more generic. Also, start to adopt a
+more normal kernel code style without the tenary statements and if
+conditionals assignments that the auto generated code has.
+
+Assisted-by: Sashiko:claude-opus-4-6
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Improve comment (Binbin)
+ - Log tweaks
+ - Mark tdmr_get_pamt_bitmap_sz() __init in response to upstream
+   changes
+ - Switch to more normal kernel code style, even though it differs from
+   the existing auto generated code.
+---
+ arch/x86/include/asm/tdx.h                  |  5 +++++
+ arch/x86/include/asm/tdx_global_metadata.h  |  3 +++
+ arch/x86/virt/vmx/tdx/tdx.c                 | 19 ++++++++++++++++++-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c | 21 ++++++++++++++++++++-
+ 4 files changed, 46 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 00/11] Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+Hi,
+
+This is next revision of Dynamic PAMT TDX series, which I’m calling v6 in 
+order to differentiate it from Sean’s giant MMU refactor/DPAMT/Huge-page 
+series which he called v5 [0]. But things are not quite linear, because 
+that v5 didn’t include the feedback from v4 [1].
+
+So this version is the conflict resolution of:
+ 1. Comments on Dynamic PAMT v4
+ 2. Sean changes in Dynamic PAMT v4 -> Sean Mega v5
+ 3. Feedback to Sean’s v5
+
+For Dynamic PAMT background, please refer to [2].
+
+This series is pretty mature at this point, however with 2 pre-req series 
+still on the list (more on that below under "Base"), I can't ask for it to 
+be merged at this point. So I'm hoping to collect some Acks and RB's in 
+the meantime and then it can have a smooth path once those other series 
+land. Please especially consider any reviewabiliy concerns on the tip side 
+that can be ironed out in the meantime.
+
+Changes
+=======
+
+Sean’s mega v5
+--------------
+This had a bunch of MMU refactor work, which did:
+ a. TDX MMU refactor that generally pushed more TDX knowledge into TDX.c
+    out of the core MMU. This covered the needs of both DPAMT and huge
+    pages.
+ b. Redid the solution for installing DPAMT backing for the pages the MMU
+    uses for the S-EPT operations.
+ c. Some huge page changes that I’ll skip here.
+
+(a) has been split into another series [3]. After long discussions on v5, 
+the changes for (b) were rolled back to the original solution in v4. 
+Sean’s v5 included him trying to do Kai’s idea and running into trouble, 
+then a second new idea which also was found to have issues on review of 
+v5. By my count we have had at least 4 or 5 ideas by smart people that led 
+us back to the same solution of keeping a cache of pages and adjusting the 
+DPAMT right before give the page to the TDX module. I, again, think that 
+we should either accept the current solution or get started on going back 
+to change the arch in order to make it more workable for this problem.
+
+Dropping Non-Required Changes
+-----------------------------
+In the interest of finally clearing these patches, I dropped everything I 
+could out of the series.
+
+The most significant thing dropped was the optimization around the 
+refcount allocation. It is a good thing to drop because it is not required 
+to make Dynamic PAMT useful as a memory optimization. And there is room 
+for debate on how far to optimize the last little bit of memory usage. 
+
+To recap, the kernel implementation keeps a kernel side refcount for each 
+2MB of the physical memory. The non-optimized version just uses a single 
+vmalloc to cover the range from 0 to max_pfn. In the worst case this is 
+8GB of memory. The optimization tried to not allocate refcounts for the 
+sparse ranges that didn't have any RAM.
+
+For a simple small server with mostly physical contiguous RAM and no CXL
+complications, the basic implementation should be close to optimal anyway.
+And for big servers, an 8GB allocation is going to have less impact. In
+the end Dynamic PAMT *is* an optimization that we will force on as a
+good default option. Even with all the optimizations we could throw at it,
+if the system is 100% TDs, Dynamic PAMT could come out slightly behind. So
+judgment on good defaults is needed regardless.
+
+Consider a couple simple examples of TDX enabled, but no TDs, and the 
+non-optimized refcount solution:
+Machine                    PAMT (GB)   DPAMT (GB)   Savings/(Loss)
+256GB (max_pfn at 256GB)   1.02        0.01         100x
+256GB (max_pfn at maxpa)   1.02        8.01         (8x)
+2TB   (max_pfn at 2TB)     8.19        0.08         99x
+2TB   (max_pfn at maxpa)   8.19        8.08         1x
+
+The weird server loses a little bit, but not nearly as much as the normal 
+ones gain. Still enough benefit in general to make Dynamic PAMT a 
+worthwhile default setting. So let's start with the simplest solution, 
+which is an improvement in most cases. And then separate out the refcount 
+optimization discussion for later.
+
+Besides that, I dropped the error cleanups. As I was implementing the last 
+discussion, I found it a bit awkward in some places. Also I noticed that 
+Dave did not fully agree to that proposal either. So it's a continual 
+source of style controversy and we can separate it out from the Dynamic 
+PAMT work.
+
+I did not drop the optimization that uses the refcounts to avoid taking 
+the global lock in tdx_pamt_get/put() because I considered it critical for 
+making Dynamic PAMT default on. It is more about avoid regressing KVM EPT 
+violation contention, and not about squeezing out more memory savings from 
+Dynamic PAMT.
+
+Regarding whether we could strip more out of the series if we made this a
+boot time kernel parameter. I think it's possible to drop "x86/virt/tdx:
+Allocate reference counters for PAMT memory" and "x86/virt/tdx: Allocate
+reference counters for PAMT memory" and still have something that is
+functional. I didn't go that route for this revision because making the
+feature optional seemed like too much of a divergence from past discussion.
+But it is an option if this series seems like too much to digest at once.
+
+AI use in this revision
+=======================
+While AI enhanced development is still relatively new to the kernel world,
+I wanted to share a bit about how this series was generated. For both
+consideration in reviewing, and also maybe people might find it
+interesting. This was my first time using AI for serious kernel work, so
+it was kind of a micromanaged evaluation type use. I used an opus model
+with a dump of the many mail threads and a description of how they were
+related. Since the previous discussion was pretty disordered, I had it try
+to catch any feedback that was missed or conflicted for each patch. And it
+caught a few that I had missed. I also used it to turn some of the
+feedback into code changes, and to heavily scrutinize the concurrency
+logic in tdx_pamt_get/put(). I used it to suggest some log changes too,
+but had to edit most of those pretty heavily. Lastly, I used the Chris
+Meson and Sashiko review prompts to review the series, which generated a
+few changes. All this experimentation generated quite a few Assisted-by
+tags, which now feels kinda excessive...
+
+Base
+====
+This is based on v2 of the MMU refactor series Yan posted a few weeks ago 
+[3], which is itself based on the struct page to pfn conversion series[4]. 
+A full stack branch can be found here: [5].
+
+Testing
+=======
+This series was tested in the usual suite, but also with the optimization
+patch removed.
+
+[0] https://lore.kernel.org/kvm/20260129011517.3545883-1-seanjc@google.com/
+[1] https://lore.kernel.org/kvm/20251121005125.417831-1-rick.p.edgecombe@intel.com/
+[2] https://lore.kernel.org/kvm/20250918232224.2202592-1-rick.p.edgecombe@intel.com/
+[3] https://lore.kernel.org/kvm/20260509075201.4077-1-yan.y.zhao@intel.com/
+[4] https://lore.kernel.org/kvm/20260430014852.24183-1-yan.y.zhao@intel.com/
+[5] https://github.com/intel-staging/tdx/tree/dpamt_v6
+
+Kiryl Shutsemau (9):
+  x86/virt/tdx: Allocate page bitmap for Dynamic PAMT
+  x86/virt/tdx: Add tdx_alloc/free_control_page() helpers
+  x86/virt/tdx: Allocate ref counts for Dynamic PAMT memory
+  x86/virt/tdx: Handle concurrent callers in tdx_pamt_get/put()
+  x86/virt/tdx: Optimize tdx_pamt_get/put()
+  KVM: TDX: Allocate PAMT memory for TD and vCPU control structures
+  KVM: TDX: Get/put PAMT pages when (un)mapping private memory
+  x86/virt/tdx: Enable Dynamic PAMT
+  Documentation/x86: Add documentation for TDX's Dynamic PAMT
+
+Rick Edgecombe (2):
+  x86/virt/tdx: Simplify tdmr_get_pamt_sz()
+  x86/tdx: Add APIs to support Dynamic PAMT ops from KVM's fault path
+
+ Documentation/arch/x86/tdx.rst              |  22 +
+ arch/x86/include/asm/kvm-x86-ops.h          |   1 +
+ arch/x86/include/asm/kvm_host.h             |   2 +
+ arch/x86/include/asm/tdx.h                  |  38 ++
+ arch/x86/include/asm/tdx_global_metadata.h  |   3 +
+ arch/x86/kvm/mmu/mmu.c                      |   4 +
+ arch/x86/kvm/vmx/tdx.c                      | 100 +++--
+ arch/x86/kvm/vmx/tdx.h                      |   2 +
+ arch/x86/virt/vmx/tdx/tdx.c                 | 445 +++++++++++++++++---
+ arch/x86/virt/vmx/tdx/tdx.h                 |   5 +-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c |  21 +-
+ 11 files changed, 544 insertions(+), 99 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 01/11] x86/virt/tdx: Simplify tdmr_get_pamt_sz()
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+For each memory region that the TDX module might use (called TDMR), three
+separate traditional PAMT allocations are needed. One for each supported
+page size (1GB, 2MB, 4KB). These store information on each page in the
+TDMR. In Linux, they are allocated out of one physically contiguous block,
+in order to more efficiently use some internal TDX module book keeping
+resources. So some simple math is needed to break the single large
+allocation into three smaller allocations for each page size.
+
+There are some commonalities in the math needed to calculate the base and
+size for each smaller allocation, and so an effort was made to share logic
+across the three. Unfortunately doing this turned out unnaturally tortured,
+with a loop iterating over the three page sizes, only to call into a
+function with cases statement for each page size. In the future Dynamic
+PAMT will add more logic that is special to the 4KB page size, making the
+benefit of the math sharing even more questionable.
+
+Three is not a very high number, so get rid of the loop and just duplicate
+the small calculation three times. In doing so, setup for future Dynamic
+PAMT changes.
+
+Since the loop that iterates over it is gone, further simplify the code by
+dropping the array of intermediate size and base storage. Just store the
+values to their final locations. Accept the small complication of having
+to clear tdmr->pamt_4k_base in the error path, so that tdmr_do_pamt_func()
+will not try to operate on the TDMR struct when attempting to free it.
+
+Assisted-by: GitHub Copilot:claude-opus-4-6 Claude:claude-opus-4-7
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+v6:
+ - Drop {} by moving a comment (Binbin)
+ - Log tweaks
+
+v4:
+ - Just refer to global var instead of passing pamt_entry_size around
+   (Xiaoyao)
+ - Remove setting pamt_4k_base to zero, because it already is zero.
+   Adjust the comment appropriately (Kai)
+
+v3:
+ - New patch
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 93 ++++++++++++-------------------------
+ 1 file changed, 29 insertions(+), 64 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 3/3] KVM: s390: Introducing kvm_arch_set_irq_inatomic fast inject
+Author: Douglas Freimuth <freimuth@linux.ibm.com>
+
+s390 needs a fast path for irq injection, and along those lines we
+introduce kvm_arch_set_irq_inatomic. Instead of placing all interrupts on
+the global work queue as it does today, this patch provides a fast path for
+irq injection.
+
+The inatomic fast path cannot lose control since it is running with
+interrupts disabled. This meant making the following changes that exist on
+the slow path today. First, the adapter_indicators page needs to be mapped
+since it is accessed with interrupts disabled, so we added map/unmap
+functions. Second, access to shared resources between the fast and slow
+paths needed to be changed from mutex and semaphores to spin_lock's.
+Finally, the memory allocation on the slow path utilizes GFP_KERNEL_ACCOUNT
+but we had to implement the fast path with GFP_ATOMIC allocation. Each of
+these enhancements were required to prevent blocking on the fast inject
+path.
+
+Fencing of Fast Inject in Secure Execution environments is enabled in the
+patch series by not mapping adapter indicator pages. In Secure Execution
+environments the path of execution available before this patch is followed.
+
+Statistical counters have been added to enable analysis of irq injection on
+the fast path and slow path including io_390_inatomic, io_flic_inject_airq,
+io_set_adapter_int and io_390_inatomic_adapter_masked_or_coalesced.
+
+Signed-off-by: Douglas Freimuth <freimuth@linux.ibm.com>
+---
+ arch/s390/include/asm/kvm_host.h |   6 +-
+ arch/s390/kvm/intercept.c        |   5 +-
+ arch/s390/kvm/interrupt.c        | 264 ++++++++++++++++++++++++-------
+ arch/s390/kvm/kvm-s390.c         |  27 +++-
+ arch/s390/kvm/kvm-s390.h         |   3 +-
+ 5 files changed, 240 insertions(+), 65 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 1/3] KVM: s390: Add map/unmap ioctl and clean mappings post-guest
+Author: Douglas Freimuth <freimuth@linux.ibm.com>
+
+s390 needs map/unmap ioctls, which map the adapter set
+indicator pages, so the pages can be accessed when interrupts are
+disabled. The mappings are cleaned up when the guest is removed.
+pin_user_pages_remote is used for both the ioctl as well
+as the pin-on-demand logic in adapter_indicators_set().
+
+Map/Unmap ioctls are fenced in order to avoid the longterm pinning
+in Secure Execution environments. In Secure Execution
+environments the path of execution available before this patch is followed.
+
+Statistical counters to count map/unmap functions for adapter indicator
+pages are added. The counters can be used to analyze
+map/unmap functions in non-Secure Execution environments and similarly
+can be used to analyze Secure Execution environments where the counters
+will not be incremented as the adapter indicator pages are not mapped.
+
+Signed-off-by: Douglas Freimuth <freimuth@linux.ibm.com>
+---
+ arch/s390/include/asm/kvm_host.h |   5 +
+ arch/s390/kvm/interrupt.c        | 194 ++++++++++++++++++++++++++-----
+ arch/s390/kvm/kvm-s390.c         |   3 +
+ arch/s390/kvm/kvm-s390.h         |   2 +
+ 4 files changed, 174 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 2/3] KVM: s390: Enable adapter_indicators_set to use mapped pages
+Author: Douglas Freimuth <freimuth@linux.ibm.com>
+
+The s390 adapter_indicators_set function can now be optimized to use
+long-term mapped pages when available so that work can be
+processed on a fast path when interrupts are disabled.
+If adapter indicator pages are not mapped then local mapping is
+done on a slow path as it is prior to this patch. For example, Secure
+Execution environments will take the local mapping path as it does prior to
+this patch.
+
+Signed-off-by: Douglas Freimuth <freimuth@linux.ibm.com>
+---
+ arch/s390/kvm/interrupt.c | 87 ++++++++++++++++++++++++++++-----------
+ 1 file changed, 63 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 0/3] KVM: s390: Introducing kvm_arch_set_irq_inatomic Fast Inject 
+Author: Douglas Freimuth <freimuth@linux.ibm.com>
+
+s390 needs this series of three patches in order to enable a non-blocking
+path for irqfd injection on s390 via kvm_arch_set_irq_inatomic(). Before
+these changes, kvm_arch_set_irq_inatomic() would just return -EWOULDBLOCK
+and place all interrupts on the global work queue, which must subsequently
+be processed by a different thread. This series of patches implements an
+s390 version of inatomic and is relevant to virtio-blk and virtio-net and
+was tested against virtio-pci and virtio-ccw.
+
+The inatomic fast path cannot lose control since it is running with
+interrupts disabled. This meant making the following changes that exist on
+the slow path today. First, the adapter_indicators page needs to be mapped
+since it is accessed with interrupts disabled, so we added map/unmap
+functions. Second, access to shared resources between the fast and slow
+paths needed to be changed from mutex and semaphores to spin_lock's.
+Finally, the memory allocation on the slow path utilizes GFP_KERNEL_ACCOUNT
+but we had to implement the fast path with GFP_ATOMIC allocation. Each of
+these enhancements were required to prevent blocking on the fast inject
+path.
+
+s390 doesn't support a PREEMPT_RT kernel and this patch doesn't either.
+Given this fact, we are not using raw_spin_lock instead we are using
+regular spin_lock.
+
+Statistical counters have been added to enable analysis of irq injection on
+the fast path and slow path including io_390_inatomic, io_flic_inject_airq,
+io_set_adapter_int and io_390_inatomic_adapter_masked_or_coalesced. And
+counters have been added to analyze map/unmap of the adapter_indicator
+pages in non-Secure Execution environments and to track fencing of Fast
+Inject in Secure Execution environments. In order to take advantage of this
+kernel series with virtio-pci, a QEMU that includes the
+'s390x/pci: set kvm_msi_via_irqfd_allowed' fix is needed.  Additionally,
+the guest xml needs a thread pool and threads explicitly assigned per disk
+device using the common way of defining threads for disks.
+
+Patch 1 enables map/unmap of adapter indicator pages but for Secure
+Execution environments it avoids the long term mapping.
+
+v7->v8: Move acquisition of kvm->lock to top of register_io_adapter()
+v7->v8: If !summary_page WARN_ON_ONCE if set indicator but not summary
+v7->v8: Remove kfree(init) from kvm_s390_inject_vm() default case
+v7->v8: return 0 if !level in kvm_arch_set_irq_inatomic()
+v7->v8: Use irqsave/irqrestore for spin_lock/unlock on fi->lock
+v7->v8: Modify statistic name io_390_inatomic_adapter_masked_or_coalesced
+
+Douglas Freimuth (3):
+  KVM: s390: Add map/unmap ioctl and clean mappings post-guest
+  KVM: s390: Enable adapter_indicators_set to use mapped pages
+  KVM: s390: Introducing kvm_arch_set_irq_inatomic fast inject
+
+ arch/s390/include/asm/kvm_host.h |  11 +-
+ arch/s390/kvm/intercept.c        |   5 +-
+ arch/s390/kvm/interrupt.c        | 525 +++++++++++++++++++++++++------
+ arch/s390/kvm/kvm-s390.c         |  30 +-
+ arch/s390/kvm/kvm-s390.h         |   5 +-
+ 5 files changed, 467 insertions(+), 109 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 072ac7183 to b4f5b3d46
+KVM mailing list update from 072ac7183 to b4f5b3d46
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      5 google.com
+      1 uniontech.com
+
+Top 15 contributors (Based on Email Body)
+
+      4  Mostafa Saleh <smostafa@google.com>
+      1  Sebastian Ene <sebastianene@google.com>
+      1  Qiang Ma <maqianga@uniontech.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v5 6/6] KVM: arm64: Ensure FFA ranges are page aligned
+Author: Mostafa Saleh <smostafa@google.com>
+
+At the moment we only check that the size of the range is page
+aligned, and truncate the address to the page boundary.
+This make an assumption that TZ will do the same.
+
+Harden this check by also checking that the base address is aligned
+and reject it otherwise.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 5/6] KVM: arm64: Validate the offset to the mem access descriptor
+Author: Mostafa Saleh <smostafa@google.com>
+
+
+Prevent the pKVM hypervisor from making assumptions that the
+endpoint memory access descriptor (EMAD) comes right after the
+FF-A memory region header.
+Prior to FF-A version 1.1 the header of the memory region
+didn't contain an offset to the endpoint memory access descriptor.
+The layout of a memory transaction looks like this from 1.1 onward:
+Type | Field name | Offset
+[ Header | ffa_mem_region  | 0
+  EMAD 1 | ffa_mem_region_attributes) | ffa_mem_region.ep_mem_offset
+]
+Verify that the offset to the first endpoint memory access descriptor
+is within the mailbox buffer bounds.
+
+Also, fix one hardcoded sizeof(struct ffa_mem_region_attributes) that
+should be replaced ffa_emad_size_get() for compatibility with FFA v1.0.
+
+[@Mostafa, Add missing call to ffa_rx_release() and use fraglen
+ as the max buffer size as it is the only intialised part]
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 25 ++++++++++++++++++-------
+ 1 file changed, 18 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 4/6] KVM: arm64: Fix bounds checking in do_ffa_mem_reclaim()
+Author: Mostafa Saleh <smostafa@google.com>
+
+Sashiko (locally) reports out of bound write possiblity if SPMD
+returns an invalid data.
+
+While SPMD is considered trusted, pKVM does some basic checks,
+for offset to be less than or equal len.
+
+However, that is incorrect as even if the offset is smaller than
+len pKVM can still access out of bound memory in the next
+ffa_host_unshare_ranges().
+
+Split this check into 2:
+1- Check that the fixed portion of the descriptor fits.
+2- After getting reg, check the variable array size addr_range_cnt
+   fits.
+
+Also, drop the WARN_ONs as that will panic the kernel and in the
+next checks there are no WARNs, so that makes it consistent.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 0/6] arm_ffa, KVM: Fix FF-A emad offset calculations
+Author: Mostafa Saleh <smostafa@google.com>
+
+Hi all,
+
+This series fixes the Endpoint Memory Access Descriptor (EMAD) offset
+calculations and adds the necessary bounds checks for both the core
+FF-A driver and the pKVM hypervisor.
+
+Prior to FF-A version 1.1, the memory region header didn't specify an
+explicit offset for the EMADs, leading to the assumption that they
+immediately follow the header.
+However, from v1.1 onwards, the specification dictates using the
+ep_mem_offset` field to determine the start of the memory access
+array.
+
+The patches in this series address this by:
+1. Updating the core `arm_ffa` firmware driver to correctly calculate the descriptor
+   offset using `ep_mem_offset` rather than defaulting to `sizeof(struct ffa_mem_region)`.
+   It also introduces bounds checking against `max_fragsize`.
+2. Enhancing the pKVM hypervisor validation logic to no longer strictly enforce that
+   the descriptor strictly follows the header, aligning it with the driver behavior
+   and the FF-A specification, while also ensuring the offset falls within the mailbox
+   buffer bounds.
+
+While addressing these bugs, Sashiko uncovered other issues that were
+fixed in the same series.
+
+Changelog
+#########
+v4->v5:
+- Collect Sudeep Rbs
+- Add extra patch to check base address alignment.
+- Remove WARN_ONs in KVM code
+- Use ffa_emad_size_get() instead of hardcoded size in KVM code.
+
+v3 -> v4:
+- Address review comments and fix Sashiko bugs
+
+v2 -> v3:
+- Fixed typo in nvhe/ffa.c (missing sizeof)
+
+v1 -> v2:
+- For pKVM, removed the strict placement enforcement for `ep_mem_offset` as it is not
+  compliant with the spec, and avoids making assumptions about the driver's memory
+  layout.
+
+Link to:
+########
+v4: https://lore.kernel.org/all/20260520204948.2440882-1-smostafa@google.com/
+v3: https://lore.kernel.org/all/20260512124442.1899107-1-sebastianene@google.com/
+v2: https://lore.kernel.org/all/20260430160241.1934777-1-sebastianene@google.com/
+v1: https://lore.kernel.org/all/ae9KN9nkOgDYJcGP@google.com/T/#t
+
+
+Mostafa Saleh (4):
+  optee: ffa: Add NULL check in optee_ffa_lend_protmem
+  firmware: arm_ffa: Fix out-of-bound writes in ffa_setup_and_transmit()
+  KVM: arm64: Fix bounds checking in do_ffa_mem_reclaim()
+  KVM: arm64: Ensure FFA ranges are page aligned
+
+Sebastian Ene (2):
+  firmware: arm_ffa: Fix Endpoint Memory Access Descriptor offset
+    calculation
+  KVM: arm64: Validate the offset to the mem access descriptor
+
+ arch/arm64/kvm/hyp/nvhe/ffa.c     | 38 ++++++++++++++++++++++---------
+ drivers/firmware/arm_ffa/driver.c | 21 ++++++++++-------
+ drivers/tee/optee/ffa_abi.c       |  3 +++
+ include/linux/arm_ffa.h           |  2 +-
+ 4 files changed, 44 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 1/6] optee: ffa: Add NULL check in optee_ffa_lend_protmem
+Author: Mostafa Saleh <smostafa@google.com>
+
+Sashiko (locally) reports a possible null dereference under memory
+pressure due to the lack of validation of the allocated pointer.
+
+Fix that by adding the missing check.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ drivers/tee/optee/ffa_abi.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: PMU: Preserve AArch32 counter low bits
+Author: Qiang Ma <maqianga@uniontech.com>
+
+AArch32 writes to PMU event counters cannot update the top 32 bits,
+even when PMUv3p5 makes the counters 64-bit. KVM therefore needs to
+preserve the existing high half and only update the low half written by
+the guest, unless the caller explicitly forces a full reset through
+PMCR.P.
+
+The current code masks @val down to the old high half before taking
+lower_32_bits(val), which means the low half is always zero. As a
+result, AArch32 writes to event counters discard the guest-provided low
+32 bits instead of storing them.
+
+Build the new value from the old high 32 bits and the low 32 bits of
+the value supplied by the guest.
+
+Fixes: 26d2d0594d70 ("KVM: arm64: PMU: Do not let AArch32 change the counters' top 32 bits")
+
+Signed-off-by: Qiang Ma <maqianga@uniontech.com>
+---
+ arch/arm64/kvm/pmu-emul.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
