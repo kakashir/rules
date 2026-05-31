@@ -1,0 +1,738 @@
+
+On /root/mail/repo:
+From 6d32bcef9 to 29b10556f
+KVM mailing list update from 6d32bcef9 to 29b10556f
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     20 google.com
+      6 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+     12  David Matlack <dmatlack@google.com>
+      8  Josh Hilke <jrhilke@google.com>
+      6  Paolo Bonzini <pbonzini@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2 3/5] KVM: nSVM: invalidate cached PDPTRs across nested NPT transitions
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+When L2 runs under nested NPT and uses PAE paging, KVM's cached PDPTRs
+in mmu->pdptrs[] can hold stale or wrong values after nested
+transitions and across migration restore, because both
+nested_svm_load_cr3() and svm_get_nested_state_pages() only refresh
+PDPTRs on the !nested_npt path.
+
+The user-visible bug is on migration restore of an L2 running with nested
+NPT and 32-bit PAE paging, if userspace uses KVM_SET_SREGS rather than
+KVM_SET_SREGS2.  In that case, load_pdptrs() leaves VCPU_EXREG_PDPTR
+marked as available, and kvm_pdptr_read() will use a stale translation
+that used L1 GPAs instead of L2 nGPAs.  svm_get_nested_state_pages()
+runs on first KVM_RUN but skips the refresh because nested_npt_enabled()
+is true.  The CPU itself reads L2's PDPTRs correctly from memory via
+L1's NPT, but KVM-side walking of guest PAE page tables uses the bogus
+cached values.
+
+Unlike Intel's GUEST_PDPTR0..3 fields in the VMCS, SVM has no
+VMCB-cached PDPTR state: the in-memory PDPTEs at the current CR3 are
+the only source of truth, and svm_cache_reg(VCPU_EXREG_PDPTR) simply
+reloads them from memory via load_pdptrs().  Clearing the avail
+bit (and the dirty bit because !avail/dirty is invalid) to force
+a reload when PDPTRs as needed fixes the bug.
+
+Do the same for nested_svm_load_cr3()'s nested_npt branch, so that
+the invariant "PDPTRs need reloading" is handled similarly for both
+immediate and deferred loading.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/kvm_cache_regs.h |  8 ++++++++
+ arch/x86/kvm/svm/nested.c     | 27 ++++++++++++++++++---------
+ 2 files changed, 26 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 5/5] KVM: x86/mmu: move pdptrs out of the MMU
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+PDPTRs are part of the CPU state.  A bit unconventionally, they are
+reached via vcpu->arch.walk_mmu instead of being stored in vcpu->arch
+directly.  That is nice in principle---it would allow TDP shadow paging
+to have its own PDPTRs---but it is not necessary, because EPT has no
+PDPTRs and NPT does not cache them.
+
+Since kvm_pdptr_read does not otherwise need the MMU, drop the pdptrs
+from the MMU altogether.  There is however something to be careful
+about, in that PDPTRs are now not stored separately in root_mmu and
+nested_mmu for L1 and L2 guests.  In practice this was already not
+an issue:
+
+- for EPT the VMCS0x has to keep them up to date; and for the purpose
+  of emulation they are always loaded from the VMCS on vmentry/vmexit,
+  thanks to the clearing of dirty and available register bitmaps in
+  vmx_switch_vmcs()
+
+- for NPT, VCPU_EXREG_PDPTR is similarly cleared for nNPT, which does
+  not cache the PDPTRs; while for non-nNPT the PDPTRs are loaded
+  together with the load of CR3.
+
+Note that page table PDPTRs are not affected, since they are stored
+in pae_root.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/include/asm/kvm_host.h |  5 ++---
+ arch/x86/kvm/kvm_cache_regs.h   |  4 ++--
+ arch/x86/kvm/svm/svm.c          |  2 +-
+ arch/x86/kvm/vmx/vmx.c          | 20 ++++++++------------
+ arch/x86/kvm/x86.c              |  6 +++---
+ 5 files changed, 16 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/5] KVM: nVMX: remove unnecessary code in prepare_vmcs02_rare
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+The early vmwrite of the PDPTRs in prepare_vmcs02_rare() is redundant, because
+every write it does will be performed by prepare_vmcs02() if it is actually
+needed.
+
+In any case where the emulator or the processor need the PDPTR, either
+is_pae_paging() is true on vmentry, or a write of CR0, CR4 or EFER will
+cause a vmexit to L0.  The next vmentry will refresh the PDPTRs in the
+vmcs02 from vmcs12.
+
+In fact, the original version[1] of what ended up being commit
+c7554efc8335 ("KVM: nVMX: Copy PDPTRs to/from vmcs12 only when
+necessary"), the writes in what is now prepare_vmcs02_rare() were removed.
+When the mega-collection of optimizations was posted[2], the removal of
+that code got dropped as a rebase good, so reinstate it.
+
+[1] https://lore.kernel.org/all/20190507160640.4812-16-sean.j.christopherson@intel.com
+[2] https://lore.kernel.org/all/1560445409-17363-31-git-send-email-pbonzini@redhat.com
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 11 -----------
+ 1 file changed, 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/5] KVM: x86: check that kvm_handle_invpcid is only invoked with shadow paging
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+This is true for both Intel and AMD.  On Intel, "enable INVPCID" is
+set unconditionally if supported, but the vmexit is triggered by the
+"INVLPG exiting" control which is disabled by enable_ept.  On AMD, KVM
+can intercept INVPCID if NPT is enabled but only in order to inject #UD
+in the guest.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/x86.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/5] KVM: x86: small MMU-adjacent cleanups
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+The non-MMU changes/preliminary cleanups from my "separate kvm_mmu"
+series; fixed, test, and extracted for inclusion in 7.2.  The rest of
+the series can be included later.
+
+The meat here is in patches 2 and 3, which prepare for having a single
+copy of the PDPTRs (in vcpu->arch) instead of two (in root_mmu and
+nested_mmu).  This is then done in the last patch.
+
+I have redone the nVMX patch now that Sean pointed out that the duplicate
+write was a rebase goof.  I kept the nSVM one as is though.
+
+v1->v2:
+- rewritten "KVM: nVMX: remove unnecessary code in prepare_vmcs02_rare"
+- added "KVM: x86/mmu: move pdptrs out of the MMU"
+
+Thanks,
+
+Paolo
+
+Paolo Bonzini (5):
+  KVM: x86: remove nested_mmu from mmu_is_nested()
+  KVM: nVMX: remove unnecessary code in prepare_vmcs02_rare
+  KVM: nSVM: invalidate cached PDPTRs across nested NPT transitions
+  KVM: x86: check that kvm_handle_invpcid is only invoked with shadow
+    paging
+  KVM: x86/mmu: move pdptrs out of the MMU
+
+ arch/x86/include/asm/kvm_host.h |  5 ++---
+ arch/x86/kvm/kvm_cache_regs.h   | 12 ++++++++++--
+ arch/x86/kvm/svm/nested.c       | 27 ++++++++++++++++++---------
+ arch/x86/kvm/svm/svm.c          |  2 +-
+ arch/x86/kvm/vmx/nested.c       | 11 -----------
+ arch/x86/kvm/vmx/vmx.c          | 20 ++++++++------------
+ arch/x86/kvm/x86.c              |  9 ++++++---
+ arch/x86/kvm/x86.h              |  2 +-
+ 8 files changed, 46 insertions(+), 42 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/5] KVM: x86: remove nested_mmu from mmu_is_nested()
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+nested_mmu is always stored into vcpu->arch.walk_mmu at the same time as
+guest_mmu is stored into vcpu->arch.mmu.  But nested_mmu is not even
+a proper MMU, it is only used for page walking; plus the fact that
+walk_mmu has to be switched at all is just an implementation detail.
+
+In the end what matters here is whether the guest is using nested
+page tables; vmx/nested.c and svm/nested.c check it to see if they
+are in nEPT or nNPT context respectively.  So switch to checking
+root_mmu vs. guest_mmu, which is a more cogent test.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Message-ID: <20260511150648.685374-2-pbonzini@redhat.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/x86.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 19/19] KVM: selftests: Add xAPIC support in IRQ test
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add the '-x' flag to tools/testing/selftests/kvm/irq_test.c to configure
+the guest to use xAPIC mode instead of the default x2APIC mode. This
+expands test coverage to ensure that IRQ injection and routing work
+correctly when the guest uses the older xAPIC interface.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 28 +++++++++++++++++++++-----
+ 1 file changed, 23 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 18/19] KVM: selftests: Make number of vCPUs configurable in
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add a '-v' flag to tools/testing/selftests/kvm/irq_test.c to allow users
+to configure the number of vCPUs to run in the test.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/19] KVM: selftests: Print vCPU affinity on timeout
+Author: Josh Hilke <jrhilke@google.com>
+
+Add kvm_print_vcpu_affinity() to lib/kvm_util.c to print the physical
+CPU affinity of a vCPU thread in a human-readable format.
+
+Use this new helper in tools/testing/selftests/kvm/irq_test.c to print
+the vCPU's affinity if it times out waiting for an interrupt while vCPU
+migration (-m) is enabled.  This provides valuable context for debugging
+IRQ delivery timeouts when vCPUs are being actively migrated across
+physical CPUs.
+
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  1 +
+ tools/testing/selftests/kvm/irq_test.c        |  2 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 49 +++++++++++++++++++
+ 3 files changed, 52 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/19] KVM: selftests: Verify vCPU migration during IRQ
+Author: Josh Hilke <jrhilke@google.com>
+
+Add the '-m' flag to tools/testing/selftests/kvm/irq_test.c to migrate
+vCPU threads across random physical CPUs during the test. This validates
+KVM's ability to handle vCPUs changing physical CPUs while interrupts
+are actively being injected.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 34 ++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/19] KVM: selftests: Add pin_task_to_random_cpu() helper function
+Author: Josh Hilke <jrhilke@google.com>
+
+Add a helper function pin_task_to_random_cpu() to randomly select a CPU
+from a given cpu_set_t and pin the specified task to it.
+
+This helper will be used in a future change in the KVM IRQ test to
+migrate vCPU threads.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 21 +++++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/19] KVM: selftests: Add kvm_sched_getaffinity() wrapper
+Author: Josh Hilke <jrhilke@google.com>
+
+Add a KVM wrapper for the sched_getaffinity syscall named
+kvm_sched_getaffinity(). Convert existing users of sched_getaffinity to
+use the new wrapper.
+
+This helper will be used in a future change in the KVM IRQ test to
+migrate vCPU threads.
+
+No functional changes intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c                  | 2 +-
+ tools/testing/selftests/kvm/arm64/arch_timer_edge_cases.c | 2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h        | 1 +
+ tools/testing/selftests/kvm/lib/kvm_util.c                | 5 ++---
+ tools/testing/selftests/kvm/mmu_stress_test.c             | 6 +-----
+ tools/testing/selftests/kvm/rseq_test.c                   | 4 +---
+ 6 files changed, 7 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/19] KVM: selftests: Add kvm_gettid() wrapper and convert users
+Author: Josh Hilke <jrhilke@google.com>
+
+Add a KVM wrapper for the gettid() syscall to avoid compilation errors
+in versions of Glibc that don't contain gettid(). Convert existing users
+of the syscall to use this new wrapper.
+
+This helper will be used in a future change in the KVM IRQ test to
+migrate vCPU threads.
+
+No functional changes intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ tools/testing/selftests/kvm/demand_paging_test.c   | 2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h | 5 +++++
+ tools/testing/selftests/kvm/lib/assert.c           | 8 ++------
+ tools/testing/selftests/kvm/lib/test_util.c        | 3 ++-
+ tools/testing/selftests/kvm/rseq_test.c            | 2 +-
+ 5 files changed, 11 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/19] KVM: selftests: Verify non-postable IRQ remapping in
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add the -n flag to tools/testing/selftests/kvm/irq_test.c to route a
+portion of device interrupts as NMIs (Non-Maskable Interrupts) into the
+guest using an alternating pattern of 4 NMIs followed by 4 regular
+interrupts.
+
+While this adds coverage for NMI injection, the primary goal is to
+validate KVM's handling of non-postable interrupt delivery.
+Specifically, the transitions between posted and remapped modes.  NMIs
+are used for this purpose because they are a reliable, architectural way
+to force these code paths.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 45 ++++++++++++++++++++------
+ 1 file changed, 35 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/19] KVM: selftests: Make number of IRQs configurable in
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add a '-i' flag to tools/testing/selftests/kvm/irq_test.c to allow users
+to specify the number of IRQs generated during a test run.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/19] KVM: selftests: Verify interrupts are received after
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add the '-c' flag to tools/testing/selftests/kvm/irq_test.c to destroy
+and recreate KVM's GSI routing table between interrupts. This ensures
+that KVM correctly handles dynamic updates to the interrupt routing
+table while interrupts are actively being signaled by assigned devices.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/19] KVM: selftests: Verify IRQs wake up halted vCPUs in
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add the '-b' flag to tools/testing/selftests/kvm/irq_test.c to verify
+that interrupts successfully wake up vCPUs that are in a halted state.
+
+By default, the guest code spins using cpu_relax() while waiting for
+interrupts. With the '-b' flag, the guest executes the HLT instruction
+instead. At the end of the test, the host explicitly routes and triggers
+a final interrupt for each vCPU. If the interrupt fails to wake the
+halted vCPU, the guest will never exit its loop, and the host's call to
+pthread_join() will hang, causing the test to time out and fail.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 32 ++++++++++++++++++++++----
+ 1 file changed, 27 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/19] KVM: selftests: Verify interrupts are received when
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add the '-a' flag to tools/testing/selftests/kvm/irq_test.c to randomly
+affinitize the device's host IRQ to different physical CPUs throughout
+the test. This stresses the kernel's ability to maintain correct
+interrupt routing and delivery even as the underlying hardware IRQ
+affinity is changed dynamically via /proc/irq/.
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ .../testing/selftests/kvm/include/proc_util.h | 19 +++++++++++
+ tools/testing/selftests/kvm/irq_test.c        | 34 ++++++++++++++++---
+ tools/testing/selftests/kvm/lib/proc_util.c   | 20 +++++++++++
+ 3 files changed, 69 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/19] KVM: selftests: Verify IRQ bypass works in IRQ test
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Trigger interrupts from a VFIO device instead of emulating interrupts
+using KVM eventfds. This verifies that guests receive interrupts via IRQ
+bypass.
+
+Add a '-d' argument to tools/testing/selftests/kvm/irq_test which
+takes the segment:bus:device.function number of a PCI device bound to
+VFIO which will trigger interrupts. The device must have a VFIO selftest
+driver in order to work with the test.
+
+Example:
+$ ./tools/testing/selftests/kvm/irq_test -d 0000:06:0a.1
+
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 61 +++++++++++++++++++++++---
+ 1 file changed, 55 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/19] KVM: selftests: Add IRQ injection test
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add a new test, irq_test.c, which verifies that KVM correctly injects
+interrupts into a running guest when triggered via an eventfd bound to a
+GSI using the irqfd mechanism.
+
+This test is intentionally simple. Support for IRQ bypass, receiving
+interrupts from real devices, and other features will be added to this
+test in future changes.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Link: https://lore.kernel.org/kvm/20250404193923.1413163-68-seanjc@google.com/
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm |   2 +
+ tools/testing/selftests/kvm/irq_test.c   | 174 +++++++++++++++++++++++
+ 2 files changed, 176 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/19] KVM: selftests: Add helper to generate random u64 in
+Author: Josh Hilke <jrhilke@google.com>
+
+Introduce kvm_random_u64_in_range(state, min, max). This function
+returns a random u64 in the inclusive range of [min, max] using a struct
+kvm_random_state.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../testing/selftests/kvm/include/test_util.h  |  3 +++
+ tools/testing/selftests/kvm/lib/test_util.c    | 18 ++++++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/19] KVM: selftests: Rename guest_rng to kvm_rng
+Author: Josh Hilke <jrhilke@google.com>
+
+Rename functions prefixed with 'guest_random_' to 'kvm_random_' and the
+global random state variable 'guest_rng' to 'kvm_rng'. This expands
+their usage and reflects that the random number generator can be used by
+both the host and the guest.
+
+No functional changes are intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../selftests/kvm/dirty_log_perf_test.c       |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c  |  2 +-
+ .../testing/selftests/kvm/include/test_util.h | 22 +++++++++----------
+ .../selftests/kvm/include/x86/kvm_util_arch.h |  4 ++--
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 20 ++++++++---------
+ tools/testing/selftests/kvm/lib/memstress.c   |  8 +++----
+ tools/testing/selftests/kvm/lib/test_util.c   |  6 ++---
+ 7 files changed, 33 insertions(+), 33 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/19] KVM: selftests: Add guest read/write macros
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Add SYNC_FROM_GUEST_AND_READ(vm, variable), to read a variable value
+from the guest. Add WRITE_AND_SYNC_TO_GUEST(vm, variable) to write a
+value to a guest variable. These macros improve the readability of code
+which reads and writes data between host and guest in tests.
+
+Also update existing guest reads/writes to use these macros in the
+following tests:
+- tools/testing/selftests/kvm/dirty_log_test.c
+- tools/testing/selftests/kvm/mmu_stress_test.c
+- tools/testing/selftests/kvm/steal_time.c
+
+No functional changes are intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/dirty_log_test.c  |  6 ++---
+ .../testing/selftests/kvm/include/kvm_util.h  | 10 +++++++++
+ tools/testing/selftests/kvm/mmu_stress_test.c |  9 +++-----
+ tools/testing/selftests/kvm/steal_time.c      | 22 +++++++------------
+ 4 files changed, 23 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/19] KVM: selftests: Add /proc/interrupts parsing helpers
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Introduce utility functions to parse /proc/interrupts and extract the
+host IRQ number for a given VFIO device and MSI vector.
+
+These helpers lay the groundwork for subsequent patches that will creat
+a KVM IRQ test and use real VFIO devices to trigger hardware interrupts.
+Specifically, they are needed to allow the test to log the exact IRQ
+number being used for better debugging.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../testing/selftests/kvm/include/proc_util.h |  9 ++++
+ tools/testing/selftests/kvm/lib/proc_util.c   | 42 +++++++++++++++++++
+ 3 files changed, 52 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/19] KVM: selftests: Build and link selftests/vfio/lib
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Include libvfio.mk into the KVM selftests Makefile and link it into all
+KVM selftests by adding it to LIBKVM_OBJS.
+
+This lays the groundwork for future changes to utilize VFIO devices to
+verify IRQ bypass in KVM selftests.
+
+Note that KVM selftests build their own copy of sefltests/vfio/lib and
+the resulting object files are placed in $(OUTPUT)/lib. This allows the
+KVM and VFIO selftests to apply different CFLAGS when building without
+conflicting with each other.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/19] KVM: selftests: Link with VFIO selftests lib
+Author: Josh Hilke <jrhilke@google.com>
+
+This is v4 of a series which introduces tools/testing/selftests/kvm/irq_test.c
+in KVM selftests. This test exercises the delivery of interrupts (both
+emulated via eventfd and real from a VFIO device) to guest vCPUs. Beyond basic
+injection, the series adds coverage for several complex scenarios, including:
+- Dynamic updates to KVM's GSI routing table while interrupts are active.
+- Waking up halted vCPUs via interrupts.
+- Stressing interrupt delivery during random host IRQ affinity changes.
+- Stressing interrupt delivery during random vCPU thread migration across
+  physical CPUs.
+- Testing non-postable interrupt remapping (using NMIs to force transitions).
+- Supporting both xAPIC and x2APIC modes in the guest.
+
+The series also links the VFIO selftests library into KVM selftests to enable
+testing of VFIO-KVM interactions.
+
+The test can optionally use a PCI device bound to vfio-pci to test physical
+device interrupts. If using a device, it can be invoked by passing the BDF to
+the VFIO selftests setup script, and then running the test with the device BDF
+passed via the -d option:
+$ ./tools/testing/selftests/vfio/scripts/setup.sh 0000:6a:01.0
+$ tools/testing/selftests/kvm/irq_test -d 0000:6a:01.0
+
+This test only supports x86. Testing physical device interrupts (-d argument)
+requires a device with a supported VFIO selftest driver. Currently supported
+devices include:
+- Intel DSA (Data Streaming Accelerator), 8086:0b25
+- Intel IOAT (I/O Acceleration Technology), 8086:2021
+
+The test can be run with following command-line arguments allow for broad
+coverage of the interrupt delivery path:
+-a: Random IRQ Affinity. Randomly affinitizes the device IRQ to different host
+    CPUs to verify stable delivery during interrupt steering changes.
+-b: Block vCPUs. Causes vCPUs to HLT instead of spinning, verifying that
+    Posted-interrupt wakeup (PIW) correctly kicks blocked vCPUs.
+-c: Clear GSI Routes. Periodically destroys/recreates KVM's GSI routing table to
+    verify handling of dynamic IRQ updates.
+-d: Device MSI Triggers. Uses the physical device to trigger MSIs instead of
+    eventfd emulation (requires a supported device driver).
+-i: IRQ Count. Sets the number of interrupts to generate (default 1000).
+-m: vCPU Migration. Migrates vCPUs to random physical CPUs to verify that
+    posted interrupts follow the vCPU across host cores.
+-n: NMI Delivery. Routes interrupts as NMIs into the guest to verify the
+    VFIO-NMI delivery path.
+-v: vCPU Count. Distributes interrupts across multiple vCPUs via round-robin
+    routing.
+-x: xAPIC Mode. Forces legacy xAPIC mode to verify compatibility.
+
+---
+Changelog
+
+v3 -> v4
+- Add context to short logs specifying if the change relates
+  specifically to the IRQ test (Sean)
+- Format code correctly (Sean)
+- Fix compilation errors for gettid() wrapper (Sean)
+- Add macros for GUEST_RECEIVED_NMI and GUEST_RECEIVED_IRQ (Sean)
+- Split helper functions into separate patches (Sean)
+
+David Matlack (12):
+  KVM: selftests: Build and link selftests/vfio/lib into KVM selftests
+  KVM: selftests: Add /proc/interrupts parsing helpers for IRQ test
+  KVM: selftests: Add guest read/write macros
+  KVM: selftests: Add IRQ injection test
+  KVM: selftests: Verify IRQ bypass works in IRQ test
+  KVM: selftests: Verify interrupts are received when IRQ affinity
+    changes in IRQ test
+  KVM: selftests: Verify IRQs wake up halted vCPUs in IRQ test
+  KVM: selftests: Verify interrupts are received after modifying IRQ
+    routes in IRQ test
+  KVM: selftests: Make number of IRQs configurable in IRQ test
+  KVM: selftests: Verify non-postable IRQ remapping in IRQ test
+  KVM: selftests: Make number of vCPUs configurable in IRQ test
+  KVM: selftests: Add xAPIC support in IRQ test
+
+Josh Hilke (7):
+  KVM: selftests: Rename guest_rng to kvm_rng
+  KVM: selftests: Add helper to generate random u64 in range [min,max]
+  KVM: selftests: Add kvm_gettid() wrapper and convert users
+  KVM: selftests: Add kvm_sched_getaffinity() wrapper and convert users
+  KVM: selftests: Add pin_task_to_random_cpu() helper function
+  KVM: selftests: Verify vCPU migration during IRQ delivery in IRQ test
+  KVM: selftests: Print vCPU affinity on timeout during IRQ test
+
+ tools/testing/selftests/kvm/Makefile.kvm      |   8 +-
+ tools/testing/selftests/kvm/arch_timer.c      |   2 +-
+ .../kvm/arm64/arch_timer_edge_cases.c         |   2 +-
+ .../selftests/kvm/demand_paging_test.c        |   2 +-
+ .../selftests/kvm/dirty_log_perf_test.c       |   4 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |   8 +-
+ .../selftests/kvm/include/kvm_syscalls.h      |   6 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  13 +
+ .../testing/selftests/kvm/include/proc_util.h |  28 ++
+ .../testing/selftests/kvm/include/test_util.h |  25 +-
+ .../selftests/kvm/include/x86/kvm_util_arch.h |   4 +-
+ tools/testing/selftests/kvm/irq_test.c        | 370 ++++++++++++++++++
+ tools/testing/selftests/kvm/lib/assert.c      |   8 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  95 ++++-
+ tools/testing/selftests/kvm/lib/memstress.c   |   8 +-
+ tools/testing/selftests/kvm/lib/proc_util.c   |  62 +++
+ tools/testing/selftests/kvm/lib/test_util.c   |  27 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c |  15 +-
+ tools/testing/selftests/kvm/rseq_test.c       |   6 +-
+ tools/testing/selftests/kvm/steal_time.c      |  22 +-
+ 20 files changed, 635 insertions(+), 80 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From d725c9ec1 to dbaedecf0
+KVM mailing list update from d725c9ec1 to dbaedecf0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
