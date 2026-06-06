@@ -1,0 +1,2775 @@
+
+On /root/mail/repo:
+From 0dd8dc1d1 to 400eafb88
+KVM mailing list update from 0dd8dc1d1 to 400eafb88
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     13 google.com
+      8 sjtu.edu.cn
+      7 amazon.co.uk
+      4 zte.com.cn
+      1 soleen.com
+      1 rulkc.org
+      1 infradead.org
+      1 gmail.com
+      1 cs.unc.edu
+
+Top 15 contributors (Based on Email Body)
+
+     10  Tarun Sahu <tarunsahu@google.com>
+      8  "muliang.shou" <muliang.shou@sjtu.edu.cn>
+      7  David Woodhouse <dwmw@amazon.co.uk>
+      4  Wang Yechao <wang.yechao255@zte.com.cn>
+      3  Sean Christopherson <seanjc@google.com>
+      1  Pasha Tatashin <pasha.tatashin@soleen.com>
+      1  Hyunwoo Kim <imv4bel@gmail.com>
+      1  Divya Mankani <divyakm@cs.unc.edu>
+      1  David Woodhouse <dwmw2@infradead.org>
+      1  Arseniy Krasnov <avkrasnov@rulkc.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] vsock/virtio: fix memory leak in virtio_transport_recv_listen
+Author: Divya Mankani <divyakm@cs.unc.edu>
+
+Syzbot reported a memory leak inside virtio_transport_recv_listen
+caused by a race condition when the parent listener socket shuts down
+while an incoming packet is being enqueued.
+
+Fix this by locking the parent socket and verifying its shutdown
+state under the lock before executing vsock_enqueue_accept().
+
+Fixes: a478546a782a ("vsock/virtio: add support for listen sockets")
+Reported-by: syzbot+1b2c9c4a0f8708082678@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=1b2c9c4a0f8708082678
+Signed-off-by: Divya Mankani <divyakm@unc.edu>
+---
+ net/vmw_vsock/virtio_transport_common.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: x86/mmu: Recursively zap orphaned nested TDP shadow
+Author: Sean Christopherson <seanjc@google.com>
+
+Recursively zap orphaned nested TDP shadow pages when emulating a guest
+write to a shadowed page table, regardless of whether or not the associated
+(parent) shadow page will be zapped, e.g. due to detected write-flooding.
+
+This plugs a hole where KVM fails to reclaim defunct, unsync shadow pages
+for select L1 hypervisor patterns.  Commit 2de4085cccea ("KVM: x86/MMU:
+Recursively zap nested TDP SPs when zapping last/only parent") modified KVM
+to recursively zap synchronized shadow pages (KVM already recursively zaps
+unsync children) when a child is orphaned.  But the fix effectively only
+applied the logic to kvm_mmu_page_unlink_children(), i.e. only performs the
+recursive zap when KVM is already zapping a parent SP and processing its
+children.
+
+If L1 zaps SPTEs bottom-up (4KiB => 2MiB => ...), as KVM's TDP MMU does
+with CONFIG_KVM_PROVE_MMU=n since commit 8ca983631f3c ("KVM: x86/mmu: Zap
+invalidated TDP MMU roots at 4KiB granularity"), then KVM (as L0) will leak
+upwards of 4 shadow pages per GiB of L2 guest memory.  Over hundreds or
+thousands of L2 boots, if the VM is "lucky" enough to escape write-flooding
+detection, i.e. not trigger reclaim of the orphaned shadow pages by dumb
+luck, then it's possible to end up with tens or even hundreds of thousands
+of unsync shadow pages and associated rmap entries.
+
+Polluting the hash table and rmap entries with a horde of stale entries
+can eventually degrade L2 guest boot time by an order of magnitude,
+especially if there is any antagonistic activity in the host, i.e. anything
+that will contend for mmu_lock and/or needs to walk rmaps.
+
+With "top"-down zapping, where "top" is 1GiB or above, then L0 KVM is
+effectively limited to leaking 4 shadow pages per 256 GiB of memory, as
+KVM's write flooding detection will kick in on the third write to an L1
+TDP PUD, and thus recursively zap the entire 256 GiB range of the parent
+PGD.  I.e. even though L1 KVM still recursively zaps 2MiB => 4KiB SPTEs
+when zapping each 1GiB SPTE, KVM only gets through two of the 1GiB SPTEs
+before dropping everything.  E.g. hacking tracing into L0 KVM's
+kvm_mmu_track_write(), the top-down zapping of L1's TDP MMU for an L2 with
+16GiB of memory leads to:
+
+  gpa = 107407000, old = 800000010741bd07, new = 8000000000000000, level = 3, flood = 0
+  gpa = 10741b000, old = 8000000112fb2d07, new = 80000000000001a0, level = 2, flood = 0
+  gpa = 10741b008, old = 800000012509cd07, new = 80000000000001a0, level = 2, flood = 1
+  gpa = 10741b010, old = 80000001114b9d07, new = 80000000000001a0, level = 2, flood = 2
+  gpa = 107407008, old = 8000000112fb5d07, new = 8000000000000000, level = 3, flood = 1
+  gpa = 112fb5298, old = 8000000106f43d07, new = 80000000000001a0, level = 2, flood = 0
+  gpa = 112fb52a0, old = 8000000106f4dd07, new = 80000000000001a0, level = 2, flood = 1
+  gpa = 112fb5ea0, old = 8000000120490d07, new = 80000000000001a0, level = 2, flood = 2
+  gpa = 107407010, old = 8000000106df2d07, new = 8000000000000000, level = 3, flood = 2
+  gpa = 107410000, old = 8000000107408d07, new = 8000000000000000, level = 5, flood = 0
+  gpa = 107408000, old = 8000000107407d07, new = 80000000000001a0, level = 4, flood = 0
+
+Contrast that with a bottom-up zap, which effectively allows all 2MiB SPTEs
+in L1 to leak their children.
+
+  gpa = 167939000, old = 800000011c8f4d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 167939020, old = 8000000104407d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 167939028, old = 800000011ed20d07, new = 8000000000000000, level = 2, flood = 2
+  gpa = 118c70bb0, old = 8000000167ab9d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 118c70bb8, old = 8000000163913d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 118c70de8, old = 800000011cc9dd07, new = 8000000000000000, level = 2, flood = 2
+  gpa = 160be7fb0, old = 800000011d322d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 160be7fb8, old = 8000000126b1bd07, new = 8000000000000000, level = 2, flood = 2
+  gpa = 1634ab000, old = 800000010e984d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 1634ab008, old = 800000016879fd07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 1634ab010, old = 800000016879ed07, new = 8000000000000000, level = 2, flood = 2
+  gpa = 11e3f1e48, old = 8000000168a33d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 11e3f1e50, old = 80000001664dcd07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 1167eacb8, old = 8000000166544d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 1167eacc0, old = 800000015c16bd07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 1689e89b8, old = 800000015f296d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 1689e89c0, old = 8000000167ca8d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 107b35eb8, old = 8000000161e71d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 107b35ec0, old = 8000000118cf3d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 118cf2d48, old = 8000000118cf1d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 118cf2d50, old = 8000000118cf0d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 118dcb770, old = 8000000118dcad07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 118dcb778, old = 8000000118dc9d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 118dc87e8, old = 8000000126997d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 118dc87f0, old = 8000000126996d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 126995148, old = 8000000126994d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 126995150, old = 8000000103477d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 1034764c8, old = 8000000103475d07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 1034764d0, old = 8000000103474d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 10ea4b788, old = 800000010ea4ad07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 10ea4b790, old = 800000010ea49d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 10ea48928, old = 800000011a5bfd07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 10ea48930, old = 800000011a5bed07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 11a5bd0d8, old = 800000011a5bcd07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 11a5bd0e0, old = 800000011d323d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 122ce2b40, old = 800000011fe0bd07, new = 8000000000000000, level = 2, flood = 0
+  gpa = 122ce2b48, old = 800000010e985d07, new = 8000000000000000, level = 2, flood = 1
+  gpa = 122ce2b50, old = 8000000161c9dd07, new = 8000000000000000, level = 2, flood = 2
+  gpa = 16864c000, old = 8000000167939d07, new = 8000000000000000, level = 3, flood = 0
+  gpa = 16864c008, old = 8000000118c70d07, new = 8000000000000000, level = 3, flood = 1
+  gpa = 16864c010, old = 80000001688a6d07, new = 8000000000000000, level = 3, flood = 2
+  gpa = 11c8f7000, old = 80000001608a7d07, new = 8000000000000000, level = 5, flood = 0
+  gpa = 1608a7000, old = 800000016864cd07, new = 80000000000001a0, level = 4, flood = 0
+
+Note, in the shadow MMU, "level" describes the level a shadow page "points"
+at, not the level of its associated SPTE. I.e.  when write-flooding of 1GiB
+PUD entries is detected, KVM recursively zaps shadow pages covering 256GiB
+worth of memory.  And as shown above, KVM's write-flooding detection
+operates at all levels, so a single PMD (in L1) can effectively only leak
+two unsync children (4KiB shadow pages) before it gets recursively zapped.
+As a result, for the top-down zap, L0 KVM will leak at most 4 unsync shadow
+pages per 256GiB of L2 memory.
+
+The top-down zap also makes it more likely that L1 will self-heal (to some
+extent), as any shadow pages that are "rediscovered" by future runs of L2
+can get reclaimed by a recursive zap, whereas bottom-up zapping orphans
+shadow pages over and over.
+
+Note, in theory, there is some risk of over-zapping, e.g. due to zapping a
+a large branch of the paging tree that L1 is only temporarily removing.  In
+practice, the usage patterns of hypervisors are highly unlikely to trigger
+false positives.  E.g. temporarily changing paging protections is typically
+done at the leaf, not on a non-leaf entry.  And if the L1 hypervisor is
+updating large swaths of PTEs, e.g. to (temporarily?) remove chunks of
+memory from L2, then L0 KVM's write-flooding detection will kick in, and
+the children would be zapped anyways.
+
+Fixes: 2de4085cccea ("KVM: x86/MMU: Recursively zap nested TDP SPs when zapping last/only parent")
+Cc: Yosry Ahmed <yosry@kernel.org>
+Cc: Jim Mattson <jmattson@google.com>
+Cc: James Houghton <jthoughton@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] KVM: x86/mmu: Expose number of shadow MMU shadow pages as
+Author: Sean Christopherson <seanjc@google.com>
+
+Turn arch.n_used_mmu_pages into a stat, mmu_shadow_pages, as the number of
+live shadow pages is arguably _the_ most critical datapoint when it comes
+to analyzing the shadow MMU.  Before the TDP MMU came along, i.e. when the
+shadow MMU was the only MMU, explicitly tracking the number of shadow pages
+wasn't as interesting, because the same information could more or less be
+gleaned from the pages_{1g,2m,4k} stats.  But with the TDP MMU, where the
+shadow MMU is only used for nested TDP, it becomes extremely difficult, if
+not impossible, to determine which SPTEs are coming from the TDP MMU, and
+which are coming from the shadow MMU.
+
+E.g. when triaging/debugging shadow MMU performance issues due to "too many
+shadow pages", being able to observe that 99%+ of all shadow pages are
+unsync is critical to being able to deduce that KVM is effectively leaking
+shadow pages.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/mmu/mmu.c          | 14 +++++++-------
+ arch/x86/kvm/mmu/mmutrace.h     |  2 +-
+ arch/x86/kvm/x86.c              |  1 +
+ 4 files changed, 10 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: x86/mmu: Plug an unsync shadow page leak
+Author: Sean Christopherson <seanjc@google.com>
+
+Recursively zap orphaned nested TDP shadow pages on emulated writes, not just
+when the parent is being fully zapped, to plug an unsync shadow page leak if
+the L1 hypervisor zaps bottom-up instead of top-down, as KVM's TDP MMU has
+done since commit 8ca983631f3c ("KVM: x86/mmu: Zap invalidated TDP MMU roots
+at 4KiB granularity").
+
+Gory details in patch 1.  Patch 2 adds a stat that, very thankfully, we more
+or less have in our internal kernels, and without which, diagnosing the bug
+would have been much more difficult.
+
+Sean Christopherson (2):
+  KVM: x86/mmu: Recursively zap orphaned nested TDP shadow pages on
+    emulated writes
+  KVM: x86/mmu: Expose number of shadow MMU shadow pages as a stat
+
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/mmu/mmu.c          | 16 ++++++++--------
+ arch/x86/kvm/mmu/mmutrace.h     |  2 +-
+ arch/x86/kvm/x86.c              |  1 +
+ 4 files changed, 11 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 10/10] selftests: kvm: Add guest_memfd_preservation_test
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Add a new KVM selftest `guest_memfd_preservation_test` to verify that
+guest memory backed by guest_memfd is preserved properly.
+
+The test leverages the Live Update Orchestrator (LUO) infrastructure
+to validate that memory folios and configuration layouts are
+successfully saved and then restored during kernel live updates,
+preventing any memory loss for the guest.
+
+Here, I have used the kvm selftests framework by creating a new
+vm and mapping two memory slots to it. One is the code that is executed
+inside the vm and other is the guest_memfd whose memory is being
+written by the guest code.
+
+In Phase 1: Once data is written the vm exits and wait for the user
+to trigger the kexec.
+
+In Phase 2: A new vm is created with retrieved kvm and again two
+memory slots are assigned. Once for guest code, and another is for
+retrieved guest_memfd where guest_memfd memory is verified by the
+executed guest code. If verification succeeds, The test passes.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ MAINTAINERS                                   |   1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   6 +-
+ .../kvm/guest_memfd_preservation_test.c       | 230 ++++++++++++++++++
+ 3 files changed, 236 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 09/10] selftests: kvm: Split ____vm_create() to expose
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Refactor `____vm_create()` in the KVM selftest library to extract its
+initialization steps into separate, reusable internal helpers.
+
+Introduce `vm_init_fields()` and `vm_init_memory_properties()`. This
+allows advanced test setups to perform targeted VM fields or memory
+property initializations independently, which is required by upcoming
+test cases that restore preserved VMs. No functional changes are
+introduced for the existing tests.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 26 +++++++++++++------
+ 2 files changed, 20 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 08/10] docs: add documentation for guest_memfd
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Add the documentation under the "Preserving file descriptors" section
+of LUO's documentation.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ Documentation/core-api/liveupdate.rst |   1 +
+ Documentation/liveupdate/vmm.rst      | 103 ++++++++++++++++++++++++++
+ MAINTAINERS                           |   1 +
+ 3 files changed, 105 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 07/10] kvm: guest_memfd_luo: add support for
+Author: Tarun Sahu <tarunsahu@google.com>
+
+This patch sets up the basic infrastructure to preserve the guest_memfd.
+Currently this supports only fully shared guest_memfd and backed by
+PAGE_SIZE pages.
+
+It registers a new LUO file handler for guest_memfd files to serialize
+and deserialize guest memory. This allows preserving guest memory backed
+by guest_memfd across updates, ensuring that guest instances can be
+resumed seamlessly without losing their memory contents.
+
+Preservation is straight forward. It walks through the folios and
+serialize them.
+
+There is kvm_gmem_freeze call on preserve which freeze the guest_memfd
+inode. It avoids any changes to inode mapping with fallocate calls or
+any new fault allocation (fails) on or after preservation. No need to check
+this during the page fault as preservation is only supported for
+pre-faulted/pre-allocated guest_memfd.
+
+While retrieving the guest_memfd, it requires the struct kvm to create
+new guest_memfd. So it first get the vm_file from the same session using
+the token passed during the preservation. And use it to get
+vm_file->kvm.
+
+This change also update the MAINTAINERS list.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ MAINTAINERS                 |   1 +
+ include/linux/kho/abi/kvm.h |  79 +++++-
+ virt/kvm/Makefile.kvm       |   2 +-
+ virt/kvm/guest_memfd_luo.c  | 485 ++++++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c         |   7 +
+ virt/kvm/kvm_mm.h           |   4 +
+ 6 files changed, 571 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 06/10] kvm: guest_memfd: Add support for freezing and
+Author: Tarun Sahu <tarunsahu@google.com>
+
+This patch introduces the freeze on gmem_inode which prevents
+the fallocate call and any new page fault allocation. This will avoid
+gmem file modification when it is being preserved
+
+Used srcu lock to synchronise the freeze call, where write blocks
+until all the reads are free. And reads are re-entrant.
+
+Incase fault fails, It return -EPERM and VM_EXIT to userspace. userspace
+must handle this properly as every new fault will fail.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ virt/kvm/guest_memfd.c | 117 +++++++++++++++++++++++++++++++++++++----
+ virt/kvm/guest_memfd.h |   5 ++
+ 2 files changed, 111 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 04/10] kvm: kvm_luo: Allow kvm preservation with LUO
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Introduce KVM VM preservation support for Live Update Orchestrator.
+
+Register an LUO file handler for KVM files to serialize and
+deserialize necessary VM state across live updates. Currently, this
+preserves the VM type. This implementation provides the necessary
+infrastructure and dependencies for the upcoming guest_memfd
+preservation support. And it can be extended to preserve more vm
+state in future.
+
+Retrieve is simply creating the kvm and populate the retrieved data.
+Only catch here is there is no way to know which fd is going to be
+assigned to this kvm file hence I am using atomically incremented id
+for the fdname.
+
+This change also updates the MAINTAINERS list for kvm_luo.c.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+
+---
+My only worry is if userspace strictly depends on the fdname, that it
+needs to be consistent with vm_fd. Discussed more details in the
+cover letter. Would really appreciates the alternatives/other approaches.
+---
+ MAINTAINERS                 |  11 +++
+ include/linux/kho/abi/kvm.h |  39 ++++++++
+ virt/kvm/Makefile.kvm       |   1 +
+ virt/kvm/kvm_luo.c          | 190 ++++++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c         |   8 ++
+ virt/kvm/kvm_mm.h           |   8 ++
+ 6 files changed, 257 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 05/10] kvm: guest_memfd: Move internal definitions and
+Author: Tarun Sahu <tarunsahu@google.com>
+
+To support guest_memfd memory preservation with LUO, guest_memfd luo
+code needs to access guest_memfd internals and reconstruct guest_memfd
+file instances from a preserved state.
+
+Extract gmem_file, gmem_inode, and the GMEM_I() helper from guest_memfd.c
+into a new internal header virt/kvm/guest_memfd.h.
+
+Additionally, split __kvm_gmem_create() to expose a non-static
+__kvm_gmem_create_file() helper. This helper returns a struct file
+instead of a file descriptor, enabling file creation and initialization
+without installing it into a file descriptor table.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ virt/kvm/guest_memfd.c | 68 +++++++++++++++++-------------------------
+ virt/kvm/guest_memfd.h | 39 ++++++++++++++++++++++++
+ 2 files changed, 67 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 03/10] kvm: Prepare core VM structs and helpers for LUO support
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Introduce core infrastructure to support VM preservation with LUO.
+
+First two changes are just refactoring, no functional change, third
+change introduces a new member in struct kvm.
+- Move ITOA_MAX_LEN to kvm_mm.h for reuse by upcoming kvm_luo code.
+- Add a public kvm_create_vm_file() helper wrapping kvm_create_vm()
+  and anon_inode_getfile() to provide a unified VM file creation API.
+- Track a weak reference to the backing file in struct kvm under
+  CONFIG_LIVEUPDATE_GUEST_MEMFD to enable reverse file resolution
+  without circular lifetime dependencies.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ include/linux/kvm_host.h | 14 +++++++
+ virt/kvm/kvm_main.c      | 79 +++++++++++++++++++++++++++++-----------
+ virt/kvm/kvm_mm.h        |  3 ++
+ 3 files changed, 75 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 02/10] liveupdate: Add LIVEUPDATE_GUEST_MEMFD config option
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Introduce the LIVEUPDATE_GUEST_MEMFD Kconfig option. This option
+enables live update support for KVM guest_memfd files, enabling
+guest_memfd-backed memory preservation across kernel upgrades.
+
+Currently this support only guest_memfd files that are full-shared
+and pre-faulted.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ kernel/liveupdate/Kconfig | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 0/10] liveupdate: kvm: Guest_memfd preservation
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Changes from V1:
+1. Remove mem_attr_array preservation
+2. Removed prefaulted guest_memfd condition
+3. Updated the check for shared guest_memfd from INIT_SHARED to
+   kvm_arch_has_private_mem
+4. Added the document liveupdate/vmm.rst
+
+Hello,
+
+I am proposing this series as RFC, to initiate the discussion for
+supporting the guest_memfd preservation. This will setup basic arhitecture
+for VM preservation during liveupdate. This Cover letter has three
+sections (please feel free to skip the section you already know):
+
+A. Guest_memfd introduction:
+To make the audience familiar with guest_memfd
+B. Liveupdate introduction:
+To make the audience familiar with liveupdate
+C. Actual Implementation Design and questions.
+
+**A: GUEST MEMFD INTRODUCTION**
+
+Initially, guest_memfd was created to support guest private memory in
+confidential computing VMs (CoCo VMs). It was designed so that whenever
+a guest wants to grant the host access to private memory, a series of
+calls occurs: from the guest to KVM, KVM to the host userspace, host
+userspace back to KVM, and finally a new page fault maps the memory into
+a separate shared address space. Conversely, if the guest transitions the
+memory back to private, the subsequent fault is handled by guest_memfd.
+(Dual Mapping Architecture). In such a VM, all guest memory is initially
+shared. On the fly, the guest may request to change pages to private; the
+metadata indicating which parts of memory are private is stored in an
+xarray inside struct kvm (mem_attr_array). This array serves as the source
+of truth for the fault mechanism, determining whether a mapping should be
+created from host-userspace-mapped pages or directly from the guest_memfd
+file. For private memory, Fault also calls architecture-specific function
+to set up private hardware access (e.g., on SEV-SNP or TDX). This type of
+guest_memfd is fully-private where shared mapping comes from userspace
+mapped address space.
+
+Subsequently, support was added to allow the entire guest memory to be
+backed by guest_memfd. This led to the implementation of the MMAP and
+INIT_SHARED flags for the guest_memfd inode. When KVM_CREATE_GUEST_MEMFD
+is called with these flags, the guest_memfd becomes mmap-able by host
+userspace. The INIT_SHARED flag is used to make the guest_memfd completely
+shared between the host and the guest. Consequently, page faults from both
+host userspace and the guest resolve to the same guest_memfd page cache.
+However, under this configuration, marking a portion of this memory as
+private is not possible. This type of guest_memfd is fully-shared.
+
+If guest_memfd is created with INIT_SHARED without MMAP, the host
+can never access the guest_memfd. But the memory is still considered
+shared.
+
+Hence, At this point, Only use-case of guest_memfd is either fully-shared
+or fully-private.
+
+There is ongoing work to make shared and private mapping in-place backed
+by guest_memfd. [1] There is also ongoing work to back guest_memfd by
+hugetlb pages. [2]
+
+**B: LIVEUPDATE INTRODUCTION (LIVEUPDATE ORCHESTRATOR - LUO)**
+
+Livepdate support was added in kernel to update the host kernel by
+minimizing the downtime to minimal. This is generally achieved by
+preserving the current state of the system and retrieve after boot to
+resume from where we left it.
+
+Any subsystem that wants to preserve themselves, register their handler
+with liveupdate system. This handler includes calls to the following
+
+*can_preserve (file)*:
+This tells the luo system about the eligibility of the file. When
+preserve ioctl is called, it first loop through all the file handlers
+and call can_preserve, the one which return true, luo uses this file
+handler fh->preserve call to preserve the file.
+
+*preserve(file)*:
+This actually preserves the file.
+
+*unpreserve(file)*:
+This unpreserve the file incase userspace want to go back.
+
+*retrieve(file)*:
+On new kernel boot, this function retrieves the file.
+
+*finish(file)*:
+When userspace decides that all the files in the liveupdate session has
+been retrieved, it can trigger this to do final work of cleaning up.
+
+LUO preserve its memory using KHO (kexec-handover). All these APIs will
+be implemented using KHO calls.
+
+**C: GUEST MEMFD PRESERVATION**
+
+SCOPE:
+1. Fully Shared Guest_memfd
+2. Guest_memfd backed by PAGE_SIZE pages
+
+Any VM whose memory is backed by such guest_memfd can be preserved
+across liveupdate.
+
+The preservation call is straight forward. It walks through the page
+cache, serialize the folios and preserve them.
+
+On the retrieval path:
+Currently, creating a guest_memfd requires an associated struct kvm
+(derived from vm_file / vm_fd). Since there is no direct way to pass a
+VM file descriptor via the LUO API.
+
+I leverage a companion patch [3] (Also added as part of this series
+PATCH[1]) that allows one file to retrieve another file from the same
+LUO session. This enables the guest_memfd retrieval path to obtain the
+preserved KVM file, use it during guest_memfd file creation, and
+subsequently populate its preserved memory.
+
+Preserving the KVM file allows us to preserve additional VM-specific
+metadata, which will be crucial in the future for cleanly resuming the
+VM. Currently, it preserves only the VM type.
+
+On the retrieval path:
+KVM normally requires a unique identifier (fdname) upon creation,
+which KVM typically assigns based on the newly created file descriptor
+number. However, in the LUO retrieval path, the retrieve call restores
+the underlying file structure and delegates actual file descriptor
+allocation to LUO (check luo_session_retrieve_fd). Currently, I used an
+atomically incremented sequence number as the fdname. I would like to
+discuss whether userspace services rely on specific naming conventions
+here. Or if we can change underlying the retrieve call
+(luo_retrieve_file) to pass fd?
+
+This series also introduces the inode freeze call for guest_memfd inode.
+Which fails any subseuquent fallocate calls or new page fault allocation.
+VMM is supposed to take necessary measure when it is triggering the
+liveupdate. VMM must:
+1. Either pause the VM before preserving the VM/guest_memfd OR
+2. Take action (vm_pause or unpreserve/destroy liveupdate sequence)
+   when a fault fails and VM_EXIT to VMM with -EPERM.
+
+Preservation Order between VM and guest_memfd file:
+There is no strict order, they are independent. Guest_memfd file needs
+the kvm_file preserved token, which it update on freeze call as freeze
+is called just before kexec jump. kexec fails incase freeze will be
+unsuccessful, for this case, it will fail if vm_file token is not found.
+
+Retrieval order for VM and guest_memfd file:
+There is no strict order needed for retrieval.
+1. If VM file is retrieve before guest_memfd: guest_memfd will be
+retrieved and vm_file also retrieved and userspace hold reference to
+both files.
+
+2. If guest_memfd file is retrieved before vm_file: guest_memfd will be
+retrieved and it will retrieve vm_file internally and userspace can
+retrieve vm_file later. But userspace will not have reference to vm_file
+and luo_finish() will drop vm_file final reference if userspace does not
+retrieve vm_file before calling luo_finish(). This is valid case, as
+guest_memfd can live without vm_file as in the case vm_file is closed
+before guest_memfd file.
+
+I have implemented the basic test, where it spawn a VM with guest_memfd
+or 16MB and write data to its 5MB portion. After LUO preserve call, and
+kexec, On retrieve, a new VM is spawn with the restored vm_file and
+restored guest_memfd and the data is verified. It uses the liveupdate
+test library [5].
+
+Future Work:
+1. Support private guest_memfd preservation.
+2. Extend the support for guest_memfd with in-place conversion of
+shared/private.
+
+[1] https://lore.kernel.org/all/20260507-gmem-inplace-conversion-v6-0-91ab5a8b19a4@google.com/
+[2] https://lore.kernel.org/all/cover.1747264138.git.ackerleytng@google.com/
+[3] https://lore.kernel.org/all/20260427175633.1978233-2-skhawaja@google.com/
+[4] https://lore.kernel.org/all/cover.1691446946.git.ackerleytng@google.com/
+[5] https://lore.kernel.org/all/20260511201155.1488670-1-vipinsh@google.com/
+
+Pasha Tatashin (1):
+  liveupdate: luo_file: Add internal APIs for file preservation
+
+Tarun Sahu (8):
+  liveupdate: Add LIVEUPDATE_GUEST_MEMFD config option
+  kvm: Prepare core VM structs and helpers for LUO support
+  kvm: kvm_luo: Allow kvm preservation with LUO
+  kvm: guest_memfd: Move internal definitions and helper to new header
+  kvm: guest_memfd: Add support for freezing and unfreezing mappings
+  kvm: guest_memfd_luo: add support for guest_memfd preservation
+  selftests: kvm: Split ____vm_create() to expose init helpers
+  selftests: kvm: Add guest_memfd_preservation_test
+
+ MAINTAINERS                                   |  13 +
+ include/linux/kho/abi/kvm.h                   | 106 ++++
+ include/linux/kvm_host.h                      |  14 +
+ include/linux/liveupdate.h                    |  21 +
+ kernel/liveupdate/Kconfig                     |  15 +
+ kernel/liveupdate/luo_file.c                  |  69 +++
+ kernel/liveupdate/luo_internal.h              |  17 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   6 +-
+ .../kvm/guest_memfd_preservation_test.c       | 230 ++++++++
+ .../testing/selftests/kvm/include/kvm_util.h  |   2 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  26 +-
+ virt/kvm/Makefile.kvm                         |   1 +
+ virt/kvm/guest_memfd.c                        | 185 +++++--
+ virt/kvm/guest_memfd.h                        |  44 ++
+ virt/kvm/guest_memfd_luo.c                    | 489 ++++++++++++++++++
+ virt/kvm/kvm_luo.c                            | 190 +++++++
+ virt/kvm/kvm_main.c                           |  94 +++-
+ virt/kvm/kvm_mm.h                             |  15 +
+ 18 files changed, 1456 insertions(+), 81 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 01/10] liveupdate: luo_file: Add internal APIs for file preservation
+Author: Tarun Sahu <tarunsahu@google.com>
+
+
+The core liveupdate mechanism allows userspace to preserve file
+descriptors. However, kernel subsystems often manage struct file
+objects directly and need to participate in the preservation process
+programmatically without relying solely on userspace interaction.
+
+Signed-off-by: Pasha Tatashin <pasha.tatashin@soleen.com>
+Signed-off-by: Samiullah Khawaja <skhawaja@google.com>
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ include/linux/liveupdate.h       | 21 ++++++++++
+ kernel/liveupdate/luo_file.c     | 69 ++++++++++++++++++++++++++++++++
+ kernel/liveupdate/luo_internal.h | 17 ++++++++
+ 3 files changed, 107 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 6/8] KVM: x86/xen: Enforce alignment of vcpu_info registration
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Xen enforces that the vcpu_info GPA is aligned to sizeof(xen_ulong_t)
+(8 bytes in 64-bit mode, 4 bytes in 32-bit mode) in map_guest_area().
+
+KVM has no such check, allowing a guest to register a vcpu_info at an
+arbitrary byte alignment. This can cause split-lock #AC exceptions on
+hosts with split_lock_detect=fatal, since the event channel delivery
+paths use locked atomic operations on evtchn_pending_sel within the
+vcpu_info.
+
+Add the same alignment check that Xen performs at vcpu_info
+registration time, based on the current long_mode state. Return -ENXIO
+on failure, matching Xen's map_guest_area() behaviour for unaligned
+requests.
+
+Like Xen, this allows a guest to register vcpu_info at a 4-byte (but
+not 8-byte) aligned address while in 32-bit mode and then switch to
+64-bit mode. Xen copes with this because it only uses 32-bit atomics
+on vcpu_info fields, which is what subsequent commits will do where
+necessary for KVM too.
+
+Originally observed in review of an unrelated patch:
+https://lore.kernel.org/all/20260604193554.1BA311F00893@smtp.kernel.org/
+
+Cc: stable@vger.kernel.org
+Fixes: 73e69a86347a ("KVM: x86/xen: register vcpu info")
+Reported-by: sashiko-bot@kernel.org
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 5/8] KVM: x86/xen: Latch shinfo mode in kvm_xen_schedop_poll()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+kvm_xen_schedop_poll() validates port numbers against
+kvm_max_evtchn_port() and then calls wait_pending_event() which reads
+the shinfo mode again to select the bitmap layout.
+
+Latch kvm_xen_has_64bit_shinfo() once and pass it to both
+max_evtchn_port() and wait_pending_event().
+
+As with the previous fix to kvm_xen_set_evtchn_fast(), this is
+harmless in practice for the same reasons: the inconsistency can only
+corrupt fields in the guest's own shared_info page, and the same
+corruption can occur anyway if the mode changes immediately after the
+latch.
+
+Fixes: d518b9d0fc80 ("KVM: x86/xen: handle PV spinlocks slowpath")
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/8] KVM: x86/xen: Rename max_evtchn_port() to kvm_max_evtchn_port()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Rename in preparation for adding a variant that takes a latched bool
+argument for use in paths that need a consistent snapshot of the
+shinfo mode.
+
+No functional change.
+
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/8] KVM: x86/xen: Latch shinfo mode in kvm_xen_set_evtchn_fast()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+kvm_xen_set_evtchn_fast() assumes the port range check in
+max_evtchn_port() and the bitmap layout selection observe the same
+shinfo mode, but each calls kvm_xen_has_64bit_shinfo() separately.
+If the guest changes the mode in between, a port accepted by the
+64-bit range check is handled with the 32-bit layout, and
+port_word_bit falls outside evtchn_pending_sel.
+
+Latch kvm_xen_has_64bit_shinfo() once on entry so the range check
+and both layout computations use the same value.
+
+In practice this is harmless: the evtchn_pending bitmap is at the same
+offset in both native and compat shared_info layouts, so a stale mode
+just results in setting a bit in what the guest (in its new compat mode)
+considers the evtchn_mask, wallclock, or the arch_shared_info fields
+which follow it — all of which are in the guest's own page. Even with
+this fix, the same corruption can occur if 64-bit mode is latched and
+the guest switches to 32-bit mode immediately afterward. Like Xen, KVM
+makes no attempt to *convert* when shinfo mode is changed. Only the
+wallclock field is updated in the new location.
+
+This fix is for internal consistency rather than correcting any
+observable bug.
+
+Fixes: 14243b387137 ("KVM: x86/xen: Add KVM_IRQ_ROUTING_XEN_EVTCHN and event channel delivery")
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Signed-off-by: Hyunwoo Kim <imv4bel@gmail.com>
+[dwmw2: Rework on top of long_mode/has_64bit_shinfo cleanups]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/8] KVM: x86/xen: Introduce kvm_xen_has_64bit_shinfo() macro
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Add a kvm_xen_has_64bit_shinfo() helper macro to replace the repeated
+pattern of 'IS_ENABLED(CONFIG_64BIT) && kvm->arch.xen.long_mode'
+throughout the Xen emulation code. The macro uses READ_ONCE() to
+ensure a consistent snapshot of the flag, which can be changed by
+another vCPU at any time.
+
+This is the KVM equivalent of Xen's !has_32bit_shinfo().
+
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 16 ++++++++--------
+ arch/x86/kvm/xen.h |  5 +++++
+ 2 files changed, 13 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/8] KVM: x86/xen: Rename 'longmode' to 'is_64bit' in hypercall handling
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Rename the local 'longmode' variable and function parameter to
+'is_64bit' throughout the Xen hypercall handling code. This
+distinguishes it from the VM-wide kvm->arch.xen.long_mode which
+represents the Xen shared_info layout mode.
+
+The 'is_64bit' parameter indicates whether the vCPU was in 64-bit
+mode when it made the hypercall, which determines how to parse the
+hypercall arguments. The UAPI field name (vcpu->run->xen.u.hcall.longmode)
+is unchanged.
+
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 26 +++++++++++++-------------
+ 1 file changed, 13 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/8] KVM: x86/xen: Clean up 32-bit vs. 64-bit shared info mode handling
+Author: David Woodhouse <dwmw2@infradead.org>
+
+This series addresses issues in KVM's Xen event channel delivery paths,
+triggered by review of a patch from Hyunwoo Kim which fixed a TOCTOU
+race in kvm_xen_set_evtchn_fast().
+
+The first three patches are preparatory cleanups:
+ • Rename the 'longmode' hypercall parameter to 'is_64bit' to
+   distinguish it from the VM-wide shinfo mode.
+ • Introduce kvm_xen_has_64bit_shinfo() with READ_ONCE() semantics.
+ • Rename max_evtchn_port() to kvm_max_evtchn_port() in preparation
+   for adding a variant that takes a latched bool.
+
+Patches 4-5 fix TOCTOU races where kvm->arch.xen.long_mode is read 
+multiple times without consistency. In practice these are harmless since 
+the bitmaps are at the same offset in both layouts and corruption is 
+limited to the guest's own shared_info page which doesn't get converted 
+when switched between 32-bit and 64-bit anyway, but the fixes ensure 
+internal consistency for any given invocation of the given function.
+
+Patches 6-8 address a split-lock DoS vector identified by Sashiko: 
+locked atomic operations on vcpu_info->evtchn_pending_sel can trigger
+an #AC exception on hosts with split_lock_detect=fatal if the guest 
+registers vcpu_info at a misaligned address. Patch 6 adds Xen-compatible 
+alignment enforcement at registration time. Patches 7-8 switch to 32-bit 
+locked operations which only require 4-byte alignment, handling the case 
+where a 32-bit guest registers vcpu_info at a 4-byte-aligned address and 
+later switches to 64-bit mode — which Xen supports, so so should KVM.
+
+Based on v7.1-rc6.
+
+(Sorry Sean, this conflicts with some stuff you have outstanding but
+should probably go first?)
+
+David Woodhouse (7):
+      KVM: x86/xen: Rename 'longmode' to 'is_64bit' in hypercall handling
+      KVM: x86/xen: Introduce kvm_xen_has_64bit_shinfo() macro
+      KVM: x86/xen: Rename max_evtchn_port() to kvm_max_evtchn_port()
+      KVM: x86/xen: Latch shinfo mode in kvm_xen_schedop_poll()
+      KVM: x86/xen: Enforce alignment of vcpu_info registration
+      KVM: x86/xen: Use 32-bit locked bts for vcpu_info evtchn_pending_sel
+      KVM: x86/xen: Use 32-bit locked ops in kvm_xen_inject_pending_events()
+
+Hyunwoo Kim (1):
+      KVM: x86/xen: Latch shinfo mode in kvm_xen_set_evtchn_fast()
+
+ arch/x86/kvm/xen.c | 186 +++++++++++++++++++++++++++++++++++------------------
+ arch/x86/kvm/xen.h |   5 ++
+ 2 files changed, 127 insertions(+), 64 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 7/8] KVM: x86/xen: Use 32-bit locked bts for vcpu_info evtchn_pending_sel
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Replace test_and_set_bit() on vcpu_info->evtchn_pending_sel with an
+explicit 'lock btsl' in kvm_xen_set_evtchn_fast(). The generic
+test_and_set_bit() uses a 64-bit locked operation ('lock btsq') on
+x86-64, which requires 8-byte alignment to avoid split-lock #AC
+exceptions.
+
+Since evtchn_pending_sel is at most 64 bits wide and port_word_bit
+ranges 0-63, a 32-bit 'lock btsl' suffices for both native and compat
+vcpu_info layouts, and only requires the 4-byte alignment that is
+already guaranteed by the registration path.
+
+This also eliminates the bogus cast of compat_vcpu_info's 32-bit
+evtchn_pending_sel to 'unsigned long *' which was the original source
+of the split-lock hazard.
+
+Fixes: 14243b387137 ("KVM: x86/xen: Add KVM_IRQ_ROUTING_XEN_EVTCHN and event channel delivery")
+Reported-by: sashiko-bot@kernel.org
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 42 ++++++++++++++++++++++++++++--------------
+ 1 file changed, 28 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 8/8] KVM: x86/xen: Use 32-bit locked ops in kvm_xen_inject_pending_events()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The 64-bit path in kvm_xen_inject_pending_events() uses 'lock orq' and
+'lock andq' on vcpu_info->evtchn_pending_sel. If the vcpu_info was
+registered with only 4-byte alignment (valid for a 32-bit guest that
+later switches to 64-bit mode), this 8-byte locked operation can cause
+split-lock #AC exceptions on hosts with split_lock_detect=fatal.
+
+Use the original 64-bit atomics when the vcpu_info is 8-byte aligned
+(the common case). Fall back to a 32-bit loop for the rare case where
+vcpu_info was registered at only 4-byte alignment. For compat guests
+(32-bit evtchn_pending_sel) the loop executes once. For native guests
+it executes a second iteration only if the high half has bits to
+deliver.
+
+Fixes: 14243b387137 ("KVM: x86/xen: Add KVM_IRQ_ROUTING_XEN_EVTCHN and event channel delivery")
+Reported-by: sashiko-bot@kernel.org
+Assisted-by: Kiro:claude-opus-4.6-1m
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/xen.c | 63 ++++++++++++++++++++++++++++++++--------------
+ 1 file changed, 44 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v1] vsock/virtio: rework MSG_ZEROCOPY flag handling
+Author: Arseniy Krasnov <avkrasnov@rulkc.org>
+
+Logically it was based on TCP implementation, so to make further
+support easier, rewrite it in the TCP way.
+
+Signed-off-by: Arseniy Krasnov <avkrasnov@rulkc.org>
+---
+ net/vmw_vsock/virtio_transport_common.c | 64 ++++++++++++-------------
+ 1 file changed, 32 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 3/3] KVM: x86: add DSM APIC forwarding ioctls
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Add userspace ioctls that apply forwarded APIC, x2APIC ICR, and APIC
+base updates on a target vCPU.
+
+Signed-off-by: muliang.shou <muliang.shou@sjtu.edu.cn>
+---
+ arch/x86/kvm/lapic.c     |  8 ++++++++
+ arch/x86/kvm/lapic.h     |  4 ++++
+ arch/x86/kvm/x86.c       | 40 ++++++++++++++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h | 27 +++++++++++++++++++++++++++
+ 4 files changed, 79 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 2/3] KVM: x86: forward LAPIC ICR writes to userspace
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Intercept LAPIC ICR/ICR2 MMIO writes, record the forwarding payload, and
+return to userspace with KVM_EXIT_DSM_SEND_IRQ when the pending request is
+processed.
+
+Signed-off-by: muliang.shou <muliang.shou@sjtu.edu.cn>
+---
+ arch/x86/kvm/lapic.c | 30 ++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.c   | 14 ++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 1/3] KVM: x86: add DSM IRQ forwarding ABI and state
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Add the Kconfig knob, request id, per-vCPU state, and userspace ABI
+needed to report DSM IRQ forwarding events to userspace.
+
+Signed-off-by: muliang.shou <muliang.shou@sjtu.edu.cn>
+---
+ arch/x86/include/asm/kvm_host.h | 17 +++++++++++++++++
+ arch/x86/kvm/Kconfig            | 12 ++++++++++++
+ include/uapi/linux/kvm.h        | 33 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 61 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 0/3] GiantVM based on shared memory
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Changes since v1:
+- Mark the series as RFC, as the design is still under discussion.
+- No functional changes.
+
+GiantVM is a many-to-one virtualization framework built atop QEMU/KVM.
+
+Many-to-one virtualization aims to aggregate commodity servers into one
+logical machine while preserving the standard VM abstraction based on
+Distributed Shared Memory (DSM) as pioneered by Prof. Kai Li back in 1986.
+
+As modern AI, big-data, and scientific workloads crave VMs whose CPU and
+memory demands exceed the capacity of a single physical server, the old
+dilemma strikes back. Scaling-up is increasingly costly due to diminishing
+returns, especially the memory wall, while scale-out clusters often require
+application refactoring and introduce message-passing overhead.
+
+GiantVM is our attempt to answer the following question: if a leopard can't
+change its spot, can we strike a balance between scaling-out and scaling-up
+to draw on the best of both worlds?
+
+We feel confident to propose our solution that aggregates multiple
+physical hosts into a single virtual machine while keeping the guest OS
+and applications unmodified.
+
+1. Key benefits
+===================
+
+The architecture provides several key benefits for memory-intensive
+services and HPC applications:
+-- Simplified programming model. GiantVM provides a shared-memory
+abstraction, so
+developers can access shared data almost like local memory.
+-- Higher resource utilization and scalable memory capacity.
+-- Transparent data sharing and migration.
+-- Integration with RDMA, CXL, UnifiedBus, and other modern high-speed
+interconnects for more performance optimization (Under active development;
+see Roadmap section).
+
+2. Architecture
+===============
+The architecture is shown below in monospace text:
+
++---------------------------------------------------+
+|                     Guest OS                      |
++-------------------------+-------------------------+
+                          |
++-------------------------V-------------------------+
+|                       Hosts                       |
+|                                                   |
+|       +-----------------------------------+       |
+|       |            Userspace DSM          |       |
+|       +----+-------------------------+----+       |
+|            |                         |            |
+|            V                         V            |
+|  +-------------------+     +-------------------+  |
+|  |       QEMU        |     |       QEMU        |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  |  |    vCPU     |  |     |  |    vCPU     |  |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  |  |  IO device  |  |     |  |  IO device  |  |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  +-------------------+     +-------------------+  |
+|  |      Host OS      |     |      Host OS      |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  |  |     KVM     |  |     |  |     KVM     |  |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  +-------------------+     +-------------------+  |
+|  |     Hardware      |     |     Hardware      |  |
+|  +-------------------+     +-------------------+  |
+|         Node 0                    Node 1          |
++---------------------------------------------------+
+
+This series provides the foundational KVM APIC-forwarding support needed 
+for the GiantVM shared-memory startup path. 
+
+It implements a concise IRQ forwarding interface that lets KVM 
+hand selected LAPIC interrupt state to userspace, where the GiantVM 
+runtime can route and reinject the interrupt for the target vCPU.
+This allows guest APIC/IPI coordination to work across nodes during 
+boot and runtime.
+
+The series also includes UAPI definitions for related DSM APIC exits and
+reinjection helpers that are expected by the userspace runtime. 
+
+3. Implementation
+=================
+This series adds the interface through the following pieces:
+
+  - Adds CONFIG_KVM_DSM_IRQ_FORWARD as an Intel KVM build option.
+  - Adds KVM_REQ_DSM_IRQ_FORWARD and per-vCPU storage for one pending
+    forwarded LAPIC interrupt record.
+  - Extends KVM UAPI definitions with DSM exit reasons and struct kvm_run
+    metadata used by the forwarding path.
+  - Intercepts LAPIC MMIO writes to APIC_ICR and APIC_ICR2, records the
+    written register, value, and derived destination APIC ID, then raises a
+    KVM request.
+  - Handles the request in vcpu_enter_guest() by exiting to userspace with
+    KVM_EXIT_DSM_SEND_IRQ and filling the lapic_irq fields in struct
+    kvm_run.
+  - Adds VM ioctls for reinjecting DSM IPI, x2APIC ICR, and APIC base state
+    from the GiantVM userspace runtime back into KVM.
+
+The LAPIC MMIO path currently records APIC_ICR/APIC_ICR2 writes and leaves
+the policy decision, including whether the destination is remote, to
+userspace. 
+
+4. Patch Layout
+===============
+  01: Kconfig, KVM request, per-vCPU state, and UAPI definitions
+  02: LAPIC ICR/ICR2 MMIO interception and userspace exit handling
+  03: VM ioctls for applying forwarded APIC, x2APIC ICR, and APIC base
+      state
+
+You can opt-in the framework by selecting CONFIG_KVM_DSM_IRQ_FORWARD as
+a kernel compile flag in e.g. menuconfig.
+
+5. Performance Data
+===================
+CoreMark was run on VMs configured with different vCPU counts to compare
+the GiantVM shared-memory setup with a regular VM baseline.  Each VM was
+configured with 64 GiB of memory, and the tested vCPU counts were 4, 8,
+16, 32, 64, 72, and 128.  The reported values are CoreMark scores, where
+higher is better.
+
+  Cores  GVM score  GVM speedup  VM score  VM speedup  GVM/VM
+  4      98783      1.00x        101032    1.00x       97.77%
+  8      205642     2.08x        210817    2.09x       97.55%
+  16     390974     3.96x        400500    3.96x       97.62%
+  32     744099     7.53x        800328    7.92x       92.97%
+  64     1477804    14.96x       1629535   16.13x      90.69%
+  72     1511546    15.30x       1810068   17.92x      83.51%
+  128    2531447    25.63x       2556548   25.30x      99.02%
+
+Across these CoreMark runs, the GiantVM shared-memory configuration
+achieved 83.51% to 99.02% of the regular VM score. Relative to its
+4-core result, GiantVM scaled to 25.63x at 128 cores, while the regular
+VM scaled to 25.30x.
+
+6. Scope
+========
+Thanks for your interest in our humble project!
+
+We wish to publish a functional core architecture and gather initial
+feedback on the high-level design and overall approach in this Request
+for Comments(RFC) submission. Specific implementation and optimization
+details are curated in our GitHub repo on a rolling basis.
+
+The patch represents a foundational framework for GiantVM support. It
+provides a basic infrastructure and rudimentary resource sharing
+mechanisms. We welcome the community to leverage this initial groundwork
+and build solutions on their own. Advanced features such as DSM memory
+management and software coherence framework is planned for future work.
+
+Testing is primarily arranged towards running benchmarks on lab settings.
+Uncharted forest bring out the best of men and the meanest of bugs during
+summer time. Community testing and feedback on various hardware setup,
+configurations, and workloads would be greatly appreciated!
+
+Setup and demo instructions are available in the accompanying installation
+guide.
+
+Link: https://github.com/GiantVM/GVM-kernel/blob/shared-memory/v7.1-rc6/README.md
+
+7. Roadmap
+==============
+Future GiantVM work includes the following items:
+
+  - GiantVM over TCP.  This implementation is not
+    included in this submission, but is available in the GiantVM QEMU and
+    kernel repositories.
+
+Link: https://github.com/GiantVM/GVM-qemu
+Link: https://github.com/GiantVM/GVM-kernel
+  - RDMA support, completed and coming soon.
+  - CXL support, completed and coming soon.
+  - Huawei UnifiedBus support, completed and under testing.
+  - ARM architecture support, under active development and close to
+    completion.
+  - RISC-V support, planned.
+
+9. Project References
+=====================
+[General Info]
+  Organization: Trusted Cloud Group, Institute of Scalable Computing,
+                Shanghai Jiao Tong University
+  Website:
+Link: https://giantvm.github.io/
+  Repository:
+Link: https://github.com/GiantVM
+
+[Publications]
+  - Xingguo Jia, Jin Zhang, Boshi Yu, Xingyue Qian, Zhengwei Qi,
+    Haibing Guan:
+    "GiantVM: A Novel Distributed Hypervisor for Resource Aggregation with
+    DSM-aware Optimizations." ACM Trans. Archit. Code Optim. 19(2):
+    20:1-20:27 (2022).
+  - Jin Zhang, Zhuocheng Ding, Yubin Chen, Xingguo Jia, Boshi Yu,
+    Zhengwei Qi, Haibing Guan: "GiantVM: a type-II hypervisor implementing
+    many-to-one virtualization." VEE 2020: 30-44.
+
+[KVM Forum Presentations]
+  - KVM Forum 2025: "GiantVM: A Many-to-one Virtualization System Built
+    Atop the QEMU/KVM Hypervisor"
+Link: https://pretalx.com/kvm-forum-2025/talk/MDGYZG/
+  - KVM Forum 2018: "Distributed QEMU" by Yubin Chen & Zhuocheng Ding
+    (Video)
+Link: https://www.youtube.com/watch?v=GprmhYU1M8Q
+
+[Citations]
+  - Kai Li: "Shared virtual memory on loosely coupled multiprocessors."
+  PhD Dissertation, Yale University, 1986.
+
+10. Acknowledgments
+===================
+This work builds on a multi-year research and engineering effort.  We thank
+the following contributors for their work across different phases of the
+project:
+
+[Initial Project Development - Linux 4.19 era]
+  Ding Zhuocheng <tcbbd@sjtu.edu.cn>
+  Chen Yubin <binsschen@sjtu.edu.cn>
+  Zhang Jin <jzhang3002@sjtu.edu.cn>
+  Wang Yun <yunwang94@sjtu.edu.cn>
+  Ma Jiacheng <jiacheng.ma@amd.com>
+  Yu Boshi <201608ybs@sjtu.edu.cn>
+  Jia Xingguo <jiaxg1998@sjtu.edu.cn>
+  Chen Weiye <vorringer@sjtu.edu.cn>
+  Wu Chenggang <wuchenggang@sjtu.edu.cn>
+  Xiang Yuxin <xiangyuxin@sjtu.edu.cn>
+
+[Modernization, Upstream Development, and Active Maintenance]
+  Xiong Tianlei <qmyyxtl@sjtu.edu.cn>
+  Xu Kailiang <xukl2019@sjtu.edu.cn>
+  Xue Songtao <xxxlhhxz@sjtu.edu.cn>
+  Shou Muliang <muliang.shou@sjtu.edu.cn>
+  Han Fengze <adoniswhite926@gmail.com>
+  Ren Luobin <renluobin0257@gmail.com>
+
+---
+muliang.shou (3):
+  KVM: x86: add DSM IRQ forwarding ABI and state
+  KVM: x86: forward LAPIC ICR writes to userspace
+  KVM: x86: add DSM APIC forwarding ioctls
+
+ arch/x86/include/asm/kvm_host.h | 17 ++++++++++
+ arch/x86/kvm/Kconfig            | 12 +++++++
+ arch/x86/kvm/lapic.c            | 38 +++++++++++++++++++++
+ arch/x86/kvm/lapic.h            |  4 +++
+ arch/x86/kvm/x86.c              | 54 +++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h        | 60 ++++++++++++++++++++++++++++++++-
+ 6 files changed, 184 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/3] GiantVM based on shared memory
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+GiantVM is a many-to-one virtualization framework built atop QEMU/KVM.
+
+Many-to-one virtualization aims to aggregate commodity servers into one
+logical machine while preserving the standard VM abstraction based on
+Distributed Shared Memory (DSM) as pioneered by Prof. Kai Li back in 1986.
+
+As modern AI, big-data, and scientific workloads crave VMs whose CPU and
+memory demands exceed the capacity of a single physical server, the old
+dilemma strikes back. Scaling-up is increasingly costly due to diminishing
+returns, especially the memory wall, while scale-out clusters often require
+application refactoring and introduce message-passing overhead.
+
+GiantVM is our attempt to answer the following question: if a leopard can't
+change its spot, can we strike a balance between scaling-out and scaling-up
+to draw on the best of both worlds?
+
+We feel confident to propose our solution that aggregates multiple
+physical hosts into a single virtual machine while keeping the guest OS
+and applications unmodified.
+
+1. Key benefits
+===================
+
+The architecture provides several key benefits for memory-intensive
+services and HPC applications:
+-- Simplified programming model. GiantVM provides a shared-memory
+abstraction, so
+developers can access shared data almost like local memory.
+-- Higher resource utilization and scalable memory capacity.
+-- Transparent data sharing and migration.
+-- Integration with RDMA, CXL, UnifiedBus, and other modern high-speed
+interconnects for more performance optimization (Under active development;
+see Roadmap section).
+
+2. Architecture
+===============
++---------------------------------------------------+
+|                     Guest OS                      |
++-------------------------+-------------------------+
+                          |
++-------------------------V-------------------------+
+|                       Hosts                       |
+|                                                   |
+|       +-----------------------------------+       |
+|       |            Userspace DSM          |       |
+|       +----+-------------------------+----+       |
+|            |                         |            |
+|            V                         V            |
+|  +-------------------+     +-------------------+  |
+|  |       QEMU        |     |       QEMU        |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  |  |    vCPU     |  |     |  |    vCPU     |  |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  |  |  IO device  |  |     |  |  IO device  |  |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  +-------------------+     +-------------------+  |
+|  |      Host OS      |     |      Host OS      |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  |  |     KVM     |  |     |  |     KVM     |  |  |
+|  |  +-------------+  |     |  +-------------+  |  |
+|  +-------------------+     +-------------------+  |
+|  |     Hardware      |     |     Hardware      |  |
+|  +-------------------+     +-------------------+  |
+|         Node 0                    Node 1          |
++---------------------------------------------------+
+
+This series provides the foundational KVM APIC-forwarding support needed 
+for the GiantVM shared-memory startup path. 
+
+It implements a concise IRQ forwarding interface that lets KVM 
+hand selected LAPIC interrupt state to userspace, where the GiantVM 
+runtime can route and reinject the interrupt for the target vCPU.
+This allows guest APIC/IPI coordination to work across nodes during 
+boot and runtime.
+
+The series also includes UAPI definitions for related DSM APIC exits and
+reinjection helpers that are expected by the userspace runtime. 
+
+3. Implementation
+=================
+This series adds the interface through the following pieces:
+
+  - Adds CONFIG_KVM_DSM_IRQ_FORWARD as an Intel KVM build option.
+  - Adds KVM_REQ_DSM_IRQ_FORWARD and per-vCPU storage for one pending
+    forwarded LAPIC interrupt record.
+  - Extends KVM UAPI definitions with DSM exit reasons and struct kvm_run
+    metadata used by the forwarding path.
+  - Intercepts LAPIC MMIO writes to APIC_ICR and APIC_ICR2, records the
+    written register, value, and derived destination APIC ID, then raises a
+    KVM request.
+  - Handles the request in vcpu_enter_guest() by exiting to userspace with
+    KVM_EXIT_DSM_SEND_IRQ and filling the lapic_irq fields in struct
+    kvm_run.
+  - Adds VM ioctls for reinjecting DSM IPI, x2APIC ICR, and APIC base state
+    from the GiantVM userspace runtime back into KVM.
+
+The LAPIC MMIO path currently records APIC_ICR/APIC_ICR2 writes and leaves
+the policy decision, including whether the destination is remote, to
+userspace. 
+
+4. Patch Layout
+===============
+  01: Kconfig, KVM request, per-vCPU state, and UAPI definitions
+  02: LAPIC ICR/ICR2 MMIO interception and userspace exit handling
+  03: VM ioctls for applying forwarded APIC, x2APIC ICR, and APIC base
+      state
+
+You can opt-in the framework by selecting CONFIG_KVM_DSM_IRQ_FORWARD as
+a kernel compile flag in e.g. menuconfig.
+
+5. Performance Data
+===================
+CoreMark was run on VMs configured with different vCPU counts to compare
+the GiantVM shared-memory setup with a regular VM baseline.  Each VM was
+configured with 64 GiB of memory, and the tested vCPU counts were 4, 8,
+16, 32, 64, 72, and 128.  The reported values are CoreMark scores, where
+higher is better.
+
+  Cores  GVM score  GVM speedup  VM score  VM speedup  GVM/VM
+  4      98783      1.00x        101032    1.00x       97.77%
+  8      205642     2.08x        210817    2.09x       97.55%
+  16     390974     3.96x        400500    3.96x       97.62%
+  32     744099     7.53x        800328    7.92x       92.97%
+  64     1477804    14.96x       1629535   16.13x      90.69%
+  72     1511546    15.30x       1810068   17.92x      83.51%
+  128    2531447    25.63x       2556548   25.30x      99.02%
+
+Across these CoreMark runs, the GiantVM shared-memory configuration
+achieved 83.51% to 99.02% of the regular VM score. Relative to its
+4-core result, GiantVM scaled to 25.63x at 128 cores, while the regular
+VM scaled to 25.30x.
+
+6. Scope
+========
+Thanks for your interest in our humble project!
+
+We wish to publish a functional core architecture and gather initial
+feedback on the high-level design and overall approach in this Request
+for Comments(RFC) submission. Specific implementation and optimization
+details are curated in our GitHub repo on a rolling basis.
+
+The patch represents a foundational framework for GiantVM support. It
+provides a basic infrastructure and rudimentary resource sharing
+mechanisms. We welcome the community to leverage this initial groundwork
+and build solutions on their own. Advanced features such as DSM memory
+management and software coherence framework is planned for future work.
+
+Testing is primarily arranged towards running benchmarks on lab settings.
+Uncharted forest bring out the best of men and the meanest of bugs during
+summer time. Community testing and feedback on various hardware setup,
+configurations, and workloads would be greatly appreciated!
+
+Setup and demo instructions are available in the accompanying installation
+guide.
+
+Link: https://github.com/GiantVM/GVM-kernel/blob/shared-memory/v7.1-rc6/README.md
+
+7. Roadmap
+==============
+Future GiantVM work includes the following items:
+
+  - GiantVM over TCP.  This implementation is not
+    included in this submission, but is available in the GiantVM QEMU and
+    kernel repositories.
+
+Link: https://github.com/GiantVM/GVM-qemu
+Link: https://github.com/GiantVM/GVM-kernel
+  - RDMA support, completed and coming soon.
+  - CXL support, completed and coming soon.
+  - Huawei UnifiedBus support, completed and under testing.
+  - ARM architecture support, under active development and close to
+    completion.
+  - RISC-V support, planned.
+
+9. Project References
+=====================
+[General Info]
+  Organization: Trusted Cloud Group, Institute of Scalable Computing,
+                Shanghai Jiao Tong University
+  Website:
+Link: https://giantvm.github.io/
+  Repository:
+Link: https://github.com/GiantVM
+
+[Publications]
+  - Xingguo Jia, Jin Zhang, Boshi Yu, Xingyue Qian, Zhengwei Qi,
+    Haibing Guan:
+    "GiantVM: A Novel Distributed Hypervisor for Resource Aggregation with
+    DSM-aware Optimizations." ACM Trans. Archit. Code Optim. 19(2):
+    20:1-20:27 (2022).
+  - Jin Zhang, Zhuocheng Ding, Yubin Chen, Xingguo Jia, Boshi Yu,
+    Zhengwei Qi, Haibing Guan: "GiantVM: a type-II hypervisor implementing
+    many-to-one virtualization." VEE 2020: 30-44.
+
+[KVM Forum Presentations]
+  - KVM Forum 2025: "GiantVM: A Many-to-one Virtualization System Built
+    Atop the QEMU/KVM Hypervisor"
+Link: https://pretalx.com/kvm-forum-2025/talk/MDGYZG/
+  - KVM Forum 2018: "Distributed QEMU" by Yubin Chen & Zhuocheng Ding
+    (Video)
+Link: https://www.youtube.com/watch?v=GprmhYU1M8Q
+
+[Citations]
+  - Kai Li: "Shared virtual memory on loosely coupled multiprocessors."
+  PhD Dissertation, Yale University, 1986.
+
+10. Acknowledgments
+===================
+This work builds on a multi-year research and engineering effort.  We thank
+the following contributors for their work across different phases of the
+project:
+
+[Initial Project Development - Linux 4.19 era]
+  Ding Zhuocheng <tcbbd@sjtu.edu.cn>
+  Chen Yubin <binsschen@sjtu.edu.cn>
+  Zhang Jin <jzhang3002@sjtu.edu.cn>
+  Wang Yun <yunwang94@sjtu.edu.cn>
+  Ma Jiacheng <jiacheng.ma@amd.com>
+  Yu Boshi <201608ybs@sjtu.edu.cn>
+  Jia Xingguo <jiaxg1998@sjtu.edu.cn>
+  Chen Weiye <vorringer@sjtu.edu.cn>
+  Wu Chenggang <wuchenggang@sjtu.edu.cn>
+  Xiang Yuxin <xiangyuxin@sjtu.edu.cn>
+
+[Modernization, Upstream Development, and Active Maintenance]
+  Xiong Tianlei <qmyyxtl@sjtu.edu.cn>
+  Xu Kailiang <xukl2019@sjtu.edu.cn>
+  Xue Songtao <xxxlhhxz@sjtu.edu.cn>
+  Shou Muliang <muliang.shou@sjtu.edu.cn>
+  Han Fengze <adoniswhite926@gmail.com>
+  Ren Luobin <renluobin0257@gmail.com>
+
+---
+muliang.shou (3):
+  KVM: x86: add DSM IRQ forwarding ABI and state
+  KVM: x86: forward LAPIC ICR writes to userspace
+  KVM: x86: add DSM APIC forwarding ioctls
+
+ arch/x86/include/asm/kvm_host.h | 17 ++++++++++
+ arch/x86/kvm/Kconfig            | 12 +++++++
+ arch/x86/kvm/lapic.c            | 38 +++++++++++++++++++++
+ arch/x86/kvm/lapic.h            |  4 +++
+ arch/x86/kvm/x86.c              | 54 +++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h        | 60 ++++++++++++++++++++++++++++++++-
+ 6 files changed, 184 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/3] KVM: x86: add DSM APIC forwarding ioctls
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Add userspace ioctls that apply forwarded APIC, x2APIC ICR, and APIC
+base updates on a target vCPU.
+
+Signed-off-by: muliang.shou <muliang.shou@sjtu.edu.cn>
+---
+ arch/x86/kvm/lapic.c     |  8 ++++++++
+ arch/x86/kvm/lapic.h     |  4 ++++
+ arch/x86/kvm/x86.c       | 40 ++++++++++++++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h | 27 +++++++++++++++++++++++++++
+ 4 files changed, 79 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 2/3] KVM: x86: forward LAPIC ICR writes to userspace
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Intercept LAPIC ICR/ICR2 MMIO writes, record the forwarding payload, and
+return to userspace with KVM_EXIT_DSM_SEND_IRQ when the pending request is
+processed.
+
+Signed-off-by: muliang.shou <muliang.shou@sjtu.edu.cn>
+---
+ arch/x86/kvm/lapic.c | 30 ++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.c   | 14 ++++++++++++++
+ 2 files changed, 44 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/3] KVM: x86: add DSM IRQ forwarding ABI and state
+Author: muliang.shou <muliang.shou@sjtu.edu.cn>
+
+Add the Kconfig knob, request id, per-vCPU state, and userspace ABI
+needed to report DSM IRQ forwarding events to userspace.
+
+Signed-off-by: muliang.shou <muliang.shou@sjtu.edu.cn>
+---
+ arch/x86/include/asm/kvm_host.h | 17 +++++++++++++++++
+ arch/x86/kvm/Kconfig            | 12 ++++++++++++
+ include/uapi/linux/kvm.h        | 33 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 61 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+=?UTF-8?B?wqBbUEFUQ0ggdjMgMy8zXSBSSVNDLVY6IEtWTTogUmVjb3ZlciBnc3RhZ2UgaHVnZSBwYWdlIG1hcHBpbmdzIGR1cmluZyBkaXNhYmxlLWRpcnR5LWxvZw==?=
+Author: wang.yechao255 <wang.yechao255@zte.com.cn>
+
+
+When dirty logging is enabled, the gstage mappings are split into
+4K pages to track dirty pages. If the migration fails or is canceled,
+in order to keep the VM's performance consistent with that before
+dirty logging was enabled, the gstage huge page mappings are recoverd
+when dirty logging is disabled.
+
+With this patch, dirty_log_perf_test shows a decrease in the number of
+vCPU faults:
+
+$ perf stat -e kvm:kvm_page_fault \
+/dirty_log_perf_test -s anonymous_hugetlb_1gb -v 1 -e -b 1G
+
+Before: 524,819      kvm:kvm_page_fault
+After : 262,685      kvm:kvm_page_fault
+
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/include/asm/kvm_gstage.h |   4 ++
+ arch/riscv/kvm/gstage.c             |  61 ++++++++++++++++
+ arch/riscv/kvm/mmu.c                | 105 ++++++++++++++++++++++++++++
+ 3 files changed, 170 insertions(+)
+
+----------------------------------------------------------------------
+
+=?UTF-8?B?W1BBVENIIHYzIDIvM10gUklTQy1WOiBLVk06IGFkZCB0cmFjZXBvaW50IGZvciBndWVzdCBwYWdlIGZhdWx0c8KgwqA=?=
+Author: wang.yechao255 <wang.yechao255@zte.com.cn>
+
+
+Add the kvm_page_fault event tracepoint to count the number of KVM
+guest page faults.
+
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/kvm/trace.h     | 25 +++++++++++++++++++++++++
+ arch/riscv/kvm/vcpu_exit.c |  3 +++
+ 2 files changed, 28 insertions(+)
+
+----------------------------------------------------------------------
+
+=?UTF-8?B?W1BBVENIIHYzIDEvM10gUklTQy1WOiBLVk06IFJlZmFjdG9yIGt2bV9hcmNoX2NvbW1pdF9tZW1vcnlfcmVnaW9uKCk=?=
+Author: wang.yechao255 <wang.yechao255@zte.com.cn>
+
+
+Refactor kvm_arch_commit_memory_region() as a preparation for a future
+commit to look cleaner and more understandable. Also, it looks more
+like its arm64 counterparts.
+
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/kvm/mmu.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+=?UTF-8?B?wqBbUEFUQ0ggdjMgMC8zXSBSSVNDLVY6IEtWTTogSHVnZSBwYWdlIHJlY292ZXJ5IGR1cmluZyBkaXNhYmxlLWRpcnR5LWxvZw==?=
+Author: wang.yechao255 <wang.yechao255@zte.com.cn>
+
+
+When dirty logging is enabled, the gstage mappings are split into
+4K pages to track dirty pages. If the migration fails or is canceled,
+in order to keep the VM's performance consistent with that before
+dirty logging was enabled, we need to recover the gstage huge page mappings
+when dirty logging is disabled.
+
+With this series, dirty_log_perf_test shows a decrease in the number of
+vCPU faults:
+
+$ perf stat -e kvm:kvm_page_fault \
+/dirty_log_perf_test -s anonymous_hugetlb_1gb -v 1 -e -b 1G
+
+Before: 524,819      kvm:kvm_page_fault
+After : 263,211      kvm:kvm_page_fault
+
+Changes in v3:
+ - Rebased on https://github.com/kvm-riscv/linux/tree/riscv_kvm_queue
+ - Add support to recover 1GB mappings for gstage.
+ - Refactor kvm_arch_commit_memory_region to be identical to arm64.
+ (sashiko AI Reviews)
+ - Scan the child page table for the first valid leaf PTE to recover.
+ - Add the memslot boundaries check when recover hugepages.
+ - Move the cond_resched_lock to the start loop iteration.
+ - The kvm_page_fault tracepoint be placed before the conditional block.
+ - Remove the fault_supports_gstage_huge_mapping check.
+
+Changes in v2:
+ - Rebased on Linux v7.1-rc1.
+ - Skip recovering huge pte if the first child pte is not leaf.
+ - Link to v2:
+ https://lore.kernel.org/linux-riscv/20260429173002565bdp1o7P0bvOs6yTz64yNx@zte.com.cn/
+
+ - Link to v1:
+ https://lore.kernel.org/linux-riscv/20260407171052241tmZDFGusMP_wlEsBVVtJo@zte.com.cn/
+
+Wang Yechao (3):
+  RISC-V: KVM: Refactor kvm_arch_commit_memory_region()
+  RISC-V: KVM: add tracepoint for guest page faults
+  RISC-V: KVM: Recover gstage huge page mappings during
+    disable-dirty-log
+
+ arch/riscv/include/asm/kvm_gstage.h |   4 +
+ arch/riscv/kvm/gstage.c             |  61 +++++++++++++++
+ arch/riscv/kvm/mmu.c                | 112 +++++++++++++++++++++++++++-
+ arch/riscv/kvm/trace.h              |  25 +++++++
+ arch/riscv/kvm/vcpu_exit.c          |   3 +
+ 5 files changed, 204 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 4a346fc8e to 2c80cb8ea
+KVM mailing list update from 4a346fc8e to 2c80cb8ea
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     30 nutanix.com
+      4 arm.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     21  Khushit Shah <khushit.shah@nutanix.com>
+      9  Shaju Abraham <shaju.abraham@nutanix.com>
+      4  Wei-Lin Chang <weilin.chang@arm.com>
+      1  Hyunwoo Kim <imv4bel@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: arm64: Fix block mapping validity check in stage-1 walker
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+For the 64K granule size, FEAT_LPA determines whether a level 1 mapping
+is allowed. Using the result of has_52bit_pa() is too restrictive, as it
+also checks the selected output addressi size in TCR.(I)PS. Fix it by
+only checking FEAT_LPA.
+
+Fixes: 5da3a3b27a01 ("KVM: arm64: Expand valid block mappings to FEAT_LPA/LPA2 support")
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+---
+ arch/arm64/kvm/at.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] KVM: arm64: Remove superfluous aligning of gfn for dirty logging
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Stage-2 mapping size is forced to PAGE_SIZE when dirty logging is
+enabled for a memslot, therefore we don't need to align it down to
+a possibly larger vma size or THP adjusted size, they won't happen.
+
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: arm64: Replace memslot_is_logging() with kvm_slot_dirty_track_enabled()
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+When checking whether a memslot has dirty logging enabled, the
+KVM_MEM_LOG_DIRTY_PAGES flag is the source of truth. Previously we were
+using memslot_is_logging() which only tests dirty bitmap and did not
+consider dirty ring. This was not detected because
+KVM_CAP_DIRTY_LOG_RING_WITH_BITMAP was introduced together with KVM
+arm64 dirty ring, and users need to enable it to ensure dirty
+information is not lost for the case of VGIC LPI/ITS table changes.
+
+Fix this by using kvm_slot_dirty_track_enabled() instead which checks
+KVM_MEM_LOG_DIRTY_PAGES.
+
+Note that memslot_is_logging() also treats a memslot as not logging if
+KVM_MEM_READONLY is set, hence a memslot with both dirty logging and
+read only would be seen as not logging for memslot_is_logging(), but
+logging for kvm_slot_dirty_track_enabled(). This allows a read only
+mapping of size > PAGE_SIZE to be built when memslot_is_logging() is
+used, leading to a better read performance compared to
+kvm_slot_dirty_track_enabled(). However memslots that have both
+KVM_MEM_LOG_DIRTY_PAGES and KVM_MEM_READONLY set do not really make
+sense as dirty logging is essentially nop for a read only memslot, so
+this shouldn't affect real workloads much.
+
+Fixes: 9cb1096f8590 ("KVM: arm64: Enable ring-based dirty memory tracking")
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+---
+It took me a long investigation to acquire the context needed to
+understand this change, however the reason for this problem not being
+detected is an educated guess. Please let me know if this is wrong or
+if there are other issues, thanks!
+
+ arch/arm64/kvm/mmu.c | 11 +++--------
+ 1 file changed, 3 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: arm64: Small dirty logging fixes/cleanups
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Hi,
+
+These are two minor fixes/cleanups I found when reading the code.
+Although the diff are small the first patch has some implications.
+Please view the patches for more detail.
+
+Thanks,
+
+Wei-Lin Chang (2):
+  KVM: arm64: Replace memslot_is_logging() with
+    kvm_slot_dirty_track_enabled()
+  KVM: arm64: Remove superfluous aligning of gfn for dirty logging
+
+ arch/arm64/kvm/mmu.c | 20 +++++++-------------
+ 1 file changed, 7 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 28/29] target/arm: supported-values and blockers for CCSIDR cache properties
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+As CCSIDR banks are not backed by standard idregs[], add special
+handling for them to hook up supported values and blockers for them.
+
+KVM rejects CCSIDR[] linesize if it is < host CTR_EL0.*MinLineSize.
+Report such case in qmp's cpu-definition blockers using
+arm_ccsidr_get_blockers.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models.c |   6 +-
+ target/arm/arm-cpu-props.c  | 154 ++++++++++++++++++++++++++++++++----
+ target/arm/arm-cpu-props.h  |   5 ++
+ 3 files changed, 147 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 24/29] target/arm: Report "off" for ID fields gated by vCPU init flags
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+When QEMU queries supported CPU properties via KVM, it uses a scratch
+vCPU initialized with all host-supported features (like SVE and PAuth).
+
+KVM exposes the corresponding ID register fields (e.g.,
+ID_AA64ISAR1_EL1.APA) as read-only, the supported values only shows the
+enabled host value (e.g., "fpaccombine") and omits "off". This will lead
+into falsely flagging a model as blocked as the features can be masked
+by not passing those flags.
+
+This commit introduces arm_field_supports_off_via_vcpu_flags() at the
+ID regs level to identify such fields. For these fields, even if KVM
+reports them as non-writable, we explicitly append "off" to the list of
+supported values if the host value is non-zero.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-idregs.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 16/29] target/arm: skip GIC, COPDBG and PMU fields during KVM writeback
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+A few ID register fields must be skipped both during writeback to KVM
+and during safe-rule validation:
+
+-  ID_AA64PFR0.GIC and ID_PFR1.GIC are owned by KVM's vGIC device:
+   when QEMU creates KVM_DEV_TYPE_ARM_VGIC_V3, the kernel sets GIC=IMP
+   in the VM's ID registers. named CPU model should not tamper with this
+   field. Hence, skip this fields during writeback and during
+   validation.
+-  Skip ID_DFR0.PMU when the field is not writable on the host, since
+   KVM populates it even for AArch64-only guests but does not expose it
+   as writable.
+ - ID_AA64DFR0_EL1.DebugVer (COPDBG) is always skipped because KVM
+   refuses writes of 0. Without this, realizing a model that does not
+   support AArch32 guests on a host that does support them fails.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-idregs.c | 47 +++++++++++++++++++++++++++++++++++++++++
+ target/arm/cpu-idregs.h |  8 +++++++
+ target/arm/kvm.c        | 23 ++++++++++++++++++++
+ 3 files changed, 78 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 02/29] target/arm: Add ID Register field descriptions in cpu-idregs.h.inc
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Add a declarative description of every architecturally defined field in
+the Arm64 ID registers in cpu-idregs.h.inc file. This file will be
+included multiple times with different definitions to build:
+    - per-field arch values,
+    - per-register field descriptor arrays,
+    - arm-idregs[] table etc.
+
+The architecturally defined values for each ID register field is
+extracted from 6.18 kernel's arch/arm64/tools/sysreg file.
+
+The safe-value tags and default values are derived from the kernel's
+ftr_bits array.
+
+Aarch32 ID registers are added with dummy field so they can be
+defaulted to 0 by later commits.
+
+X-macro structure:
+IDREG_START(REG)
+IDREG_FIELD_START(REG, FIELD, SHIFT, LENGTH, SAFE_RULE, DEFAULT_VAL)
+IDREG_FIELD_ARCH_VAL(VALUE, NAME)
+...
+IDREG_FIELD_END(REG, FIELD)
+...
+IDREG_END(REG)
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-idregs.h.inc | 1807 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 1807 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 21/29] target/arm/qmp: add named models and properties to cpu-model-expansion
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Update qmp_query_cpu_model_expansion() to include and process the new
+arm_cpu_props and composite properties under KVM. Also, allow expansion
+of the new named CPU models themselves.
+
+Process named model properties separately from standard advertised
+features to avoid double processing of properties like sve/pauth.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-qmp-cmds.c | 71 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 70 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 22/29] target/arm/kvm: introduce kvm_arm_get_host_isar helper
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Introduce kvm_arm_get_host_isar() to provide scratch vCPU probed host
+isar. Will be used in future commits.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/kvm-stub.c | 5 +++++
+ target/arm/kvm.c      | 5 +++++
+ target/arm/kvm_arm.h  | 4 ++++
+ 3 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 12/29] target/arm/kvm: Writeback modified ID registers to KVM
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+After named CPU model is realized or host model is customized,
+writeback the resulting cpu->isar.idregs[] back to KVM. Warns if
+any non-writable bits differ.
+
+For this:
+ - Fetch and maintain writable mask per ID register during scratch
+   vCPU creation.
+ - Try to read all ID registers values, so we don't writeback any
+   stale value to KVM for -cpu host.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-idregs.c |   1 +
+ target/arm/cpu-idregs.h |   1 +
+ target/arm/kvm.c        | 160 +++++++++++++++++++++++++++++++++++++++-
+ target/arm/trace-events |   1 +
+ 4 files changed, 162 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 05/29] target/arm: Replace FIELD() macros with IDREG_FIELD expansion
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Replace the existing FIELD() macro with the newly introduced
+IDREG_FIELD() macro to remove duplication.
+
+All definitions for TCG remains the same.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-features.h | 235 +++-----------------------------------
+ 1 file changed, 19 insertions(+), 216 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 08/29] target/arm: Add ID register field helper functions
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Add helpers in cpu-idregs.c for working with individual ID registers
+and fields. This includes:
+- read/write specific field.
+- look up architectural value name for a given field value and vice
+  versa.
+- reset a field or ID register to it's default value.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-props.c | 246 +++++++++++++++++++++++++++++++++++++
+ target/arm/arm-cpu-props.h |   8 ++
+ target/arm/cpu-idregs.c    | 119 ++++++++++++++++++
+ target/arm/cpu-idregs.h    |  11 ++
+ target/arm/cpu64.c         |   2 +-
+ 5 files changed, 385 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 18/29] target/arm: define pauth composite property
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Define pauth composite property for named cpu model. Define a
+custom getter which checks whether any PAuth algo is present.
+The sub property list covers all six PAuth fields.
+
+Add appropriate pauth composite model values for neoverse-v1-v1
+and neoverse-v2-v1.
+
+In arm_cpu_pauth_finalize(), return early if cpu is an instance of
+named cpu model, as the authoritative ID regs fields values are provided
+by the model in that case.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models.c | 14 +++++++
+ target/arm/arm-cpu-props.c  | 76 +++++++++++++++++++++++++++++++++----
+ target/arm/arm-cpu-props.h  |  2 +
+ target/arm/cpu64.c          | 16 ++++++++
+ 4 files changed, 101 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 27/29] target/arm: Provide default cache hierarchy
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Default cache-hierarchy into kvm-base-v1, hence every model inherits
+a cache topology.
+
+Topology:
+  L1:  separate-i-d, 4-way x 256 sets x 64B  = 64 KiB each
+  L2:  unified,      8-way x 2048 sets x 64B = 1 MiB
+  L3:  unified,      12-way x 8192 sets x 64B = 6 MiB
+
+CLIDR_EL1 fields are set to match the geometry:
+  LoC=3, LoUIS=LoUU=1, ICB=unknown, TTYPEN=0.
+
+Whether to keep them on as default is another question to tackle some
+another time.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models.c | 46 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 20/29] target/arm: Introduce stub files required for qmp support
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Add arm-cpu-props-stub.c and arm-cpu-models-stub.c, which will be
+required to add qmp support.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models-stub.c | 13 +++++++++++++
+ target/arm/arm-cpu-props-stub.c  | 23 +++++++++++++++++++++++
+ target/arm/meson.build           |  2 +-
+ 3 files changed, 37 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 07/29] target/arm: Define ARM properties
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Add properties for most fields.
+
+Properties that map to fields that are not supported by the linux kernel
+(i.e. not in the ftr_bits array) are not included, as these fields
+are already zeroed out by the kernel and are not writable.
+
+Add new properties as kernel start supporting their respective fields.
+
+These properties will be added to CPU objects in future patches.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-props.c | 242 +++++++++++++++++++++++++++++++++++++
+ target/arm/meson.build     |   1 +
+ 2 files changed, 243 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 14/29] target/arm: Validate cpu->isar.idregs[] before writeback
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Before writing cpu->isar.idregs[] back to KVM, validate that every field
+satisfies its declared safe-rule against the host isar->idregs[] view.
+This catches values that would be unsafe to expose on the current host
+(e.g. claiming a higher feature level than the host actually supports).
+
+Introduce arm_idregs_validate_safe_rule(), which iterates over every
+field defined in cpu-idregs.h.inc and checks the model value against
+the host value accoiding to the field's ArmIdRegSafeRule. If the
+requested value is invalid, error out, while also mentioning the
+related property.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-props.c | 14 +++++++++
+ target/arm/arm-cpu-props.h |  1 +
+ target/arm/cpu-idregs.c    | 64 ++++++++++++++++++++++++++++++++++++++
+ target/arm/cpu-idregs.h    | 10 ++++++
+ target/arm/kvm.c           |  7 +++++
+ 5 files changed, 96 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 09/29] target/arm: Add all ARM64 properties to host model
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+All all properties defined in arm_cpu_props to the host model under
+CONFIG_KVM.
+
+Properties are processed in the order they appear in cmdline:
+for example, saying -cpu host,sve=off,feat_SVE=on is same as saying
+-cpu host,sve=off,sve=on.
+
+There is an exception for pauth, as it is backed by cpu->prop_pauth,
+doing -cpu host,pauth=on,hw_prop_APA/API/APA3=0 will lead to an error.
+And just doing hw_prop_APA/API/APA3/GPA/GPI=<val> will not turn on
+pauth.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu64.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 17/29] target/arm: Add composite property type to model definitions
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Introduce ARM_MODEL_PROP_COMP, a composite type model property.
+
+It will act as an master "on"/"off" switch for a list of sub-properties.
+For example (pauth=on, appropiately set APA/GPA/...) based on the named
+model.
+
+A composite entry in the named model will have a default value either
+"on" or "off" and a list of sub properties. Which will be applied on
+the cpu model when the composite is turned on.
+
+Add find_model_prop_in_chain() to walk the parent model hierarchy and
+resolve a property entry (child-first). Expose arm_cpu_get_composite_
+subprop() so the property layer (in a later commit) can retrieve a
+composite's sub-prop values given a CPU.
+
+Refactor arm_apply_model_props() into public arm_apply_model_prop().
+
+Hierarchical inheritance for composite properties sub-props is not
+added to avoid complexities.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models.c |  81 +++++++++++++++----
+ target/arm/arm-cpu-models.h |  12 +++
+ target/arm/arm-cpu-props.c  | 150 +++++++++++++++++++++++++++++++++++-
+ target/arm/arm-cpu-props.h  |   7 +-
+ 4 files changed, 233 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 25/29] target/arm/qmp: hook blockers in query-cpu-definitions
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Now, report blocker for named cpu models in query-cpu-definitions.
+Heavy handling is done by validating the realized ID registers values
+against the host values. sveNNNN needs special handling as those
+are not stored in any ID registers.
+
+Introduces arm_cpu_class_check_missing_features() and
+arm_idregs_get_blocker() to achieve this.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models-stub.c |  5 ++++
+ target/arm/arm-cpu-models.c      | 34 ++++++++++++++++++++++
+ target/arm/arm-cpu-models.h      |  2 ++
+ target/arm/arm-qmp-cmds.c        | 12 ++++++++
+ target/arm/cpu-idregs.c          | 48 ++++++++++++++++++++++++++++++++
+ target/arm/cpu-idregs.h          |  3 ++
+ 6 files changed, 104 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 26/29] target/arm: Support exposing cache information for named cpu models
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Introduce "expose-cache" with newly introduced cache sub-props like
+the per level (type, sets, linesize, associativity) and cache attributes
+(louis, loc, louu, icb_type, ttypen). Back "expose-cache" by
+ARMCPU::cache_exposed.
+
+Add kvm_arm_writeback_ccsidr(), which writesback demux ccsidr values
+into cpregs. Which is then written back to KVM.
+
+Additionally, the same cache topology is exposed to the guest through
+PPTT/DT cache nodes in virt.c, gated by the expose-cache boolean.
+
+To support this on infra side:
+  - Introduce a new prop type ARM_PROP_CUSTOM which mandates custom
+    getter/setter and reset for a prop. Required for properties backed
+    by CCSIDR bank
+  - Add CLIDR_EL1 to cpu-idregs.h.inc. As it is not a part of kernel's
+    sysreg file, safe-rules are populated with ANY.
+  - Remove FIELD() entries for CLIDR_EL1.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ hw/arm/virt.c               |  20 ++-
+ target/arm/arm-cpu-props.c  | 272 +++++++++++++++++++++++++++++++++++-
+ target/arm/arm-cpu-props.h  |   5 +-
+ target/arm/arm-qmp-cmds.c   |   1 +
+ target/arm/cpu-features.h   |  11 --
+ target/arm/cpu-idregs.h     |   1 +
+ target/arm/cpu-idregs.h.inc |  91 ++++++++++++
+ target/arm/cpu.h            |   3 +
+ target/arm/kvm.c            |  54 +++++++
+ 9 files changed, 440 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 15/29] target/arm/kvm: handle DCZID_EL0 specially
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+DCZID_EL0 is not trapped by KVM and guest reads raw host values.
+Read the host value directly and populate it in  ahcf->isar.idreg.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/kvm.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 03/29] target/arm: Add MIDR, REVIDR, AIDR and extra ID regs to cpu-sysregs
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Add entries for sysregs MIDR_EL1, REVIDR_EL1, AIDR_EL1,
+ID_AA64FPFR0_EL1, and ID_AA64ISAR3_EL1 to cpu-sysregs.h.inc
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-sysregs.h.inc | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 10/29] target/arm: Add named cpu model infra + graviton3 named model
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Introduce a small named-CPU-model layer on top of the field-backed
+property infrastructure. Each model is a flat table of (name, value)
+overrides and a parent pointer. At instance-init, the parent chain is
+walked root-first and every level's properties are applied via QOM,
+so a child entry overrides its ancestors for the same name.
+
+For example, the graviton3-v1 named model hierarchy is:
+kvm-base-v1           KVM-imposed quirks (chain root)
+  arm-v8_4-a-v1       ARMv8.4-A architectural mandate
+    neoverse-v1-v1    Neoverse V1
+      graviton3-v1    AWS Graviton3
+
+arm-v8_4-a-v1:
+  Only features mandated by the ARM ARM.
+
+neoverse-v1-v1:
+  Reference manual derived feature values for the reference core.
+  Values differ from TRM values based on what was exposed to the guest
+  with -cpu host.
+
+graviton3-v1:
+  SoC integration choices (crypto pin, cache hints, PAuth alg).
+
+The model values are figured out from ID register dump visible to
+QEMU with -cpu host on Graviton3 machine.
+
+Model realization:
+1. arm_idregs_reset_to_defaults: Reset cpu->isar.idregs[] to the default
+                                 values.
+2. Add all properties to the CPU Object
+3. arm_realize_model_chain: Walk the parent chain from root first and
+                            apply all the properties.
+
+Realized model ID reg values will be written back to KVM in future
+patch.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ hw/arm/virt.c               |   5 +
+ target/arm/arm-cpu-models.c | 300 ++++++++++++++++++++++++++++++++++++
+ target/arm/arm-cpu-models.h |  35 +++++
+ target/arm/meson.build      |   7 +-
+ 4 files changed, 345 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 00/29] target/arm: Named CPU models for Arm64 on KVM
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Hi All,
+
+This is the v2 RFC of the Named CPU models support for Arm64 in QEMU.
+v2 implements all of Planned items that were mentioned in v1.
+v1 link: https://lore.kernel.org/qemu-arm/20260513163356.3033159-1-shaju.abraham@nutanix.com/
+
+Background:
+=============================================================
+Currently QEMU only support -cpu host/max for KVM on Arm64. This disables
+live migration of VMs between hosts that differ in CPU features.
+
+This RFC proposes hierarchical named models for Arm64 under KVM, this
+provides strict contract of CPU features that will be exposed to the guest
+for a given named model. Models can be customized further with feature
+properties (like feat_AES=off, pauth=on, sve=off, etc...). 
+
+The design has three layers: an ARM ID-register field table (single
+source of truth for fields, safe-rules, defaults, arch-defined values); a
+property layer on top (single-field, fractional, and composite properties);
+and a hierarchical named-model layer that picks values for those properties
+with parent-chain inheritance.
+
+The series also implements QMP commands that lets the management layer query
+which models a host can run, what each model resolves to, and which feature
+values the host supports.
+
+Relationship with "customizable host model" series:
+============================================================
+This RFC overlaps with customizable host model series [1]. The two series
+solve different parts of the same problem: [1] provides the lower layer
+(per-field SYSREG_<REG>_<FIELD> u64 properties on -cpu host,
+writable-mask probing, ID-register writeback).
+
+This series adds the layers above that, like:
+hierarchical named CPU models, default-from-zero baselines, fractional and
+composite properties for named models (sve, pauth, expose-cache),
+property/value names, and QMP introspection (blockers via safe-rule
+validation, supported values, new query-arm-cpu-props-info). This series
+also fixes the host-supports-Nested-Virtualziation-while-qemu-booted-without-it
+writeback case [2] that surfaces once [1]'s writeback lands.
+
+Long term plan is to rebase this series on top of [1]. Few difficulties
+in that will be augmenting the ID regs fields table with safe rules and
+default values, which Eric correctly mentioned in [1] that it cannot
+be inferred from Registers.json.
+
+For property names and values we have no strong preference,
+<SYSREG>_<REG>_<FIELD> with uint64 values or "feat_*" properties with
+string values (SYSREG_ID_AA64ISAR0_AES=2/feat_AES="pmull").
+
+[1]: https://lore.kernel.org/qemu-arm/20260519132905.145643-1-eric.auger@redhat.com/
+[2]: See patch 29 of this series.
+
+TL;DR examples:
+  # Boot with Grace
+  qemu-system-aarch64 -cpu grace-v1 -machine virt,accel=kvm ...
+
+  # Grace with a feature disabled
+  qemu-system-aarch64 -cpu grace-v1,feat_SHA1=off ...
+
+  # Host passthrough with individual feature control
+  qemu-system-aarch64 -cpu host,feat_AES=aes ...
+
+  # named CPU model with composite properties
+  qemu-system-aarch64 -cpu grace-v1,pauth=off,sve=on ...
+
+  # QMP -cpu host query-cpu-model-expansion:
+        "model": {
+            "name": "host",
+            "props": {
+                "cpu_partnum": 3407,
+                "feat_SM4": "on",
+                "feat_SM3": "on",
+                ....
+            }
+        }
+
+    # QMP -cpu graviton3-v1 query-cpu-model-expansion:
+        "model": {
+            "name": "graviton3-v1",
+            "props": {
+                "cpu_partnum": 3392,
+                "feat_SM4": "on",
+                "feat_SM3": "on",
+                "feat_RNDR": "on",
+                ....
+            }
+        }
+
+    # QMP query-cpu-definitions (on Grace host) (blockers for graviton3-v1):
+        {
+            "name": "grace-v1",
+            "typename": "grace-v1-arm-cpu",
+            "static": false,
+            "deprecated": false
+        },
+        {
+            "name": "graviton3-v1",
+            "typename": "graviton3-v1-arm-cpu",
+            "unavailable-features": [
+                "hw_prop_TGRAN4_2",
+                "hw_prop_TGRAN64_2",
+                "hw_prop_TGRAN16_2",
+                "hw_prop_APA",
+                "feat_RNDR"
+            ],
+            "static": false,
+            "deprecated": false
+        },
+        ....
+
+    # new QMP query-arm-cpu-props-info (on Grace host):
+        {
+            "name": "feat_SHA1",
+            "type": "boolean",
+            "supported-values": [
+                "on",
+                "off"
+            ]
+        },
+        {
+            "name": "feat_AES",
+            "type": "string",
+            "supported-values": [
+                "off",
+                "aes",
+                "pmull"
+            ]
+        },
+        ....
+
+Changes since v1:
+  - Added `query-cpu-definitions` and `query-cpu-model-expansion` QMP
+    support for named models and accompanying properties.
+  - Introduced `query-arm-cpu-props-info` QMP command that returns
+    list of all newly supported properties for -cpu host, and its supported
+    values.
+  - Add composite properties for named models which acts as master "on"/"off"
+    switches for features that compose of broader range of ID registers
+    fields like pauth and sve.
+  - Added `expose-cache` composite with other cache related properties to
+    allow named models to expose cache information to the guest.
+  - Cache the host isar view with and without EL2 support, and make
+    -cpu host with writeback work on host kernel that supports
+    virtualization.
+  - Validate the cpu->isar.idregs before writing back to KVM to catch early
+    errors.
+  - Properties and models are now defined in file rather than using .h.inc 
+    files.
+
+Tested on NVIDIA Grace and AWS Graviton3 hosts (6.18); booted grace-v1,
+graviton3-v1, neoverse-v2-v1, neoverse-v1-v1, and -cpu host with per-feature
+overrides.
+
+Plans for v3:
+  - Some documentation and unit tests.
+  - More properties based on what more the latest kernel supports.
+  - pmu composite property.
+  - Trying to rebase on top of [1].
+  - Splitting this huge series into 3-4 sub series.
+
+Warm Regards,
+Khushit, Shaju
+
+Khushit Shah (20):
+  target/arm: Introduce data-structures for the ARM property layer
+  target/arm: Add all ARM64 properties to host model
+  target/arm: Add Nvidia Grace named model
+  target/arm/kvm: enable writable implementation ID registers
+  target/aarm: Validate cpu->isar.idregs[] before writeback
+  target/arm/kvm: handle DCZID_EL0 specially
+  target/arm: skip GIC, COPDBG and PMU fields during KVM writeback
+  target/arm: Add composite property type to model definitions
+  target/arm: define pauth composite property
+  target/arm: define sve composite property
+  target/arm: Introduce stub files required for qmp support
+  target/arm/qmp: add named models and properties to cpu-model-expansion
+  target/arm/kvm: introduce kvm_arm_get_host_isar helper
+  target/arm/qmp: add query-arm-cpu-props-info
+  target/arm: Report "off" for ID fields gated by vCPU init flags
+  target/arm/qmp: hook blockers in query-cpu-definitions
+  target/arm: Support exposing cache information for named cpu models
+  target/arm: Provide default cache hierarchy
+  target/arm: supported-values and blockers for CCSIDR cache properties
+  target/arm/kvm: fix host model writeback when kernel supports EL2
+
+Shaju Abraham (9):
+  target/arm: named_cpu_model: define containers for ID registers and
+    fields
+  target/arm: Add ID Register field descriptions in cpu-idregs.h.inc
+  target/arm: Add MIDR, REVIDR, AIDR and extra ID regs to cpu-sysregs
+  target/arm: Generate ARM64 ID registers and field tables
+  target/arm: Replace FIELD() macros with IDREG_FIELD expansion
+  target/arm: Define ARM properties
+  target/arm: Add ID register field helper functions
+  target/arm: Add named cpu model infra + graviton3 named model
+  target/arm/kvm: Writeback modified ID registers to KVM
+
+ hw/arm/virt.c                    |   28 +-
+ qapi/misc-arm.json               |   41 +
+ stubs/qmp-arm-gic.c              |    6 +
+ target/arm/arm-cpu-models-stub.c |   18 +
+ target/arm/arm-cpu-models.c      |  620 ++++++++++
+ target/arm/arm-cpu-models.h      |   49 +
+ target/arm/arm-cpu-props-stub.c  |   36 +
+ target/arm/arm-cpu-props.c       | 1212 +++++++++++++++++++
+ target/arm/arm-cpu-props.h       |   70 ++
+ target/arm/arm-qmp-cmds.c        |  128 +-
+ target/arm/cpu-features.h        |  246 +---
+ target/arm/cpu-idregs.c          |  508 ++++++++
+ target/arm/cpu-idregs.h          |  119 ++
+ target/arm/cpu-idregs.h.inc      | 1898 ++++++++++++++++++++++++++++++
+ target/arm/cpu-sysregs.h.inc     |    5 +
+ target/arm/cpu.h                 |    3 +
+ target/arm/cpu64.c               |   31 +-
+ target/arm/kvm-stub.c            |    7 +-
+ target/arm/kvm.c                 |  356 +++++-
+ target/arm/kvm_arm.h             |    7 +-
+ target/arm/meson.build           |   11 +-
+ target/arm/trace-events          |    1 +
+ 22 files changed, 5148 insertions(+), 252 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 06/29] target/arm: Introduce data-structures for the ARM property layer
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Introduce the data-structures required for the ARM property layer
+
+Initially support 4 types of properties:
+- STRING: 1:1 mapping to fields that have architecturally defined
+          values. The value names are borrowed from kernel's
+          sysreg.
+- NUMERIC: 1:1 mapping to fields that have implementation defined
+           values like cache line size, debug counters etc...
+- BOOLEAN: 1:1 mapping to fields that are 1-bit wide.
+- FRACTIONAL: maps two fields, BASE and _FRAC, the valid values
+              for the properties must be preset.
+              (Example: MPAM, CSV2, NV, etc..)
+
+These data structure will be used by next patch to define ARM
+properties.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-props.h | 41 ++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 19/29] target/arm: define sve composite property
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Define sve composite property for named cpu model. The sub-property
+list contains: feat_SVE, hw_prop_SVEVer, feat_SVE_AES, feat_SVE_ELTPERM,
+feat_SVE_BITPERM, feat_SVE_BFLOAT16, feat_SVE_B16B16, feat_SVE_SHA3,
+feat_SVE_SM4, feat_SVE_I8MM, feat_SVE_F16MM, feat_SVE_F32MM,
+feat_SVE_F64MM and sve* QEMU vector-length toggles.
+
+Also add appropiate sve composite model values for neoverse-v1-v1,
+neoverse-v2-v1 and grace-v1.
+
+In cpu64.c mandate a SVE vector length if named cpu model enables SVE.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models.c | 35 +++++++++++++++++++++++++++++++++++
+ target/arm/arm-cpu-props.c  | 25 +++++++++++++++++++++++++
+ target/arm/cpu64.c          | 14 +++++++++++++-
+ 3 files changed, 73 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 29/29] target/arm/kvm: fix host model writeback when kernel supports EL2
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+kvm_arm_get_host_cpu_features() probes the host by spinning up a
+scratch vCPU and reading its ID registers. When the host kernel
+advertises nested virtualization, the scratch is created with
+KVM_ARM_VCPU_HAS_EL2, which makes the kernel run limit_nv_id_reg()
+on that vCPU and force several fields (e.g. ID_AA64MMFR4_EL1.NV_frac,
+parts of ID_AA64DFR0_EL1) to values that match KVM's nested-virt
+capabilities rather than the raw host.
+
+If the actual vCPU is later created without EL2 (e.g. -machine
+virt,virtualization=off), the EL2-on values cached above no longer
+match what the kernel exposes for the real vCPU and ID-register
+writeback fails.
+
+Fix this by caching two host views, one probed with EL2 and one
+without, and selecting the appropriate view at every use site.
+For -cpu host (and -cpu max) without EL2 we additionally rebase
+cpu->isar.idregs[] from the EL2-on view it was initialized with
+onto the EL2-off view via kvm_arm_rebase_host_idregs(), so each
+field that the user has not explicitly touched picks up the value
+that the real vCPU will actually see.
+
+Corner case: the rebase compares the post-init field value against
+the EL2-on host value to decide whether the user set it. If the
+user directly or indirectly set field X=i and the EL2-on view also
+reports feat_X=i but the EL2-off view reports feat_X=j, the rebase
+cannot distinguish "user asked for i" from "inherited i from host" and
+will overwrite with j. This only affects -cpu host/max without EL2
+on NV enabled kernels where the user-requested value happens to match
+the EL2-on host view, so we avoid the complexity of user set values
+tracking and accept the loss here.
+
+Named models are not affected with the issue as they already start
+with default-zeroed view.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/arm-cpu-models.c | 10 +++-
+ target/arm/arm-qmp-cmds.c   |  2 +-
+ target/arm/cpu64.c          |  2 +-
+ target/arm/kvm-stub.c       |  4 +-
+ target/arm/kvm.c            | 98 ++++++++++++++++++++++++++++++-------
+ target/arm/kvm_arm.h        |  5 +-
+ 6 files changed, 96 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 23/29] target/arm/qmp: add query-arm-cpu-props-info
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Introduce 'query-arm-cpu-props-info' QMP command. This command returns
+information about ARM CPU model properties, including their name, type,
+supported values on the given host, and composite parent if any.
+
+This provides management layer necessary information to determine
+migration compatibility off a VM on different host.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ qapi/misc-arm.json              | 41 ++++++++++++++++
+ stubs/qmp-arm-gic.c             |  6 +++
+ target/arm/arm-cpu-props-stub.c | 13 +++++
+ target/arm/arm-cpu-props.c      | 85 +++++++++++++++++++++++++++++++++
+ target/arm/arm-cpu-props.h      |  5 ++
+ target/arm/arm-qmp-cmds.c       | 44 +++++++++++++++++
+ target/arm/cpu-idregs.c         | 71 +++++++++++++++++++++++++++
+ target/arm/cpu-idregs.h         |  8 ++++
+ 8 files changed, 273 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 01/29] target/arm: named_cpu_model: define containers for ID registers and fields
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Define data structures for mapping the ARM ID registers and ID register
+fields.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-idregs.h | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 11/29] target/arm: Add Nvidia Grace named model
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Add Nvidia Grace named model alongside its hierarchy (neoverse-v2,
+armv9-a)
+
+Field values were derived from the ID register view that KVM exposes to
+QEMU with -cpu host on an Nvidia Grace system.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ hw/arm/virt.c               |   3 +
+ target/arm/arm-cpu-models.c | 132 +++++++++++++++++++++++++++++++++++-
+ 2 files changed, 134 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 04/29] target/arm: Generate ARM64 ID registers and field tables
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+
+Include cpu-idregs.h.inc multiple times with different definitions for
+the X-macros. This will generate tables for all Arm64 ID registers and
+their fields and their architecturally defined values. These tables
+will be consumed by the property layer in future patches.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/cpu-idregs.c | 125 ++++++++++++++++++++++++++++++++++++++++
+ target/arm/cpu-idregs.h |  38 +++++++++++-
+ target/arm/meson.build  |   3 +-
+ 3 files changed, 164 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 13/29] target/arm/kvm: enable writable implementation ID registers
+Author: Khushit Shah <khushit.shah@nutanix.com>
+
+Enable KVM_CAP_ARM_WRITABLE_IMP_ID_REGS if the host kernel supports it.
+This allows QEMU to write implementation-defined ID registers (MIDR,
+REVIDR) so that named CPU models can present the correct values to the
+guest instead of inheriting the host's identity.
+
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ target/arm/kvm.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: arm64: Reassign nested_mmus array behind mmu_lock
+Author: Hyunwoo Kim <imv4bel@gmail.com>
+
+kvm->arch.nested_mmus[] is walked under kvm->mmu_lock, including from the
+MMU notifier path (kvm_unmap_gfn_range() -> kvm_nested_s2_unmap()), which
+can run at any time. kvm_vcpu_init_nested() reallocates the array and frees
+the old buffer while holding only kvm->arch.config_lock, so such a walker
+can reference the freed array.
+
+Allocate the new array outside of mmu_lock, as the allocation can sleep.
+Under the lock, copy the existing entries, fix up the back pointers and
+reassign the array. Free the old buffer after dropping the lock, as
+kvfree() can sleep as well.
+
+Fixes: 4f128f8e1aaac ("KVM: arm64: nv: Support multiple nested Stage-2 mmu structures")
+Signed-off-by: Hyunwoo Kim <imv4bel@gmail.com>
+Reviewed-by: Oliver Upton <oupton@kernel.org>
+---
+Changes in v2:
+- reword shortlog and changelog per review 
+  (diff unchanged; kept Oliver's Reviewed-by)
+- v1: https://lore.kernel.org/all/aiHEKOeZMVwsRlvP@v4bel/
+---
+ arch/arm64/kvm/nested.c | 33 ++++++++++++++++++++-------------
+ 1 file changed, 20 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
