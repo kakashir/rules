@@ -1,0 +1,1948 @@
+
+On /root/mail/repo:
+From df346c3bc to 6ddbd70f8
+KVM mailing list update from df346c3bc to 6ddbd70f8
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     43 google.com
+     12 linux.ibm.com
+     11 tencent.com
+      6 amazon.com
+      4 virtuozzo.com
+      2 intel.com
+      1 suse.de
+      1 redhat.com
+      1 oracle.com
+      1 openvz.org
+      1 linux.intel.com
+      1 kernel.org
+      1 fb.com
+
+Top 15 contributors (Based on Email Body)
+
+     23  Sean Christopherson <seanjc@google.com>
+     20  Colton Lewis <coltonlewis@google.com>
+     11  Wanpeng Li <wanpengli@tencent.com>
+      6  Jack Thomson <jackabt@amazon.com>
+      5  Omar Elghoul <oelghoul@linux.ibm.com>
+      4  Nina Schoetterl-Glausch <nsg@linux.ibm.com>
+      2  Peter Fang <peter.fang@intel.com>
+      2  Pavel Tikhomirov <ptikhomirov@virtuozzo.com>
+      2  Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+      1  William Bezenah <wbezenah@linux.ibm.com>
+      1  Maxim Levitsky <mlevitsk@redhat.com>
+      1  Marc Zyngier <maz@kernel.org>
+      1  Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+      1  Dongli Zhang <dongli.zhang@oracle.com>
+      1  "Denis V. Lunev" <den@openvz.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86/hyperv: Get target FIFO in
+[PATCH v2 1/8] KVM: x86/hyperv: Get target FIFO in
+Author: Sean Christopherson <seanjc@google.com>
+
+When handling Hyper-V PV TLB flushes, retrieve the to-be-used FIFO in
+hv_tlb_flush_enqueue() instead of having the caller pass in the FIFO.  This
+will make it easier to fix a cross-vCPU race where KVM can access a vCPU's
+FIFO before it's fully initialized.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/hyperv.c | 24 +++++++++---------------
+ 1 file changed, 9 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/hyperv: Fix racy usage of vcpu->arch.hyperv
+[PATCH v2 0/8] KVM: x86/hyperv: Fix racy usage of vcpu->arch.hyperv
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix a bug found by syzkaller (on a Google-internal kernel) where KVM consumes
+a vCPU's HyperV structure before it's fully initialized, by concurrently
+triggering PV TLB flushes (queues flushes into a vCPU's FIFO without holding
+the vCPU's mutex) on a vCPU that is in the process of activating HyperV.
+
+Harden against similar bugs by asserting the vcpu->mutex is held when using
+the "normal" to_hv_vcpu(), same as we did for get_vmcs12() and
+get_shadow_vmcs12() (also in response to cross-task races).  To avoid false
+positives when creating a vCPU, initialize vcpu_idx to -1, and treat the vCPU
+as unreachable (other than the caller, obviously) if its index is -1.
+
+v2:
+ - Init vcpu->vcpu_idx to -1, use that as a canary to detect the vCPU is
+   unreachable, and allow accessing Hyper-V state if the vCPU is otherwise
+   unreachable. [syzbot]
+
+v1: https://lore.kernel.org/all/20260423140833.439512-1-seanjc@google.com
+
+Sean Christopherson (8):
+  KVM: x86/hyperv: Get target FIFO in hv_tlb_flush_enqueue(), not caller
+  KVM: x86/hyperv: Check for NULL vCPU Hyper-V object in
+    kvm_hv_get_tlb_flush_fifo()
+  KVM: x86/hyperv: Ensure vCPU's Hyper-V object is initialized on
+    cross-vCPU accesses
+  KVM: Initialize a vCPU's index to '-1' while it's being created
+  KVM: Move nVMX's lockdep logic for vcpu->mutex to a common helper
+  KVM: x86: Treat a vCPU as unreachable if its index is invalid
+  KVM: x86/hyperv: Assert vCPU's mutex is held in to_hv_vcpu()
+  KVM: x86/hyperv: Use {READ,WRITE}_ONCE for cross-task synic->active
+    accesses
+
+ arch/x86/kvm/hyperv.c     | 64 +++++++++++++++++++++------------------
+ arch/x86/kvm/hyperv.h     | 25 +++++++++++++--
+ arch/x86/kvm/vmx/nested.h |  6 ++--
+ include/linux/kvm_host.h  |  7 +++++
+ virt/kvm/kvm_main.c       |  2 ++
+ 5 files changed, 67 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Treat any non-zero return from set_dr() as a
+[PATCH v3 1/8] KVM: x86: Treat any non-zero return from set_dr() as a
+Author: Sean Christopherson <seanjc@google.com>
+
+
+When emulating a MOV to a debug register, em_dr_write() calls
+@ctxt->ops->set_dr(), which is forwarded to emulator_set_dr() and
+then kvm_set_dr(). The latter checks that the written value is valid,
+otherwise returning an error, in which case the emulator is supposed to
+inject a #GP fault into the guest.
+
+Commit 996ff5429e98 ("KVM: x86: move kvm_inject_gp up from kvm_set_dr
+to callers") changed the contract of kvm_set_dr() (and thus
+emulator_set_dr()), returning 1 as an error instead of -1, but the
+caller in em_dr_write() was never updated, checking only if the returned
+value is negative. The end result is that em_dr_write() does not detect
+the error, so an invalid write does not generate a #GP, but at the same
+time the register value is not updated.
+
+The practical impact is limited, as check_dr_write() already checks DR6
+and DR7 manually. However, it misses DR4/DR5, which alias DR6/DR7 when
+CR4.DE=3D0.
+
+Fix the bug by treating any non-zero return from set_dr() as a reason to
+inject #GP.
+
+Note, the manual checks on DR6 and DR7 are flawed, as they incorrectly
+prioritize the #GP over a DR7.GD=3D1 #DB (the General Detect #DB has
+priority on both Intel and AMD).
+
+Note #2, relying on ->set_dr() to detect #GP is also flawed as all
+exceptions have higher priority than the instruction intercept on SVM,
+i.e. the manual checks need to be extended to DR4 and DR5 (after the
+priority bug is fixed).
+
+Fixes: 996ff5429e98 ("KVM: x86: move kvm_inject_gp up from kvm_set_dr to ca=
+llers")
+Signed-off-by: Carlos L=C3=B3pez <clopez@suse.de>
+Link: https://patch.msgid.link/20260601133320.91479-2-clopez@suse.de
+[sean: drop explicit "!=3D 0", massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/emulate.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Fix emulated MOV DR{4,5} #GP bugs
+[PATCH v3 0/8] KVM: x86: Fix emulated MOV DR{4,5} #GP bugs
+Author: Sean Christopherson <seanjc@google.com>
+
+Carlos' fix for a bug where KVM fails to signal #GP on emulated MOV DR to
+DR4 or DR5, plus a pile of follow-up fixes priority goofs (#UD versus #GP,
+#GP vs #DB, and #GP versus #VMEXIT on SVM).  The rest are opportunistic
+cleanups.
+
+v3:
+ - Fix a #UD vs #GP due to CPL>0 bug.
+ - Prioritize DR7.GD=3D1 #DB over CPL>0 #GP on Intel.
+
+v2: https://lore.kernel.org/all/20260603230718.1733483-1-seanjc@google.com
+
+v1: https://lore.kernel.org/all/20260601133320.91479-2-clopez@suse.de
+
+Carlos L=C3=B3pez (1):
+  KVM: x86: Treat any non-zero return from set_dr() as a faulting
+    condition
+
+Sean Christopherson (7):
+  KVM: x86: Prioritize DR7.GD #DB over #GP due to illegal DR6/7 value
+  KVM: x86: Manually check DR4/5 write values to fix SVM intercept
+    priority
+  KVM: x86: Prioritize #UD on MOV DR over #GP due to non-zero CPL
+  KVM: VMX: Prioritize DR7.GD=3D1 #DB over CPL>0 #GP on Intel
+  KVM: x86: Use kvm_dr{6,7}_valid() to check DR{4,5,6,7} write values in
+    emulator
+  KVM: x86: WARN if MOV DR emulation hits a "too late" #GP
+  KVM: x86: Read CR4.DE in emulator if and only if accessing DR4 or DR5
+
+ arch/x86/kvm/emulate.c | 49 +++++++++++++++++++++++++++++++-----------
+ arch/x86/kvm/vmx/vmx.c |  6 +++---
+ 2 files changed, 40 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  selftests/vfio: avoid VLAs
+[PATCH] selftests/vfio: avoid VLAs
+Author: Alex Mastro <amastro@fb.com>
+
+Allocate VFIO ioctl requests dynamically instead of using VLAs. GCC 11.5.0
+rejects initialized VLAs with:
+
+  error: variable-sized object may not be initialized
+
+The replaced stack u8 arrays also do not guarantee native struct alignment
+for the aliased pointers.
+
+Fixes: 19faf6fd969c ("vfio: selftests: Add a helper library for VFIO selftests")
+Fixes: 20face8c75ff ("vfio: selftests: Add helper to set/override a vf_token")
+Signed-off-by: Alex Mastro <amastro@fb.com>
+Assisted-by: Codex:gpt-5.5-high
+---
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c | 28 +++++++++++++---------
+ 1 file changed, 17 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  ARM64 PMU Partitioning
+[PATCH v8 00/21] ARM64 PMU Partitioning
+Author: Colton Lewis <coltonlewis@google.com>
+
+This series creates a new PMU scheme on ARM, a partitioned PMU that
+allows reserving a subset of counters for more direct guest access,
+significantly reducing overhead. More details, including performance
+benchmarks, can be read in the v1 cover letter linked below.
+
+An overview of what this series accomplishes was presented at KVM
+Forum 2025. Slides [1] and video [2] are linked below.
+
+The kernel command line parameter for the driver still exists, but now
+only defines an upper limit of counters the guest might use rather
+than taking those counters from the host permanently.
+
+I would appreciate any discussion on whether that parameter should
+still exist as it's an inconvenient enabling gate on the feature that
+is no longer required. The question comes down to what, if any, guards
+we want against a guest monopolizing all counters on a system.
+
+v8:
+
+* Rebase on top of v7.1-rc7.
+
+* Implement Oliver Upton's accessor proposal to centralize PMU
+  register access and simplify trap handlers. Instead of one singular
+  accessor, implement as two because the read and write paths are
+  always different anyway.
+
+* Introduce the partitioning flag along with the
+  kvm_pmu_is_partitioned predicate
+
+* Don't use ifdef for partitioning predicates as that can be handled
+  by has_vhe
+
+* Clean up MDCR_EL2 handling by open-coding use_fgt and hpmn and
+  unconditionally setting RES0 bits.
+
+* Use {read,write}_pmcrcntrn in context swaps
+
+* Put operators on preceeding lines
+
+* Rename hw_cntr_mask to hw_cntr_impl to clarify it tracks the number
+  of counters implemented by hardware
+
+* Use GENMASK_ULL in mask functions returning u64
+
+* warn_once when host events are squeezed out by guest counter
+  allocations.
+
+* Address Sashiko AI Review findings:
+
+  - Critical fixes for lazy PMU context swaps (ensuring guest state is
+    loaded on transition to GUEST_OWNED), PMSELR_EL0 trapping to
+    prevent stale selector index, and masking guest PMCR_EL0 writes to
+    prevent host reset.
+
+  - High priority fixes for lock safety (disabling IRQs when acquiring
+    perf context lock), disabling guest counters on vCPU put,
+    preserving VHE host profiling in MDCR_EL2, waking halted vCPUs on
+    guest PMU interrupts, masking host configuration leaks, preemption
+    safety in per-CPU accesses, emulating PMCR.N reads, and preventing
+    data races in PMOVSSET_EL0 accesses.
+
+  - Medium/Low fixes for user-access fallback safety, VM-wide state
+    modification restrictions, selftests type safety, and cleanup of
+    unused fields and typos.
+
+v7:
+https://lore.kernel.org/kvmarm/20260504211813.1804997-1-coltonlewis@google.com/
+
+v6:
+https://lore.kernel.org/kvmarm/20260209221414.2169465-1-coltonlewis@google.com/
+
+v5:
+https://lore.kernel.org/kvmarm/20251209205121.1871534-1-coltonlewis@google.com/
+
+v4:
+https://lore.kernel.org/kvmarm/20250714225917.1396543-1-coltonlewis@google.com/
+
+v3:
+https://lore.kernel.org/kvm/20250626200459.1153955-1-coltonlewis@google.com/
+
+v2:
+https://lore.kernel.org/kvm/20250620221326.1261128-1-coltonlewis@google.com/
+
+v1:
+https://lore.kernel.org/kvm/20250602192702.2125115-1-coltonlewis@google.com/
+
+[1] https://gitlab.com/qemu-project/kvm-forum/-/raw/main/_attachments/2025/Optimizing__itvHkhc.pdf
+[2] https://www.youtube.com/watch?v=YRzZ8jMIA6M&list=PLW3ep1uCIRfxwmllXTOA2txfDWN6vUOHp&index=9
+
+Colton Lewis (20):
+  arm64: cpufeature: Add cpucap for HPMN0
+  KVM: arm64: Reorganize PMU functions
+  perf: arm_pmuv3: Generalize counter bitmasks
+  perf: arm_pmuv3: Check cntr_mask before using pmccntr
+  perf: arm_pmuv3: Allocate counter indices from high to low
+  perf: arm_pmuv3: Add method to partition the PMU
+  KVM: arm64: Set up FGT for Partitioned PMU
+  KVM: arm64: Add Partitioned PMU register trap handlers
+  KVM: arm64: Set up MDCR_EL2 to handle a Partitioned PMU
+  KVM: arm64: Context swap Partitioned PMU guest registers
+  KVM: arm64: Enforce PMU event filter at vcpu_load()
+  perf: Add perf_pmu_resched_update()
+  KVM: arm64: Apply dynamic guest counter reservations
+  KVM: arm64: Implement lazy PMU context swaps
+  perf: arm_pmuv3: Handle IRQs for Partitioned PMU guest counters
+  KVM: arm64: Detect overflows for the Partitioned PMU
+  KVM: arm64: Add vCPU device attr to partition the PMU
+  KVM: selftests: Add find_bit to KVM library
+  KVM: arm64: selftests: Add test case for Partitioned PMU
+  KVM: arm64: selftests: Relax testing for exceptions when partitioned
+
+Marc Zyngier (1):
+  KVM: arm64: Reorganize PMU includes
+
+ arch/arm/include/asm/arm_pmuv3.h              |  18 +
+ arch/arm64/include/asm/arm_pmuv3.h            |  12 +-
+ arch/arm64/include/asm/kvm_host.h             |  17 +-
+ arch/arm64/include/asm/kvm_types.h            |   6 +-
+ arch/arm64/include/uapi/asm/kvm.h             |   2 +
+ arch/arm64/kernel/cpufeature.c                |  10 +-
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arm.c                          |   2 +
+ arch/arm64/kvm/config.c                       |  41 +-
+ arch/arm64/kvm/debug.c                        |  30 +-
+ arch/arm64/kvm/pmu-direct.c                   | 507 ++++++++++++
+ arch/arm64/kvm/pmu-emul.c                     | 684 +----------------
+ arch/arm64/kvm/pmu.c                          | 720 ++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c                     | 271 +++++--
+ arch/arm64/tools/cpucaps                      |   1 +
+ arch/arm64/tools/sysreg                       |   6 +-
+ drivers/perf/arm_pmuv3.c                      | 136 +++-
+ include/kvm/arm_pmu.h                         |  93 ++-
+ include/linux/perf/arm_pmu.h                  |   8 +
+ include/linux/perf/arm_pmuv3.h                |  14 +-
+ include/linux/perf_event.h                    |   3 +
+ kernel/events/core.c                          |  31 +-
+ tools/include/perf/arm_pmuv3.h                |  12 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/arm64/vpmu_counter_access.c | 112 ++-
+ tools/testing/selftests/kvm/lib/find_bit.c    |   2 +
+ 26 files changed, 1918 insertions(+), 823 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/apic: KVM: Use cpu_physical_id() to get APIC ID of
+[PATCH] x86/apic: KVM: Use cpu_physical_id() to get APIC ID of
+Author: Sean Christopherson <seanjc@google.com>
+
+Use cpu_physical_id() instead of default_cpu_present_to_apicid() when
+getting the APIC ID of the pCPU on which a vCPU is running/loaded, as the
+kernel has gone way off the rails if a vCPU is loaded on a pCPU that has
+been physically removed from the system.  Even if the impossible were to
+happen, the absolutely worst case scenario is that hardware will ring the
+AIVC doorbell on the wrong pCPU, i.e. a severely broken system will
+experience mild performance issues.
+
+Kill off KVM's superfluous kvm_cpu_get_apicid() wrapper along with the
+for-KVM export of default_cpu_present_to_apicid(), as they existed purely
+for the wonky AVIC usage.
+
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+
+Tip tree folks, I'd like to take this through the kvm-x86 tree (in 7.3) for
+obvious reasons.  I assume the odds of a conflict on the removal of
+EXPORT_SYMBOL_FOR_KVM() are tiny.
+
+ arch/x86/include/asm/kvm_host.h    | 10 ----------
+ arch/x86/kernel/apic/apic_common.c |  1 -
+ arch/x86/kvm/svm/avic.c            |  6 +++---
+ 3 files changed, 3 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+[PATCH v4 1/4] s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Ensure that fmb_lock is held by pcibios_enable_device() and
+pcibios_disable_device() when calling zpci_fmb_enable_device() or
+zpci_fmb_disable_device(), respectively. Additionally, assert that the
+fmb_lock is held within the latter two functions to prevent future race
+conditions regarding new callers.
+
+Fixes: af0a8a8453f7 ("s390/pci: implement pcibios_add_device")
+Fixes: 944239c59e93 ("s390/pci: implement pcibios_release_device")
+Cc: stable@vger.kernel.org
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Niklas Schnelle <schnelle@linux.ibm.com>
+---
+ arch/s390/pci/pci.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vfio-pci/zdev: Improved zPCI Function Measurement Support
+[PATCH v4 0/4] vfio-pci/zdev: Improved zPCI Function Measurement Support
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Hi,
+
+This patch series improves support for function measurement for zPCI
+passthrough devices on s390x.
+
+Changelog
+=========
+v3 -> v4:
+* Patch 2/3:
+  - Replace mutex_lock/unlock in zpci_reenable_device() with a guard
+
+* Patch 3/4:
+  - Allow usercopy of the FMB when initializing its kmem_cache
+  - Move the guard in vfio_pci_zdev_feature_fmb_enable() lower to only
+    protect the FMB
+  - Ensure vfio_pci_zdev_feature_fmb_enable() fails on double-enable for
+    consistency with the documentation
+  - Eliminate the bounce buffer in vfio_pci_zdev_feature_fmb_read()
+  - Replace the void pointer with __aligned_u64 in the FMB read uAPI
+    structure
+
+v2 -> v3:
+* Patch 1/4 (new patch):
+  - Fix race conditions in pcibios_enable/disable_device() with regard to
+    the FMB enable/disable
+  - Assert that fmb_lock is held within zpci_fmb_enable_device() and
+    zpci_fmb_disable_device()
+
+* Patch 2/4 (previously 1/3):
+  - Move the FMB enable logic into a static function zpci_fmb_do_enable()
+    to reduce code duplication between zpci_fmb_enable_device() and
+    zpci_fmb_reenable_device()
+  - Reword commit message to use the imperative voice more consistently
+
+* Patch 3/4 (previously 2/3):
+  - Split the previous VFIO feature into a SET-only and a GET-only feature
+    for enabling/disabling and reading the FMB respectively
+  - Remove FMB definitions from the VFIO uAPI and instead treat it as an
+    opaque structure
+
+* Patch 4/4 (previously 3/3):
+  - Clarify goto label name to reduce misunderstandings
+
+v1 -> v2:
+* Patch 1/3:
+  - Address a possible race condition in zpci_reenable_device() caused by
+    calling zpci_fmb_reenable_device() without holding fmb_lock
+  - Assert that fmb_lock is held within zpci_fmb_reenable_device()
+
+* Patch 3/3:
+  - Address a possible race condition in pci_perf_seq_write() caused by
+    consuming zdev->kzdev without holding kzdev_lock
+
+Motivation
+==========
+The firmware on s390x machines allows for tracking a variety of statistics
+relating to zPCI devices in a function measurement block (FMB). However,
+the kernel currently lacks a structured mechanism of sharing this
+information with userspace, beyond /sys/kernel/debug/pci/ID/statistics.
+This can lead to shortcomings when running a guest on KVM with PCI
+passthrough devices, as QEMU is unable to provide an accurate FMB snapshot
+to the guest.
+
+Proposal
+========
+We propose adding a new VFIO device feature to zPCI passthrough devices,
+allowing userspace programs to read the latest FMB snapshot as it is
+written by the firmware. We ensure that function measurement enablement is
+preserved across device resets on the host. Furthermore, we guard against
+host tampering with the FMB via sysfs when the zPCI device is in
+passthrough to protect the VM's state.
+
+I'd appreciate some feedback on these patches.
+
+Thanks in advance.
+
+Omar Elghoul (4):
+  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+  s390/pci: Preserve FMB state in device re-enablement
+  vfio-pci/zdev: Add VFIO FMB device features
+  s390/pci: Fence FMB enable/disable via sysfs for passthrough devices
+
+ arch/s390/include/asm/pci.h      |   1 +
+ arch/s390/pci/pci.c              | 107 +++++++++++++++++++++++++------
+ arch/s390/pci/pci_debug.c        |  11 +++-
+ drivers/vfio/pci/vfio_pci_core.c |   4 ++
+ drivers/vfio/pci/vfio_pci_priv.h |  18 ++++++
+ drivers/vfio/pci/vfio_pci_zdev.c |  55 ++++++++++++++++
+ include/uapi/linux/vfio.h        |  29 +++++++++
+ 7 files changed, 206 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost/vsock: add support for VHOST_RESET_OWNER and CPR migration
+[PATCH 0/4] vhost/vsock: add support for VHOST_RESET_OWNER and CPR migration
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+Host<-->guest connections via AF_VSOCK sockets aren't supposed to
+outlive VM migration, since VM is moving to another host.  However
+there's a special case, which is QEMU live-update, or CPR
+(checkpoint-restore) migration.  In this case, VM remains on the same
+host, and we'd like such connections to persist.
+
+For this to work, we need to be able to transfer device ownership from
+source QEMU to dest QEMU.  Namely, source needs to reset ownership by
+issuing VHOST_RESET_OWNER ioctl, and then target has to claim it by
+calling VHOST_SET_OWNER.
+
+Since VHOST_RESET_OWNER isn't yet implemented for vhost-vsock, let's add
+such implementation (patches 1-2).  Also fix regression introduced by
+the earlier commit [1] (patch 3), and fix the deadlock bug (commit 4).
+
+There's a complementary series for QEMU [0] adding support of vhost-vsock
+devices during CPR migration.
+
+NOTE: this series needs to be applied on top of Michael's vhost/linux-next
+tree as it contains relevant commit [1], not yet present in master branch.
+
+I've tested this (patched QEMU + patched kernel) approximately as follows:
+
+  * Run listener in the guest:
+  socat -u VSOCK-LISTEN:9999 - >/tmp/recv.bin
+
+  * Run data transfer from host to guest:
+  socat -u FILE:/root/bigfile.bin VSOCK-CONNECT:CID:9999
+
+  * Perform CPR migration during transfer (either cpr-exec or cpr-transfer)
+  * Check that file hash sum matches
+
+[0] https://lore.kernel.org/qemu-devel/20260612165110.431376-1-andrey.drobyshev@virtuozzo.com
+[1] https://git.kernel.org/pub/scm/linux/kernel/git/mst/vhost.git/commit/?id=bb26ed5f3a8b
+
+Andrey Drobyshev (1):
+  vhost/vsock: re-scan TX virtqueue on device start
+
+Denis V. Lunev (1):
+  vhost/vsock: suppress EHOSTUNREACH fast-fail during CPR pause
+
+Pavel Tikhomirov (2):
+  vhost/vsock: split out vhost_vsock_drop_backends helper
+  vhost/vsock: add VHOST_RESET_OWNER ioctl
+
+ drivers/vhost/vsock.c | 80 +++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 69 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost/vsock: split out vhost_vsock_drop_backends helper
+[PATCH 1/4] vhost/vsock: split out vhost_vsock_drop_backends helper
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+
+Split the actual backend dropping part from vhost_vsock_stop.  We're
+going to need it for the VHOST_RESET_OWNER implementation in the
+following patch, when vsock->dev.mutex is already taken and owner is
+checked.
+
+Signed-off-by: Pavel Tikhomirov <ptikhomirov@virtuozzo.com>
+---
+ drivers/vhost/vsock.c | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Pass walk flags to kvm_pgtable_get_leaf()
+[PATCH v5 1/5] KVM: arm64: Pass walk flags to kvm_pgtable_get_leaf()
+Author: Jack Thomson <jackabt.amazon@gmail.com>
+
+
+Allow callers of kvm_pgtable_get_leaf() to specify the page-table walk
+flags, in preparation for performing walks under the MMU read lock.
+
+Reading a stage-2 leaf while only holding the read lock requires
+KVM_PGTABLE_WALK_SHARED: parallel faults (which also only hold the read
+lock) can unlink table pages and free them via RCU, so the walker must
+be inside an RCU read-side critical section, which the shared walk flag
+provides via kvm_pgtable_walk_begin().
+
+All existing callers either hold the write lock, walk with interrupts
+disabled, or run at hyp where shared walks are rejected; they keep the
+current behaviour by passing no flags.
+
+No functional change intended.
+
+Signed-off-by: Jack Thomson <jackabt@amazon.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h  |  5 ++++-
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c | 10 +++++-----
+ arch/arm64/kvm/hyp/pgtable.c          |  5 +++--
+ arch/arm64/kvm/mmu.c                  |  2 +-
+ arch/arm64/kvm/nested.c               |  2 +-
+ 5 files changed, 14 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add KVM_PRE_FAULT_MEMORY support
+[PATCH v5 0/5] KVM: arm64: Add KVM_PRE_FAULT_MEMORY support
+Author: Jack Thomson <jackabt.amazon@gmail.com>
+
+
+Hi,
+
+This series adds arm64 support for KVM_PRE_FAULT_MEMORY, which was added
+for x86 in [1]. The ioctl allows userspace to populate stage-2 mappings
+before running a vCPU, reducing the number of stage-2 faults taken in
+the run path. This is useful for post-copy migration, where stage-2
+fault latency shows up directly in memory-intensive workloads.
+
+On arm64, the GPA supplied to the ioctl is treated as an IPA in the
+userspace-owned VM's memslot address space. If the vCPU most recently
+ran a nested guest, KVM still targets the VM's canonical stage-2. It
+does not interpret the GPA as an L2 IPA, and does not try to populate
+the nested/shadow stage-2 selected by the vCPU's last run state.
+
+The patches are:
+
+ - Allow callers of kvm_pgtable_get_leaf() to pass walk flags, so the
+   prefault path can walk stage-2 under the MMU read lock.
+
+ - Add arm64 support for KVM_PRE_FAULT_MEMORY.
+
+ - Enable pre_fault_memory_test on arm64.
+
+ - Add a backing-source option to pre_fault_memory_test.
+
+ - Add a nested (NV) selftest that prefaults on a vCPU whose last-run
+   context is backed by a shadow stage-2 MMU with an empty nested
+   stage-2 root.
+
+The prefault flag and page_size output in the stage-2 fault descriptor
+remain in this series so the arm64 implementation can advance by the
+mapping granule installed by the fault path and report poison without
+queueing a SIGBUS.
+
+Tested with pre_fault_memory_test under an arm64 QEMU setup with
+anonymous, shmem, anonymous_thp, anonymous_hugetlb and shared_hugetlb
+backings, including 64K, 2M and 32M hugetlb pools, and with the new
+nv_pre_fault_memory_test on an NV-capable setup.
+
+=== Changes since v4 [2] ===
+
+ - Reworked nested virt semantics: arm64 now treats the ioctl GPA as the
+   VM/memslot IPA and always targets the canonical stage-2. It no longer
+   translates an L2 IPA through L1's stage-2.
+
+ - Documented the arm64 nested behavior in the KVM API text.
+
+ - Switch to the canonical stage-2 with the vCPU put/load helpers when
+   the vCPU last ran with a nested/shadow MMU, keeping VMID, VNCR and
+   shadow-MMU refcount state consistent.
+
+ - Split the kvm_pgtable_get_leaf() walk-flag plumbing into a prep patch
+   and walk existing mappings with KVM_PGTABLE_WALK_SHARED under the MMU
+   read lock.
+
+ - Tightened prefault fault handling: preserve fault info, set IL in the
+   synthetic ESR, handle existing mappings, return -EAGAIN for invalid
+   memslot races, and report -EHWPOISON without queueing SIGBUS.
+
+ - Avoid directly walking stage-2 page tables when pKVM is enabled.
+   Protected VMs remain unsupported via -EOPNOTSUPP.
+
+ - Preserve the selected selftest memory backing when recreating the
+   racing memslot.
+
+ - Add the nested (NV) prefault selftest, including an empty nested
+   stage-2 root to catch accidental L2-IPA interpretation.
+
+=== Changes since v3 [3] ===
+
+ - Return -EOPNOTSUPP for protected VMs.
+
+ - Reworked nested-vCPU handling to translate an L2 IPA through L1's
+   stage-2. This has been superseded by the canonical VM-IPA semantics
+   described above.
+
+ - Make page_size unsigned and keep local declarations ordered at the
+   top of kvm_arch_vcpu_pre_fault_memory().
+
+=== Changes since v2 [4] ===
+
+ - Update the synthetic fault info. Thanks Suzuki.
+
+ - Remove the selftest change for unaligned mmap allocations. Thanks
+   Sean.
+
+[1]: https://lore.kernel.org/kvm/20240710174031.312055-1-pbonzini@redhat.com/
+[2]: https://lore.kernel.org/linux-arm-kernel/20260113152643.18858-1-jackabt.amazon@gmail.com/
+[3]: https://lore.kernel.org/linux-arm-kernel/20251119154910.97716-1-jackabt.amazon@gmail.com/
+[4]: https://lore.kernel.org/linux-arm-kernel/20251013151502.6679-1-jackabt.amazon@gmail.com/
+
+Jack Thomson (5):
+  KVM: arm64: Pass walk flags to kvm_pgtable_get_leaf()
+  KVM: arm64: Add pre_fault_memory implementation
+  KVM: selftests: Enable pre_fault_memory_test for arm64
+  KVM: selftests: Add option for different backing in pre-fault tests
+  KVM: selftests: Add nested pre-fault test for arm64
+
+ Documentation/virt/kvm/api.rst                |  18 +-
+ arch/arm64/include/asm/kvm_pgtable.h          |   5 +-
+ arch/arm64/kvm/Kconfig                        |   1 +
+ arch/arm64/kvm/arm.c                          |   1 +
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |  10 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   5 +-
+ arch/arm64/kvm/mmu.c                          | 164 +++++++++++++-
+ arch/arm64/kvm/nested.c                       |   2 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../kvm/arm64/nv_pre_fault_memory_test.c      | 200 ++++++++++++++++++
+ .../selftests/kvm/pre_fault_memory_test.c     | 150 ++++++++++---
+ 11 files changed, 513 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: access_tracking_perf_test: bump number of NUMA nodes to 32
+[PATCH] KVM: selftests: access_tracking_perf_test: bump number of NUMA nodes to 32
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+It's rare to find a system that has more than 4 sockets,
+but a system can have more than 4 NUMA nodes if each socket
+exposes its chiplets as separate NUMA nodes.
+
+In particular, our CI caught a failure in this test on a system with
+two sockets, each containing an 'AMD EPYC 7601 32-Core Processor'.
+
+Bump the limit to 32, just in case.
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ tools/testing/selftests/kvm/include/lru_gen_util.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Move vTPR vs. TPR Threshold consistency
+[PATCH v2 1/2] KVM: nVMX: Move vTPR vs. TPR Threshold consistency
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the off-by-default consistency check for vmcs12.tpr_threshold vs.
+the virtual APIC vTPR into the "normal" controls checks, as waiting until
+KVM has loaded some amount of state is unnecessary and actively dangerous.
+Specifically, failure to unwind vmcs01.GUEST_CR3 to KVM's value when EPT
+is disabled results in KVM running L1 with an L1-controlled CR3, not with
+KVM's CR3!
+
+Alternatively, KVM could simply reset the MMU to force a reload of
+vmcs01.GUEST_CR3, but the _only_ reason the check was shoved into a "late"
+flow was to wait until the vmcs12 pages were retrieved.  Rather than build
+up more crusty code, simply access vTPR using a regular guest memory access
+(performance isn't a concern).  To circumvent the restrictions that led to
+KVM deferring nested_get_vmcs12_pages(), (a) use a VM-scoped API to read
+guest memory so that it always hits non-SMM memslots (for RSM), and (b)
+skip the check (since its off-by-default anyways) when the vCPU doesn't
+want to run, i.e. when userspace is restoring/stuffing state.
+
+If reading guest memory fails, simply skip the consistency check, as KVM's
+de facto ABI is that VMX instruction accesses to non-existent memory get
+PCI Bus Error semantics, where reads return 0xFFs.  And if vTPR=0xFF, then
+the vTPR is guaranteed to be greater than or equal to TPR_THRESHOLD.
+
+Fixes: 1100e4910ad2 ("KVM: nVMX: Add an off-by-default module param to WARN on missed consistency checks")
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 66 +++++++++++++++++----------------------
+ 1 file changed, 29 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Fix ept=n bugs where KVM runs L2 with guest CR3
+[PATCH v2 0/2] KVM: nVMX: Fix ept=n bugs where KVM runs L2 with guest CR3
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix two bugs where KVM can run L2 with a guest-controlled CR3.  The underlying
+flaw dates back to commit f087a02941fe ("KVM: nVMX: Stash L1's CR3 in
+vmcs01.GUEST_CR3 on nested entry w/o EPT").  Past me claimed:
+
+  Smashing vmcs01.GUEST_CR3 is safe because nested VM-Exits, and the unwind,
+  reset KVM's MMU, i.e. vmcs01.GUEST_CR3 is guaranteed to be overwritten with
+  a shadow CR3 prior to re-entering L1.
+
+which was and is true, _if_ a nested VM-Exit or the unwind is reached.  If KVM
+fails directly, vmcs01.GUEST_CR3 will be left pointing at L1's actual CR3, i.e.
+KVM will run with legacy shadow paging a guest-controlled CR3, which is... not
+good.
+
+v2:
+ - Use kvm_read_cr3() to read vcpu->arch.cr3. [Sashiko]
+ - Skip consistency check if reading vTPR fails. [Jim]
+
+v1: https://lore.kernel.org/all/20260603223418.1720035-1-seanjc@google.com
+
+Sean Christopherson (2):
+  KVM: nVMX: Move vTPR vs. TPR Threshold consistency check into "normal"
+    checks
+  KVM: nVMX: Don't use vmcs01.GUEST_CR3 to snapshot L1's CR3 when EPT is
+    disabled
+
+ arch/x86/kvm/vmx/nested.c | 87 +++++++++++++++++----------------------
+ arch/x86/kvm/vmx/vmx.h    |  7 ++++
+ 2 files changed, 44 insertions(+), 50 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/pgtable: Unconditionally clear _PAGE_UNUSED
+[PATCH v1 1/1] s390/pgtable: Unconditionally clear _PAGE_UNUSED
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When setting ptes with set_ptes(), unconditionally clear the
+_PAGE_UNUSED flag.
+
+The flag has only sense when the pte is being unmapped to be swapped,
+it will be set by KVM when unmapping unused pages.  Setting it in any
+other way does not make sense and can lead to guest corruption.
+
+Fixes: c98175b7917f ("KVM: s390: Add gmap_helper_set_unused()")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/include/asm/pgtable.h | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Minor refactor of base/ext facility
+[PATCH v4 1/4] KVM: s390: Minor refactor of base/ext facility
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+
+Directly use the size of the arrays instead of going through the
+indirection of kvm_s390_fac_size().
+Don't use magic number for the number of entries in the non hypervisor
+managed facility bit mask list.
+Make the constraint of that number on kvm_s390_fac_base obvious.
+Get rid of implicit double anding of stfle_fac_list.
+
+Signed-off-by: Nina Schoetterl-Glausch <nsg@linux.ibm.com>
+Co-developed-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 44 +++++++++++++++++++-------------------------
+ 1 file changed, 19 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: vsie: Implement ASTFLEIE facility 2
+[PATCH v4 0/4] KVM: s390: vsie: Implement ASTFLEIE facility 2
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+Add support for STFLE format 2 in VSIE guests.
+
+The change requires qemu support to set the ASTFLEIE2 feature bit.
+ASTFLEIE2 is available since IBM z16.
+To function G1 has to run this KVM code and G1 and G2 have to run QEMU
+
+Tests are implemented in kvm-unit-tests and sent as a series to that
+list.
+
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+The series was originally developed by Nina and only rebased and
+slightly adjusted by me. It was not sent earlier since the accompanying
+kvm-unit-tests and qemu changes were not ready.
+
+---
+Changes in v4:
+- adjusted struct kvm_s390_flcb2 to make sure reserved0 is always 0
+
+Changes in v3:
+- renamed struct kvm_s390_f2_flcb to kvm_s390_flcb2 as requested by
+  Janosch
+- rebased
+
+Changes in v2:
+- adjusted variable naming in handle_stfle()
+- add some constants for readability
+- add struct for format-2 facility list control block
+- rebased to v7.0-rc1
+
+---
+Nina Schoetterl-Glausch (4):
+      KVM: s390: Minor refactor of base/ext facility lists
+      s390/sclp: Detect ASTFLEIE 2 facility
+      KVM: s390: vsie: Refactor handle_stfle
+      KVM: s390: vsie: Implement ASTFLEIE facility 2
+
+ arch/s390/include/asm/kvm_host.h | 12 ++++++
+ arch/s390/include/asm/sclp.h     |  1 +
+ arch/s390/include/uapi/asm/kvm.h |  1 +
+ arch/s390/kvm/kvm-s390.c         | 46 ++++++++++------------
+ arch/s390/kvm/vsie.c             | 85 +++++++++++++++++++++++++++++++---------
+ drivers/s390/char/sclp_early.c   |  4 +-
+ 6 files changed, 104 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/tdx: Add helper to query maximum TD Quote size
+[PATCH 1/2] x86/tdx: Add helper to query maximum TD Quote size
+Author: Peter Fang <peter.fang@intel.com>
+
+TDX attestation blob ("TD Quote") sizes can grow with newer
+cryptographic schemes, so guests can no longer rely on a fixed-size
+buffer for the Quote.
+
+Newer TDX modules report the maximum TD Quote size via a TD-scope
+metadata field. Add a helper to query it instead of exposing tdg_vm_rd()
+directly, as it can read arbitrary metadata fields.
+
+Thanks to Xu Yilun for suggesting this.
+
+Assisted-by: Claude:claude-opus-4-7
+Assisted-by: GitHub Copilot:gpt-5.4
+Signed-off-by: Peter Fang <peter.fang@intel.com>
+---
+ arch/x86/coco/tdx/tdx.c           | 19 +++++++++++++++++++
+ arch/x86/include/asm/shared/tdx.h |  1 +
+ arch/x86/include/asm/tdx.h        |  2 ++
+ 3 files changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  tdx-guest: Make Quote buffer size dynamic
+[PATCH 0/2] tdx-guest: Make Quote buffer size dynamic
+Author: Peter Fang <peter.fang@intel.com>
+
+Hi,
+
+This series changes the TDX attestation driver's Quote buffer size from
+a fixed constant to a value queried from the TDX module. So effectively:
+
+  s/FIXED_BUF_SIZE/queried_buf_size/g
+
+...in the TDX guest driver.
+
+Terminology
+===========
+
+A "TD Quote" is an attestation structure signed with a platform key. It
+contains information about a TDX guest and the platform it's running on.
+
+The "Quote buffer" in the TDX guest driver is a memory buffer shared
+between the TDX guest and the host VMM to retrieve TD Quotes. It has a
+header defined in the GHCI spec [1].
+
+Device Identifier Composition Engine ("DICE") provides a framework for
+layering attestation evidence. This replaces the SGX model of contacting
+an Intel server to obtain a certificate.
+
+Problem
+=======
+
+The fixed-size Quote buffer approach is not sustainable. As
+cryptographic algorithms evolve, TD Quote sizes also grow. A previous
+commit [2] increased the guest driver's fixed-size Quote buffer to 128
+KB to accommodate DICE Quotes, but it may still be insufficient when
+those Quotes use post-quantum cryptography (PQC). PQC certificate chains
+are roughly 10x-15x larger than conventional ones, which can increase
+Quote sizes to several megabytes.
+
+What's in this series
+=====================
+
+To avoid changing the driver whenever the Quote buffer becomes too
+small, newer TDX modules report their maximum Quote size via a metadata
+field. The guest driver uses this value for its Quote buffer when
+available. Older TDX modules continue to use the 128 KB buffer.
+
+The changes do not affect configfs-tsm-report ABIs.
+
+Patch 1/2: Add a helper to read the QUOTE_MAX_SIZE metadata field.
+Patch 2/2: Replace the fixed Quote buffer size with the queried value,
+           when available.
+
+AI use
+======
+
+I used AI tools (Claude:claude-opus-4-7, GitHub Copilot:gpt-5.4) to
+proofread this cover letter and the changelogs. The series also
+underwent AI code review (Claude:claude-opus-4-7), but the feedback was
+limited to style suggestions.
+
+[1] Guest Hypervisor Communication Interface (GHCI) Specification,
+    Version 1.5, Section "TDG.VP.VMCALL<GetQuote>"
+[2] 43185067c6fd ("configfs-tsm-report: tdx_guest: Increase Quote buffer
+    size to 128KB")
+
+Kuppuswamy Sathyanarayanan (1):
+  virt: tdx-guest: Allocate Quote buffer dynamically
+
+Peter Fang (1):
+  x86/tdx: Add helper to query maximum TD Quote size
+
+ arch/x86/coco/tdx/tdx.c                 | 19 +++++++++
+ arch/x86/include/asm/shared/tdx.h       |  1 +
+ arch/x86/include/asm/tdx.h              |  2 +
+ drivers/virt/coco/tdx-guest/tdx-guest.c | 52 ++++++++++++++++++-------
+ 4 files changed, 60 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  sched/fair: Add EEVDF lag credit primitive for nominated next-buddy
+[PATCH v3 01/10] sched/fair: Add EEVDF lag credit primitive for nominated next-buddy
+Author: Wanpeng Li <kernellwp@gmail.com>
+
+
+pick_eevdf()'s PICK_BUDDY path only returns cfs_rq->next when the
+entity is eligible. A yield_to() target that is behind avg_vruntime at
+any level of its sched_entity hierarchy is skipped, and the
+set_next_buddy() hint is lost.
+
+Add eevdf_credit_entity_vlag(), which can credit a nominated entity up to
+the eligibility boundary so that pick_eevdf() can honor the buddy hint.
+The helper handles cfs_rq->curr, which is off-tree and can be shifted in
+place while carrying any active vprot window.
+
+Gate the helper behind SCHED_FEAT(YIELD_TO_LAG_CREDIT). The helper has no
+caller in this change, so mark it __maybe_unused; there is no functional
+change.
+
+Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+---
+ kernel/sched/fair.c     | 48 +++++++++++++++++++++++++++++++++++++++++
+ kernel/sched/features.h |  9 ++++++++
+ 2 files changed, 57 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  sched/fair, KVM: Semantics-aware directed yield for oversubscribed KVM
+[PATCH v3 00/10] sched/fair, KVM: Semantics-aware directed yield for oversubscribed KVM
+Author: Wanpeng Li <kernellwp@gmail.com>
+
+
+On overcommitted hosts, a spinning vCPU often calls yield_to() to let a
+lock holder or IPI receiver run.  The hint can be ineffective for two
+independent reasons: the scheduler may fail to select the nominated task,
+and KVM may nominate a task that is not the one the spinning vCPU is
+waiting for.
+
+This series addresses both sides.  The scheduler side credits bounded
+EEVDF lag to the nominated next-buddy so the buddy hint is honored across
+the relevant cgroup hierarchy, and forces a local reschedule so the
+credited buddy can be selected immediately.  The KVM side tracks recent
+unicast fixed IPI sender/receiver pairs and prefers the confirmed receiver
+when selecting a directed-yield target.
+
+Problem Statement
+-----------------
+
+In overcommitted virtualization scenarios, vCPUs frequently spin on locks
+held by other vCPUs that are not currently running, or on IPI responses
+from vCPUs that are runnable but not scheduled.  Paravirtual spinlock
+support and PLE detect these situations and call yield_to() to let the
+other vCPU make progress.
+
+The current implementation has two limitations:
+
+1. Scheduler-side limitation:
+
+   yield_to_task_fair() relies on set_next_buddy() to express a preference
+   for the target.  set_next_buddy() nominates the target at every level of
+   its cgroup ancestor chain, but pick_eevdf()'s PICK_BUDDY branch only
+   returns cfs_rq->next when that entity is already eligible
+   (entity_eligible()).  A target that is behind avg_vruntime at any level
+   of the chain is skipped, and the hint is dropped at the first ineligible
+   group entity.
+
+   Even when the target is eligible, yield_to() does not by itself force
+   the caller off the CPU.  An active RUN_TO_PARITY protect_slice() on the
+   local yielder can therefore keep pick_eevdf() returning the yielder
+   instead of the target.
+
+   The recent forfeit-on-yield work (commits 79104becf42b "sched/fair:
+   Forfeit vruntime on yield" and 127b90315ca0 "sched/proxy: Yield the
+   donor task") makes the yielder ineligible, but it does not make the
+   nominated target eligible when that target is behind avg_vruntime, keep
+   PICK_BUDDY from being dropped at the first ineligible group entity, or
+   cancel an active RUN_TO_PARITY slice on the yielder.  This series builds
+   on that behavior by crediting the target and cancelling slice
+   protection, so the nominated entity is the one pick_eevdf() returns.
+
+2. KVM-side limitation:
+
+   kvm_vcpu_on_spin() selects a directed-yield target from coarse
+   preempted / preempted-in-kernel state.  It cannot distinguish a vCPU
+   spinning on an IPI response from a vCPU spinning on a lock.  When a vCPU
+   sends an IPI and spins waiting for the response, the heuristic can boost
+   an unrelated vCPU and miss the actual IPI receiver.
+
+These effects lengthen lock hold times and increase spin time,
+context-switch overhead and cache pressure in overcommitted environments,
+especially for workloads with fine-grained synchronization.
+
+Solution Overview
+-----------------
+
+Part 1: Scheduler EEVDF lag credit (patches 1-5)
+
+Rather than penalizing the yielding vCPU, credit the nominated target so
+pick_eevdf() honors the buddy hint.
+
+The mechanism is EEVDF-native and cgroup-hierarchy-aware:
+
+- Credit bounded EEVDF lag to the nominated next-buddy so pick_eevdf()'s
+  PICK_BUDDY branch returns it.  Walk the same ancestor chain that
+  set_next_buddy() nominated and credit each not-yet-eligible level, so the
+  hint is not dropped at the first ineligible group entity.
+
+- Credit to a small positive-vlag margin, not merely the vlag = 0
+  eligibility boundary, so the target stays eligible across several
+  scheduling decisions rather than a single pick.  The margin scales with
+  runqueue depth and is clamped to entity_lag()'s legal positive-lag bound,
+  preserving EEVDF fairness.
+
+- Handle both the off-tree current entity (shifted in place, carrying any
+  vprot window) and a queued (on-tree) entity (repositioned via the
+  canonical place_entity()-paired requeue used by requeue_delayed_entity(),
+  keeping sum_w_vruntime consistent with entity_key()).
+
+- Force a local reschedule at the end of the credit path: cancel
+  RUN_TO_PARITY slice protection along the yielder's sched_entity chain and
+  resched_curr() the local CPU.  Only this forced preemption is rate
+  limited (once per 6ms per rq) to avoid excessive forced preemption on
+  PLE-heavy guests; the lag credit itself runs on every directed yield.
+
+The mechanism is gated by SCHED_FEAT(YIELD_TO_LAG_CREDIT) (default on).
+With the feature off, yield_to_task_fair() keeps the existing forfeit-only
+behavior.
+
+Part 2: KVM IPI-aware directed yield (patches 6-10)
+
+KVM tracks recent unicast fixed IPI sender/receiver relationships and uses
+them to prioritize directed-yield targets.
+
+- Record unicast fixed IPIs from both LAPIC delivery paths, the APIC-map
+  fast path and the slow fallback, when exactly one destination vCPU
+  accepts the interrupt.
+
+- Use READ_ONCE()/WRITE_ONCE() accessors.  The per-vCPU ipi_context state
+  is only a best-effort scheduling hint.
+
+- Age out stale relationships with a recency window (50ms default), and
+  clear state on a matching-vector EOI without dropping unrelated pending
+  IPI state.
+
+Directed-yield candidate selection uses the following priority order:
+
+  1. A confirmed recent IPI receiver of the spinning vCPU.
+  2. The arch-specific pending-interrupt hint
+     (kvm_arch_dy_has_pending_interrupt()).
+  3. The existing preempted / preempted-in-kernel heuristic.
+
+If the strict IPI-aware pass finds no eligible candidate, an optional
+second pass falls back to a relaxed preempted-only search.  The fallback is
+controlled by the enable_relaxed_boost module parameter (default on).
+
+Runtime controls:
+  * /sys/kernel/debug/sched/features (YIELD_TO_LAG_CREDIT)
+  * /sys/module/kvm/parameters/ipi_tracking_enabled
+  * /sys/module/kvm/parameters/ipi_window_ns
+  * /sys/module/kvm/parameters/enable_relaxed_boost
+
+Host-side deployment model
+--------------------------
+
+The series is host-side by design.  It requires no guest ABI, paravirtual
+driver, negotiated feature bit, or guest kernel change, so existing guests
+benefit without coordination between host and guest software.
+
+That deployment model gives the mechanisms broad coverage.  The scheduler
+lag credit applies to every yield_to() the host already receives, including
+PLE and paravirtual spinlock paths.  The KVM side observes the actual
+unicast-IPI sender/receiver relationship at software LAPIC delivery time,
+so it covers spin and IPI waits from spinlocks, RCU, smp_call_function()
+and IPI-based wakeups rather than a single paravirtualized operation such
+as TLB shootdown.
+
+The host-side approach also composes with existing paravirtualization.  If
+a guest provides PV TLB shootdown or PV spinlocks, those interfaces reduce
+the amount of spinning that reaches the host; this series handles the
+residual yield_to() and IPI waits that remain.  It is runtime gated as
+described above and can be enabled or disabled per host.
+
+The scheduler side is independent of APICv, IPI virtualization and the
+LAPIC delivery path.  The KVM side depends on software LAPIC delivery: when
+IPI/EOI virtualization handles the guest's ICR and EOI writes in hardware,
+no sender/receiver relationship is recorded, and candidate selection falls
+back to the pending-interrupt and preempted heuristics, plus the relaxed
+preempted-only pass added in patch 10.  In that configuration the tracking
+state stays empty while the scheduler side remains fully active.
+
+The design separates the consumer of the hint from its source.  Software
+IPI tracking supplies the confirmed receiver on hosts where software LAPIC
+delivery is observable today; a future guest-cooperative scheduling hint
+could populate the same slot without changing the priority-ordered
+candidate selection.
+
+Performance Results
+-------------------
+
+Test environment: a 16-core x86-64 host, 16 vCPUs per guest.  Host CPU
+overcommit is varied by co-locating 2, 3 and 4 guests (120 runs per point),
+with APICv disabled so the KVM side observes IPI delivery in software.
+Dbench reports throughput and reflects the scheduler-side lag credit; the
+PARSEC workloads report end-to-end latency reduction under the full series.
+
+Dbench (filesystem metadata operations), throughput improvement:
+  2 VMs:  +6.65%
+  3 VMs:  +4.80%
+  4 VMs:  +7.59%
+
+PARSEC Dedup, simlarge input (IPI-heavy synchronization), latency
+reduction:
+  2 VMs:  +8.87%
+  3 VMs: +10.29%
+  4 VMs: +15.60%
+
+PARSEC VIPS, simlarge input (balanced sync and compute), latency
+reduction:
+  2 VMs: +10.23%
+  3 VMs:  +6.63%
+  4 VMs:  +4.50%
+
+Analysis:
+
+- Dedup's gains grow with the VM count: as more runnable vCPUs compete for
+  each physical CPU, a directed yield is more likely to land on a vCPU that
+  is genuinely preempted while an IPI sender spins, so honoring the
+  confirmed receiver matters more.
+
+- Dedup, with its IPI-heavy synchronization, benefits most from the
+  IPI-aware directed yield.  Preferring the confirmed IPI receiver over the
+  generic preempted-lock-holder heuristic shortens IPI response latency.
+
+- VIPS mixes synchronization and compute, so its gains shrink as the VM
+  count rises: at higher overcommit more of each run is spent in compute
+  that a directed yield cannot accelerate, leaving less spin time to
+  recover.
+
+- Dbench benefits primarily from the scheduler-side lag credit; its lock
+  patterns involve more direct lock-holder boosting than IPI spinning.
+
+- No configuration regressed; the mechanisms degrade gracefully as
+  contention rises.
+
+The gains stem from three factors:
+
+1. Lock holders receive sustained CPU time to complete critical sections,
+   reducing lock hold duration and cascading contention.
+
+2. IPI receivers are scheduled promptly when senders spin, reducing IPI
+   response latency and wasted spin cycles.
+
+3. Reduced context switching between lock waiters and holders improves
+   cache utilization.
+
+Scope of the scheduler-side benefit
+-----------------------------------
+
+The lag credit takes effect only when the yielding vCPU and its target
+share a runqueue, i.e. when more runnable vCPUs than pCPUs contend for a
+CPU:
+
+- Under CPU overcommit - co-located guests, or a VM whose vCPUs are pooled
+  onto fewer pCPUs than it has vCPUs - the waiter and the lock-holder or
+  IPI-receiver land on the same rq, and the buddy hint applies.  The
+  results here are from this regime, with guests co-located so their vCPUs
+  contend for shared pCPUs.
+
+- Without such contention - 1:1 vCPU:pCPU pinning, or a matched vCPU:pCPU
+  count with no intra-VM overcommit - there is no eligible buddy to credit,
+  so the path is inert and adds no overhead or regression.
+
+Independent s390 testing (directed yield there uses the diag9c hypercall)
+shows the same pattern: under intra-VM vCPU pooling the yield-to hypercall
+rate falls by more than half with a few percent throughput gain, while 1:1
+pinning and matched vCPU:pCPU configurations show no change either way.
+
+Directed yield is a same-runqueue mechanism and cannot help a waiter whose
+target is on a different rq; extending it to cross-runqueue cases is left
+as future work.
+
+Patch Organization
+------------------
+
+Patches 1-5: Scheduler EEVDF lag credit
+
+  Patch 1: Add the eevdf_credit_entity_vlag() primitive and the
+           YIELD_TO_LAG_CREDIT feature.  Handles the off-tree current
+           entity and has no functional effect on its own.
+
+  Patch 2: Credit to a persistent, queue-depth-scaled positive-vlag
+           margin, clamped to entity_lag()'s legal bound.
+
+  Patch 3: Extend the primitive to a queued (on-tree) entity via the
+           canonical place_entity()-paired requeue.
+
+  Patch 4: Wire the credit walk into yield_to_task_fair(), crediting each
+           level of the nominated ancestor chain.
+
+  Patch 5: Force a local reschedule (cancel RUN_TO_PARITY slice protection
+           and resched_curr()) so the credited buddy can be selected.
+           Activation patch; rate-limits only the forced preemption.
+
+Patches 6-10: KVM IPI-aware directed yield
+
+  Patch 6: Add per-vCPU IPI tracking infrastructure, module parameters and
+           helper functions.  Candidate selection is unchanged.
+
+  Patch 7: Track unicast fixed IPI delivery from both LAPIC paths.
+
+  Patch 8: Clear IPI tracking on a matching-vector EOI.
+
+  Patch 9: Implement IPI-aware directed-yield candidate selection with the
+           priority order above.
+
+  Patch 10: Add the relaxed preempted-only fallback as a safety net.
+
+Testing
+-------
+
+Workloads tested:
+
+- Dbench (filesystem metadata stress)
+- PARSEC benchmarks (Dedup, VIPS)
+- Kernel compilation (make -j16 in each VM)
+
+No regressions observed on any configuration.  The mechanisms show neutral
+to positive impact across diverse workloads.
+
+Rate-limit policy
+-----------------
+
+The scheduler-side forced reschedule is rate-limited to bound the cost of
+frequent VM exits.  Under the kvm-full profile, PLE-heavy workloads such as
+PARSEC VIPS and Dedup take many PAUSE-loop exits; each exit can drive a
+yield_to(), and thus a potential forced preemption.  Forcing a reschedule
+on every yield_to() would add needless preemption pressure and cache churn.
+
+The series limits only the forced preemption path
+(cancel_protect_slice() plus resched_curr()) to once per 6ms per rq.  The
+lag credit itself remains unthrottled, so each directed yield refreshes the
+buddy hint.  The fixed 6ms interval is intentionally conservative; an
+adaptive limit based on the per-rq yield_to()/PLE-exit rate can be explored
+separately.
+
+Changelog:
+
+v2 -> v3:
+- Redesign the scheduler side.  v2 applied a bounded vruntime penalty to
+  the yielding vCPU (a "debooster"); v3 instead credits bounded EEVDF lag
+  to the nominated next-buddy so pick_eevdf()'s PICK_BUDDY branch returns
+  it.  Crediting the target is EEVDF-native, composes cleanly with
+  RUN_TO_PARITY, and avoids the fairness reasoning required when shifting
+  the yielder's vruntime in a cgroup hierarchy.  The redesign also removes
+  the bulk of the v2 machinery:
+  * Drop the cgroup LCA finder, reverse-pair debouncing, the per-rq
+    penalty tracking and the dedicated debugfs sysctl.  The mechanism is
+    now gated by SCHED_FEAT(YIELD_TO_LAG_CREDIT).
+  * Credit to a queue-depth-scaled positive-vlag margin clamped to
+    entity_lag()'s legal bound, keeping the target eligible across several
+    picks while preserving EEVDF fairness.
+  * Handle the off-tree current entity (in-place shift) and a queued
+    on-tree entity (canonical place_entity()-paired requeue) separately,
+    so sum_w_vruntime stays consistent with entity_key().
+  * Add an explicit forced local reschedule that cancels RUN_TO_PARITY
+    slice protection so the credited buddy can be selected; only the
+    forced preemption is rate limited (6ms/rq), the lag credit runs on
+    every yield.
+- KVM side keeps the v2 design; rebased and reorganized into five patches
+  (infrastructure, track delivery, clear-on-EOI, candidate selection,
+  relaxed fallback).  Tracking now hooks both the APIC-map fast path and
+  the slow fallback, and the EOI clear is vector-matched.
+- Rebase onto v7.1-rc7.
+
+v1 -> v2:
+- Rebase onto v6.19-rc1 (v1 was based on v6.18-rc4).
+- Drop the "KVM: Fix last_boosted_vcpu index assignment bug" patch, as
+  v6.19-rc1 already contains the fix.
+- Scheduler side (the v2 vruntime debooster, since replaced in v3):
+  * Apply the deboost before yield_task_fair() to adapt to v6.19's EEVDF
+    forfeit behavior (se->vruntime = se->deadline), which would otherwise
+    inflate the yielder's vruntime before the penalty was computed.
+  * Use rq->donor instead of rq->curr for correct EEVDF donor tracking.
+  * Use h_nr_queued instead of nr_queued for accurate hierarchical task
+    counting in the penalty cap.
+  * Drop the vlag assignment (recalculated on dequeue/enqueue) and the
+    update_min_vruntime() call (the yielder is cfs_rq->curr, off-tree), and
+    remove the unnecessary gran_floor safeguard.
+  * Rename the debugfs knob to vcpu_debooster_enabled.
+- KVM IPI tracking: improve module-parameter documentation and add the
+  kvm_vcpu_is_ipi_receiver() declaration to x86.h.
+
+Wanpeng Li (10):
+  sched/fair: Add EEVDF lag credit primitive for nominated next-buddy
+  sched/fair: Credit a persistent, queue-depth-scaled vlag margin
+  sched/fair: Credit queued next-buddy via canonical requeue
+  sched/fair: Credit nominated next-buddy in yield_to_task_fair()
+  sched/fair: Force a local resched on yield_to() so the buddy is picked
+  KVM: x86: Add IPI tracking infrastructure for directed yield
+  KVM: x86/lapic: Track unicast fixed IPI delivery
+  KVM: x86/lapic: Clear IPI tracking on matching-vector EOI
+  KVM: Add IPI-aware directed-yield candidate selection
+  KVM: Add relaxed preempted-only fallback for directed yield
+
+ arch/x86/include/asm/kvm_host.h |  19 +++
+ arch/x86/kvm/lapic.c            | 234 +++++++++++++++++++++++++++++++-
+ arch/x86/kvm/x86.c              |   3 +
+ arch/x86/kvm/x86.h              |   8 ++
+ include/linux/kvm_host.h        |   8 ++
+ kernel/sched/fair.c             | 224 +++++++++++++++++++++++++++++-
+ kernel/sched/features.h         |   9 ++
+ kernel/sched/sched.h            |  10 ++
+ virt/kvm/kvm_main.c             |  95 +++++++++++--
+ 9 files changed, 594 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 79e17f962 to beddd7aae
+KVM mailing list update from 79e17f962 to beddd7aae
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     36 google.com
+      6 amazon.com
+      4 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     20  Colton Lewis <coltonlewis@google.com>
+     10  tabba@google.com
+      6  Jack Thomson <jackabt@amazon.com>
+      5  Vincent Donnefort <vdonnefort@google.com>
+      4  Marc Zyngier <maz@kernel.org>
+      1  Fuad Tabba <tabba@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  ARM64 PMU Partitioning
+[PATCH v8 00/21] ARM64 PMU Partitioning
+Author: Colton Lewis <coltonlewis@google.com>
+
+This series creates a new PMU scheme on ARM, a partitioned PMU that
+allows reserving a subset of counters for more direct guest access,
+significantly reducing overhead. More details, including performance
+benchmarks, can be read in the v1 cover letter linked below.
+
+An overview of what this series accomplishes was presented at KVM
+Forum 2025. Slides [1] and video [2] are linked below.
+
+The kernel command line parameter for the driver still exists, but now
+only defines an upper limit of counters the guest might use rather
+than taking those counters from the host permanently.
+
+I would appreciate any discussion on whether that parameter should
+still exist as it's an inconvenient enabling gate on the feature that
+is no longer required. The question comes down to what, if any, guards
+we want against a guest monopolizing all counters on a system.
+
+v8:
+
+* Rebase on top of v7.1-rc7.
+
+* Implement Oliver Upton's accessor proposal to centralize PMU
+  register access and simplify trap handlers. Instead of one singular
+  accessor, implement as two because the read and write paths are
+  always different anyway.
+
+* Introduce the partitioning flag along with the
+  kvm_pmu_is_partitioned predicate
+
+* Don't use ifdef for partitioning predicates as that can be handled
+  by has_vhe
+
+* Clean up MDCR_EL2 handling by open-coding use_fgt and hpmn and
+  unconditionally setting RES0 bits.
+
+* Use {read,write}_pmcrcntrn in context swaps
+
+* Put operators on preceeding lines
+
+* Rename hw_cntr_mask to hw_cntr_impl to clarify it tracks the number
+  of counters implemented by hardware
+
+* Use GENMASK_ULL in mask functions returning u64
+
+* warn_once when host events are squeezed out by guest counter
+  allocations.
+
+* Address Sashiko AI Review findings:
+
+  - Critical fixes for lazy PMU context swaps (ensuring guest state is
+    loaded on transition to GUEST_OWNED), PMSELR_EL0 trapping to
+    prevent stale selector index, and masking guest PMCR_EL0 writes to
+    prevent host reset.
+
+  - High priority fixes for lock safety (disabling IRQs when acquiring
+    perf context lock), disabling guest counters on vCPU put,
+    preserving VHE host profiling in MDCR_EL2, waking halted vCPUs on
+    guest PMU interrupts, masking host configuration leaks, preemption
+    safety in per-CPU accesses, emulating PMCR.N reads, and preventing
+    data races in PMOVSSET_EL0 accesses.
+
+  - Medium/Low fixes for user-access fallback safety, VM-wide state
+    modification restrictions, selftests type safety, and cleanup of
+    unused fields and typos.
+
+v7:
+https://lore.kernel.org/kvmarm/20260504211813.1804997-1-coltonlewis@google.com/
+
+v6:
+https://lore.kernel.org/kvmarm/20260209221414.2169465-1-coltonlewis@google.com/
+
+v5:
+https://lore.kernel.org/kvmarm/20251209205121.1871534-1-coltonlewis@google.com/
+
+v4:
+https://lore.kernel.org/kvmarm/20250714225917.1396543-1-coltonlewis@google.com/
+
+v3:
+https://lore.kernel.org/kvm/20250626200459.1153955-1-coltonlewis@google.com/
+
+v2:
+https://lore.kernel.org/kvm/20250620221326.1261128-1-coltonlewis@google.com/
+
+v1:
+https://lore.kernel.org/kvm/20250602192702.2125115-1-coltonlewis@google.com/
+
+[1] https://gitlab.com/qemu-project/kvm-forum/-/raw/main/_attachments/2025/Optimizing__itvHkhc.pdf
+[2] https://www.youtube.com/watch?v=YRzZ8jMIA6M&list=PLW3ep1uCIRfxwmllXTOA2txfDWN6vUOHp&index=9
+
+Colton Lewis (20):
+  arm64: cpufeature: Add cpucap for HPMN0
+  KVM: arm64: Reorganize PMU functions
+  perf: arm_pmuv3: Generalize counter bitmasks
+  perf: arm_pmuv3: Check cntr_mask before using pmccntr
+  perf: arm_pmuv3: Allocate counter indices from high to low
+  perf: arm_pmuv3: Add method to partition the PMU
+  KVM: arm64: Set up FGT for Partitioned PMU
+  KVM: arm64: Add Partitioned PMU register trap handlers
+  KVM: arm64: Set up MDCR_EL2 to handle a Partitioned PMU
+  KVM: arm64: Context swap Partitioned PMU guest registers
+  KVM: arm64: Enforce PMU event filter at vcpu_load()
+  perf: Add perf_pmu_resched_update()
+  KVM: arm64: Apply dynamic guest counter reservations
+  KVM: arm64: Implement lazy PMU context swaps
+  perf: arm_pmuv3: Handle IRQs for Partitioned PMU guest counters
+  KVM: arm64: Detect overflows for the Partitioned PMU
+  KVM: arm64: Add vCPU device attr to partition the PMU
+  KVM: selftests: Add find_bit to KVM library
+  KVM: arm64: selftests: Add test case for Partitioned PMU
+  KVM: arm64: selftests: Relax testing for exceptions when partitioned
+
+Marc Zyngier (1):
+  KVM: arm64: Reorganize PMU includes
+
+ arch/arm/include/asm/arm_pmuv3.h              |  18 +
+ arch/arm64/include/asm/arm_pmuv3.h            |  12 +-
+ arch/arm64/include/asm/kvm_host.h             |  17 +-
+ arch/arm64/include/asm/kvm_types.h            |   6 +-
+ arch/arm64/include/uapi/asm/kvm.h             |   2 +
+ arch/arm64/kernel/cpufeature.c                |  10 +-
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arm.c                          |   2 +
+ arch/arm64/kvm/config.c                       |  41 +-
+ arch/arm64/kvm/debug.c                        |  30 +-
+ arch/arm64/kvm/pmu-direct.c                   | 507 ++++++++++++
+ arch/arm64/kvm/pmu-emul.c                     | 684 +----------------
+ arch/arm64/kvm/pmu.c                          | 720 ++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c                     | 271 +++++--
+ arch/arm64/tools/cpucaps                      |   1 +
+ arch/arm64/tools/sysreg                       |   6 +-
+ drivers/perf/arm_pmuv3.c                      | 136 +++-
+ include/kvm/arm_pmu.h                         |  93 ++-
+ include/linux/perf/arm_pmu.h                  |   8 +
+ include/linux/perf/arm_pmuv3.h                |  14 +-
+ include/linux/perf_event.h                    |   3 +
+ kernel/events/core.c                          |  31 +-
+ tools/include/perf/arm_pmuv3.h                |  12 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/arm64/vpmu_counter_access.c | 112 ++-
+ tools/testing/selftests/kvm/lib/find_bit.c    |   2 +
+ 26 files changed, 1918 insertions(+), 823 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Pass walk flags to kvm_pgtable_get_leaf()
+[PATCH v5 1/5] KVM: arm64: Pass walk flags to kvm_pgtable_get_leaf()
+Author: Jack Thomson <jackabt.amazon@gmail.com>
+
+
+Allow callers of kvm_pgtable_get_leaf() to specify the page-table walk
+flags, in preparation for performing walks under the MMU read lock.
+
+Reading a stage-2 leaf while only holding the read lock requires
+KVM_PGTABLE_WALK_SHARED: parallel faults (which also only hold the read
+lock) can unlink table pages and free them via RCU, so the walker must
+be inside an RCU read-side critical section, which the shared walk flag
+provides via kvm_pgtable_walk_begin().
+
+All existing callers either hold the write lock, walk with interrupts
+disabled, or run at hyp where shared walks are rejected; they keep the
+current behaviour by passing no flags.
+
+No functional change intended.
+
+Signed-off-by: Jack Thomson <jackabt@amazon.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h  |  5 ++++-
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c | 10 +++++-----
+ arch/arm64/kvm/hyp/pgtable.c          |  5 +++--
+ arch/arm64/kvm/mmu.c                  |  2 +-
+ arch/arm64/kvm/nested.c               |  2 +-
+ 5 files changed, 14 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add KVM_PRE_FAULT_MEMORY support
+[PATCH v5 0/5] KVM: arm64: Add KVM_PRE_FAULT_MEMORY support
+Author: Jack Thomson <jackabt.amazon@gmail.com>
+
+
+Hi,
+
+This series adds arm64 support for KVM_PRE_FAULT_MEMORY, which was added
+for x86 in [1]. The ioctl allows userspace to populate stage-2 mappings
+before running a vCPU, reducing the number of stage-2 faults taken in
+the run path. This is useful for post-copy migration, where stage-2
+fault latency shows up directly in memory-intensive workloads.
+
+On arm64, the GPA supplied to the ioctl is treated as an IPA in the
+userspace-owned VM's memslot address space. If the vCPU most recently
+ran a nested guest, KVM still targets the VM's canonical stage-2. It
+does not interpret the GPA as an L2 IPA, and does not try to populate
+the nested/shadow stage-2 selected by the vCPU's last run state.
+
+The patches are:
+
+ - Allow callers of kvm_pgtable_get_leaf() to pass walk flags, so the
+   prefault path can walk stage-2 under the MMU read lock.
+
+ - Add arm64 support for KVM_PRE_FAULT_MEMORY.
+
+ - Enable pre_fault_memory_test on arm64.
+
+ - Add a backing-source option to pre_fault_memory_test.
+
+ - Add a nested (NV) selftest that prefaults on a vCPU whose last-run
+   context is backed by a shadow stage-2 MMU with an empty nested
+   stage-2 root.
+
+The prefault flag and page_size output in the stage-2 fault descriptor
+remain in this series so the arm64 implementation can advance by the
+mapping granule installed by the fault path and report poison without
+queueing a SIGBUS.
+
+Tested with pre_fault_memory_test under an arm64 QEMU setup with
+anonymous, shmem, anonymous_thp, anonymous_hugetlb and shared_hugetlb
+backings, including 64K, 2M and 32M hugetlb pools, and with the new
+nv_pre_fault_memory_test on an NV-capable setup.
+
+=== Changes since v4 [2] ===
+
+ - Reworked nested virt semantics: arm64 now treats the ioctl GPA as the
+   VM/memslot IPA and always targets the canonical stage-2. It no longer
+   translates an L2 IPA through L1's stage-2.
+
+ - Documented the arm64 nested behavior in the KVM API text.
+
+ - Switch to the canonical stage-2 with the vCPU put/load helpers when
+   the vCPU last ran with a nested/shadow MMU, keeping VMID, VNCR and
+   shadow-MMU refcount state consistent.
+
+ - Split the kvm_pgtable_get_leaf() walk-flag plumbing into a prep patch
+   and walk existing mappings with KVM_PGTABLE_WALK_SHARED under the MMU
+   read lock.
+
+ - Tightened prefault fault handling: preserve fault info, set IL in the
+   synthetic ESR, handle existing mappings, return -EAGAIN for invalid
+   memslot races, and report -EHWPOISON without queueing SIGBUS.
+
+ - Avoid directly walking stage-2 page tables when pKVM is enabled.
+   Protected VMs remain unsupported via -EOPNOTSUPP.
+
+ - Preserve the selected selftest memory backing when recreating the
+   racing memslot.
+
+ - Add the nested (NV) prefault selftest, including an empty nested
+   stage-2 root to catch accidental L2-IPA interpretation.
+
+=== Changes since v3 [3] ===
+
+ - Return -EOPNOTSUPP for protected VMs.
+
+ - Reworked nested-vCPU handling to translate an L2 IPA through L1's
+   stage-2. This has been superseded by the canonical VM-IPA semantics
+   described above.
+
+ - Make page_size unsigned and keep local declarations ordered at the
+   top of kvm_arch_vcpu_pre_fault_memory().
+
+=== Changes since v2 [4] ===
+
+ - Update the synthetic fault info. Thanks Suzuki.
+
+ - Remove the selftest change for unaligned mmap allocations. Thanks
+   Sean.
+
+[1]: https://lore.kernel.org/kvm/20240710174031.312055-1-pbonzini@redhat.com/
+[2]: https://lore.kernel.org/linux-arm-kernel/20260113152643.18858-1-jackabt.amazon@gmail.com/
+[3]: https://lore.kernel.org/linux-arm-kernel/20251119154910.97716-1-jackabt.amazon@gmail.com/
+[4]: https://lore.kernel.org/linux-arm-kernel/20251013151502.6679-1-jackabt.amazon@gmail.com/
+
+Jack Thomson (5):
+  KVM: arm64: Pass walk flags to kvm_pgtable_get_leaf()
+  KVM: arm64: Add pre_fault_memory implementation
+  KVM: selftests: Enable pre_fault_memory_test for arm64
+  KVM: selftests: Add option for different backing in pre-fault tests
+  KVM: selftests: Add nested pre-fault test for arm64
+
+ Documentation/virt/kvm/api.rst                |  18 +-
+ arch/arm64/include/asm/kvm_pgtable.h          |   5 +-
+ arch/arm64/kvm/Kconfig                        |   1 +
+ arch/arm64/kvm/arm.c                          |   1 +
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |  10 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   5 +-
+ arch/arm64/kvm/mmu.c                          | 164 +++++++++++++-
+ arch/arm64/kvm/nested.c                       |   2 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../kvm/arm64/nv_pre_fault_memory_test.c      | 200 ++++++++++++++++++
+ .../selftests/kvm/pre_fault_memory_test.c     | 150 ++++++++++---
+ 11 files changed, 513 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Allow early calls to pKVM host_share/unshare_hyp
+[PATCH v1 1/4] KVM: arm64: Allow early calls to pKVM host_share/unshare_hyp
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+New:  trace_hyp_printk() for pKVM/nVHE hypervisor
+[PATCH v1 0/4] trace_hyp_printk() for pKVM/nVHE hypervisor
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+Hi all,
+
+This series adds a hypervisor event "hyp_printk" which enables
+developers to log pretty much anything into the hypervisor tracing
+buffer, just like the kernel function trace_printk().
+
+This enables rich logging from the hypervisor, while leaving all the
+string parsing burden to the kernel. This has been the main way of
+debugging pKVM in Android.
+
+Even though not strictly related to trace_hyp_printk, I have added the
+following two patches:
+
+  * KVM: arm64: Allow early calls to pKVM host_share/unshare_hyp
+
+    This one mainly intends to support one of the new features I have
+    posted here [1], which allows to enable tracing as early as
+    possible. I have added it here to limit cross-posting.
+
+  * KVM: arm64: Move kvm_define_hypevents.h to arch/arm64/kvm/
+
+    This one is just a cleanup.
+
+[1] https://lore.kernel.org/all/20260605163825.1762953-1-vdonnefort@google.com/
+
+Vincent Donnefort (4):
+  KVM: arm64: Allow early calls to pKVM host_share/unshare_hyp
+  KVM: arm64: Move kvm_define_hypevents.h to arch/arm64/kvm/
+  tracing/remotes: Add REMOTE_EVENT_CUSTOM_PRINTK() helper
+  KVM: arm64: Add hyp_printk event to nVHE/pKVM hyp
+
+ arch/arm64/include/asm/kvm_asm.h              |  4 +-
+ arch/arm64/include/asm/kvm_hypevents.h        | 14 ++++
+ arch/arm64/include/asm/kvm_hyptrace.h         |  8 +++
+ arch/arm64/kernel/image-vars.h                |  1 +
+ arch/arm64/kernel/vmlinux.lds.S               |  4 ++
+ .../define_hypevents.h}                       |  0
+ .../kvm/hyp/include/nvhe/define_events.h      |  2 -
+ arch/arm64/kvm/hyp/include/nvhe/trace.h       | 65 +++++++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/events.c              |  6 ++
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |  2 +-
+ arch/arm64/kvm/hyp_trace.c                    | 60 ++++++++++++++++-
+ include/trace/define_remote_events.h          | 19 +++++-
+ 12 files changed, 176 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Sync SPSR_EL1 when injecting an exception into a pVM
+[PATCH] KVM: arm64: Sync SPSR_EL1 when injecting an exception into a pVM
+Author: Fuad Tabba <tabba@google.com>
+
+When pKVM injects a synchronous exception into a protected guest, it
+re-enters without restoring the guest's EL1 sysregs and writes the EL1
+exception registers to hardware by hand: ESR_EL1 and ELR_EL1, but not
+SPSR_EL1. enter_exception64() sets SPSR_EL1 (the interrupted PSTATE)
+only in memory, so the guest's handler reads a stale SPSR_EL1 and
+restores the wrong PSTATE on eret.
+
+Write SPSR_EL1 alongside the other exception registers.
+
+Fixes: 6c30bfb18d0b ("KVM: arm64: Add handlers for protected VM System Registers")
+Reported-by: sashiko <sashiko@sashiko.dev>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Sync SCTLR_EL1 when injecting an exception into a pVM
+[PATCH] KVM: arm64: Sync SCTLR_EL1 when injecting an exception into a pVM
+Author: tabba <tabba@google.com>
+
+When pKVM injects a synchronous exception into a protected guest,
+enter_exception64() reads SCTLR_EL1 to set the new PSTATE's PAN and
+SSBS bits. pKVM refreshes VBAR_EL1 from the live value before injecting
+but not SCTLR_EL1, which is untrapped for protected guests, so a guest
+that updates it and then traps takes the exception with stale PAN/SSBS.
+
+Sync SCTLR_EL1 alongside VBAR_EL1.
+
+Fixes: 798eb5978700 ("KVM: arm64: Sync protected guest VBAR_EL1 on injecting an undef exception")
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add scoped resource management (guard)
+[PATCH v1 01/11] KVM: arm64: Add scoped resource management (guard)
+Author: tabba <tabba@google.com>
+
+The nVHE hypervisor manages hyp_spinlock_t locks by hand across error
+paths, where a missed unlock deadlocks the next CPU to take the lock.
+Wire hyp_spinlock_t into <linux/cleanup.h> via DEFINE_LOCK_GUARD_1 so
+callers can use guard(hyp_spinlock) and scoped_guard(hyp_spinlock),
+letting later patches replace the manual lock/unlock pairs.
+
+Signed-off-by: Fuad Tabba <tabba@google.com>
+---
+ arch/arm64/kvm/hyp/include/nvhe/spinlock.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Rework pKVM vCPU state synchronisation
+[PATCH v1 00/11] KVM: arm64: Rework pKVM vCPU state synchronisation
+Author: tabba <tabba@google.com>
+
+Hi folks,
+
+Building on Will's pKVM infrastructure series [1], this series reworks
+how pKVM moves vCPU state between the host and EL2, and stops copying a
+non-protected guest's state on every world switch.
+
+EL2 gains proper primitives for the state it transfers: vCPU lookup
+helpers, and VGIC flush/sync that reduces how much host state EL2
+dereferences. The series also moves some preparatory code (such as sys
+reg access and PSCI helpers) to shared headers and HYP, and implements
+lazy copying of a non-protected guest's register state back to the host
+until the host actually needs it, instead of on every exit.
+
+This is the first of two series moving pKVM vCPU state management to
+EL2. The follow-up completes the job for protected VMs: state
+isolation, PSCI handling at EL2, and the resulting API behaviour.
+
+The series is structured as follows:
+
+  01-03:  Guard/scoped-resource support for hyp_spinlock and KVM locking
+          (Marc asked for this to land as a prequel to a series that uses it).
+  04-07:  Preparatory refactoring (MPIDR, sys reg access, vCPU reset, PSCI
+          helpers) to shared headers and HYP.
+  08:     Host and hypervisor vCPU lookup primitives.
+  09-10:  VGIC: reduce EL2's exposure to host state, add flush/sync primitives.
+  11:     Lazy state sync for non-protected guests.
+
+Based on v7.1-rc7.
+
+[1] https://lore.kernel.org/all/20260105154939.11041-1-will@kernel.org/
+
+Cheers,
+/fuad
+
+Fuad Tabba (8):
+  KVM: arm64: Add scoped resource management (guard) for hyp_spinlock
+  KVM: arm64: Use guard(hyp_spinlock) in pKVM hypervisor code
+  KVM: arm64: Use guard()/scoped_guard() in arm64 KVM EL1 code
+  KVM: arm64: Extract MPIDR computation into a shared header
+  KVM: arm64: Make vcpu_{read,write}_sys_reg available to HYP code
+  KVM: arm64: Factor out reusable vCPU reset helpers
+  KVM: arm64: Move PSCI helper functions to a shared header
+  KVM: arm64: Implement lazy vCPU state sync for non-protected guests
+
+Marc Zyngier (3):
+  KVM: arm64: Add host and hypervisor vCPU lookup primitives
+  KVM: arm64: Minimise EL2's exposure of host VGIC state during world
+    switch
+  KVM: arm64: Add primitives to flush/sync the VGIC state at EL2
+
+ arch/arm64/include/asm/kvm_arm.h           |  12 +
+ arch/arm64/include/asm/kvm_asm.h           |   1 +
+ arch/arm64/include/asm/kvm_emulate.h       |  80 ++++++-
+ arch/arm64/include/asm/kvm_host.h          |   2 +
+ arch/arm64/kvm/arm.c                       |  21 +-
+ arch/arm64/kvm/handle_exit.c               |  22 ++
+ arch/arm64/kvm/hyp/include/nvhe/spinlock.h |   6 +
+ arch/arm64/kvm/hyp/nvhe/ffa.c              | 154 +++++--------
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c         | 255 ++++++++++++++++++---
+ arch/arm64/kvm/hyp/nvhe/mm.c               |  37 +--
+ arch/arm64/kvm/hyp/nvhe/page_alloc.c       |  13 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c             |  86 +++----
+ arch/arm64/kvm/mmu.c                       |  80 +++----
+ arch/arm64/kvm/pkvm.c                      |  26 +--
+ arch/arm64/kvm/psci.c                      |  47 +---
+ arch/arm64/kvm/reset.c                     |  68 +-----
+ arch/arm64/kvm/sys_regs.c                  |  14 +-
+ arch/arm64/kvm/sys_regs.h                  |  19 ++
+ include/kvm/arm_psci.h                     |  28 +++
+ 19 files changed, 562 insertions(+), 409 deletions(-)
+
+----------------------------------------------------------------------
+
