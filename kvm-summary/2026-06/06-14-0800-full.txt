@@ -1,0 +1,2314 @@
+
+On /root/mail/repo:
+From 6ddbd70f8 to 23e7d1929
+KVM mailing list update from 6ddbd70f8 to 23e7d1929
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     55 google.com
+      4 oss.qualcomm.com
+
+Top 15 contributors (Based on Email Body)
+
+     35  Sean Christopherson <seanjc@google.com>
+     11  David Matlack <dmatlack@google.com>
+      6  Josh Hilke <jrhilke@google.com>
+      4  Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+      3  Octavian Purdila <tavip@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH RFC 3/3] selftests/vfio: Add PCIe Device Serial Number test
+Author: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+
+Add a selftest exercising the vfio-pci DSN handling:
+ - the serial number is scrubbed to zero by default while the DSN
+   capability remains present,
+ - guest writes to the DSN bytes are rejected (value unchanged),
+ - VFIO_DEVICE_FEATURE_PCI_DSN PROBE reflects DSN support,
+ - SET/GET round-trips and is reflected in the guest-visible config
+   space,
+ - SET twice returns the latest value on GET,
+ - the presented serial persists across a device reset, and
+ - a short argsz is rejected with -EINVAL.
+
+The tests skip when the assigned device has no DSN capability or does
+not support reset.
+
+Run with the device assigned to vfio-pci, e.g.:
+
+  VFIO_SELFTESTS_BDF="0000:01:00.0" ./vfio_pci_dsn_test
+
+Exercised under QEMU with full VFIO assignment via IOMMUFD: all of the
+test's cases passed on x86_64 (intel-iommu) and arm64 (smmuv3) against an
+emulated e1000e (which implements DSN), and on x86_64 against an SR-IOV
+VF that implements DSN in an AER -> ARI -> DSN extended-capability chain.
+The SR-IOV run used a KASAN + PROVE_LOCKING kernel with no reports.
+
+Signed-off-by: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+---
+ MAINTAINERS                                      |   6 +
+ tools/testing/selftests/vfio/Makefile            |   1 +
+ tools/testing/selftests/vfio/vfio_pci_dsn_test.c | 206 +++++++++++++++++++++++
+ 3 files changed, 213 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH RFC 2/3] vfio/pci: Allow userspace to set a virtual Device
+Author: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+
+The preceding patch ("vfio/pci: Virtualize and scrub Device Serial
+Number from guests") hides the physical PCIe Device Serial Number from
+guests by zeroing it.  Some use cases instead need a stable but
+non-host-identifying serial, for example to keep a consistent device
+identity across live migration between different physical devices.
+
+Add a VFIO_DEVICE_FEATURE_PCI_DSN device feature that lets the trusted
+userspace VMM GET/SET the 64-bit serial number presented in the device's
+virtualized config space.  SET writes the value into the virtualized DSN
+capability (whose dwords are virtualized by the preceding patch, so guest
+reads return it) and GET reads it back; PROBE reports support.  The
+feature returns -ENOTTY for devices without a DSN capability.  Guest
+writes remain disallowed.
+
+The presented serial is stored only in vconfig: it persists across a
+runtime FLR/Secondary Bus Reset (reset does not rebuild vconfig) and is
+cleared when the device fd is closed (vfio_config_free()), i.e. it is
+per-open.  A feature ioctl can only reach an opened device, whose vconfig
+was allocated by vfio_config_init() during vfio_pci_core_enable().
+
+This feature uses index 13, not the next sequential value 12.  Index 12
+is already assigned to VFIO_DEVICE_FEATURE_MIG_PRECOPY_INFOv2 in
+linux-next by commit d7140b5dde45
+("vfio: Define uAPI for re-init initial bytes during the PRE_COPY phase")
+(https://lore.kernel.org/r/20260317161753.18964-2-yishaih@nvidia.com).
+Using 12 makes the core feature switch route the ioctl to the
+migration-precopy handler, which returns -EINVAL; this was observed in
+testing, hence index 13.
+
+Signed-off-by: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c | 59 ++++++++++++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c   |  2 ++
+ drivers/vfio/pci/vfio_pci_priv.h   |  2 ++
+ include/uapi/linux/vfio.h          | 18 ++++++++++++
+ 4 files changed, 81 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH RFC 1/3] vfio/pci: Virtualize and scrub Device Serial
+Author: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+
+The PCIe Device Serial Number (DSN) Extended Capability reports a unique,
+persistent hardware serial number (PCIe r6.2 sec 7.9.3).  The value
+identifies the physical component: per the spec the functions of a
+Multi-Function Device that implement the capability report the same DSN,
+so a single value can fingerprint a whole physical device.  Root Complex
+integrated Endpoints (RCiEPs) may implement the capability independently
+and are not required to share their value with other RCiEPs of the same
+Root Complex, but each such value is still a stable, host-specific
+identifier.
+
+vfio-pci has no perm_bits entry for the DSN capability, so guest reads of
+the serial number fall through to the physical device.  This leaks a
+stable hardware identifier into the guest that can be used to fingerprint
+the host device and correlate it across VMs, which is undesirable for
+multi-tenant passthrough.
+
+Add a perm_bits initializer that fully virtualizes the DSN capability:
+the header dword and both serial-number dwords (PCI_DSN_CAP,
+PCI_DSN_LOW_DW, PCI_DSN_HIGH_DW) are marked ALL_VIRT/NO_WRITE so all
+reads are served from the virtualized config space rather than hardware
+and writes are denied (the DSN is read-only state).  Scrub the serial in
+vconfig during vfio_ecap_init() so guests read a zeroed serial while the
+capability remains visible.  Add the DSN register-offset defines to
+pci_regs.h.
+
+The capability length used by alloc_perm_bits() comes from the existing
+pci_ext_cap_length[PCI_EXT_CAP_ID_DSN] = PCI_EXT_CAP_DSN_SIZEOF (12),
+which covers the 4-byte header plus the 8-byte serial.
+
+SR-IOV: per the SR-IOV spec a PF's DSN applies to all of its VFs, and a
+VF that implements the DSN capability must report the same value as its
+PF.  vfio-pci exposes only the assigned device's own config space to the
+guest, and neither the vconfig fill nor the vfio_ecap_init() walk applies
+any VF-specific transform to the DSN bytes, so the DSN capability is
+virtualized and scrubbed for a VF exactly as for a PF.  Therefore a VF
+that implements DSN (whose value is the PF's host serial) is scrubbed,
+and a VF that omits the capability (the spec-recommended case) exposes no
+serial to scrub.
+
+Variant drivers (mlx5-vfio-pci, hisi-acc-vfio-pci, nvgrace-gpu-vfio-pci,
+virtio-vfio-pci, etc.) build on vfio-pci-core and share this config-space
+path and perm_bits table, so the scrub applies to them as well.
+
+The scrub is the default because a guest cannot rely on a meaningful DSN
+through vfio-pci in general (it identifies the physical device, which
+varies across assignment and migration). The following patch lets the VMM
+present a chosen serial where a stable identity is required.
+
+Signed-off-by: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c | 39 ++++++++++++++++++++++++++++++++++++++
+ include/uapi/linux/pci_regs.h      |  5 +++++
+ 2 files changed, 44 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH RFC 0/3] vfio/pci: Hide and optionally override the PCIe
+Author: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+
+vfio-pci has no perm_bits entry for the PCIe Device Serial Number (DSN)
+Extended Capability, so guest reads of the serial
+number currently fall through to the physical device.  The DSN is a
+unique, persistent hardware serial number that identifies the physical
+component (the functions of a Multi-Function Device report the same
+value; Root Complex integrated Endpoints may implement it independently),
+so exposing it lets a guest fingerprint the host hardware and correlate
+it across VMs.  For multi-tenant passthrough this is an unnecessary
+host-identifier leak.
+
+Series:
+
+  Patch 1 fully virtualizes the DSN capability (header + both serial
+  dwords) and scrubs the serial in the virtualized config space, so guests
+  read a zeroed serial while the capability stays visible.
+
+  Patch 2 adds a VFIO_DEVICE_FEATURE_PCI_DSN device feature so a trusted
+  userspace VMM can GET/SET the serial presented to the guest, for use
+  cases that need a stable but non-host-identifying serial (e.g. across
+  live migration between different physical devices).
+
+  Patch 3 adds a selftest: scrub-by-default, guest-write rejection,
+  PROBE/SET/GET, set-twice, persistence-across-reset, and bad-argsz.
+
+Position on default-on (the main RFC question):
+  I propose scrubbing by default rather than opt-in.  Rationale:
+  - A passed-through DSN is not meaningful to a guest today: the value
+    identifies the specific physical device, so any guest that keyed off
+    it would already break on migration or reassignment.
+  - vfio-pci already virtualizes/zeroes other identifying or host-specific
+    config state. The DSN is an outlier passed through unfiltered.
+  - Patch 2 provides an explicit escape hatch (VMM-set serial) for the
+    rare consumer that wants a stable identity.
+  If maintainers prefer opt-in, the scrub can be gated behind a module
+  param or a per-device feature flag.
+
+Concurrency:
+  The guest config-space read path is unlocked and reads the DSN as two
+  independent 32-bit accesses, so the kernel cannot make a 64-bit guest
+  read atomic.  Patch 2 uses WRITE_ONCE/READ_ONCE for per-dword
+  consistency and documents that a guest reading across a SET may see an
+  old/new mix, exactly as HW may tear a 64-bit read of a register pair.
+  Serializing concurrent SET callers is the VMM's responsibility.
+
+Lifetime:
+  The presented serial lives only in vconfig: it persists across runtime
+  FLR/SBR and is cleared on device fd close (per-open).
+
+SR-IOV:
+  Per the SR-IOV spec a PF's DSN applies to all its VFs, and a VF that
+  implements DSN must report the same value as its PF.  vfio-pci exposes
+  only the assigned device's own config space and applies no VF-specific
+  transform to the DSN bytes, so a VF that implements DSN (whose value is
+  the PF's host serial) is scrubbed like a PF, and a VF that omits the
+  capability (the spec-recommended case) exposes no serial.  The selftest
+  covers VFs when run against a VF BDF that exposes DSN.
+
+Testing (under QEMU with full VFIO device assignment via IOMMUFD); in
+every configuration all of the selftest's cases passed with none skipped
+or failing:
+  - x86_64 (intel-iommu), e1000e PF with DSN: all cases passed.
+  - arm64 (smmuv3), e1000e PF with DSN: all cases passed.
+  - x86_64 SR-IOV: an igb PF was given 1 VF that implements a DSN cap in a
+    realistic extended-capability chain (AER -> ARI -> DSN); the VF was
+    bound to vfio-pci and the selftest run against it: all cases passed.
+    This exercises the spec case where a VF's DSN mirrors the PF host
+    serial.
+  - The SR-IOV run used a kernel built with KASAN + PROVE_LOCKING; no KASAN
+    reports, lockdep splats, or warnings were produced.
+
+Signed-off-by: Pranjal Arya <pranjal.arya@oss.qualcomm.com>
+---
+Pranjal Arya (3):
+      vfio/pci: Virtualize and scrub Device Serial Number from guests
+      vfio/pci: Allow userspace to set a virtual Device Serial Number
+      selftests/vfio: Add PCIe Device Serial Number test
+
+ MAINTAINERS                                      |   6 +
+ drivers/vfio/pci/vfio_pci_config.c               |  98 +++++++++++
+ drivers/vfio/pci/vfio_pci_core.c                 |   2 +
+ drivers/vfio/pci/vfio_pci_priv.h                 |   2 +
+ include/uapi/linux/pci_regs.h                    |   5 +
+ include/uapi/linux/vfio.h                        |  18 ++
+ tools/testing/selftests/vfio/Makefile            |   1 +
+ tools/testing/selftests/vfio/vfio_pci_dsn_test.c | 206 +++++++++++++++++++++++
+ 8 files changed, 338 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 20/20] KVM: selftests: Add xAPIC support in eventfd IRQ test
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-x' flag to let the user run the test
+in xAPIC mode instead of the default x2APIC mode.  When using xAPIC mode,
+sanity check user input to ensure the test is being run with at most 255
+vCPUs, as xAPIC can only address IDs 0-254 (255, i.e. 0xff, broadcasts to
+all CPUs).
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: add sanity check on number of vCPUs]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 31 +++++++++++++++++++++-----
+ 1 file changed, 26 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 18/20] KVM: selftests: Verify vCPU migration during IRQ
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-m' flag to have the test migrate the
+target vCPU to a random physical CPU before triggering its interrupt, e.g.
+to validate KVM's ability to update device posted IRQ routing.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: pin one vCPU at a time to simplify things, use main()'s affinity]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 19/20] KVM: selftests: Make number of vCPUs configurable in
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-v' flag to allow the user to
+configure the number of vCPUs to create and run (versus only ever using a
+single vCPU).
+
+Update the routing logic to play nice with 32 bit IDs, enable x2APIC format
+in KVM (to enable 32-bit ID routing), and disable KVM's x2APIC broadcast
+quirk so that targeting vCPU 255 doesn't blast the interrupt to all vCPUs
+when in x2APIC mode.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 16/20] KVM: selftests: Add kvm_sched_getaffinity() wrapper
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add and use a KVM wrapper for the sched_getaffinity() syscall so that
+selftests don't need to manually assert that the syscall succeeded.
+
+Note, some tests didn't actually assert success, but they all obviously
+rely on the syscall to succeed.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c                  | 2 +-
+ tools/testing/selftests/kvm/arm64/arch_timer_edge_cases.c | 2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h        | 2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c                | 5 ++---
+ tools/testing/selftests/kvm/mmu_stress_test.c             | 6 +-----
+ tools/testing/selftests/kvm/rseq_test.c                   | 4 +---
+ 6 files changed, 8 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 17/20] KVM: selftests: Add a utility to pin a task to a
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a helper function, pin_task_to_random_cpu(), to pin a task to a random
+CPU from a given cpu_set_t.
+
+This helper will be used eventfd IRQ test to migrate vCPUs to random pCPUs,
+to stress host-side interrupt routing and delivery.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 21 +++++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 15/20] KVM: selftests: Add kvm_gettid() wrapper and convert users
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a KVM wrapper for the gettid() syscall so that tests don't have to
+open code the syscall() themselves.  Unfortunately, not all flavors of
+libc that KVM selftests support provide gettid().  Convert all existing
+users of the syscall to the new wrapper.
+
+Note, per the gettid() manpage[1], "This call is always successful", i.e.
+prefixing kvm_ to the syscall name is aligned with the goal of providing
+syscall wrappers that guarantee success.
+
+No functional changes intended.
+
+Link: https://man7.org/linux/man-pages/man2/gettid.2.html [1]
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/demand_paging_test.c   | 2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h | 5 +++++
+ tools/testing/selftests/kvm/lib/assert.c           | 8 ++------
+ tools/testing/selftests/kvm/lib/test_util.c        | 3 ++-
+ tools/testing/selftests/kvm/rseq_test.c            | 2 +-
+ 5 files changed, 11 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 14/20] KVM: selftests: Verify non-postable IRQ remapping in
+Author: Sean Christopherson <seanjc@google.com>
+
+Extend the eventfd IRQ test with an '-n' flag to route a subset of device
+interrupts as NMIs (Non-Maskable Interrupts) into the guest using an
+alternating pattern of 4 NMIs followed by 4 regular interrupts.
+
+While this adds coverage for NMI injection, the primary goal is to
+validate KVM's handling of non-postable interrupt delivery (AMD and Intel
+IOMMUs only support posting fixed IRQs targeting a single vCPU).  KVM
+has historically bungled handling transitions between posted and remapped
+modes.  Use NMIs to stress the transitions, because they are a reliable,
+architectural way to force these code paths.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: add GUEST_RECEIVED_INTERRUPT(), massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 48 ++++++++++++++++++++------
+ 1 file changed, 37 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 13/20] KVM: selftests: Make number of IRQs configurable in
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-i' flag to let the user specify the
+the number of IRQs to generate (instead of hardcoding the test to always
+generate 1000 interrupts).
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 12/20] KVM: selftests: Add option to set empty routing
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with an '-e' flag to set empty GSI routing
+between interrupts.  Clobbering the GSI routing table verifies that KVM
+correctly handles CPUx => NULL => CPUy transitions, not just CPUx => CPUy
+transitions, and verifies that KVM can "rebuild" an entire routing setup.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: '-e' for "empty" instead of '-c' for "clear", massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 11/20] KVM: selftests: Verify interrupts are received when
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extent the eventfd IRQ test with a '-a' flag to randomly affinitize the
+device's host IRQ to different physical CPUs throughout the test.  This
+stresses the kernel's ability to maintain correct interrupt routing and
+delivery even as the underlying hardware IRQ affinity is changed
+dynamically via /proc/<irq>/smp_affinity{,_list}.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 27 +++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 10/20] KVM: selftests: Add a helper to set proc IRQ
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a utility, proc_irq_set_smp_affinity(), to set the CPU affinity of a
+Linux host IRQ via the proc filesystem.  Use smp_affinity_list instead of
+smp_affinity to avoid having to convert the single CPU to a bitmask.
+
+The helper will be used by the eventfd IRQ test to verify delivery of IRQs
+when the affinity is randomized/modified.
+
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: make the utility self-contained, drop "list", massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/proc_util.h |  2 ++
+ tools/testing/selftests/kvm/lib/proc_util.c     | 14 ++++++++++++++
+ 2 files changed, 16 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 09/20] KVM: selftests: Add VFIO device support to eventfd
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-d' argument that takes a BDF (in the
+format segment:bus:device.function) of an interrupt-capable PCI(e) device
+bound to VFIO, and use said device to trigger interrupts instead of always
+synthesizing interrupts via direct writes to the eventfd.
+
+Using a VFIO device to trigger interrupts validates the end-to-end delivery
+of IRQs for "real" devices, and when supported by hardware (and KVM), also
+validates interrupt delivery via IRQ bypass, i.e. via device posted IRQs.
+
+Now that IOMMUFD is a thing, auto-probe IOMMUFD vs. "legacy" VFIO by
+temporarily opening /dev/iommufd, and skip the test if neither IOMMUFD nor
+legacy VFIO is available.  Add a '-t' option to the user override the probe
+logic, e.g. in case IOMMUFD is available but the system is configured for
+legacy usage.
+
+Note, the device must have a VFIO selftest driver in order to work with
+the test.  A helper script to list supported devices will hopefully be
+available in the near future at
+tools/testing/selftests/vfio/scripts/list_supported_devices.sh[1].
+
+Example:
+$ ./tools/testing/selftests/kvm/irq_test -d 0000:06:0a.1
+
+Link: https://lore.kernel.org/all/20260602222941.3133236-1-jrhilke%40google.com [1]
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 86 ++++++++++++++++++++++++--
+ 1 file changed, 80 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 08/20] KVM: selftests: Add helper to get host IRQ from
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Introduce proc_util.c and proc_util.h to house utility functions for
+interacting with the proc filesystem.
+
+Add vfio_msix_to_host_irq(), which parses /proc/interrupts, to get the host
+Linux IRQ for a given VFIO device BDF and MSI-X vector.
+
+This helper will be used by the eventfd IRQ test to print the host IRQ
+number when triggering IRQs via VFIO device, e.g. to aid in debugging if
+the test fails.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../testing/selftests/kvm/include/proc_util.h |  9 +++++
+ tools/testing/selftests/kvm/lib/proc_util.c   | 40 +++++++++++++++++++
+ 3 files changed, 50 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 07/20] KVM: selftests: Add an irqfd send+receive (and later
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a new test, irq_test to verify that KVM correctly delivers interrupts
+to a running vCPU, when triggered via an eventfd bound to a KVM GSI using
+KVM's irqfd mechanism.
+
+This test is intentionally simple, for now.  Support for sending interrupts
+via VFIO devices, for IRQ bypass, and for other features will be added in
+the near future.
+
+Add the test in common code, even though it currently will only build and
+run on x86, as the concept and the bulk of the host-side code isn't
+specific to x86.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Link: https://lore.kernel.org/kvm/20250404193923.1413163-68-seanjc@google.com
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: use while() and TEST_ASSERT() instead of if-statement => TEST_FAIL()]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm |   1 +
+ tools/testing/selftests/kvm/irq_test.c   | 170 +++++++++++++++++++++++
+ 2 files changed, 171 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 06/20] KVM: selftests: Add helper to generate random u64 in
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Introduce kvm_random_u64_in_range(state, min, max). This function
+returns a random u64 in the inclusive range of [min, max] using a struct
+kvm_random_state.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../testing/selftests/kvm/include/test_util.h  |  3 +++
+ tools/testing/selftests/kvm/lib/test_util.c    | 18 ++++++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 04/20] KVM: selftests: Initialize the default/global pRNG
+Author: Sean Christopherson <seanjc@google.com>
+
+Initialize the default kvm_rng during selftest initialization so that the
+pRNG can be used by tests before creating a VM.  As pointed out by Sashiko,
+failure to actually initialize the generate makes it decidedly not random.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 03/20] KVM: selftests: Rename guest_rng to kvm_rng
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Rename functions prefixed with 'guest_random_' to 'kvm_random_' and the
+global random state variable 'guest_rng' to 'kvm_rng', as the pRNG isn't
+strictly limited to guest code.  This will allow using the pRNG in host
+code without creating confusing/misleading function calls.
+
+No functional changes are intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/dirty_log_perf_test.c       |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c  |  2 +-
+ .../testing/selftests/kvm/include/test_util.h | 22 +++++++++----------
+ .../selftests/kvm/include/x86/kvm_util_arch.h |  4 ++--
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 20 ++++++++---------
+ tools/testing/selftests/kvm/lib/memstress.c   |  8 +++----
+ tools/testing/selftests/kvm/lib/test_util.c   |  6 ++---
+ .../testing/selftests/kvm/x86/sev_dbg_test.c  |  2 +-
+ 8 files changed, 34 insertions(+), 34 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 05/20] KVM: selftests: Seed libc's RNG before using it to
+Author: Sean Christopherson <seanjc@google.com>
+
+Seed the RNG used by random() using the de facto standard method of
+srand(time(0)), so that a different seed is actually used in each test run.
+E.g. without seeding the RNG, literally every test on x86 will use
+0x6b8b4567 to seed the KVM RNG.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 02/20] KVM: selftests: Add macros to read/write+sync
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add SYNC_FROM_GUEST_AND_READ(vm, variable), to read a variable value
+from the guest. Add WRITE_AND_SYNC_TO_GUEST(vm, variable, value) to
+write a value to a guest variable. These macros improve the readability
+of code which reads and writes data between host and guest in tests.
+
+Use the new macro in existing tests that do back-to-back write+sync.
+
+No functional changes are intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/dirty_log_test.c  |  9 +++-----
+ .../testing/selftests/kvm/include/kvm_util.h  | 10 +++++++++
+ tools/testing/selftests/kvm/mmu_stress_test.c |  9 +++-----
+ tools/testing/selftests/kvm/steal_time.c      | 22 +++++++------------
+ 4 files changed, 24 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 01/20] KVM: selftests: Build and link selftests/vfio/lib
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Include libvfio.mk into the KVM selftests Makefile and link it into all
+KVM selftests by adding it to LIBKVM_OBJS.
+
+This lays the groundwork for future changes to utilize VFIO devices to
+verify IRQ bypass in KVM selftests.
+
+Note that KVM selftests build their own copy of selftests/vfio/lib and
+the resulting object files are placed in $(OUTPUT)/lib. This allows the
+KVM and VFIO selftests to apply different CFLAGS when building without
+conflicting with each other.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 00/20] KVM: selftests: Add eventfd+VFIO IRQ test
+Author: Sean Christopherson <seanjc@google.com>
+
+David and Josh's series to add a selftest for verifying interrupt delivery
+via eventfd (via KVM_IRQFD), and also from a real device, wired up via VFIO.
+
+I originally wanted to get this into 7.2, but that's not going to happen.  But
+I hope to get this applied early in the 7.3 cycle so that additional features
+and whatnot can be developed on top without too much pain (hopefully).
+
+Gory details in the patches, and in the v5 cover letter.
+
+v7:
+ - Seed kvm_rng during kvm_selftest_init(). [Sashiko]
+ - Seed libc's RNG during kvm_selftest_init(), so that the seed (from random())
+   that's printed and passed to kvm_rng isn't the same every time.
+ - Init irq_cpu to -1 in all paths. [Sashiko]
+
+v6:
+ - Massage most changelogs.
+ - Fix SoB ordering issues.
+ - Clean up KVM_SET_GSI_ROUTING helper.
+ - Remove misleading "IRQ injection" and "emulated eventfd" terminology.
+ - Add GUEST_RECEIVED_INTERRUPT() to simplifiy the core loop.
+ - Use cpu_relax() in tight loops while waiting for interrupts.
+ - Print as much information as possible in the actual assert, instead of
+   printing to stdout separately.
+ - Make a best guess as to the right VFIO vs. IOMMUFD mode instead of
+   assuming IOMMUFD, and give the user the option to overide said guess.
+ - Simplify open_proc_irq_smp_affinity_list() +
+   write_proc_irq_smp_affinity_list() into proc_irq_set_smp_affinity().
+ - Drop print_proc_irq_file() and kvm_print_vcpu_affinity() (for now) to avoid
+   potential issues on systems with high CPU counts.
+ - Drop the blocking/HLT testing as it was at best broken.
+ - Use -e for "empty", not -c for "clear", when completely tearing down GSI
+   routing, because routing can be "cleared" without completely emptying the
+   routing information.
+ - Use the main task's CPU affinity as the available_cpus set.
+ - Allow overcommiting vCPUs:pCPUs.
+ - Set the target vCPU's affinity instead of batching when vCPU0 is targeted.
+ - Add support for 256+ vCPUs with x2APIC.
+ - Restrict xAPIC mode to 255 vCPUs.
+ - Restrict the test to KVM selftest's max supported vCPUs.
+
+v5:
+ - https://lore.kernel.org/all/20260604020143.748245-1-jrhilke@google.com
+ - Rename get_proc_vfio_irq_number() to vfio_msix_to_host_irq()
+ - Rename open_proc_irq_affinity() and write_proc_irq_affinity() to include "_smp_affinity_list"
+ - Print /proc/irq/<irq>/smp_affinity and effective_affinity on timeout failures
+ - Convert IRQ type from 'int' to 'unsigned int' across helpers and the test
+ - Fix compiler warnings for uninitialized variables in irq_test.c
+ - Remove rate-limiting on affinity changes
+
+v4: https://lore.kernel.org/kvm/20260530002134.558837-1-jrhilke@google.com
+
+David Matlack (11):
+  KVM: selftests: Build and link selftests/vfio/lib into KVM selftests
+  KVM: selftests: Add macros to read/write+sync to/from guest memory
+  KVM: selftests: Add an irqfd send+receive (and later IRQ bypass) test
+  KVM: selftests: Add helper to get host IRQ from device MSI-X for IRQ
+    bypass test
+  KVM: selftests: Add VFIO device support to eventfd IRQ test
+  KVM: selftests: Verify interrupts are received when IRQ affinity
+    changes in IRQ test
+  KVM: selftests: Add option to set empty routing between IRQs in
+    eventfd IRQ test
+  KVM: selftests: Make number of IRQs configurable in IRQ test
+  KVM: selftests: Verify vCPU migration during IRQ delivery in IRQ test
+  KVM: selftests: Make number of vCPUs configurable in IRQ test
+  KVM: selftests: Add xAPIC support in eventfd IRQ test
+
+Josh Hilke (6):
+  KVM: selftests: Rename guest_rng to kvm_rng
+  KVM: selftests: Add helper to generate random u64 in range [min,max]
+  KVM: selftests: Add a helper to set proc IRQ affinity for IRQ test
+  KVM: selftests: Add kvm_gettid() wrapper and convert users
+  KVM: selftests: Add kvm_sched_getaffinity() wrapper and convert users
+  KVM: selftests: Add a utility to pin a task to a random CPU, given a
+    CPU set
+
+Sean Christopherson (3):
+  KVM: selftests: Initialize the default/global pRNG during
+    kvm_selftest_init()
+  KVM: selftests: Seed libc's RNG before using it to generate a seed for
+    KVM's pRNG
+  KVM: selftests: Verify non-postable IRQ remapping in IRQ test
+
+ tools/testing/selftests/kvm/Makefile.kvm      |   7 +-
+ tools/testing/selftests/kvm/arch_timer.c      |   2 +-
+ .../kvm/arm64/arch_timer_edge_cases.c         |   2 +-
+ .../selftests/kvm/demand_paging_test.c        |   2 +-
+ .../selftests/kvm/dirty_log_perf_test.c       |   4 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |  11 +-
+ .../selftests/kvm/include/kvm_syscalls.h      |   7 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  12 +
+ .../testing/selftests/kvm/include/proc_util.h |  11 +
+ .../testing/selftests/kvm/include/test_util.h |  25 +-
+ .../selftests/kvm/include/x86/kvm_util_arch.h |   4 +-
+ tools/testing/selftests/kvm/irq_test.c        | 350 ++++++++++++++++++
+ tools/testing/selftests/kvm/lib/assert.c      |   8 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  53 ++-
+ tools/testing/selftests/kvm/lib/memstress.c   |   8 +-
+ tools/testing/selftests/kvm/lib/proc_util.c   |  54 +++
+ tools/testing/selftests/kvm/lib/test_util.c   |  27 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c |  15 +-
+ tools/testing/selftests/kvm/rseq_test.c       |   6 +-
+ tools/testing/selftests/kvm/steal_time.c      |  22 +-
+ .../testing/selftests/kvm/x86/sev_dbg_test.c  |   2 +-
+ 21 files changed, 548 insertions(+), 84 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net v2 2/2] vsock/virtio: restore msg_iter on transmission failure
+Author: Octavian Purdila <tavip@google.com>
+
+When transmission fails in virtio_transport_send_pkt_info, the msg_iter
+might have been partially advanced. If we don't restore it, the next
+attempt to send data will use an incorrect iterator state, leading to
+desync and warnings like "send_pkt() returns 0, but X expected".
+
+Specifically, this can happen in the following scenario, triggered by
+the syzkaller repro:
+
+1. A write-only VMA (PROT_WRITE only) is partially populated by a
+   prior TUN write that failed with -EIO but still faulted in some
+   pages).
+2. A vsock sendmmsg call with MSG_ZEROCOPY requests transmission of a
+   buffer from this VMA.
+3. The first packet (64KB) is sent successfully because the pages are
+   populated.
+4. The second packet allocation fails because GUP fast pins the first page
+   but GUP slow fails on the next unpopulated page due to PROT_WRITE-only
+   permissions.
+5. The iterator is advanced by the partially successful GUP (68KB total
+   advanced: 64KB from first packet + 4KB from second), but the send loop
+   breaks and only reports 64KB sent. This creates a 4KB desync.
+6. The next retry starts with a non-zero iov_offset, disabling zerocopy
+   and falling back to copy mode.
+7. In copy mode, the transmission succeeds for the next packets but
+   exhausts the iterator early because of the desync.
+8. The final retry sees an empty iterator but zerocopy is re-enabled
+   (offset resets). It attempts to send the remaining bytes with zerocopy
+   but pins 0 pages, creating an empty packet.
+9. The transport sends the empty packet, triggering the warning because
+   the returned bytes (header only) do not match the expected payload size.
+10. The loop continues to spin, allocating ubuf_info each time, eventually
+    exhausting sysctl_optmem_max and returning -ENOMEM to userspace.
+
+Restore msg_iter to its original state before the packet allocation
+and transmission attempt if they fail.
+
+Fixes: e0718bd82e27 ("vsock: enable setting SO_ZEROCOPY")
+Reported-by: syzbot+28e5f3d207b14bae122a@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=28e5f3d207b14bae122a
+Assisted-by: gemini:gemini-3.1-pro
+Signed-off-by: Octavian Purdila <tavip@google.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH net v2 1/2] iov_iter: export iov_iter_restore
+Author: Octavian Purdila <tavip@google.com>
+
+Export iov_iter_restore so that it can be used by modules.
+
+This is needed by the virtio vsock transport (which can be built as a
+module) to restore the msg_iter state when transmission fails.
+
+Signed-off-by: Octavian Purdila <tavip@google.com>
+---
+ lib/iov_iter.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH net v2 0/2] vsock/virtio: fix msg_iter desync on transmission failure
+Author: Octavian Purdila <tavip@google.com>
+
+This series fixes a msg_iter desync issue in the virtio vsock transport
+that can lead to warnings and eventual -ENOMEM under specific failure
+scenarios (e.g. partial GUP failure during MSG_ZEROCOPY transmission).
+
+To fix this, we need to restore the msg_iter state on transmission failure.
+However, since virtio vsock transport can be built as a module, we first
+need to export iov_iter_restore.
+
+Patch 1 exports iov_iter_restore.
+Patch 2 implements the msg_iter restoration in virtio vsock.
+
+Changes in v2:
+- Use iov_iter_savestate()/iov_iter_restore() (Stefano)
+- Use a single restore point (Stefano)
+- Reverse xmas tree (Stefano)
+- Added comments in the code (Stefano)
+
+v1: https://lore.kernel.org/all/20260609004809.1285028-1-tavip@google.com/
+
+Octavian Purdila (2):
+  iov_iter: export iov_iter_restore
+  vsock/virtio: restore msg_iter on transmission failure
+
+ lib/iov_iter.c                          |  1 +
+ net/vmw_vsock/virtio_transport_common.c | 13 +++++++++++++
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 30/30] KVM: x86: Move a pile of stuff from kvm_host.h => x86.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the majority of remaining KVM-internal declarations and defines in
+kvm_host.h to x86.h, so that kvm_host.h only holds structure and function
+definitions that need to be visible to arch-neutral KVM.
+
+Land the emulator interfaces in x86.h, even though kvm_emulate.h *seems*
+like a good home, as the interfaces and defines being moved are provided by
+x86.c.  I.e. keep kvm_emulate.h as an interface to the emulator proper.
+
+Note, any "misses" are likely unintentional.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 199 --------------------------------
+ arch/x86/kvm/ioapic.c           |   1 +
+ arch/x86/kvm/x86.h              | 197 +++++++++++++++++++++++++++++++
+ 3 files changed, 198 insertions(+), 199 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 29/30] KVM: x86/mmu: Move kvm_mmu_do_page_fault() from
+Author: Sean Christopherson <seanjc@google.com>
+
+Move kvm_mmu_do_page_fault() into mmu.c, as there are no users outside of
+mmu.c, and the function typically isn't inlined by the compiler anyways.
+This will allow moving the EMULTYPE_xxx definitions into x86.h without
+having to include x86.h in mmu_internal.h, i.e. will help preserve the
+goal of making x86.h KVM x86's "top-level" include.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu/mmu.c          | 67 ++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/mmu/mmu_internal.h | 66 --------------------------------
+ 2 files changed, 66 insertions(+), 67 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 27/30] KVM: x86: Rework kvm_arch_interrupt_allowed() into kvm_is_interrupt_allowed()
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename kvm_arch_interrupt_allowed() to kvm_is_interrupt_allowed() and
+change its return type to a boolean, as the purpose of the helper is purely
+to check if interrupts are architecturally allowed.  I.e. whether or not
+interrupts are temporarily disallowed due a pending nested VM-Enter is
+irrelevant (and callers are most definitely not supposed to care).
+
+Opportunistically bury the helper in x86.c, as it hasn't been referenced by
+arch-neutral code since commit a1b37100d9e2 ("KVM: Reduce runnability
+interface with arch support code"), and has long since gained _very_
+x86-specific semantics (see above).
+
+Opportunistically add a comment to call out that treating -EBUSY as
+"allowed" is intentional.
+
+For all intents and purposes, no functional change intended (KVM treats
+-EBUSY as "allowed" before and after).
+
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  1 -
+ arch/x86/kvm/x86.c              | 23 +++++++++++++++--------
+ 2 files changed, 15 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 28/30] KVM: x86/mmu: Move kvm_arch_async_page_ready() below kvm_tdp_page_fault()
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the implementation of kvm_arch_async_page_ready() "down" in mmu.c so
+that it lives below kvm_tdp_page_fault().  This will allow moving
+kvm_mmu_do_page_fault() into mmu.c without needing a forward declaration.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 62 +++++++++++++++++++++---------------------
+ 1 file changed, 31 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 25/30] KVM: x86: Move kvm_pv_send_ipi() declaration from
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the declaration of kvm_pv_send_ipi() into lapic.h, as its
+implementation is provided by lapic.c (sending PV IPIs relies on the
+optimized APIC map provided by the in-kernel local APIC), and it's only
+used by KVM x86 code.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 4 ----
+ arch/x86/kvm/lapic.h            | 3 +++
+ 2 files changed, 3 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 26/30] KVM: x86: Don't treat interrupts as allowed just
+Author: Sean Christopherson <seanjc@google.com>
+
+When querying whether or not interrupts (IRQs) are allowed, check for a
+pending nested run _after_ checking whether or not interrupts are blocked.
+If L1 is running L2 _without_ nested_exit_on_intr(), i.e. if L1 IRQs can
+be blocked while running L2, and interrupts will indeed be blocked once the
+nested VM-Enter to L2 is completed, then KVM should treat interrupts as not
+being allowed.
+
+For injection, this avoids an unnecessary (forced) VM-Exit, as KVM can
+immediately request an IRQ window, instead of forcing an exit and _then_
+requesting an IRQ window (because after the forced exit, KVM will see that
+interrupts are blocked).
+
+For non-injection usage, only kvm_vcpu_ready_for_interrupt_injection() is
+affected in practice.  kvm_vcpu_has_events() is unreachable when a nested
+run is pending, as KVM clears nested_run_pending prior to calling
+kvm_emulate_halt_noskip() when putting L2 into HLT via GUEST_ACTIVITY_HLT,
+and SVM has no equivalent to GUEST_ACTIVITY_STATE.  I.e. the vCPU will
+always be runnable if a nested run is pending, and thus
+kvm_arch_vcpu_runnable() => kvm_vcpu_has_events() is effectively dead code,
+as is __kvm_emulate_halt() => kvm_vcpu_has_events().  Oh, and TDX doesn't
+support nested VMX.  Similarly, kvm_can_do_async_pf() is unreachable as
+KVM shouldn't be faulting in memory with a pending nested VM-Enter.
+
+As for kvm_vcpu_ready_for_interrupt_injection(), incorrectly treating
+interrupts as being allowed could result in KVM prematurely exiting to
+userspace to accept an ExtINT.  But, KVM will still hold/block the ExtINT
+and request its own IRQ window.  I.e. the net effect is more or less the
+same as the for-injection case.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/svm.c | 6 +++---
+ arch/x86/kvm/vmx/vmx.c | 5 ++++-
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 24/30] KVM: x86: Move IRQ-related helper declarations from
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the function declaration for APIs to get/query pending IRQs from
+kvm_host.h to irq.h, as the APIs are only used by KVM x86 code.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 5 -----
+ arch/x86/kvm/irq.h              | 6 ++++++
+ arch/x86/kvm/svm/nested.c       | 1 +
+ arch/x86/kvm/vmx/nested.c       | 1 +
+ 4 files changed, 8 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 23/30] KVM: x86: Move __kvm_irq_line_state() from
+Author: Sean Christopherson <seanjc@google.com>
+
+Bury __kvm_irq_line_state() in CONFIG_KVM_IOAPIC=y code, as it's only used
+by PIC and I/O APIC code.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 12 ------------
+ arch/x86/kvm/ioapic.h           | 12 ++++++++++++
+ 2 files changed, 12 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 21/30] KVM: x86: Move LLDT assembly wrappers into VMX
+Author: Sean Christopherson <seanjc@google.com>
+
+Move kvm_{load,read}_ldt() into vmx.c, as vmx_{load,store}_ldt(), as they
+are exclusively used by VMX to save/restore host state, and have no
+business being globally visible.
+
+Ideally, KVM-specific helpers wouldn't exist at all, as they are nothing
+more than assembly wrappers for SLDT and LLDT, i.e. should be provided by
+the kernel, not by KVM.  Punt that cleanup to the future, as
+arch/x86/include/asm/desc.h _does_ provide helpers, but load_ldt() is only
+available for CONFIG_PARAVIRT_XXL=n builds, and both {load,store}_ldt()
+unnecessarily constrain the operands to memory.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 12 ------------
+ arch/x86/kvm/vmx/vmx.c          | 18 +++++++++++++++---
+ 2 files changed, 15 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 22/30] KVM: x86: Move misc "VALID MASK" defines from
+Author: Sean Christopherson <seanjc@google.com>
+
+Move a variety of "VALID MASK" defines, e.g. that capture which flags in
+a given ioctl are supported by KVM, from kvm_host.h to x86.c.  The set of
+valid flags/bits is very much a KVM-internal detail, as the values from the
+hardcoded #defines are often captured and massaged by KVM's setup code, i.e.
+*directly* using the macros outside of KVM x86 would be actively dangerous.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 34 ---------------------------------
+ arch/x86/kvm/x86.c              | 33 ++++++++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+), 34 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/30] KVM: x86: Move the bulk of MSR specific code from
+Author: Sean Christopherson <seanjc@google.com>
+
+Introduce msrs.{c,h}, and move the vast majority of MSR specific code out
+of x86.{c,h}.  Use a plural "msrs" instead of just "msr" to be consistent
+with regs.{c,h}, and to make it easier to differentiate KVM's code from the
+other 5+ msr.c files in the kernel.
+
+Opportunistically drop the "x86.h" include from mtrr.c, mostly as proof
+that the bulk of the MSR code is indeed being relocated to msrs.c.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/Makefile |    2 +-
+ arch/x86/kvm/msrs.c   | 2732 +++++++++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/msrs.h   |  128 ++
+ arch/x86/kvm/mtrr.c   |    2 +-
+ arch/x86/kvm/x86.c    | 2710 +---------------------------------------
+ arch/x86/kvm/x86.h    |   87 +-
+ 6 files changed, 2867 insertions(+), 2794 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 20/30] KVM: x86: Move MMU helper declarations from
+Author: Sean Christopherson <seanjc@google.com>
+
+Move a pile of MMU helper declarations and macros into mmu.h, as they are
+very much KVM x86 internal APIs and details, and not intended to be exposed
+to arch-neutral KVM, and certainly not to the broader kernel.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 70 --------------------------------
+ arch/x86/kvm/mmu.h              | 71 +++++++++++++++++++++++++++++++++
+ 2 files changed, 71 insertions(+), 70 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 19/30] KVM: x86/pmu: Move "struct kvm_x86_pmu_event_filter"
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the definition of "struct kvm_x86_pmu_event_filter" to pmu.c, as the
+as the details of the filters are very much implementation details that can
+and should be buried in pmu.c.  While the _existence_ of filters is public
+knowledge, almost by definition, the contents don't need to be exposed
+outside of the PMU code as the filter data is provided by userspace, i.e.
+it pretty much has to be dynamically allocated, and thus never should be
+fully embedded in a globally visible structure.
+
+No functional change intended
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 13 +------------
+ arch/x86/kvm/pmu.c              | 12 ++++++++++++
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 18/30] KVM: x86: Move "struct kvm_x86_msr_filter"
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the definition of "struct kvm_x86_msr_filter" and its associate,
+"struct msr_bitmap_range", to msrs.c, as the details of the filters are
+very much implementation details that can and should be buried in msrs.c.
+While the _existence_ of filters is public knowledge, almost by definition,
+the contents don't need to be exposed outside of the MSR code as the filter
+data is provided by userspace, i.e. it pretty much has to be dynamically
+allocated, and thus never should be fully embedded in a globally visible
+structure.
+
+Note, this creates a discrepancy with the PMU event filter structure; that
+will be remedied shortly.
+
+No functional change intended.
+
+Suggested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 15 ++-------------
+ arch/x86/kvm/msrs.c             | 13 +++++++++++++
+ 2 files changed, 15 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/30] KVM: x86: Move MSR helper declarations from
+Author: Sean Christopherson <seanjc@google.com>
+
+Relocate declarations of MSR helpers (and kvm_nr_uret_msrs) from x86's
+kvm_host.h to msrs, to continue trimming down kvm_host.h.
+
+Deliberately leave the funky read_msr() where it is, as it will hopefully
+be removed entirely as part of a broader kernel-API cleanup.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 26 -------------------------
+ arch/x86/kvm/msrs.h             | 34 ++++++++++++++++++++++++++++++---
+ 2 files changed, 31 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/30] KVM: x86: Move kvm_{g,s}et_segment() to inline
+Author: Sean Christopherson <seanjc@google.com>
+
+Define kvm_{g,s}et_segment() as inline functions in regs.h, as they are
+literally one-line wrappers to invoke vendor code.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 --
+ arch/x86/kvm/regs.h             | 12 ++++++++++++
+ arch/x86/kvm/x86.c              | 12 ------------
+ 3 files changed, 12 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/30] KVM: x86: Move register helper declarations from
+Author: Sean Christopherson <seanjc@google.com>
+
+Relocate declarations of Control/Debug Register, EFLAGS and RIP helpers
+from x86's kvm_host.h to regs.h, to continue trimming down kvm_host.h.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 19 -------------------
+ arch/x86/kvm/regs.h             | 18 ++++++++++++++++++
+ 2 files changed, 18 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/30] KVM: x86: Expose several TSC helpers via x86.h for
+Author: Sean Christopherson <seanjc@google.com>
+
+Begrudgingly move adjust_tsc_offset_{guest,host}() to x86.h as inlines,
+and expose several other TSC helpers in anticipation of moving KVM's MSR
+code to a dedicated msrs.c.  Unfortunately for KVM, several MSRs that KVM
+emulates can affect TSC state.
+
+Opportunistically drop a superfluous local "tsc_offset" variable, whose
+existence causes checkpatch to complain about lack of a blank line.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 22 +++-------------------
+ arch/x86/kvm/x86.h | 19 +++++++++++++++++++
+ 2 files changed, 22 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/30] KVM: x86: Extract get/set MSR (list) ioctl logic to helpers
+Author: Sean Christopherson <seanjc@google.com>
+
+Extract the code for getting/setting MSRs and MSR lists to dedicated
+helpers in anticipation of moving the MSR code to a new msrs.c.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 135 ++++++++++++++++++++++++++-------------------
+ 1 file changed, 78 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/30] KVM: x86: Move eager_page_split to mmu.{c,h}
+Author: Sean Christopherson <seanjc@google.com>
+
+Move KVM's eager_page_split module param to the MMU, as it is very much an
+MMU knob.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu.h     | 1 +
+ arch/x86/kvm/mmu/mmu.c | 3 +++
+ arch/x86/kvm/x86.c     | 3 ---
+ arch/x86/kvm/x86.h     | 2 --
+ 4 files changed, 4 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/30] KVM: x86: Move kvm_{load,put}_guest_fpu() to fpu.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the kvm_{load,put}_guest_fpu() helpers to fpu.h in anticipation of
+moving the bulk of KVM's register specific code out of x86.c.
+
+No functional change intended.
+
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/fpu.h | 26 ++++++++++++++++++++++++++
+ arch/x86/kvm/x86.c | 24 ------------------------
+ 2 files changed, 26 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/30] KVM: x86/hyperv: Eliminate an unnecessary include of
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop an mostly unused include of x86.h from hyperv.h, and instead pull in
+regs.h, which is need for at least is_guest_mode().  This eliminates the
+last include of x86.h from a common x86 header, i.e. solidifies that x86.h
+is the top of the pyramid.
+
+Add a missing x86.h include in cpuid.c to avoid build breakage.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/cpuid.c  | 1 +
+ arch/x86/kvm/hyperv.h | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/30] KVM: x86: Move tdp_enabled from kvm_host.h to mmu.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Relocated the declaration of tdp_enabled into mmu.h, and opportunistically
+hoist tdp_mmu_enabled up to the top so that the two are co-located.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 --
+ arch/x86/kvm/mmu.h              | 12 ++++++------
+ 2 files changed, 6 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/30] KVM: x86: Swap the include order between x86.h and mmu.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Invert the include ordering between x86.h and mmu.h, and move
+mmu_is_nested() to mmu.h where it belongs (mmu_is_nested()'s placement in
+x86.h was solely responsible for the existing ordering), so that x86.h is
+not included by most KVM internal headers (but includes them).
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu.h | 6 +++++-
+ arch/x86/kvm/x86.h | 6 +-----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/30] KVM: x86: Move the bulk of register specific code
+Author: Sean Christopherson <seanjc@google.com>
+
+Introduce regs.c, and move the vast majority of register specific code out
+of x86.c and into regs.c.  Deliberately leave behind MSR code, as KVM's MSR
+support is complex enough to warrant its own compilation unit, and doesn't
+have much in common with the other register code.
+
+Note, "struct kvm_sregs" has fields for EFER and MSR_IA32_APICBASE, and so
+the {G,S}ET_REGS flows technically contain a tiny amount of MSR code.
+MSR_IA32_APICBASE is already managed by lapic.c, and so doesn't require a
+"placement decision".  As for EFER, leave all other EFER handling in x86.c
+(later to be moved to msrs.c).  The primary interface to EFER, set_efer(),
+is very much MSR specific, even though EFER is arguably more of a Control
+Register than an MSR.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/Makefile |   4 +-
+ arch/x86/kvm/regs.c   | 875 +++++++++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/regs.h   |  25 ++
+ arch/x86/kvm/x86.c    | 887 +-----------------------------------------
+ arch/x86/kvm/x86.h    |   2 +
+ 5 files changed, 906 insertions(+), 887 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/30] KVM: x86: Move local APIC specific helpers out of asm/kvm_host.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Move single-use local APIC IRQ helpers out of asm/kvm_host.h so that they
+are co-located with their user, and not exposed to the broader world.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 12 ------------
+ arch/x86/kvm/irq.c              |  7 +++++++
+ arch/x86/kvm/lapic.h            |  5 +++++
+ 3 files changed, 12 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/30] KVM: x86: Move kvm_caps and kvm_host_values to asm/kvm_host.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Relocate the kvm_caps and kvm_host_values struct definitions and their
+associated global variable declarations to asm/kvm_host.h to allow for a
+variety of cleanups in x86.h and mmu.h, and to establish a (hopefully)
+maintainable rule that asm/kvm_host.h's role is to define common
+structures (and declare any associated globals), and anything needed by
+arch-neutral KVM.
+
+While it would be lovely to trim kvm_host.h down to the point where it
+*only* holds things needed by arch-neutral and/or non-KVM code, multiple
+attempts to do just that have failed miserably.  Trying to "hide" code
+from arch-neutral KVM is too restrictive (and ultimately pointless), and
+KVM x86 itself also needs a place to define common structures and their
+globals, e.g. to avoid inconsistent header include chains and/or misplaced
+helpers.
+
+E.g. as pointed out by Kai, it's weird that x86.h, which is a kitchen sink
+of sorts, includes regs.h, but not mmu.h.  Literally the only reason that
+x86.h doesn't include mmu.h is that mmu.h references kvm_host, which is
+currently defined in x86.h.  As a result of odd include ordering, the
+very clearly MMU-specific helper mmu_is_nested() lives in x86.h, not mmu.h
+
+"Fix" the kvm_host dependency so that x86.h can be the "central" include
+everyone expects it to be, and set KVM x86 on the path to having somewhat
+sensible "rules" for what goes where:
+
+  - asm/kvm_host.h holds "common" structure definitions and associated key
+    global variables, and things that are referenced by arch-neutral KVM.
+  - <thing>.{c,h} holds relevant declarations and definitions.
+  - x86.{c,h} is the kitchen sink for everything else.
+
+Cc: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 44 ++++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.h              | 45 ---------------------------------
+ 2 files changed, 44 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/30] KVM: x86: Rename __{g,s}et_sregs2() => kvm_x86_vcpu_ioctl_{g,s}et_sregs2()
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename the KVM_{G,S}ET_SREGS2 helpers in anticipation of moving them out of
+x86.c (while leaving the ioctl dispatch behind).  Having globally visible
+APIs named __{g,s}et_sregs2() would be "fine", but ugly, given that
+__{g,s}et_sregs() will NOT be globally visible.  As a bonus, this makes it
+a bit more obvious that the helpers implement newer versions of
+kvm_arch_vcpu_ioctl_set_sregs().
+
+No functional change intended.
+
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/30] KVM: x86: Move get_segment_base() to regs.h, as kvm_get_segment_base()
+Author: Sean Christopherson <seanjc@google.com>
+
+Move get_segment_base() to regs.h, as kvm_get_segment_base(), so that the
+bulk of the register code can be moved from x86.c to a new regs.c, without
+simultaneously needing to rename "public" helpers to explicitly scope them
+to KVM.
+
+No functional change intended.
+
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/regs.h | 5 +++++
+ arch/x86/kvm/x86.c  | 9 ++-------
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/30] KVM: x86: Extract REGS and SREGS runtime sync code
+Author: Sean Christopherson <seanjc@google.com>
+
+Extract the REGS and SREGS portions of {store,sync}_regs() into separate
+helpers in anticipation of moving the register specific code out of x86.c
+and into regs.c.
+
+No functional change intended.
+
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/30] KVM: x86: x86.{c,h} spring cleaning
+Author: Sean Christopherson <seanjc@google.com>
+
+It's still technically spring!
+
+Perform spring cleaning on x86.{c,h} and asm/kvm_host.h, by adding regs.c
+(the kvm_cache_regs.h => regs.h is already applied) and msrs.{c,h}, and moving
+relevant code out of x86.c.
+
+v4:
+ - Drop the GPR API cleanups (already applied).
+ - Collect more tags. [Yosry, Kai
+ - Chunked the x86.c => regs.c code movement into several patches, so that the
+   bulk move is as close to a pure move as is reasonably possible. [Yosry]
+ - Drop a redundant BUILD_BUG_ON() from store_regs().
+ - Fix various changelog goofs. [Kai]
+ - Fix alignment goofs in kvm_get_{,feature_}msr_index_list(). [Kai]
+ - Drop the defunct x86.h include from mtrr.c. [Kai]
+ - Fix whitespace goofs. [Kai]
+ - Rewrite the changelog for the bulk regs.c move to better explain why only a
+   tiny amount of EFER code is moved. [Yosry]
+ - Move "struct kvm_x86_msr_filter" and "struct kvm_x86_pmu_event_filter" to
+   msrs.c and pmu.c respectively. [Kai]
+ - Rename LDT helpers to vmx_{load,store}_ldt(), and call out that they will
+   hopefully be replaced by kernel helpers in the near future. [Kai]
+ - Drop the kvm_cpu_get_apicid() code movement (sent a separate patch to kill
+   it off entirely). [Kai]
+ - Add more detail to explain why using VALID_MASK defines outside of x86.c is
+   dangerous. [Yosry, Kai]
+ - Bury kvm_arch_interrupt_allowed() in x86.c as kvm_is_interrupt_allowed(). [Kai]
+ - Move kvm_find_async_pf_gfn() prototype to x86.h. [Sashiko]
+
+v3:
+ - Collect more tags. [David, Binbin, Yosry]
+ - Use kvm_run_sync_regs_{from,to}_user() instead of kvm_run_{g,s}et_regs().
+   [Kai]
+ - Fix a variety of typos. [Binbin]
+ - Everything beyond patch 15...
+
+v2:
+ - https://lore.kernel.org/all/20260514215355.1648463-2-seanjc@google.com
+ - Collect tags. [Yosry, Kai]
+ - Fix some truly egregious goofs. [Binbin]
+ - Rename kvm_cache_regs.h => regs.h, add regs.c. [Yosry, because he
+   complained, not because he actually suggested this :-D ]
+ - Drop superfluous casting/masking of e*x() usage. [Kai]
+
+v1: https://lore.kernel.org/all/20260409235622.2052730-1-seanjc@google.com
+
+Sean Christopherson (30):
+  KVM: x86: Extract REGS and SREGS runtime sync code to helpers
+  KVM: x86: Move get_segment_base() to regs.h, as kvm_get_segment_base()
+  KVM: x86: Rename __{g,s}et_sregs2() =>
+    kvm_x86_vcpu_ioctl_{g,s}et_sregs2()
+  KVM: x86: Move the bulk of register specific code from x86.c to regs.c
+  KVM: x86: Move local APIC specific helpers out of asm/kvm_host.h
+  KVM: x86: Move kvm_caps and kvm_host_values to asm/kvm_host.h
+  KVM: x86: Swap the include order between x86.h and mmu.h
+  KVM: x86: Move tdp_enabled from kvm_host.h to mmu.h
+  KVM: x86: Move eager_page_split to mmu.{c,h}
+  KVM: x86/hyperv: Eliminate an unnecessary include of x86.h in hyperv.h
+  KVM: x86: Move kvm_{load,put}_guest_fpu() to fpu.h
+  KVM: x86: Extract get/set MSR (list) ioctl logic to helpers
+  KVM: x86: Expose several TSC helpers via x86.h for use by MSR code
+  KVM: x86: Move the bulk of MSR specific code from x86.c to msrs.{c,h}
+  KVM: x86: Move register helper declarations from kvm_host.h => regs.h
+  KVM: x86: Move kvm_{g,s}et_segment() to inline helpers in regs.h
+  KVM: x86: Move MSR helper declarations from kvm_host.h => msrs.h
+  KVM: x86: Move "struct kvm_x86_msr_filter" definition to msrs.c
+  KVM: x86/pmu: Move "struct kvm_x86_pmu_event_filter" definition to
+    pmu.c
+  KVM: x86: Move MMU helper declarations from kvm_host.h => mmu.h
+  KVM: x86: Move LLDT assembly wrappers into VMX
+  KVM: x86: Move misc "VALID MASK" defines from kvm_host.h => x86.c
+  KVM: x86: Move __kvm_irq_line_state() from kvm_host.h => ioapic.h
+  KVM: x86: Move IRQ-related helper declarations from kvm_host.h =>
+    irq.h
+  KVM: x86: Move kvm_pv_send_ipi() declaration from kvm_host.h =>
+    lapic.h
+  KVM: x86: Don't treat interrupts as allowed just because a nested run
+    is pending
+  KVM: x86: Rework kvm_arch_interrupt_allowed() into
+    kvm_is_interrupt_allowed()
+  KVM: x86/mmu: Move kvm_arch_async_page_ready() below
+    kvm_tdp_page_fault()
+  KVM: x86/mmu: Move kvm_mmu_do_page_fault() from mmu_internal.h =>
+    mmu.c
+  KVM: x86: Move a pile of stuff from kvm_host.h => x86.h
+
+ arch/x86/include/asm/kvm_host.h |  470 +---
+ arch/x86/kvm/Makefile           |    4 +-
+ arch/x86/kvm/cpuid.c            |    1 +
+ arch/x86/kvm/fpu.h              |   26 +
+ arch/x86/kvm/hyperv.h           |    3 +-
+ arch/x86/kvm/ioapic.c           |    1 +
+ arch/x86/kvm/ioapic.h           |   12 +
+ arch/x86/kvm/irq.c              |    7 +
+ arch/x86/kvm/irq.h              |    6 +
+ arch/x86/kvm/lapic.h            |    8 +
+ arch/x86/kvm/mmu.h              |   90 +-
+ arch/x86/kvm/mmu/mmu.c          |  132 +-
+ arch/x86/kvm/mmu/mmu_internal.h |   66 -
+ arch/x86/kvm/msrs.c             | 2745 +++++++++++++++++++++++
+ arch/x86/kvm/msrs.h             |  156 ++
+ arch/x86/kvm/mtrr.c             |    2 +-
+ arch/x86/kvm/pmu.c              |   12 +
+ arch/x86/kvm/regs.c             |  875 ++++++++
+ arch/x86/kvm/regs.h             |   60 +
+ arch/x86/kvm/svm/nested.c       |    1 +
+ arch/x86/kvm/svm/svm.c          |    6 +-
+ arch/x86/kvm/vmx/nested.c       |    1 +
+ arch/x86/kvm/vmx/vmx.c          |   23 +-
+ arch/x86/kvm/x86.c              | 3709 +------------------------------
+ arch/x86/kvm/x86.h              |  354 +--
+ 25 files changed, 4457 insertions(+), 4313 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From beddd7aae to 2b0bfead6
+KVM mailing list update from beddd7aae to 2b0bfead6
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     21 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     11  David Matlack <dmatlack@google.com>
+      6  Josh Hilke <jrhilke@google.com>
+      4  Sean Christopherson <seanjc@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v7 18/20] KVM: selftests: Verify vCPU migration during IRQ
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-m' flag to have the test migrate the
+target vCPU to a random physical CPU before triggering its interrupt, e.g.
+to validate KVM's ability to update device posted IRQ routing.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: pin one vCPU at a time to simplify things, use main()'s affinity]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 20/20] KVM: selftests: Add xAPIC support in eventfd IRQ test
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-x' flag to let the user run the test
+in xAPIC mode instead of the default x2APIC mode.  When using xAPIC mode,
+sanity check user input to ensure the test is being run with at most 255
+vCPUs, as xAPIC can only address IDs 0-254 (255, i.e. 0xff, broadcasts to
+all CPUs).
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: add sanity check on number of vCPUs]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 31 +++++++++++++++++++++-----
+ 1 file changed, 26 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 17/20] KVM: selftests: Add a utility to pin a task to a
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a helper function, pin_task_to_random_cpu(), to pin a task to a random
+CPU from a given cpu_set_t.
+
+This helper will be used eventfd IRQ test to migrate vCPUs to random pCPUs,
+to stress host-side interrupt routing and delivery.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 21 +++++++++++++++++++
+ 2 files changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 19/20] KVM: selftests: Make number of vCPUs configurable in
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-v' flag to allow the user to
+configure the number of vCPUs to create and run (versus only ever using a
+single vCPU).
+
+Update the routing logic to play nice with 32 bit IDs, enable x2APIC format
+in KVM (to enable 32-bit ID routing), and disable KVM's x2APIC broadcast
+quirk so that targeting vCPU 255 doesn't blast the interrupt to all vCPUs
+when in x2APIC mode.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 14/20] KVM: selftests: Verify non-postable IRQ remapping in
+Author: Sean Christopherson <seanjc@google.com>
+
+Extend the eventfd IRQ test with an '-n' flag to route a subset of device
+interrupts as NMIs (Non-Maskable Interrupts) into the guest using an
+alternating pattern of 4 NMIs followed by 4 regular interrupts.
+
+While this adds coverage for NMI injection, the primary goal is to
+validate KVM's handling of non-postable interrupt delivery (AMD and Intel
+IOMMUs only support posting fixed IRQs targeting a single vCPU).  KVM
+has historically bungled handling transitions between posted and remapped
+modes.  Use NMIs to stress the transitions, because they are a reliable,
+architectural way to force these code paths.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: add GUEST_RECEIVED_INTERRUPT(), massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 48 ++++++++++++++++++++------
+ 1 file changed, 37 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 15/20] KVM: selftests: Add kvm_gettid() wrapper and convert users
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a KVM wrapper for the gettid() syscall so that tests don't have to
+open code the syscall() themselves.  Unfortunately, not all flavors of
+libc that KVM selftests support provide gettid().  Convert all existing
+users of the syscall to the new wrapper.
+
+Note, per the gettid() manpage[1], "This call is always successful", i.e.
+prefixing kvm_ to the syscall name is aligned with the goal of providing
+syscall wrappers that guarantee success.
+
+No functional changes intended.
+
+Link: https://man7.org/linux/man-pages/man2/gettid.2.html [1]
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/demand_paging_test.c   | 2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h | 5 +++++
+ tools/testing/selftests/kvm/lib/assert.c           | 8 ++------
+ tools/testing/selftests/kvm/lib/test_util.c        | 3 ++-
+ tools/testing/selftests/kvm/rseq_test.c            | 2 +-
+ 5 files changed, 11 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 16/20] KVM: selftests: Add kvm_sched_getaffinity() wrapper
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add and use a KVM wrapper for the sched_getaffinity() syscall so that
+selftests don't need to manually assert that the syscall succeeded.
+
+Note, some tests didn't actually assert success, but they all obviously
+rely on the syscall to succeed.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c                  | 2 +-
+ tools/testing/selftests/kvm/arm64/arch_timer_edge_cases.c | 2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h        | 2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c                | 5 ++---
+ tools/testing/selftests/kvm/mmu_stress_test.c             | 6 +-----
+ tools/testing/selftests/kvm/rseq_test.c                   | 4 +---
+ 6 files changed, 8 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 13/20] KVM: selftests: Make number of IRQs configurable in
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-i' flag to let the user specify the
+the number of IRQs to generate (instead of hardcoding the test to always
+generate 1000 interrupts).
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 12/20] KVM: selftests: Add option to set empty routing
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with an '-e' flag to set empty GSI routing
+between interrupts.  Clobbering the GSI routing table verifies that KVM
+correctly handles CPUx => NULL => CPUy transitions, not just CPUx => CPUy
+transitions, and verifies that KVM can "rebuild" an entire routing setup.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: '-e' for "empty" instead of '-c' for "clear", massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 11/20] KVM: selftests: Verify interrupts are received when
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extent the eventfd IRQ test with a '-a' flag to randomly affinitize the
+device's host IRQ to different physical CPUs throughout the test.  This
+stresses the kernel's ability to maintain correct interrupt routing and
+delivery even as the underlying hardware IRQ affinity is changed
+dynamically via /proc/<irq>/smp_affinity{,_list}.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 27 +++++++++++++++++++++-----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 10/20] KVM: selftests: Add a helper to set proc IRQ
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a utility, proc_irq_set_smp_affinity(), to set the CPU affinity of a
+Linux host IRQ via the proc filesystem.  Use smp_affinity_list instead of
+smp_affinity to avoid having to convert the single CPU to a bitmask.
+
+The helper will be used by the eventfd IRQ test to verify delivery of IRQs
+when the affinity is randomized/modified.
+
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: make the utility self-contained, drop "list", massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/proc_util.h |  2 ++
+ tools/testing/selftests/kvm/lib/proc_util.c     | 14 ++++++++++++++
+ 2 files changed, 16 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 09/20] KVM: selftests: Add VFIO device support to eventfd
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Extend the eventfd IRQ test with a '-d' argument that takes a BDF (in the
+format segment:bus:device.function) of an interrupt-capable PCI(e) device
+bound to VFIO, and use said device to trigger interrupts instead of always
+synthesizing interrupts via direct writes to the eventfd.
+
+Using a VFIO device to trigger interrupts validates the end-to-end delivery
+of IRQs for "real" devices, and when supported by hardware (and KVM), also
+validates interrupt delivery via IRQ bypass, i.e. via device posted IRQs.
+
+Now that IOMMUFD is a thing, auto-probe IOMMUFD vs. "legacy" VFIO by
+temporarily opening /dev/iommufd, and skip the test if neither IOMMUFD nor
+legacy VFIO is available.  Add a '-t' option to the user override the probe
+logic, e.g. in case IOMMUFD is available but the system is configured for
+legacy usage.
+
+Note, the device must have a VFIO selftest driver in order to work with
+the test.  A helper script to list supported devices will hopefully be
+available in the near future at
+tools/testing/selftests/vfio/scripts/list_supported_devices.sh[1].
+
+Example:
+$ ./tools/testing/selftests/kvm/irq_test -d 0000:06:0a.1
+
+Link: https://lore.kernel.org/all/20260602222941.3133236-1-jrhilke%40google.com [1]
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/irq_test.c | 86 ++++++++++++++++++++++++--
+ 1 file changed, 80 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 07/20] KVM: selftests: Add an irqfd send+receive (and later
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add a new test, irq_test to verify that KVM correctly delivers interrupts
+to a running vCPU, when triggered via an eventfd bound to a KVM GSI using
+KVM's irqfd mechanism.
+
+This test is intentionally simple, for now.  Support for sending interrupts
+via VFIO devices, for IRQ bypass, and for other features will be added in
+the near future.
+
+Add the test in common code, even though it currently will only build and
+run on x86, as the concept and the bulk of the host-side code isn't
+specific to x86.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Link: https://lore.kernel.org/kvm/20250404193923.1413163-68-seanjc@google.com
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: use while() and TEST_ASSERT() instead of if-statement => TEST_FAIL()]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm |   1 +
+ tools/testing/selftests/kvm/irq_test.c   | 170 +++++++++++++++++++++++
+ 2 files changed, 171 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 08/20] KVM: selftests: Add helper to get host IRQ from
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Introduce proc_util.c and proc_util.h to house utility functions for
+interacting with the proc filesystem.
+
+Add vfio_msix_to_host_irq(), which parses /proc/interrupts, to get the host
+Linux IRQ for a given VFIO device BDF and MSI-X vector.
+
+This helper will be used by the eventfd IRQ test to print the host IRQ
+number when triggering IRQs via VFIO device, e.g. to aid in debugging if
+the test fails.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../testing/selftests/kvm/include/proc_util.h |  9 +++++
+ tools/testing/selftests/kvm/lib/proc_util.c   | 40 +++++++++++++++++++
+ 3 files changed, 50 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 06/20] KVM: selftests: Add helper to generate random u64 in
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Introduce kvm_random_u64_in_range(state, min, max). This function
+returns a random u64 in the inclusive range of [min, max] using a struct
+kvm_random_state.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../testing/selftests/kvm/include/test_util.h  |  3 +++
+ tools/testing/selftests/kvm/lib/test_util.c    | 18 ++++++++++++++++++
+ 2 files changed, 21 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 05/20] KVM: selftests: Seed libc's RNG before using it to
+Author: Sean Christopherson <seanjc@google.com>
+
+Seed the RNG used by random() using the de facto standard method of
+srand(time(0)), so that a different seed is actually used in each test run.
+E.g. without seeding the RNG, literally every test on x86 will use
+0x6b8b4567 to seed the KVM RNG.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 03/20] KVM: selftests: Rename guest_rng to kvm_rng
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Rename functions prefixed with 'guest_random_' to 'kvm_random_' and the
+global random state variable 'guest_rng' to 'kvm_rng', as the pRNG isn't
+strictly limited to guest code.  This will allow using the pRNG in host
+code without creating confusing/misleading function calls.
+
+No functional changes are intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/dirty_log_perf_test.c       |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c  |  2 +-
+ .../testing/selftests/kvm/include/test_util.h | 22 +++++++++----------
+ .../selftests/kvm/include/x86/kvm_util_arch.h |  4 ++--
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 20 ++++++++---------
+ tools/testing/selftests/kvm/lib/memstress.c   |  8 +++----
+ tools/testing/selftests/kvm/lib/test_util.c   |  6 ++---
+ .../testing/selftests/kvm/x86/sev_dbg_test.c  |  2 +-
+ 8 files changed, 34 insertions(+), 34 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 04/20] KVM: selftests: Initialize the default/global pRNG
+Author: Sean Christopherson <seanjc@google.com>
+
+Initialize the default kvm_rng during selftest initialization so that the
+pRNG can be used by tests before creating a VM.  As pointed out by Sashiko,
+failure to actually initialize the generate makes it decidedly not random.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 02/20] KVM: selftests: Add macros to read/write+sync
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Add SYNC_FROM_GUEST_AND_READ(vm, variable), to read a variable value
+from the guest. Add WRITE_AND_SYNC_TO_GUEST(vm, variable, value) to
+write a value to a guest variable. These macros improve the readability
+of code which reads and writes data between host and guest in tests.
+
+Use the new macro in existing tests that do back-to-back write+sync.
+
+No functional changes are intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Co-developed-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+[sean: massage changelog]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/dirty_log_test.c  |  9 +++-----
+ .../testing/selftests/kvm/include/kvm_util.h  | 10 +++++++++
+ tools/testing/selftests/kvm/mmu_stress_test.c |  9 +++-----
+ tools/testing/selftests/kvm/steal_time.c      | 22 +++++++------------
+ 4 files changed, 24 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 01/20] KVM: selftests: Build and link selftests/vfio/lib
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Include libvfio.mk into the KVM selftests Makefile and link it into all
+KVM selftests by adding it to LIBKVM_OBJS.
+
+This lays the groundwork for future changes to utilize VFIO devices to
+verify IRQ bypass in KVM selftests.
+
+Note that KVM selftests build their own copy of selftests/vfio/lib and
+the resulting object files are placed in $(OUTPUT)/lib. This allows the
+KVM and VFIO selftests to apply different CFLAGS when building without
+conflicting with each other.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 00/20] KVM: selftests: Add eventfd+VFIO IRQ test
+Author: Sean Christopherson <seanjc@google.com>
+
+David and Josh's series to add a selftest for verifying interrupt delivery
+via eventfd (via KVM_IRQFD), and also from a real device, wired up via VFIO.
+
+I originally wanted to get this into 7.2, but that's not going to happen.  But
+I hope to get this applied early in the 7.3 cycle so that additional features
+and whatnot can be developed on top without too much pain (hopefully).
+
+Gory details in the patches, and in the v5 cover letter.
+
+v7:
+ - Seed kvm_rng during kvm_selftest_init(). [Sashiko]
+ - Seed libc's RNG during kvm_selftest_init(), so that the seed (from random())
+   that's printed and passed to kvm_rng isn't the same every time.
+ - Init irq_cpu to -1 in all paths. [Sashiko]
+
+v6:
+ - Massage most changelogs.
+ - Fix SoB ordering issues.
+ - Clean up KVM_SET_GSI_ROUTING helper.
+ - Remove misleading "IRQ injection" and "emulated eventfd" terminology.
+ - Add GUEST_RECEIVED_INTERRUPT() to simplifiy the core loop.
+ - Use cpu_relax() in tight loops while waiting for interrupts.
+ - Print as much information as possible in the actual assert, instead of
+   printing to stdout separately.
+ - Make a best guess as to the right VFIO vs. IOMMUFD mode instead of
+   assuming IOMMUFD, and give the user the option to overide said guess.
+ - Simplify open_proc_irq_smp_affinity_list() +
+   write_proc_irq_smp_affinity_list() into proc_irq_set_smp_affinity().
+ - Drop print_proc_irq_file() and kvm_print_vcpu_affinity() (for now) to avoid
+   potential issues on systems with high CPU counts.
+ - Drop the blocking/HLT testing as it was at best broken.
+ - Use -e for "empty", not -c for "clear", when completely tearing down GSI
+   routing, because routing can be "cleared" without completely emptying the
+   routing information.
+ - Use the main task's CPU affinity as the available_cpus set.
+ - Allow overcommiting vCPUs:pCPUs.
+ - Set the target vCPU's affinity instead of batching when vCPU0 is targeted.
+ - Add support for 256+ vCPUs with x2APIC.
+ - Restrict xAPIC mode to 255 vCPUs.
+ - Restrict the test to KVM selftest's max supported vCPUs.
+
+v5:
+ - https://lore.kernel.org/all/20260604020143.748245-1-jrhilke@google.com
+ - Rename get_proc_vfio_irq_number() to vfio_msix_to_host_irq()
+ - Rename open_proc_irq_affinity() and write_proc_irq_affinity() to include "_smp_affinity_list"
+ - Print /proc/irq/<irq>/smp_affinity and effective_affinity on timeout failures
+ - Convert IRQ type from 'int' to 'unsigned int' across helpers and the test
+ - Fix compiler warnings for uninitialized variables in irq_test.c
+ - Remove rate-limiting on affinity changes
+
+v4: https://lore.kernel.org/kvm/20260530002134.558837-1-jrhilke@google.com
+
+David Matlack (11):
+  KVM: selftests: Build and link selftests/vfio/lib into KVM selftests
+  KVM: selftests: Add macros to read/write+sync to/from guest memory
+  KVM: selftests: Add an irqfd send+receive (and later IRQ bypass) test
+  KVM: selftests: Add helper to get host IRQ from device MSI-X for IRQ
+    bypass test
+  KVM: selftests: Add VFIO device support to eventfd IRQ test
+  KVM: selftests: Verify interrupts are received when IRQ affinity
+    changes in IRQ test
+  KVM: selftests: Add option to set empty routing between IRQs in
+    eventfd IRQ test
+  KVM: selftests: Make number of IRQs configurable in IRQ test
+  KVM: selftests: Verify vCPU migration during IRQ delivery in IRQ test
+  KVM: selftests: Make number of vCPUs configurable in IRQ test
+  KVM: selftests: Add xAPIC support in eventfd IRQ test
+
+Josh Hilke (6):
+  KVM: selftests: Rename guest_rng to kvm_rng
+  KVM: selftests: Add helper to generate random u64 in range [min,max]
+  KVM: selftests: Add a helper to set proc IRQ affinity for IRQ test
+  KVM: selftests: Add kvm_gettid() wrapper and convert users
+  KVM: selftests: Add kvm_sched_getaffinity() wrapper and convert users
+  KVM: selftests: Add a utility to pin a task to a random CPU, given a
+    CPU set
+
+Sean Christopherson (3):
+  KVM: selftests: Initialize the default/global pRNG during
+    kvm_selftest_init()
+  KVM: selftests: Seed libc's RNG before using it to generate a seed for
+    KVM's pRNG
+  KVM: selftests: Verify non-postable IRQ remapping in IRQ test
+
+ tools/testing/selftests/kvm/Makefile.kvm      |   7 +-
+ tools/testing/selftests/kvm/arch_timer.c      |   2 +-
+ .../kvm/arm64/arch_timer_edge_cases.c         |   2 +-
+ .../selftests/kvm/demand_paging_test.c        |   2 +-
+ .../selftests/kvm/dirty_log_perf_test.c       |   4 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |  11 +-
+ .../selftests/kvm/include/kvm_syscalls.h      |   7 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  12 +
+ .../testing/selftests/kvm/include/proc_util.h |  11 +
+ .../testing/selftests/kvm/include/test_util.h |  25 +-
+ .../selftests/kvm/include/x86/kvm_util_arch.h |   4 +-
+ tools/testing/selftests/kvm/irq_test.c        | 350 ++++++++++++++++++
+ tools/testing/selftests/kvm/lib/assert.c      |   8 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  53 ++-
+ tools/testing/selftests/kvm/lib/memstress.c   |   8 +-
+ tools/testing/selftests/kvm/lib/proc_util.c   |  54 +++
+ tools/testing/selftests/kvm/lib/test_util.c   |  27 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c |  15 +-
+ tools/testing/selftests/kvm/rseq_test.c       |   6 +-
+ tools/testing/selftests/kvm/steal_time.c      |  22 +-
+ .../testing/selftests/kvm/x86/sev_dbg_test.c  |   2 +-
+ 21 files changed, 548 insertions(+), 84 deletions(-)
+
+----------------------------------------------------------------------
+
