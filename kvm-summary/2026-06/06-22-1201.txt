@@ -1,0 +1,263 @@
+
+On /root/mail/repo:
+From 1c7f1ce37 to 137f06162
+KVM mailing list update from 1c7f1ce37 to 137f06162
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      2 goodmis.org
+      2 gmail.com
+      1 loongson.cn
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+      2  Steven Rostedt <rostedt@goodmis.org>
+      2  Mikhail Malyshev <mike.malyshev@gmail.com>
+      1  Steven Rostedt <rostedt@kernel.org>
+      1  Bibo Mao <maobibo@loongson.cn>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86/mmu: Emulate, don't kill the VM, on access to a disabled passthrough BAR
+[PATCH 1/1] KVM: x86/mmu: Emulate, don't kill the VM, on access to a disabled passthrough BAR
+Author: mike.malyshev <mike.malyshev@gmail.com>
+
+
+A passed-through PCI device's BAR is mapped into the guest through a
+VM_IO/VM_PFNMAP VMA whose fault handler (e.g. vfio_pci_mmap_fault())
+declines to install a PTE while the device's memory space is disabled,
+such as immediately after the guest clears PCI_COMMAND.MEM. If another
+vCPU accesses that BAR during the window, hva_to_pfn_remapped() fails and
+the gfn resolves to an error pfn even though the memslot is still valid.
+kvm_handle_error_pfn() then returns -EFAULT and KVM_RUN exits to userspace,
+which typically treats this as fatal and kills the VM.
+
+This is guest-triggerable: a guest that toggles PCI_COMMAND.MEM on an
+assigned device while another vCPU touches the BAR can take down its own
+VM (observed in production with an assigned Intel iGPU; the guest's display
+driver clears PCI_COMMAND.MEM on one vCPU while another is mid-MMIO to the
+BAR).
+
+On bare metal an access to a BAR whose memory decoding is disabled simply
+completes as an Unsupported Request: reads return all ones, writes are
+dropped. KVM can present the same behaviour by treating the access as MMIO
+and emulating it, which is exactly what the noslot path already does for a
+gfn that has no memslot.
+
+Distinguish the VM_IO/VM_PFNMAP fault-handler failure from other error
+pfns with a new KVM_PFN_ERR_PFNMAP value (in range of KVM_PFN_ERR_MASK, so
+existing is_error_pfn() checks are unaffected) and route it to
+kvm_handle_noslot_fault() in the x86 TDP fault path. Genuine,
+non-pfnmap faults, e.g. a vanished anonymous backing, still take the fatal
+-EFAULT path, consistent with what mmu_stress_test already expects. The
+MMIO mapping self-heals when the device's memory space is re-enabled and
+the memslot is updated, bumping the MMIO generation.
+
+Signed-off-by: Mikhail Malyshev <mike.malyshev@gmail.com>
+---
+ arch/x86/kvm/mmu/mmu.c   | 16 +++++++++++++++-
+ include/linux/kvm_host.h |  8 ++++++++
+ virt/kvm/kvm_main.c      |  9 ++++++++-
+ 3 files changed, 31 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: don't kill the VM on access to a disabled passthrough BAR
+[PATCH 0/1] KVM: x86/mmu: don't kill the VM on access to a disabled passthrough BAR
+Author: mike.malyshev <mike.malyshev@gmail.com>
+
+
+A guest with an assigned PCI device can crash its own VM by toggling
+PCI_COMMAND.MEM on that device while another vCPU accesses the device's
+BAR. KVM_RUN returns -EFAULT, which userspace (QEMU) treats as fatal.
+
+This is a guest-triggerable, host-side VM kill, so I think it is worth
+addressing in KVM rather than papering over it in userspace.
+
+The window
+==========
+
+A passed-through BAR is mapped into the guest via a VM_IO/VM_PFNMAP VMA
+whose fault handler (vfio_pci_mmap_fault()) refuses to install a PTE while
+the device's memory space is disabled. When the guest clears
+PCI_COMMAND.MEM:
+
+  - the kernel vfio config-write path zaps the BAR's userspace mapping;
+  - userspace's memory listener later removes the corresponding KVM
+    memslot.
+
+A vCPU that faults on the BAR in the window after the mapping is zapped but
+before the memslot is removed lands in the page fault path with a *valid*
+memslot but a backing whose fault handler declines. hva_to_pfn_remapped()
+returns an error, the gfn resolves to KVM_PFN_ERR_FAULT, and
+kvm_handle_error_pfn() returns -EFAULT.
+
+On bare metal the same access is an Unsupported Request (reads all ones,
+writes dropped), not a fatal error. This series makes KVM emulate the
+access as MMIO in that case, matching hardware, while leaving genuine
+faults (e.g. a vanished anonymous backing, vma == NULL) returning -EFAULT
+as before -- consistent with what tools/testing/selftests/kvm/
+mmu_stress_test.c already asserts.
+
+How it was found / confirmed
+============================
+
+The crash was originally hit in production on edge devices that pass an
+Intel iGPU (Raptor Lake-P) through to a guest; the guest's display driver
+clears PCI_COMMAND.MEM on one vCPU while another vCPU is mid-MMIO to BAR0.
+
+To study it deterministically I built a reduced, hardware-light reproducer
+(no specific guest OS required, the race is host-side):
+
+  - a Linux guest with any assigned PCI device whose BAR0 is mmap'd from
+    userspace (/sys/.../resource0) and hammered with a tight MMIO write
+    loop on one vCPU;
+  - a second thread that toggles PCI_COMMAND.MEM 1->0->1 on that device
+    via the VFIO config region.
+
+Without this patch the VM dies within ~1 s. eBPF on the fault path showed
+the -EFAULT originating in the faultin path (kvm_mmu_faultin_pfn ->
+kvm_handle_error_pfn) with the memslot valid (flags=0, not
+KVM_MEMSLOT_INVALID), no mmu_notifier invalidation in progress, and the
+pfn equal to the GUP-error value -- i.e. the VM_PFNMAP fault handler
+declining, exactly the case this patch targets. (An earlier attempt to
+treat it as a stale-mapping race and retry on mmu_invalidate_retry_gfn()
+did not help, because by the time of the fault the invalidation has
+already completed and the seq is stable; that confirmed the failure is a
+steady-state "device decoding disabled" condition, not a transient
+invalidation, and led to the MMIO approach here.)
+
+With the patch the same reproducer survived 200k toggle cycles, and a
+fleet of 17 devices ran 48h with no recurrence.
+
+Open questions for reviewers
+============================
+
+ - hva_to_pfn_remapped() can in principle return an error for reasons
+   other than "fault handler declined" (e.g. an OOM from
+   fixup_user_fault()). Treating all of them as MMIO is what this patch
+   does for simplicity; I can instead plumb the specific condition through
+   if you'd prefer to narrow it.
+
+ - I could not find a clean way to add a selftest: a faithful regression
+   test needs a VM_PFNMAP backing whose fault handler can be toggled,
+   which from pure userspace means /dev/mem or a real assigned device
+   (neither CI-portable), or a dedicated test module (outside selftests).
+   Guidance on the preferred shape would be welcome.
+
+Mikhail Malyshev (1):
+  KVM: x86/mmu: Emulate, don't kill the VM, on access to a disabled
+    passthrough BAR
+
+ arch/x86/kvm/mmu/mmu.c   | 16 +++++++++++++++-
+ include/linux/kvm_host.h |  8 ++++++++
+ virt/kvm/kvm_main.c      |  9 ++++++++-
+ 3 files changed, 31 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  tracing: Move non-trace_printk prototypes back to kernel.h
+[PATCH 1/2] tracing: Move non-trace_printk prototypes back to kernel.h
+Author: Steven Rostedt <rostedt@kernel.org>
+
+
+In order to remove the include to trace_printk.h from kernel.h the tracing
+control prototypes need to be moved back into kernel.h. That's because
+they are used in other common header files like rcu.h. There's no point in
+removing trace_printk.h from kernel.h if it just gets added back to other
+common headers.
+
+Prototypes are very cheap for the compiler and should not be an issue.
+
+Signed-off-by: Steven Rostedt <rostedt@goodmis.org>
+---
+ include/linux/kernel.h       | 18 ++++++++++++++++++
+ include/linux/trace_printk.h | 17 -----------------
+ 2 files changed, 18 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  tracing: Move trace_printk.h out of kernel.h
+[PATCH 0/2] tracing: Move trace_printk.h out of kernel.h
+Author: Steven Rostedt <rostedt@kernel.org>
+
+There's been complaints about trace_printk() being defined in kernel.h as it
+can increase the compilation time. As it is only used by some developers for
+debugging purposes, it should not be in kernel.h causing lots of wasted CPU
+cycles for those that do not ever care about it.
+
+Instead, add a CONFIG_TRACE_PRINTK_DEBUGGING option that developers that do
+use it can set and not have to always remember to add #include <linux/trace_printk.h>
+to the files they add trace_printk() while debugging. It also means that
+those that do not have that config set will not have to worry about wasted
+CPU cycles as it is only include in the CFLAGS when the option is set, and
+its completely ignored otherwise.
+
+Steven Rostedt (2):
+      tracing: Move non-trace_printk prototypes back to kernel.h
+      tracing: Add CONFIG_TRACE_PRINTK_DEBUGGING to clean up kernel.h
+
+----
+ .../driver_development_debugging_guide.rst         |  2 +-
+ Makefile                                           |  5 +++++
+ arch/powerpc/kvm/book3s_xics.c                     |  1 +
+ drivers/gpu/drm/i915/gt/intel_gtt.h                |  1 +
+ drivers/gpu/drm/i915/i915_gem.h                    |  1 +
+ drivers/hwtracing/stm/dummy_stm.c                  |  4 ++++
+ drivers/infiniband/hw/hfi1/trace_dbg.h             |  1 +
+ drivers/usb/early/xhci-dbc.c                       |  1 +
+ fs/ext4/inline.c                                   |  1 +
+ include/linux/kernel.h                             | 19 ++++++++++++++++++-
+ include/linux/sunrpc/debug.h                       |  1 +
+ include/linux/trace_printk.h                       | 22 +++-------------------
+ kernel/trace/Kconfig                               | 10 ++++++++++
+ kernel/trace/ring_buffer_benchmark.c               |  1 +
+ kernel/trace/trace.h                               |  1 +
+ samples/fprobe/fprobe_example.c                    |  1 +
+ samples/ftrace/ftrace-direct-modify.c              |  1 +
+ samples/ftrace/ftrace-direct-multi-modify.c        |  1 +
+ samples/ftrace/ftrace-direct-multi.c               |  2 +-
+ samples/ftrace/ftrace-direct-too.c                 |  2 +-
+ samples/ftrace/ftrace-direct.c                     |  2 +-
+ 21 files changed, 56 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From e22fb9d31 to 2dd008eea
+KVM mailing list update from e22fb9d31 to 2dd008eea
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      1 grrlz.net
+
+Top 15 contributors (Based on Email Body)
+
+      1  Bradley Morgan <include@grrlz.net>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: account pKVM reclaim against the VM mm
+[PATCH] KVM: arm64: account pKVM reclaim against the VM mm
+Author: Bradley Morgan <include@grrlz.net>
+
+Protected guest faults charge long term pins to the VM's mm. Teardown
+can run later from file release, where current->mm may be unrelated.
+
+Drop the charge from kvm->mm instead.
+
+Fixes: 4e6e03f9eadd ("KVM: arm64: Hook up reclaim hypercall to pkvm_pgtable_stage2_destroy()")
+Signed-off-by: Bradley Morgan <include@grrlz.net>
+---
+ arch/arm64/kvm/pkvm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
