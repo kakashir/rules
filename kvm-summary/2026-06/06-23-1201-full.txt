@@ -1,0 +1,2357 @@
+
+On /root/mail/repo:
+From 137f06162 to a2be90383
+KVM mailing list update from 137f06162 to a2be90383
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     16 gmail.com
+     15 google.com
+     12 huawei.com
+     10 linux.ibm.com
+      6 meta.com
+      5 virtuozzo.com
+      2 redhat.com
+      2 kylinos.cn
+      1 nutanix.com
+      1 linux.dev
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     16  Charlie Jenkins <thecharlesjenkins@gmail.com>
+     12  Chengwen Feng <fengchengwen@huawei.com>
+     10  Tarun Sahu <tarunsahu@google.com>
+     10  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      6  Zhiping Zhang <zhipingz@meta.com>
+      3  Octavian Purdila <tavip@google.com>
+      3  Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+      2  Pavel Tikhomirov <ptikhomirov@virtuozzo.com>
+      2  leixiang <leixiang@kylinos.cn>
+      2  Brendan Jackman <jackmanb@google.com>
+      1  Sebastian Ott <sebott@redhat.com>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+      1  Gulshan Gabel <gulshan.gabel@nutanix.com>
+      1  Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+      1  Andrew Jones <andrew.jones@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH net v3 2/2] vsock/virtio: restore msg_iter on transmission failure
+Author: Octavian Purdila <tavip@google.com>
+
+When transmission fails in virtio_transport_send_pkt_info, the msg_iter
+might have been partially advanced. If we don't restore it, the next
+attempt to send data will use an incorrect iterator state, leading to
+desync and warnings like "send_pkt() returns 0, but X expected".
+
+Specifically, this can happen in the following scenario, triggered by
+the syzkaller repro:
+
+1. A write-only VMA (PROT_WRITE only) is partially populated by a
+   prior TUN write that failed with -EIO but still faulted in some
+   pages).
+2. A vsock sendmmsg call with MSG_ZEROCOPY requests transmission of a
+   buffer from this VMA.
+3. The first packet (64KB) is sent successfully because the pages are
+   populated.
+4. The second packet allocation fails because GUP fast pins the first page
+   but GUP slow fails on the next unpopulated page due to PROT_WRITE-only
+   permissions.
+5. The iterator is advanced by the partially successful GUP (68KB total
+   advanced: 64KB from first packet + 4KB from second), but the send loop
+   breaks and only reports 64KB sent. This creates a 4KB desync.
+6. The next retry starts with a non-zero iov_offset, disabling zerocopy
+   and falling back to copy mode.
+7. In copy mode, the transmission succeeds for the next packets but
+   exhausts the iterator early because of the desync.
+8. The final retry sees an empty iterator but zerocopy is re-enabled
+   (offset resets). It attempts to send the remaining bytes with zerocopy
+   but pins 0 pages, creating an empty packet.
+9. The transport sends the empty packet, triggering the warning because
+   the returned bytes (header only) do not match the expected payload size.
+10. The loop continues to spin, allocating ubuf_info each time, eventually
+    exhausting sysctl_optmem_max and returning -ENOMEM to userspace.
+
+Restore msg_iter to its original state before the packet allocation
+and transmission attempt if they fail.
+
+Fixes: e0718bd82e27 ("vsock: enable setting SO_ZEROCOPY")
+Reported-by: syzbot+28e5f3d207b14bae122a@syzkaller.appspotmail.com
+Closes: https://syzkaller.appspot.com/bug?extid=28e5f3d207b14bae122a
+Assisted-by: gemini:gemini-3.1-pro
+Reviewed-by: Stefano Garzarella <sgarzare@redhat.com>
+Signed-off-by: Octavian Purdila <tavip@google.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH net v3 0/2] vsock/virtio: fix msg_iter desync on transmission failure
+Author: Octavian Purdila <tavip@google.com>
+
+This series fixes a msg_iter desync issue in the virtio vsock transport
+that can lead to warnings and eventual -ENOMEM under specific failure
+scenarios (e.g. partial GUP failure during MSG_ZEROCOPY transmission).
+
+To fix this, we need to restore the msg_iter state on transmission failure.
+However, since virtio vsock transport can be built as a module, we first
+need to export iov_iter_restore.
+
+Patch 1 exports iov_iter_restore.
+Patch 2 implements the msg_iter restoration in virtio vsock.
+
+Changes in v3:
+- Use EXPORT_SYMBOL_GPL (Jens)
+
+Changes in v2:
+- Use iov_iter_savestate()/iov_iter_restore() (Stefano)
+- Use a single restore point (Stefano)
+- Reverse xmas tree (Stefano)
+- Added comments in the code (Stefano)
+
+v2: https://lore.kernel.org/all/20260613000953.467473-1-tavip@google.com/
+v1: https://lore.kernel.org/all/20260609004809.1285028-1-tavip@google.com/
+
+Octavian Purdila (2):
+  iov_iter: export iov_iter_restore
+  vsock/virtio: restore msg_iter on transmission failure
+
+ lib/iov_iter.c                          |  1 +
+ net/vmw_vsock/virtio_transport_common.c | 13 +++++++++++++
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH net v3 1/2] iov_iter: export iov_iter_restore
+Author: Octavian Purdila <tavip@google.com>
+
+Export iov_iter_restore so that it can be used by modules.
+
+This is needed by the virtio vsock transport (which can be built as a
+module) to restore the msg_iter state when transmission fails.
+
+Acked-by: Stefano Garzarella <sgarzare@redhat.com>
+Signed-off-by: Octavian Purdila <tavip@google.com>
+---
+ lib/iov_iter.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/4] dma-buf: add optional get_pci_tph() callback
+Author: Zhiping Zhang <zhipingz@meta.com>
+
+Add an optional dma_buf_ops.get_pci_tph callback and a
+DMA-buf importer wrapper, dma_buf_get_pci_tph().
+
+TPH is PCIe TLP Processing Hint. 8-bit ST and 16-bit Extended ST are
+distinct PCIe TPH namespaces, so the importer requests the namespace it
+can emit and the exporter returns the matching ST/PH tuple or
+-EOPNOTSUPP.
+
+dma_buf_get_pci_tph() is the importer entry point. It requires
+&dmabuf->resv to be held while the callback runs and returns
+-EOPNOTSUPP when the exporter does not provide PCI TPH metadata.
+
+The first user is VFIO_DEVICE_FEATURE_DMA_BUF_TPH in vfio-pci, with
+mlx5 as the first importer.
+
+Signed-off-by: Zhiping Zhang <zhipingz@meta.com>
+---
+ drivers/dma-buf/dma-buf.c | 25 +++++++++++++++++++++++++
+ include/linux/dma-buf.h   | 22 ++++++++++++++++++++++
+ 2 files changed, 47 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 6/9] kvm: guest_memfd_luo: add support for guest_memfd preservation
+Author: Tarun Sahu <tarunsahu@google.com>
+
+This patch sets up the basic infrastructure to preserve the guest_memfd.
+Currently this supports only fully shared guest_memfd and backed by
+PAGE_SIZE pages.
+
+It uses INIT_SHARED flag to check its shareability and
+kvm_arch_has_private_mem to check if the conversion of memory to private
+is not supported.
+
+Preservation is straight forward. It walks through the folios and
+serialize them.
+
+There is kvm_gmem_freeze call on preserve which freeze the guest_memfd
+inode. It avoids any changes to inode mapping with fallocate calls and
+also fails any new fault allocation on or after preservation.
+
+This change also update the MAINTAINERS list.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ MAINTAINERS                 |   1 +
+ include/linux/kho/abi/kvm.h |  79 +++++-
+ virt/kvm/Makefile.kvm       |   2 +-
+ virt/kvm/guest_memfd_luo.c  | 497 ++++++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c         |   7 +
+ virt/kvm/kvm_mm.h           |   4 +
+ 6 files changed, 583 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 7/9] docs: add documentation for guest_memfd preservation
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Add the documentation under the "Preserving file descriptors" section
+of LUO's documentation.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ Documentation/core-api/liveupdate.rst |   1 +
+ Documentation/liveupdate/vmm.rst      | 107 ++++++++++++++++++++++++++
+ MAINTAINERS                           |   1 +
+ virt/kvm/guest_memfd_luo.c            |   4 +-
+ 4 files changed, 111 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 9/9] selftests: kvm: Add guest_memfd_preservation_test
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Add a new KVM selftest `guest_memfd_preservation_test` to verify that
+guest memory backed by guest_memfd is preserved properly.
+
+Here, I have used the kvm selftests framework by creating a new
+vm and mapping two memory slots to it. One is the code that is executed
+inside the vm and other is the guest_memfd whose memory is being
+written by the guest code.
+
+In Stage 1: Once data is written the vm exits and wait for the user
+to trigger the kexec.
+
+In Stage 2: A new vm is created with retrieved kvm and again two
+memory slots are assigned. Once for guest code, and another is for
+retrieved guest_memfd where guest_memfd memory is verified by the
+executed guest code. If verification succeeds, The test passes.
+
+// Kernel is compiled with CONFIG_LIVEUPDATE_GUEST_MEMFD and booted
+// with kho=on liveupdate=on command line parameter.
+
+$ ./selftests/kvm/guest_memfd_preservation_test --stage 1
+$ <kexec>
+$ ./selftests/kvm/guest_memfd_preservation_test --stage 2
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ MAINTAINERS                                   |   1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   6 +-
+ .../kvm/guest_memfd_preservation_test.c       | 236 ++++++++++++++++++
+ 3 files changed, 242 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 8/9] selftests: kvm: Split ____vm_create() to expose init helpers
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Refactor `____vm_create()` in the KVM selftest library to extract its
+initialization steps into separate, reusable internal helpers.
+
+Introduce `vm_init_fields()` and `vm_init_memory_properties()`. This
+allows advanced test setups to perform targeted VM fields or memory
+property initializations independently, which is required by upcoming
+test cases that restore preserved VMs. No functional changes are
+introduced for the existing tests.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 26 +++++++++++++------
+ 2 files changed, 20 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 5/9] kvm: guest_memfd: Add support for freezing and
+Author: Tarun Sahu <tarunsahu@google.com>
+
+This patch introduces the freeze on gmem_inode which prevents
+the fallocate call and any new page fault allocation. This will avoid
+gmem file modification when it is being preserved
+
+Used srcu lock to synchronise the freeze call, where write blocks
+until all the reads are free. And reads are re-entrant.
+
+Incase fault fails, It return -EPERM and VM_EXIT to userspace. userspace
+must handle this properly as every new fault will fail.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ virt/kvm/guest_memfd.c | 117 +++++++++++++++++++++++++++++++++++++----
+ virt/kvm/guest_memfd.h |   5 ++
+ 2 files changed, 111 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/9] kvm: guest_memfd: Move internal definitions and helper
+Author: Tarun Sahu <tarunsahu@google.com>
+
+To support guest_memfd memory preservation with LUO, guest_memfd luo
+code needs to access guest_memfd internals and reconstruct guest_memfd
+file instances from a preserved state.
+
+Extract gmem_file, gmem_inode, and the GMEM_I() helper from guest_memfd.c
+into a new internal header virt/kvm/guest_memfd.h.
+
+Additionally, split __kvm_gmem_create() to expose a non-static
+__kvm_gmem_create_file() helper. This helper returns a struct file
+instead of a file descriptor, enabling file creation and initialization
+without installing it into a file descriptor table.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ virt/kvm/guest_memfd.c | 68 +++++++++++++++++-------------------------
+ virt/kvm/guest_memfd.h | 39 ++++++++++++++++++++++++
+ 2 files changed, 67 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/9] kvm: kvm_luo: Allow kvm preservation with LUO
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Introduce KVM VM preservation support for Live Update Orchestrator.
+
+Register an LUO file handler for KVM files to serialize and
+deserialize necessary VM state across live updates. Currently, this
+preserves the VM type. This implementation provides the necessary
+infrastructure and dependencies for the upcoming guest_memfd
+preservation support. And it can be extended to preserve more vm
+state in future.
+
+Retrieve is simply creating the kvm and populate the retrieved data.
+Only catch here is there is no way to know which fd is going to be
+assigned to this kvm file hence I am using atomically incremented id
+for the fdname.
+
+This change also updates the MAINTAINERS list for kvm_luo.c.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ MAINTAINERS                 |  11 ++
+ include/linux/kho/abi/kvm.h |  39 ++++++++
+ virt/kvm/Makefile.kvm       |   1 +
+ virt/kvm/kvm_luo.c          | 195 ++++++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c         |   8 ++
+ virt/kvm/kvm_mm.h           |   8 ++
+ 6 files changed, 262 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/9] kvm: Prepare core VM structs and helpers for LUO support
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Introduce core infrastructure to support VM preservation with LUO.
+
+First two changes are just refactoring, no functional change, third
+change introduces a new member in struct kvm.
+- Move ITOA_MAX_LEN to kvm_mm.h for reuse by upcoming kvm_luo code.
+- Add a public kvm_create_vm_file() helper wrapping kvm_create_vm()
+  and anon_inode_getfile() to provide a unified VM file creation API.
+- Track a weak reference to the backing file in struct kvm under
+  CONFIG_LIVEUPDATE_GUEST_MEMFD to enable reverse file resolution
+  without circular lifetime dependencies.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ include/linux/kvm_host.h | 14 +++++++
+ virt/kvm/kvm_main.c      | 79 +++++++++++++++++++++++++++++-----------
+ virt/kvm/kvm_mm.h        |  3 ++
+ 3 files changed, 75 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/9] liveupdate: kvm: guest_memfd preservation
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Hello,
+This is Non-RFC patch series for guest_memfd preservation. After
+having multiple discussion across hypervisor liveupdate meeting,
+guest_memfd bi-weekly meeting, the design for the basic support of
+guest_memfd preservation is final. This series is going to include
+guest_memfd which are fully shared and does not support private mem
+and backed by PAGE_SIZE pages.
+
+Steps to test:
+1. Compile Kernel with CONFIG_LIVEUPDATE_GUEST_MEMFD=y
+2. boot kernel with command line: kho=on liveupdate=on
+3. run the following kselftest
+	$ .selftests/kvm/guest_memfd_preservation_test --stage 1
+	$ <kexec> --reuse-cmdline
+	$ .selftests/kvm/guest_memfd_preservation_test --stage 2
+
+NOTE: Assert the following:
+	$ ls /dev/liveupdate
+	$ ls /dev/kvm
+	$ dmesg | grep liveupdate # (should have kvm_vm_luo &&
+		# guest_memfd_luo handler registered)
+
+The changes are rebased on:
+	kvm/next + liveupdate/next (merge) + [3] + [4] + [5]
+	Where,
+	[3]: luo: conversion of serialized_data to KHOSER_PTR
+	[4]: luo: APIs to retrieve file internally from session
+	[5]: selftests: liveupdate sefltests library
+Here is the github repo:
+	https://github.com/tar-unix/linux/tree/gmem-pre
+
+V3 <- RFC V2 [2]
+1. Finalize the design
+2. resolve sashiko reported bugs
+3. Use of KHOSER_PTR instead of raw serialized_data as per [3]
+
+RFC V2 [2] <- RFC V1 [1]
+1. Removed mem_attr_array as it is not needed for fully-shared
+2. Removed pre-faulted condition
+3. Added vm_type preservation for ARM64.
+4. Removed liveupdate_get_file_incoming api patch as it is sent
+   separately [4] by Samiullah.
+
+[1] https://lore.kernel.org/all/cover.1779080766.git.tarunsahu@google.com/
+[2] https://lore.kernel.org/all/c054ba0fb2639932bbe354420d3f4f84cce84905.1780676742.git.tarunsahu@google.com/
+[3] https://lore.kernel.org/all/20260622111215.4157974-1-tarunsahu@google.com/
+[4] https://lore.kernel.org/all/20260613012521.835490-1-skhawaja@google.com/
+[5] https://lore.kernel.org/all/20260612214512.464146-1-vipinsh@google.com/
+
+Tarun Sahu (9):
+  liveupdate: Add LIVEUPDATE_GUEST_MEMFD config option
+  kvm: Prepare core VM structs and helpers for LUO support
+  kvm: kvm_luo: Allow kvm preservation with LUO
+  kvm: guest_memfd: Move internal definitions and helper to new header
+  kvm: guest_memfd: Add support for freezing and unfreezing mappings
+  kvm: guest_memfd_luo: add support for guest_memfd preservation
+  docs: add documentation for guest_memfd preservation via LUO
+  selftests: kvm: Split ____vm_create() to expose init helpers
+  selftests: kvm: Add guest_memfd_preservation_test
+
+ Documentation/core-api/liveupdate.rst         |   1 +
+ Documentation/liveupdate/vmm.rst              | 107 ++++
+ MAINTAINERS                                   |  14 +
+ include/linux/kho/abi/kvm.h                   | 106 ++++
+ include/linux/kvm_host.h                      |  14 +
+ kernel/liveupdate/Kconfig                     |  15 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   6 +-
+ .../kvm/guest_memfd_preservation_test.c       | 236 +++++++++
+ .../testing/selftests/kvm/include/kvm_util.h  |   2 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  26 +-
+ virt/kvm/Makefile.kvm                         |   1 +
+ virt/kvm/guest_memfd.c                        | 185 +++++--
+ virt/kvm/guest_memfd.h                        |  44 ++
+ virt/kvm/guest_memfd_luo.c                    | 497 ++++++++++++++++++
+ virt/kvm/kvm_luo.c                            | 195 +++++++
+ virt/kvm/kvm_main.c                           |  94 +++-
+ virt/kvm/kvm_mm.h                             |  15 +
+ 17 files changed, 1477 insertions(+), 81 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/9] liveupdate: Add LIVEUPDATE_GUEST_MEMFD config option
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Introduce the LIVEUPDATE_GUEST_MEMFD Kconfig option. This option
+enables live update support for KVM guest_memfd files, enabling
+guest_memfd-backed memory preservation across kernel upgrades.
+
+Currently this support only guest_memfd files that are full-shared
+and pre-faulted.
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ kernel/liveupdate/Kconfig | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 1/4] PCI/TPH: Add requester/completer type helpers
+Author: Zhiping Zhang <zhipingz@meta.com>
+
+Add pcie_tph_enabled_req_type() so drivers can query the enabled TPH
+requester mode without reaching into pci_dev internals.
+
+Add pcie_tph_completer_type() so drivers that publish TPH metadata for
+a device acting as a completer can gate on the "TPH Completer
+Supported" field of Device Capabilities 2 (bits 13:12,
+PCI_EXP_DEVCAP2_TPH_COMP_MASK) rather than reusing requester-side
+state. Fold the reserved 0b10 encoding into NONE so callers only see
+the defined values.
+
+This keeps pci_dev::tph_req_type and the completer-capability decode
+inside the PCI/TPH code and provides !CONFIG_PCIE_TPH stubs for
+callers.
+
+Signed-off-by: Zhiping Zhang <zhipingz@meta.com>
+---
+ drivers/pci/tph.c       | 45 +++++++++++++++++++++++++++++++++++++++++
+ include/linux/pci-tph.h |  8 ++++++++
+ 2 files changed, 53 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 4/4] RDMA/mlx5: get tph for p2p access when registering dma-buf mr
+Author: Zhiping Zhang <zhipingz@meta.com>
+
+Peer-to-peer DMA between a mlx5 NIC and a foreign PCIe endpoint
+(typically a GPU or a vfio-pci passthrough device) traverses the host
+PCIe fabric. The endpoint exporting the dma-buf knows which PCIe TLP
+Processing Hint (TPH) Steering Tag yields the best placement for the
+traffic it will sink: per-endpoint hint selection lets the root complex
+or switch direct DMA to a specific cache slice / NUMA node, cutting
+cross-socket snoop traffic and DRAM pressure under sustained p2p
+workloads.
+
+Until now the mlx5 importer had no way to learn the exporter's chosen
+ST tag, so dma-buf MRs were registered without TPH and ran with the
+default (no-hint) routing. With dma_buf_get_pci_tph() in place this
+patch wires up mlx5_ib to query that metadata at MR registration time
+for p2p access and use it to program requester-side TPH on the outbound
+mkey. If the exporter has no metadata, fall back to the existing
+no-TPH path so behavior for non-TPH-aware exporters is unchanged.
+
+Use mlx5_st_alloc_index_by_tag() to translate exporter-provided
+steering tags into local ST entries when table mode is active, and add
+mlx5_st_get_index() for DMAH-backed flows that already carry an ST
+index.
+
+For TPH-backed FRMRs, keep the extra ST-table reference tied to MR
+lifetime rather than pooled mkey lifetime. Acquire the ref before MR
+creation and release it again when the MR is returned to the pool or
+the backing mkey is destroyed, while leaving the generic FRMR pool
+core unchanged.
+
+Import the DMA_BUF namespace for the new dma_buf_get_pci_tph() call so
+modular mlx5_ib builds link cleanly.
+
+Signed-off-by: Zhiping Zhang <zhipingz@meta.com>
+---
+ drivers/infiniband/hw/mlx5/main.c             |   1 +
+ drivers/infiniband/hw/mlx5/mr.c               | 103 +++++++++++++++++-
+ .../net/ethernet/mellanox/mlx5/core/lib/st.c  |  49 +++++++--
+ include/linux/mlx5/driver.h                   |  13 ++
+ 4 files changed, 157 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 0/4] vfio/dma-buf: add TPH support for peer-to-peer access
+Author: Zhiping Zhang <zhipingz@meta.com>
+
+This series adds TLP Processing Hints (TPH) support to the VFIO dma-buf
+export path, allowing importing drivers (e.g. mlx5) to use the
+exporter's steering tag when performing peer-to-peer DMA into a
+VFIO-owned device.
+
+There is no separate in-tree vendor kernel driver for the target device:
+vfio-pci is the in-tree driver and the targeted device is managed
+from userspace via VFIO passthrough. That is why the ST has to flow
+through a uAPI: userspace owns the device and its ST table, so it is the
+entity that can publish a meaningful value for a given dma-buf. The
+kernel-visible participants are still in-tree: vfio-pci exports the
+dma-buf and mlx5 imports it.
+
+On the effect: the endpoint's PCIe ingress block uses the ST as
+an in-band instruction for the incoming P2P TLP -- selecting a target
+cache partition and, on writes, an in-flight operation on the data
+before it lands. The dma-buf callback keeps this opaque to the
+framework -- only the producer (userspace owner of the VFIO device)
+and the consumer (endpoint block) need to interpret the value. The
+dma-buf get_pci_tph callback itself is optional for workloads that depend
+on the endpoint's in-flight operation that fallback does not produce
+the same result.
+
+The dma-buf hook is intentionally generic and discoverable rather than
+a private side channel. The exporter owns the completing address
+space for the dma-buf and decides whether it can provide a meaningful
+ST/PH tuple for that completer; the dma-buf core keeps the tuple opaque,
+and importers merely request the namespace they support and place the
+returned value on generated TLPs. Exporters that cannot derive a
+meaningful tuple simply return -EOPNOTSUPP.
+
+Patch 1 adds small PCI/TPH type helpers so drivers can query the enabled
+TPH requester mode and the device's TPH Completer Supported field
+without reaching into pci_dev internals (and so callers in
+CONFIG_PCIE_TPH=3Dn builds get a clean fallback).
+Patch 2 adds the optional dma_buf_ops::get_pci_tph callback plus the
+dma_buf_get_pci_tph() importer wrapper so importers can fetch TPH
+metadata from an exporter under dmabuf->resv.
+Patch 3 implements get_pci_tph in vfio-pci and adds the new uAPI
+(VFIO_DEVICE_FEATURE_DMA_BUF_TPH) for userspace to attach the metadata.
+Patch 4 wires up the mlx5 RDMA driver as a consumer.
+
+Build-tested with both CONFIG_PCIE_TPH=3Dy and CONFIG_PCIE_TPH=3Dn.
+Functional validation on the target topology: PCIe analyzer captures
+on the P2P TLPs confirm the ST emitted by mlx5 matches the value
+published through VFIO_DEVICE_FEATURE_DMA_BUF_TPH, and the end-to-end
+P2P workload only produces results consistent with the endpoint's
+ST-selected in-flight operation. For example, with userspace
+publishing 8-bit ST=3D0xf0 and PH=3D2, an analyzer capture of a peer-to-
+peer MWr64 shows "STP MWr64 TC=3D0 OHC=3D2 ..." followed by "OHC-B
+ST=3DF0h PH=3D2 HV=3D1":
+(TLP Captures)
+08000260 -> STP MWr64 TC=3D0 OHC=3D2 TS=3D0 Attr=3D0 L=3D8
+F0000004 -> RID=3D4h:0h.0h EP- Tag=3DF0h
+E0200000 -> AddrH=3D000020E0h
+00080006 -> AddrL=3D06000800h
+90F00000 -> OHC-B ST=3DF0h PH=3D2 HV=3D1 AMA=3D0 AV-
+
+Depends on (submitted separately):
+  net/mlx5: free mlx5_st_idx_data on final dealloc
+    https://lore.kernel.org/linux-rdma/20260612170406.3339093-1-zhipingz@=
+meta.com
+
+Previous link:
+v8: https://lore.kernel.org/dri-devel/20260615065912.2177918-1-zhipingz@m=
+eta.com/
+v7: https://lore.kernel.org/dri-devel/20260611161546.4075580-1-zhipingz@m=
+eta.com/
+v6: https://lore.kernel.org/dri-devel/20260608185646.4085127-1-zhipingz@m=
+eta.com/
+v5: https://lore.kernel.org/dri-devel/20260526144401.1485788-1-zhipingz@m=
+eta.com/
+v4: https://lore.kernel.org/linux-pci/20260519201401.1558410-1-zhipingz@m=
+eta.com/
+v3: https://lore.kernel.org/linux-pci/20260512184755.4137227-1-zhipingz@m=
+eta.com/
+v2: https://lore.kernel.org/linux-pci/20260430200704.352228-1-zhipingz@me=
+ta.com/
+
+Zhiping Zhang (4):
+  PCI/TPH: Add requester/completer type helpers
+  dma-buf: add optional get_pci_tph() callback
+  vfio/pci: implement get_pci_tph and DMA_BUF_TPH feature
+  RDMA/mlx5: get tph for p2p access when registering dma-buf mr
+
+ drivers/dma-buf/dma-buf.c                     |  25 +++++
+ drivers/infiniband/hw/mlx5/main.c             |   1 +
+ drivers/infiniband/hw/mlx5/mr.c               | 103 +++++++++++++++++-
+ .../net/ethernet/mellanox/mlx5/core/lib/st.c  |  49 +++++++--
+ drivers/pci/tph.c                             |  45 ++++++++
+ drivers/vfio/pci/vfio_pci_core.c              |   3 +
+ drivers/vfio/pci/vfio_pci_dmabuf.c            |  97 ++++++++++++++++-
+ drivers/vfio/pci/vfio_pci_priv.h              |  12 ++
+ include/linux/dma-buf.h                       |  22 ++++
+ include/linux/mlx5/driver.h                   |  13 ++
+ include/linux/pci-tph.h                       |   8 ++
+ include/uapi/linux/vfio.h                     |  37 +++++++
+ 12 files changed, 405 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 3/4] vfio/pci: implement get_pci_tph and DMA_BUF_TPH feature
+Author: Zhiping Zhang <zhipingz@meta.com>
+
+Implement dma-buf get_pci_tph for vfio-pci exported dma-bufs and add
+VFIO_DEVICE_FEATURE_DMA_BUF_TPH so userspace can publish TPH metadata
+for a VFIO-owned device.
+
+8-bit ST and 16-bit Extended ST are distinct PCIe TPH namespaces; the
+uAPI carries both with explicit validity flags, and get_pci_tph()
+returns the value matching the importer's requested namespace or
+-EOPNOTSUPP.
+
+Publish and read the TPH descriptor under dmabuf->resv, matching the
+locking used for other importer-visible dma-buf state. The SET ioctl
+takes dma_resv_lock_interruptible(), while the callback runs under
+DMA-buf's asserted resv lock.
+
+Reject requests the device cannot consume as a completer:
+pcie_tph_completer_type() must report at least
+PCI_EXP_DEVCAP2_TPH_COMP_TPH_ONLY, and Extended ST requires
+PCI_EXP_DEVCAP2_TPH_COMP_EXT_TPH. Make PROBE follow the same hardware
+gate so the feature only probes as supported when the device can really
+consume it.
+
+Signed-off-by: Zhiping Zhang <zhipingz@meta.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c   |  3 +
+ drivers/vfio/pci/vfio_pci_dmabuf.c | 97 +++++++++++++++++++++++++++++-
+ drivers/vfio/pci/vfio_pci_priv.h   | 12 ++++
+ include/uapi/linux/vfio.h          | 37 ++++++++++++
+ 4 files changed, 148 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/4] vhost/vsock: add VHOST_RESET_OWNER ioctl
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+
+This ioctl is needed for QEMU's CPR (checkpoint-restore) migration of
+the guest with vhost-vsock device.  For this to work, we need to reset
+the device ownership on the source side by calling RESET_OWNER, and then
+claim it on the dest side by calling SET_OWNER.  We expect not to lose any
+AF_VSOCK connection while this happens.
+
+RESET_OWNER keeps the guest CID hashed, so that connections survive. That
+leaves the device reachable by the lockless send path while the worker is
+being torn down: a concurrent vhost_transport_send_pkt() can call
+vhost_vq_work_queue() as vhost_workers_free() frees the worker.  That might
+cause a use-after-free of vq->worker.  In addition, any work queued onto
+the dying worker leaves VHOST_WORK_QUEUED stuck, stalling send_pkt_queue
+after resume.
+
+Fence the send path around the teardown: send_pkt() only kicks the worker
+while the backend is alive (otherwise the skb stays queued and
+vhost_vsock_start() drains it on resume).  And reset_owner() calls
+synchronize_rcu() after drop_backends() so in-flight senders finish before
+the worker is freed.
+
+Signed-off-by: Pavel Tikhomirov <ptikhomirov@virtuozzo.com>
+Signed-off-by: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+---
+ drivers/vhost/vsock.c | 41 ++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 40 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/4] vhost/vsock: re-scan TX virtqueue on device start
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+During QEMU CPR live-update (and VHOST_RESET_OWNER in general) the guest
+keeps running while the host drops and later re-attaches vhost backends.
+If the guest adds a buffer to the TX virtqueue (guest->host) and kicks
+while the backend is temporarily NULL (between vhost_vsock_drop_backends()
+and the next vhost_vsock_start()), then the kick is delivered to the
+vhost worker, handle_tx_kick() sees a NULL backend and returns, and the
+kick signal is consumed.  The buffer is then left in the ring.
+
+Then upon device start vhost_vsock_start() only re-kicks the RX send
+worker, never the TX VQ, so the buffer is processed only if the guest
+happens to kick again.  But if the guest itself is now waiting for data
+from the host, it will never kick TX VQ again, and we end up in a
+deadlock.
+
+The issue itself is pre-existing, but it only manifests during a brief
+pause caused by VHOST_RESET_OWNER.  Namely, the deadlock is reproduced
+during active host->guest socat data transfer under multiple consecutive
+CPR live-update's.
+
+To fix this, in vhost_vsock_start(), after kicking the RX send worker, also
+queue the TX vq poll so any buffers the guest enqueued while we were paused
+get scanned.
+
+Signed-off-by: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+---
+ drivers/vhost/vsock.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/4] vhost/vsock: suppress EHOSTUNREACH fast-fail during CPR pause
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+Earlier commit bb26ed5f3a8b ("vhost/vsock: Refuse the connection
+immediately when guest isn't ready") added a fast-fail in
+vhost_transport_send_pkt().  It rejects every host send with -EHOSTUNREACH
+until the destination calls SET_RUNNING(1).  The fast-fail condition checks
+whether device's backends are dropped, and if they're, the guest is
+considered to be not ready.
+
+However, there might be other reasons for backends to be nulled.  In
+particular, when QEMU is performing CPR (checkpoint-restore) migration,
+device ownership is being RESET and SET again, which leads to backends
+drop and reattach.  If we end up connecting during this window, an
+AF_VSOCK client gets -EHOSTUNREACH, which is wrong.
+
+Add a 'started' flag which is set once in vhost_vsock_start() and is
+never cleared.  The behaviour changes to:
+
+  * When device was never started -> flag is unset -> no listener can
+    exist yet -> fast-fail;
+  * Once the device starts -> flag is set -> we don't fast-fail ->
+    we queue and preserve during any later stop / CPR pause.
+
+Important caveat: after the first start, a connect during any stopped
+window is queued instead of fast-failed.  That was the behaviour before
+the patch bb26ed5f3a8b, and we're restoring it now.  However we still
+keep the behaviour originally intended by that commit (i.e. fast-fail if
+there's no real listener yet) while fixing the CPR path.
+
+Signed-off-by: Denis V. Lunev <den@openvz.org>
+Signed-off-by: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+---
+ drivers/vhost/vsock.c | 22 ++++++++++++----------
+ 1 file changed, 12 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/4] vhost/vsock: split out vhost_vsock_drop_backends helper
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+
+Split the actual backend dropping part from vhost_vsock_stop.  We're
+going to need it for the VHOST_RESET_OWNER implementation in the
+following patch, when vsock->dev.mutex is already taken and owner is
+checked.
+
+Signed-off-by: Pavel Tikhomirov <ptikhomirov@virtuozzo.com>
+Reviewed-by: Stefano Garzarella <sgarzare@redhat.com>
+---
+ drivers/vhost/vsock.c | 26 +++++++++++++++++---------
+ 1 file changed, 17 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/4] vhost/vsock: add support for VHOST_RESET_OWNER and CPR migration
+Author: Andrey Drobyshev <andrey.drobyshev@virtuozzo.com>
+
+v1 -> v2:
+
+  * Patch 2 (suppress EHOSTUNREACH): replace 'cpr_paused' + backend check
+    with a single 'started' latch;
+  * Patch 3 (re-scan TX virtqueue): reword commit message;
+  * Patch 4 (VHOST_RESET_OWNER):
+      - fix a vhost_worker use-after-free / stuck VHOST_WORK_QUEUED stall
+        against the lockless send path;
+      - drop the no-op vsock_for_each_connected_socket() iteration;
+  * Shuffle the patches, keep RESET_OWNER implementation last to preserve
+    bisectability;
+  * Reword the cover letter.
+
+v1: https://lore.kernel.org/virtualization/20260612165718.433546-1-andrey.drobyshev@virtuozzo.com
+
+Host<-->guest connections via AF_VSOCK sockets aren't supposed to
+outlive VM migration, since VM is moving to another host.  However
+there's a special case, which is QEMU live-update, or CPR
+(checkpoint-restore) migration.  In this case, VM remains on the same
+host, and we'd like such connections to persist.
+
+For this to work, we need to be able to transfer device ownership from
+source QEMU to dest QEMU.  Namely, source needs to reset ownership by
+issuing VHOST_RESET_OWNER ioctl, and then target has to claim it by
+calling VHOST_SET_OWNER.
+
+Since VHOST_RESET_OWNER isn't yet implemented for vhost-vsock, let's add
+such implementation.  Patch 1 is a preliminary helper.  Patches 2 and 3
+fix the pre-existing issues which do manifest during CPR / RESET_OWNER.
+Patch 4 is the ioctl's implementation itself - we keep it last to
+preserve bisectability.
+
+There's a complementary series for QEMU [0] adding support of vhost-vsock
+devices during CPR migration.
+
+I've tested this (patched QEMU + patched kernel) approximately as follows:
+
+  * Run listener in the guest:
+  socat -u VSOCK-LISTEN:9999 - >/tmp/recv.bin
+
+  * Run data transfer from host to guest:
+  socat -u FILE:/root/bigfile.bin VSOCK-CONNECT:CID:9999
+
+  * Perform CPR migration during transfer (either cpr-exec or cpr-transfer)
+  * Check that file hash sum matches
+
+[0] https://lore.kernel.org/qemu-devel/20260619105514.128812-1-andrey.drobyshev@virtuozzo.com
+
+Andrey Drobyshev (2):
+  vhost/vsock: suppress EHOSTUNREACH fast-fail during CPR pause
+  vhost/vsock: re-scan TX virtqueue on device start
+
+Pavel Tikhomirov (2):
+  vhost/vsock: split out vhost_vsock_drop_backends helper
+  vhost/vsock: add VHOST_RESET_OWNER ioctl
+
+ drivers/vhost/vsock.c | 96 ++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 76 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH] checkpatch: add support for Assisted-by tag
+Author: Andrew Jones <andrew.jones@linux.dev>
+
+Import Linux commit d1db4118489f ("checkpatch: add support for
+Assisted-by tag").
+
+(I should have used AI for this, since it'd be fun to include that
+tag on this tag-enabling patch, but sometimes I still do my own
+homework!)
+
+Signed-off-by: Andrew Jones <andrew.jones@linux.dev>
+---
+ scripts/checkpatch.pl | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 9/9] KVM: s390: Return failure in case of failure in kvm_s390_set_cmma_bits()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+If the allocation of the bits array failed, kvm_s390_set_cmma_bits()
+would return 0 instead of an error code.
+
+Rework the function to use the __free() macros and thus simplify the
+code flow; when the above mentioned allocation fails, simply return
+-ENOMEM.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 18 +++++++-----------
+ 1 file changed, 7 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 3/9] KVM: s390: Do not set special large pages dirty
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Special pages / folios should not be set dirty. This also applies to
+large pages.
+
+Add a missing check in gmap_clear_young_crste() to prevent setting the
+large page dirty if it is a special page.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: a2c17f9270cc ("KVM: s390: New gmap code")
+---
+ arch/s390/kvm/gmap.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 8/9] KVM: s390: selftests: Fix cmma selftest
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+The existing cmma selftest depended on the host allocating page tables
+for all present memslots. Since the gmap rewrite, memory that is not
+accessed by the guest might not have page tables allocated yet.
+
+This caused the test to fail due to a mismatch in the assertion.
+
+Fix by having the guest access also the second half of the test
+memslot, thus guaranteeing that its page tables are present.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+---
+ tools/testing/selftests/kvm/s390/cmma_test.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 5/9] KVM: s390: Fix handle_{sske,pfmf} under memory pressure
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Under heavy memory pressure, handle_sske() and handle_pfmf() might
+cause an endless loop if the mmu cache runs empty, the atomic
+allocations fail, and the top-up function also fails. While quite
+unlikely, that scenario is not impossible.
+
+Fix the issue by not ignoring the return value of
+kvm_s390_mmu_cache_topup(), and appropriately returning an error code
+in case of failure.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+---
+ arch/s390/kvm/priv.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 2/9] KVM: s390: Fix dat_peek_cmma() overflow
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+If userspace passes a start address that is out of bounds,
+_dat_walk_gfn_range() will fail with -EFAULT, but state.end will not be
+touched and will stay 0. This will cause *count to underflow and report
+a very high number, and the function will end up erroneously reporting
+success.
+
+Fix by only setting *count if the end address is not smaller than the
+starting address. This way invalid starting addresses will correctly
+return -EFAULT and *count will correctly indicate that no values have
+been returned.
+
+Fixes: 7b368470e1a4 ("KVM: s390: KVM page table management functions: CMMA")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/dat.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 7/9] KVM: s390: Fix cmma dirty tracking
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+It is possible that some guest memory areas have not been touched yet
+when starting migration mode, and thus have no ptes allocated. Only
+existing and allocated ptes should count toward the total of dirty cmma
+entries.
+
+When starting migration mode, count how many pages actually have a pte
+(and PGSTE), instead of blindly counting the number of pages in all
+memslots.
+
+Also fix dat_get_cmma() to properly wrap around if the first attempt
+reached the end of guest memory without finding cmma-dirty pages.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/dat.c      |  3 +++
+ arch/s390/kvm/gmap.c     | 11 +++++++++--
+ arch/s390/kvm/kvm-s390.c |  8 +++-----
+ arch/s390/kvm/priv.c     |  2 +-
+ 4 files changed, 16 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 0/9] KVM: s390: A bunch of gmap-related fixes
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Fix handling of _PAGE_UNUSED pte bit. The bit was lingering around
+longer than it should have, causing issues. This is yet a different
+approach from the previous version.
+
+Fix some cmma dirty tracking functions.
+
+Also fix a few other small issues in gmap.
+
+v4-v5:
+* Make sure the counter of cmma-dirty pages does not explode
+* Improve comments in cmma selftest
+* Rework and fix locking in kvm_s390_set_mem_control()
+* Do not return success if an allocation in kvm_s390_set_cmma_bits() fails
+
+v3->v4:
+* Improve/fix descriptions of patches 1 and 3
+* Fix handle_{sske,pfmf} under memory pressure
+* Fix cmma dirty tracking and its selftest
+
+v2->v3:
+* Fix _PAGE_UNUSED in yet a different way
+* Fix a potential overflow in dat_peek_cmma()
+* Some minor gmap fixes that are not actual bugs yet
+
+v1->v2:
+* Completely different approach, entirely new patch
+
+Claudio Imbrenda (9):
+  s390/mm: Fix handling of _PAGE_UNUSED pte bit
+  KVM: s390: Fix dat_peek_cmma() overflow
+  KVM: s390: Do not set special large pages dirty
+  KVM: s390: Fix code typo in gmap_protect_asce_top_level()
+  KVM: s390: Fix handle_{sske,pfmf} under memory pressure
+  KVM: s390: Fix locking in kvm_s390_set_mem_control()
+  KVM: s390: Fix cmma dirty tracking
+  KVM: s390: selftests: Fix cmma selftest
+  KVM: s390: Return failure in case of failure in
+    kvm_s390_set_cmma_bits()
+
+ arch/s390/include/asm/pgtable.h              |  4 +--
+ arch/s390/kvm/dat.c                          |  5 ++-
+ arch/s390/kvm/gmap.c                         | 15 ++++++---
+ arch/s390/kvm/kvm-s390.c                     | 35 ++++++++------------
+ arch/s390/kvm/priv.c                         | 10 ++++--
+ arch/s390/mm/gmap_helpers.c                  |  3 +-
+ tools/testing/selftests/kvm/s390/cmma_test.c |  6 ++++
+ 7 files changed, 46 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 6/9] KVM: s390: Fix locking in kvm_s390_set_mem_control()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+All subfunctions in kvm_s390_set_mem_control() need to take the
+kvm->lock, so factor it out of the switch.
+
+Also add the missing locking around dat_reset_cmma().
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 9 ++++-----
+ 1 file changed, 4 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 4/9] KVM: s390: Fix code typo in gmap_protect_asce_top_level()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+The correct length to pass to kvm_s390_get_guest_pages() is asce.tl + 1,
+not asce.dt + 1. It was a typo, which, due to fortuitous circumstances,
+did not cause bugs. It should nonetheless be fixed.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: e5f98a6899bd ("KVM: s390: Add some helper functions needed for vSIE")
+---
+ arch/s390/kvm/gmap.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 1/9] s390/mm: Fix handling of _PAGE_UNUSED pte bit
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+The _PAGE_UNUSED softbit should not really be lying around. Its sole
+purpose is to signal to try_to_unmap_one() and try_to_migrate_one()
+that the page can be discarded instead of being moved / swapped.
+
+KVM has no way to know why a page is being unmapped, so it sets the bit
+on userspace ptes corresponding to unused guest pages every time they
+get unmapped. KVM has no reasonable way to clear the bit once the page
+is in use again.
+
+While set_ptes() checks and clears the bit, other paths that set new
+ptes did not. This led to used pages being thrown out as if they were
+unused, causing guest corruption.
+
+Fix the issue by clearing the _PAGE_UNUSED bit for present ptes in
+set_pte(), i.e. whenever a present pte is getting set. The check in
+set_ptes() is then redundant and can be removed.
+
+Also fix gmap_helper_try_set_pte_unused() to only set the bit if the
+pte is present; the _PAGE_UNUSED bit is only defined for present ptes
+and thus should not be set for non-present ptes.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: c98175b7917f ("KVM: s390: Add gmap_helper_set_unused()")
+Acked-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/include/asm/pgtable.h | 4 ++--
+ arch/s390/mm/gmap_helpers.c     | 3 ++-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: fix steal_time for arm64 with host page size
+Author: Sebastian Ott <sebott@redhat.com>
+
+
+Fix the following failure when running with 16K host page size:
+==== Test Assertion Failure ====
+   lib/kvm_util.c:991: vm_adjust_num_guest_pages(vm->mode, npages) == npages
+   pid=873 tid=873 errno=0 - Success
+      1  0x0000000000405a27: vm_mem_add at kvm_util.c:991
+      2  0x000000000040241f: check_steal_time_uapi at steal_time.c:223 (discriminator 7)
+      3   (inlined by) main at steal_time.c:539 (discriminator 7)
+      4  0x00007fff8b57af3b: ?? ??:0
+      5  0x00007fff8b57b007: ?? ??:0
+      6  0x0000000000402b6f: _start at ??:?
+   Number of guest pages is not compatible with the host. Try npages=4
+
+Fixes: fc240715fc50 ("KVM: selftests: arm64: Fix steal_time test after UAPI refactoring")
+Reported-by: Zenghui Yu <zenghui.yu@linux.dev>
+Link: https://lore.kernel.org/kvmarm/7575a845-a542-4b16-b512-aec3126f97f3@linux.dev/T/#u
+Signed-off-by: Sebastian Ott <sebott@redhat.com>
+---
+  tools/testing/selftests/kvm/steal_time.c | 6 ++++--
+  1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvm-unit-tests] svm_tests: replace rdpru with byte encoding
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ x86/svm_tests.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 6.6.y] KVM: VMX: Update SVI during runtime APICv activation
+Author: Gulshan Gabel <gulshan.gabel@nutanix.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v2 06/13] KVM: VMX: Use higher-level allocator
+Author: Brendan Jackman <jackmanb@google.com>
+
+The difference between __alloc_pages_node() and alloc_pages_node() is
+that the former allows you to pass NUMA_NO_NODE.
+
+The former is going away and the latter works fine here so switch over.
+
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: kvm@vger.kernel.org
+Assisted-by: Gemini:unknown-version
+Signed-off-by: Brendan Jackman <jackmanb@google.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 00/13] mm: Some cleanups for page allocator APIs
+Author: Brendan Jackman <jackmanb@google.com>
+
+Some tweaks and cleanups for page allocator entrypoint and flags. This
+is motivated by preparation for __GFP_UNMAPPED [1] (which will probably
+become ALLOC_UNMAPPED in its next iteration), but all this is supposed
+to be an improvement to the codebase in its own right: unifying code
+paths, reducing API surface, and removing GFP flags.
+
+[1] https://lore.kernel.org/all/20260320-page_alloc-unmapped-v2-0-28bf1bd54f41@google.com/
+
+This started with unifying  __alloc_frozen_pages[_nolock]_noprof() and
+expanded from there.
+
+Unifying the nolock allocator entrypoint with the normal allocator
+entrypoint means adding an alloc_flags argument to the later (only
+exposed within mm/). This presents an opportunity to take advantage of
+that arg to remove some GFP flags, if we add that alloc_flags arg a bit
+more broadly to allocator entrypoints.
+
+To distinguish between mm-internal and "public" allocator entrypoints,
+it makes sense to use the __ prefix. There are already some public APIs
+with that prefix. For *alloc_pages*, just removing those variants seems
+like a nice cleanup anyway, so do that. For get_free_pages, the "__"
+variant is the _only_ variant and it's very widely used, so it doesn't
+seem worthwhile to modify that. Therefore, scope this "__" change
+specifically to the *alloc_pages* API, which means we leave the
+*folio_alloc* API untouched too, even though that could probably be
+cleaned up if so desired.
+
+Tested:
+
+- KVM, mm, and BPF selftests in a QEMU VM
+
+- kunit.py on x86_64
+
+- For the ALLOC_NO_CODETAG bits I just booted a VM and read
+  /proc/allocinfo. I confirmed that if I remove ALLOC_NO_CODETAG, the
+  kernel crashes in early boot, so I was at least booting code that
+  depends on this logic.
+
+I used Google's internal version of Antigravity (AI coding harness) to
+do the repetitive bits, those commits are marked with Assisted-by, the
+rest is manual.
+
+Signed-off-by: Brendan Jackman <jackmanb@google.com>
+---
+Changes in v2:
+- Fixed up whitespace in nolock unification patch
+- Introduced ALLOC_DEFAULT to replace literal 0 for alloc_flags
+- All other patches are new
+- Link to v1: https://patch.msgid.link/20260617-alloc-trylock-v1-1-83fd7858832e@google.com
+
+---
+Brendan Jackman (13):
+      mm/page_alloc: rename ALLOC_TRYLOCK -> ALLOC_NOLOCK
+      mm/page_alloc: some renames to clarify alloc_flags scopes
+      mm/page_alloc: unify __alloc_frozen_pages[_nolock]_noprof()
+      mm/page_alloc: relax GFP WARN in nolock allocs
+      perf/x86/intel: Use higher-level allocator
+      KVM: VMX: Use higher-level allocator
+      x86/virt: Use higher-level allocator
+      sgi-xp: Use higher-level allocator
+      net/funeth: Switch to higher-level allocator
+      mm: Remove __alloc_pages_node()
+      alloc_tag: Move to mm/
+      mm: Move __alloc_pages() to mm/internal.h
+      mm: remove __GFP_NO_CODETAG
+
+ Documentation/admin-guide/cgroup-v1/cpusets.rst  |   2 +-
+ Documentation/admin-guide/mm/transhuge.rst       |   2 +-
+ MAINTAINERS                                      |   2 +-
+ arch/x86/events/intel/ds.c                       |   6 +-
+ arch/x86/kvm/vmx/vmx.c                           |   2 +-
+ arch/x86/virt/hw.c                               |   2 +-
+ drivers/misc/sgi-xp/xpc_uv.c                     |   2 +-
+ drivers/net/ethernet/fungible/funeth/funeth_rx.c |   2 +-
+ include/linux/gfp.h                              |  28 +--
+ lib/Makefile                                     |   1 -
+ mm/Makefile                                      |   1 +
+ {lib => mm}/alloc_tag.c                          |  18 +-
+ mm/compaction.c                                  |   4 +-
+ mm/hugetlb.c                                     |   3 +-
+ mm/internal.h                                    |  20 +-
+ mm/mempolicy.c                                   |  10 +-
+ mm/page_alloc.c                                  | 254 +++++++++++++----------
+ mm/page_frag_cache.c                             |   4 +-
+ mm/slub.c                                        |   6 +-
+ 19 files changed, 193 insertions(+), 176 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: Nullify irqfd->producer when add_producer() fails
+Author: leixiang <leixiang@kylinos.cn>
+
+The x86 and powerpc add_producer() callbacks set irqfd->producer before the
+fallible setup and never clear it on error.  The bypass manager doesn't
+register a producer whose add_producer() failed -- producer->eventfd is
+left NULL, so the later unregister early-returns and del_producer() is
+never called -- so nothing ever drops the pointer.
+
+For VFIO PCI the producer is embedded in struct vfio_pci_irq_ctx and freed
+when the vector is disabled, after which a routing update dereferences the
+dangling pointer via kvm_arch_update_irqfd_routing().
+
+Nullify irqfd->producer on the error paths.
+
+Fixes: 77e1b8332d1d ("KVM: x86: Decouple device assignment from IRQ bypass")
+Fixes: c57875f5f9be ("KVM: PPC: Book3S HV: Enable IRQ bypass")
+Cc: stable@vger.kernel.org
+Signed-off-by: leixiang <leixiang@kylinos.cn>
+---
+ arch/powerpc/kvm/book3s_hv.c | 4 +++-
+ arch/x86/kvm/irq.c           | 4 +++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: Nullify irqfd->producer when add_producer() fails
+Author: leixiang <leixiang@kylinos.cn>
+
+The x86 and powerpc add_producer() callbacks set irqfd->producer before the
+fallible setup and never clear it on error.  The bypass manager doesn't
+register a producer whose add_producer() failed -- producer->eventfd is
+left NULL, so the later unregister early-returns and del_producer() is
+never called -- so nothing ever drops the pointer.
+
+For VFIO PCI the producer is embedded in struct vfio_pci_irq_ctx and freed
+when the vector is disabled, after which a routing update dereferences the
+dangling pointer via kvm_arch_update_irqfd_routing().
+
+Nullify irqfd->producer on the error paths.
+
+Fixes: 77e1b8332d1d ("KVM: x86: Decouple device assignment from IRQ bypass")
+Fixes: c57875f5f9be ("KVM: PPC: Book3S HV: Enable IRQ bypass")
+Cc: stable@vger.kernel.org
+Signed-off-by: leixiang <leixiang@kylinos.cn>
+---
+ arch/powerpc/kvm/book3s_hv.c | 4 +++-
+ arch/x86/kvm/irq.c           | 4 +++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 10/12] vfio/pci: Add TPH_ENABLE feature skeleton and unsafe module parameter
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Introduce module param enable_unsafe_tph to gate all TPH related features,
+and add VFIO_DEVICE_FEATURE_TPH_ENABLE uapi together with per-device
+tph_permit flag.
+
+This is a preparatory implementation: only feature framework is added
+for now, actual TPH_CTRL register permission control and steering tag
+features (TPH_CPU_ST / TPH_ST_CONFIG) will be attached in subsequent
+TPH capability virtualization commits.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci.c        | 13 ++++++++++++-
+ drivers/vfio/pci/vfio_pci_config.c |  1 +
+ drivers/vfio/pci/vfio_pci_core.c   | 25 ++++++++++++++++++++++++-
+ include/linux/vfio_pci_core.h      |  4 +++-
+ include/uapi/linux/vfio.h          |  7 +++++++
+ 5 files changed, 47 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 11/12] vfio/pci: Add TPH_ST_CONFIG for PCIe TPH ST configuration
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add a new VFIO device feature VFIO_DEVICE_FEATURE_TPH_ST_CONFIG to allow
+userspace to configure PCIe TPH Steering Tag table entries. This interface
+supports only configuration writes, read operations are not permitted.
+
+Implement shadow ST table to cache entries, paired with per-device mutex
+for concurrent access protection. Batch write failure triggers entry
+rollback to guarantee hardware and shadow table consistency.
+
+The feature is double gated:
+1. Global enable_unsafe_tph module parameter must be enabled;
+2. Userspace needs to firstly SET VFIO_DEVICE_FEATURE_TPH_ENABLE
+   to set per-device tph_permit flag before using TPH_CPU_CONFIG.
+
+Design note for Sashiko reset shadow table warning:
+Do not clear tph_st_shadow on FLR/device reset. Userspace VFIO application
+can detect hardware reset events and re-initialize full ST table
+configuration to sync shadow cache with hardware state afterward. Retain
+cached ST entries to support offline error diagnosis and post-reset
+recovery.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c |   1 -
+ drivers/vfio/pci/vfio_pci_core.c   | 128 +++++++++++++++++++++++++++++
+ include/linux/vfio_pci_core.h      |   2 +
+ include/uapi/linux/vfio.h          |  22 +++++
+ 4 files changed, 152 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 05/12] PCI/TPH: Refactor pcie_tph_get_cpu_st & add explicit variant
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Refactor pcie_tph_get_cpu_st(): extract core logic into static internal
+get_cpu_st() helper accepting explicit requester type parameter.
+
+- Preserve original pcie_tph_get_cpu_st() unchanged as auto wrapper; it
+  uses existing pdev->tph_req_type automatically, existing callers require
+  no change.
+- Add exported pcie_tph_get_cpu_st_explicit() with bool 'extended'
+  parameter for manual STD/EXT requester selection, consumed by upcoming
+  VFIO TPH code.
+- Add capability check: reject explicit EXT request when device does not
+  support extended TPH requester.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 68 ++++++++++++++++++++++++++++++-----------
+ include/linux/pci-tph.h |  7 +++++
+ 2 files changed, 57 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 01/12] PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+pcie_tph_get_st_table_loc() incorrectly uses FIELD_GET(), which shifts the
+field value to bit 0. But the function is designed to return raw
+PCI_TPH_LOC_* values as defined in the function comment.
+
+This causes incorrect ST table location detection. Fix it by using bitwise
+AND with PCI_TPH_CAP_LOC_MASK to return the unshifted field value matching
+the function specification.
+
+This doesn't make a difference to mlx5_st_create(), the lone external
+caller, because it only checks for PCI_TPH_LOC_NONE (0), but will be needed
+for callers that check for PCI_TPH_LOC_CAP or PCI_TPH_LOC_MSIX.
+
+Also add tph_cap validation for pcie_tph_get_st_table_loc() to prevent
+invalid PCI configuration space access when TPH is not supported. Add stub
+functions for pcie_tph_get_st_table_size() and pcie_tph_get_st_table_loc()
+when !CONFIG_PCIE_TPH.
+
+Fixes: d2e8a34876ce ("PCI/TPH: Add Steering Tag support")
+Cc: stable@vger.kernel.org
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Reviewed-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/tph.c       | 12 +++++-------
+ include/linux/pci-tph.h |  5 +++++
+ 2 files changed, 10 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 07/12] PCI/TPH: Add pcie_tph_supported() helper to check TPH capability attributes
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add new helper pcie_tph_supported() with want_ext parameter:
+- want_ext = false: Check if device has valid TPH capability;
+- want_ext = true: Check hardware Extended TPH support.
+
+This helper is prepared for follow-up VFIO TPH virtualization patches to
+uniformly query basic TPH existence and Extended TPH capability.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 19 +++++++++++++++++++
+ include/linux/pci-tph.h |  3 +++
+ 2 files changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v18 09/12] vfio/pci: Hide TPH capability when TPH is unsupported
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Check the device negotiated TPH support status before parsing the TPH
+extended capability. Return zero length to hide the capability from
+userspace if TPH is disabled during topology negotiation.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v18 12/12] vfio/pci: Virtualize PCIe TPH capability registers
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Virtualize TPH extended capability config space registers:
+- Original TPH capability was fully read-only; now split permission:
+  TPH_CAP header remains read-only, TPH_CTRL register supports write to
+  toggle TPH requester enable mode.
+- Block direct ST-table programming via config space write access: all ST
+  entry configuration is restricted to VFIO_DEVICE_FEATURE_TPH_ST_CONFIG
+  feature exclusively after userspace SET TPH_ENABLE opt-in.
+- Backup original virtual config value and revert vconfig if hardware TPH
+  enable operation fails or invalid requester mode is configured.
+- After TPH requester gets enabled via CTRL write, sync cached shadow ST
+  table down to physical hardware with memory_lock protection and PCI D0
+  power check.
+
+Add vconfig masking to hide EXT_TPH capability bit if underlying hardware
+does not support extended TPH via new vfio_tph_mask_ext_tph_bit helper.
+Reset hardware TPH state on device open/close to eliminate cross-session
+TPH configuration leakage between different VM lifecycles.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c | 117 +++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c   |   4 +
+ 2 files changed, 121 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v18 06/12] PCI/TPH: Expose the enabled TPH requester type
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+
+Add pcie_tph_enabled_req_type() so drivers can query the enabled TPH
+requester mode without reaching into pci_dev internals.
+
+Signed-off-by: Zhiping Zhang <zhipingz@meta.com>
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 12 ++++++++++++
+ include/linux/pci-tph.h |  3 +++
+ 2 files changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v18 08/12] PCI/TPH: Add sysfs binary file to export CPU to steering-tag mapping
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add per-Root-Port-only sysfs binary attribute tph_cpu_st to expose ACPI
+DSM CPU-to-ST mapping to userspace, addressing concerns that VFIO should
+not host CPU steering tag translation interfaces.
+
+ABI: /sys/bus/pci/devices/<root-port-bdf>/tph_cpu_st
+- Read-only root-only (0400) binary blob;
+- Each entry is packed 8-byte struct pci_tph_cpu_st defined in uapi/pci.h;
+- Support arbitrary offset partial read/sub-field extraction;
+- Non-present/impossible CPUs return zero-filled entries to avoid
+  sequential read abort on sparse CPU topology;
+- Insert cond_resched() in read loop to avoid soft lockup when dumping full
+  blob.
+
+Dynamic visibility rules enforced via is_bin_visible:
+1. Only expose file on PCIe Root Port devices, hide on all endpoints;
+2. Root Port must implement TPH Completer capability in DevCap2;
+3. Platform must provide valid ACPI DSM for CPU-to-ST mapping.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ Documentation/ABI/testing/sysfs-bus-pci |  24 ++++
+ drivers/pci/pci-sysfs.c                 |   3 +
+ drivers/pci/pci.h                       |   4 +
+ drivers/pci/tph.c                       | 151 +++++++++++++++++++++---
+ include/uapi/linux/pci.h                |  16 +++
+ 5 files changed, 183 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 04/12] PCI/TPH: Refactor pcie_enable_tph & add explicit requester variant
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Refactor pcie_enable_tph implementation: extract core logic into static
+internal enable_tph() helper accepting explicit requester type.
+
+- Preserve original pcie_enable_tph() unchanged as auto wrapper; it
+  auto-selects EXT/standard TPH requester per device capability, existing
+  bnxt/mlx5 callers require zero modification.
+- Add exported pcie_enable_tph_explicit() with bool 'extended' parameter
+  for explicit STD/EXT selection, used by upcoming VFIO TPH support.
+
+Input validation for EXT_TPH availability is retained inside helper to
+reject invalid explicit EXT request if hardware does not support extended
+requester.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 70 ++++++++++++++++++++++++++++-------------
+ include/linux/pci-tph.h |  4 +++
+ 2 files changed, 53 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 00/12] vfio/pci: Add PCIe TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+This patchset enables full userspace configurable PCIe TPH support for
+VFIO, which brings performance benefits for userspace workloads such as
+DPDK and SPDK.
+
+Currently VFIO only exposes read-only TPH capability registers to
+userspace, while all write operations are silently discarded. This
+prevents userspace from enabling and configuring TPH, limiting performance
+optimization opportunities.
+
+Per PCIe spec 7.5.3.15: TPH Completer support is applicable to Root Ports
+and Endpoints, allowing Steering Tags to target host CPUs or peer devices
+for P2P transactions.
+
+TPH usage model can be divided into three fundamental parts:
+1. Retrieve Steering Tag:
+   - Tags targeting host CPUs are obtained via platform methods (ACPI _DSM)
+     wrapped in pcie_tph_get_cpu_st(). Userspace requires a generic
+     interface to query these CPU-associated ST values.
+   - Tags targeting peer devices are managed by userspace drivers.
+2. Program Steering Tag table:
+   - For devices with standard ST table structures (in capability space or
+     MSI-X table), userspace needs a unified interface to configure ST
+     entries.
+   - Devices without standard ST tables are handled by userspace itself.
+3. Toggle device TPH Requester enable/disable state.
+
+To support the above scenarios, this series extends PCI and VFIO with
+complete TPH virtualization features:
+- [*PCI*] Support sysfs binary file [under root-port which support TPH
+  completor and _DSM] to export CPU to steering-tag mapping, so that
+  userspace could retrieve CPU's ST by read.
+- [*VFIO*] New device feature TPH_ST_CONFIG: Batch configure interface for
+  device ST table entries, with shadow cache and atomic rollback support.
+- [*VFIO*] Full TPH capability register virtualization: allow userspace to
+  toggle TPH Requester state via TPH_CTRL register writes.
+
+To guarantee isolation and security, this patchset adopts a two-level
+safety gate design with careful ABI considerations:
+1. Global unsafe gate:
+   TPH caching behavior may cross isolation domains and impact shared
+   platform resources. A new module parameter `enable_unsafe_tph` is
+   introduced (default off) to globally gate all VFIO TPH functionalities.
+2. Per-device opt-in gate:
+   To preserve strict ABI compatibility and avoid unexpected hardware
+   state changes for existing users, a new VFIO device feature TPH_ENABLE
+   is added. TPH capabilities are only available after userspace explicitly
+   enables it per-device.
+
+Because Kernel PCI TPH implementation requires TPH Requester to be enabled
+before programming ST entries. To support userspace configuring ST table
+in arbitrary order, a shadow ST table is introduced to buffer ST writes
+before TPH is enabled. All cached entries are flushed to hardware when
+TPH Requester turns on. This also provides atomic batch rollback capability
+for reliable configuration.
+
+The patchset is split into two logical parts: the first eight patches fix
+and refactor core PCI/TPH kernel code to export required helper interfaces
+and CPU to ST mapping, the remaining four patches implement corresponding
+VFIO TPH virtualization layer step by step.
+
+Based on earlier RFC work by Wathsala Vithanage
+
+---
+v18:
+- Address all comments of [08/12] commit from Alex
+  - Add document in sysfs-bus-pci
+  - Place the new field at the root port
+  - Add new filed only when root port support TPH completer and _DSM
+    method
+  - Support random offset read, return zero if cpu is offline
+  - Zero-initialize the buffer rather than memset and reserved = 0
+- Fix git am fail for [10/12] commit
+- Fix folloing Sashiko review comments of [11/12] commit:
+  - Add __GFP_ACCOUNT in thp_st_shadow allocation
+  - Move reset tph_permit in vfio_pci_tph_init/deinit
+  - Refine feature PROBE for `TPH_ST_CONFIG`, make sure probe OK when
+    enable_unsafe_tph is set
+  - Add commit-log about why TPH ST shadow table is not cleared when the
+    VFIO device is reset
+- 
+v17:
+- Move retrieve CPU to ST mapping logic from VFIO to PCI subsystem
+- Remove tph_lock which seemed not use
+- Fix Sashiko review comment of v16:
+  - tph_permit is bit field which has concurrent problem
+  - Fix tph_permit not reset when re-open device
+  - TPH capability virtualization write has concurrent, don't rollback
+    original value problems.
+  - Missing virtualization of TPH Capability Header leaks the physical
+    Next Capability Pointer to the guest
+
+Chengwen Feng (11):
+  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+  PCI/TPH: Fix tph_enabled concurrent update race by bitfield packing
+  PCI/TPH: Cache TPH requester capability at probe time
+  PCI/TPH: Refactor pcie_enable_tph & add explicit requester variant
+  PCI/TPH: Refactor pcie_tph_get_cpu_st & add explicit variant
+  PCI/TPH: Add pcie_tph_supported() helper to check TPH capability
+    attributes
+  PCI/TPH: Add sysfs binary file to export CPU to steering-tag mapping
+  vfio/pci: Hide TPH capability when TPH is unsupported
+  vfio/pci: Add TPH_ENABLE feature skeleton and unsafe module parameter
+  vfio/pci: Add TPH_ST_CONFIG for PCIe TPH ST configuration
+  vfio/pci: Virtualize PCIe TPH capability registers
+
+Zhiping Zhang (1):
+  PCI/TPH: Expose the enabled TPH requester type
+
+ Documentation/ABI/testing/sysfs-bus-pci |  24 ++
+ drivers/pci/pci-sysfs.c                 |   3 +
+ drivers/pci/pci.h                       |   4 +
+ drivers/pci/tph.c                       | 363 +++++++++++++++++++-----
+ drivers/vfio/pci/vfio_pci.c             |  13 +-
+ drivers/vfio/pci/vfio_pci_config.c      | 120 ++++++++
+ drivers/vfio/pci/vfio_pci_core.c        | 157 +++++++++-
+ include/linux/pci-tph.h                 |  22 ++
+ include/linux/pci.h                     |   6 +-
+ include/linux/vfio_pci_core.h           |   6 +-
+ include/uapi/linux/pci.h                |  16 ++
+ include/uapi/linux/vfio.h               |  29 ++
+ 12 files changed, 685 insertions(+), 78 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 03/12] PCI/TPH: Cache TPH requester capability at probe time
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Calculate the negotiated TPH requester type from device and root port
+capabilities once in pci_tph_init().
+
+Add tph_ext_support flag to cache whether the device is allowed to
+issue Extended TPH requests after topology negotiation. If the final
+requester type is disabled, clear TPH capability to prevent usage.
+
+Simplify pcie_enable_tph() by using the cached requester capability
+instead of recalculating every time.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c   | 43 +++++++++++++++++++++++++------------------
+ include/linux/pci.h |  4 +++-
+ 2 files changed, 28 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18 02/12] PCI/TPH: Fix tph_enabled concurrent update race by bitfield packing
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Split tph_enabled from shared pci_dev bitfield into spare bit of tph_cap's
+u16: tph_cap is immutable post-enumeration (15 bits for offset), remaining
+1 bit stores tph_enabled. Removes cross-bitfield concurrent write hazards
+highlighted by Sashiko after VFIO TPH exposure. No functional changes.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ include/linux/pci.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 16/16] riscv: Remove unused instruction headers
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+All usages of hard-coded riscv instruction have been migrated over to
+the generated instruction headers so the old macros can be deleted.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ arch/riscv/include/asm/insn.h | 413 +-----------------------------------------
+ 1 file changed, 4 insertions(+), 409 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 15/16] riscv: kexec: Use generated instruction headers
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the kexec relocation code to use the generated instruction
+headers instead of the hand-written instruction composition functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+This was again tested by brute forcing all possible inputs to the value
+fed into the immediates.
+---
+ arch/riscv/kernel/machine_kexec_file.c | 55 ++++++++++++----------------------
+ 1 file changed, 19 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 14/16] riscv: kvm: Use generated instruction headers for
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the csr emulation code to use the generated instruction headers
+instead of the hand-written instruction composition functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+This can be tested with the introduced csr_test selftest.
+---
+ arch/riscv/include/asm/kvm_vcpu_insn.h |  3 +-
+ arch/riscv/kvm/vcpu_insn.c             | 61 +++++++++++++++++-----------------
+ 2 files changed, 32 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 13/16] KVM: riscv: selftests: Add csr emulation test
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Introduce a kvm test that uses the emulated test csr to validate that
+all emulated reads/writes to csrs function as expected.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm     |   1 +
+ tools/testing/selftests/kvm/riscv/csr_test.c | 126 +++++++++++++++++++++++++++
+ 2 files changed, 127 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 10/16] KVM: riscv: selftests: Add mmio test
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Use the test KVM device to validate that reads and writes to a device
+are properly emulated by KVM. This test checks all load and store
+instructions that are emulated by KVM.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ tools/testing/selftests/kvm/riscv/mmio_test.c | 184 ++++++++++++++++++++++++++
+ 2 files changed, 185 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 11/16] riscv: kvm: Use generated instruction headers for
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the mmio emulation code to use the generated instruction headers
+instead of the hand-written instruction composition functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ arch/riscv/include/asm/kvm_vcpu_insn.h |   2 +-
+ arch/riscv/kvm/vcpu_insn.c             | 127 ++++++++++++++-------------------
+ 2 files changed, 55 insertions(+), 74 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 09/16] KVM: device: Add test device
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Create a KVM test device to help verify mmio reads and write emulation.
+This is a simple device that will store the data in a buffer on writes
+and echo back that stored data on a read.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ include/uapi/linux/kvm.h |  2 +
+ lib/Kconfig.debug        |  6 +++
+ virt/kvm/Kconfig.debug   | 16 ++++++++
+ virt/kvm/Makefile.kvm    |  1 +
+ virt/kvm/kvm_main.c      |  8 ++++
+ virt/kvm/mmio_test.c     | 95 ++++++++++++++++++++++++++++++++++++++++++++++++
+ virt/kvm/mmio_test.h     | 18 +++++++++
+ 7 files changed, 146 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 12/16] riscv: kvm: Add emulated test csr
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+To test the riscv kvm implementation of emulated CSRs, add support to
+emulate the vsscratch csr when CONFIG_RISCV_KVM_TEST_CSR is set.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ arch/riscv/Kconfig.debug                   |  1 +
+ arch/riscv/include/asm/kvm_host.h          | 10 ++++++++++
+ arch/riscv/include/asm/kvm_vcpu_test_csr.h | 15 +++++++++++++++
+ arch/riscv/kvm/Kconfig.debug               | 16 ++++++++++++++++
+ arch/riscv/kvm/Makefile                    |  1 +
+ arch/riscv/kvm/vcpu_insn.c                 |  5 +++++
+ arch/riscv/kvm/vcpu_test_csr.c             | 21 +++++++++++++++++++++
+ 7 files changed, 69 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 07/16] riscv: Use generated instruction headers for
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the misaligned loads/store code to use the generated instruction
+headers instead of the hand-written instruction composition functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+Similar to the other patches of this series, I extracted out the logic
+of this function and brute forced all possible inputs to validate that
+the outputs are the same. To verify this change in the kernel, I booted
+on Spike and used the misaligned access checker which does some
+misaligned accesses.
+---
+ arch/riscv/kernel/traps_misaligned.c | 183 ++++++++++++++++-------------------
+ 1 file changed, 83 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 08/16] riscv: kvm: Use generated instruction headers for
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the csr parsing code to use the generated instruction headers
+instead of the hand-written instruction composition functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+This is a simple transformation that I have again validated through
+brute force.
+---
+ arch/riscv/kvm/vcpu_insn.c | 47 +++++++++++++++++++++++-----------------------
+ 1 file changed, 24 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 06/16] riscv: cfi: Use generated instruction headers
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the code that is decoding cfi instructions to use the generated
+instruction headers.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+This function generates the same assembly as before.
+---
+ arch/riscv/kernel/cfi.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 01/16] riscv: Introduce instruction table generation
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Eliminate the need to hand-write riscv instructions by using a shell
+script to autogenerate a header from an instruction table. This is modeled
+after the syscall table infrastructure.
+
+The table is generated externally by riscv-unified-db [1], but is
+in a simple format to make it possible to use other tools or modify
+manually.
+
+[1] https://github.com/riscv-software-src/riscv-unified-db
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+This change immediately modifies all of the riscv_insn_* macros. I don't
+have a clean way of sharing my test cases but what I did was compare the
+old and new versions of the functions using the following test case:
+
+    for (unsigned int i = 0; i < ((1ULL << 32) - 1); i++) {\
+        bool old = riscv_insn_is_##name(i);\
+        bool new = new_riscv_insn_is_##name(i);\
+        if (old != new) {\
+            printf(#name " %u\n", i);\
+        }\
+    }
+
+    for (unsigned int i = 0; i < ((1ULL << 32) - 1); i++) {\
+        bool old = riscv_insn_is_##name(i);\
+        bool new = new_riscv_insn_is_##name(i);\
+\
+        if (old != new) {\
+            printf(#name " %u\n", i);\
+            return;\
+        }\
+    }
+
+void check()
+{
+    check_64(auipc)
+    check_64(jalr)
+    check_64(jal)
+    check_64(beq)
+    check_64(bne)
+    check_64(blt)
+    check_64(bge)
+    check_64(bltu)
+    check_64(bgeu)
+    check_64(ebreak)
+    check_64(sret)
+    check_64(fence)
+
+    check_32(c_jr)
+    check_32(c_jalr)
+    check_32(c_j)
+    check_32(c_beqz)
+    check_32(c_bnez)
+    check_32(c_ebreak)
+}
+
+This does a simple brute force to check all possible numbers. The
+only difference with the new version is that the fence instruction
+refers to the literal "fence" instruction whereas the previous version
+could have matched on to fence, fence.i, or fence.tso. This does not
+make a material difference because riscv_insn_is_fence() isn't currently
+in use.
+---
+ arch/riscv/Makefile           |    3 +
+ arch/riscv/include/asm/Kbuild |    1 +
+ arch/riscv/include/asm/insn.h |   72 +--
+ arch/riscv/tools/Makefile     |   22 +
+ arch/riscv/tools/insn.tbl     | 1392 +++++++++++++++++++++++++++++++++++++++++
+ arch/riscv/tools/insn_tbl.sh  |  256 ++++++++
+ 6 files changed, 1704 insertions(+), 42 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 05/16] riscv: kprobes: Use generated instruction headers
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the code that is decoding instruction for the use of kprobes to
+use the generated instruction headers instead of the hand-written
+instruction functions.
+
+With the more granular instruction support, split the decoding of branches into
+their own functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+Tested using CONFIG_RISCV_KPROBES_KUNIT
+---
+ arch/riscv/include/asm/insn.h            |   7 +
+ arch/riscv/kernel/probes/decode-insn.c   |   7 +-
+ arch/riscv/kernel/probes/simulate-insn.c | 253 ++++++++++++-------------------
+ arch/riscv/kernel/probes/simulate-insn.h |   7 +-
+ 4 files changed, 114 insertions(+), 160 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 04/16] riscv: Add kprobes instruction simulation KUnit
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+This KUnit iterates through all 32-bit integers and validates that the
+simulation code for kprobes simulates properly. These tests are very
+slow so they are gated behind a new kconfig option
+CONFIG_RISCV_KPROBES_SIMULATE_KUNIT.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+ arch/riscv/kernel/tests/Kconfig.debug              |  13 ++
+ arch/riscv/kernel/tests/kprobes/Makefile           |   2 +
+ .../kernel/tests/kprobes/test-kprobes-simulate.c   | 250 +++++++++++++++++++++
+ arch/riscv/kernel/tests/kprobes/test-kprobes.h     |   6 +
+ 4 files changed, 271 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 03/16] riscv: kgdb: Use generated instruction headers
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the code that is decoding instructions for the use of kgdb
+single stepping to use the generated instruction headers instead of the
+hand-written instruction functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+I tested this again by comparing the original get_step_address()
+function with this new version and input all possible 32 bit numbers and
+checked that the next_addr was the same in every case.
+
+This is the code I used:
+
+void check_step()
+{
+	for (unsigned long opcode = 0; opcode < ((1ULL << 32) - 1); opcode++) {
+		unsigned long next_addr, next_addr2;
+		get_step_address(opcode, &next_addr);
+		get_step_address2(opcode, &next_addr2);
+		if (next_addr != next_addr2) {
+			printf("opcode: %lu -> %lu != %lu\n", opcode, next_addr, next_addr2);
+		}
+	}
+}
+---
+ arch/riscv/include/asm/insn.h |  21 +++++++++
+ arch/riscv/kernel/kgdb.c      | 102 ++++++++++++++++--------------------------
+ 2 files changed, 60 insertions(+), 63 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 00/16] riscv: Generate riscv instruction functions
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+There is a lot of code that is manually manipulating riscv instructions.
+Constructing these headers for new instructions is time consuming and
+error prone.
+
+The first patch in this series introduces the instruction definition
+table along with a script that runs at compile time to create all of the
+associated instruction manipulation functions. The remaining patches
+migrate all of the manual instruction code to use these generated
+functions.
+
+The instruction definition table is generated from the
+riscv-unified-db[1], an open source RVI project for instruction
+specifications. I got this table generation merged into
+riscv-unified-db, that PR can be accessed on github [2].
+
+A lot of the validation for these changes is from running all possible
+32-bit or 16-bit integers through these functions to see that any given
+instruction will produce to expected result. I give more detail on the
+test cases in the notes of the first couple of patches.
+
+For the KVM patches, I also introduce two test cases to ensure that the
+instruction manipulation is working as expected.
+
+[1] https://github.com/riscv/riscv-unified-db
+[2] https://github.com/riscv/riscv-unified-db/pull/1780
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+Changes in v2:
+- rebased on v7.1
+- I dropped the patch fixing the mmio bug in kvm because in the
+  meantime that bug has been fixed in a different patch
+- Calls to panic() for instructions not support on current hardware have
+  been changed into BUG_ON()
+- Fixed incorrect handling of branches in simulate_*()
+- Added CONFIG_RISCV_KPROBES_SIMULATE_KUNIT for more detailed
+  simulate_*() testing
+- Updated insn.tbl based on new merged in changes to riscv-unified-db
+- Link to v1: https://lore.kernel.org/r/20260407-riscv_insn_table-v1-0-54b4736a1e77@gmail.com
+
+---
+Charlie Jenkins (16):
+      riscv: Introduce instruction table generation
+      riscv: alternatives: Use generated instruction headers for patching code
+      riscv: kgdb: Use generated instruction headers
+      riscv: Add kprobes instruction simulation KUnit
+      riscv: kprobes: Use generated instruction headers
+      riscv: cfi: Use generated instruction headers
+      riscv: Use generated instruction headers for misaligned loads/stores
+      riscv: kvm: Use generated instruction headers for csr code
+      KVM: device: Add test device
+      KVM: riscv: selftests: Add mmio test
+      riscv: kvm: Use generated instruction headers for mmio emulation
+      riscv: kvm: Add emulated test csr
+      KVM: riscv: selftests: Add csr emulation test
+      riscv: kvm: Use generated instruction headers for csr emulation
+      riscv: kexec: Use generated instruction headers for kexec relocations
+      riscv: Remove unused instruction headers
+
+ arch/riscv/Kconfig.debug                           |    1 +
+ arch/riscv/Makefile                                |    3 +
+ arch/riscv/include/asm/Kbuild                      |    1 +
+ arch/riscv/include/asm/insn.h                      |  563 +-------
+ arch/riscv/include/asm/kvm_host.h                  |   10 +
+ arch/riscv/include/asm/kvm_vcpu_insn.h             |    5 +-
+ arch/riscv/include/asm/kvm_vcpu_test_csr.h         |   15 +
+ arch/riscv/kernel/alternative.c                    |   23 +-
+ arch/riscv/kernel/cfi.c                            |    6 +-
+ arch/riscv/kernel/kgdb.c                           |  102 +-
+ arch/riscv/kernel/machine_kexec_file.c             |   55 +-
+ arch/riscv/kernel/probes/decode-insn.c             |    7 +-
+ arch/riscv/kernel/probes/simulate-insn.c           |  253 ++--
+ arch/riscv/kernel/probes/simulate-insn.h           |    7 +-
+ arch/riscv/kernel/tests/Kconfig.debug              |   13 +
+ arch/riscv/kernel/tests/kprobes/Makefile           |    2 +
+ .../kernel/tests/kprobes/test-kprobes-simulate.c   |  250 ++++
+ arch/riscv/kernel/tests/kprobes/test-kprobes.h     |    6 +
+ arch/riscv/kernel/traps_misaligned.c               |  183 ++-
+ arch/riscv/kvm/Kconfig.debug                       |   16 +
+ arch/riscv/kvm/Makefile                            |    1 +
+ arch/riscv/kvm/vcpu_insn.c                         |  232 ++--
+ arch/riscv/kvm/vcpu_test_csr.c                     |   21 +
+ arch/riscv/tools/Makefile                          |   22 +
+ arch/riscv/tools/insn.tbl                          | 1392 ++++++++++++++++++++
+ arch/riscv/tools/insn_tbl.sh                       |  256 ++++
+ include/uapi/linux/kvm.h                           |    2 +
+ lib/Kconfig.debug                                  |    6 +
+ tools/testing/selftests/kvm/Makefile.kvm           |    2 +
+ tools/testing/selftests/kvm/riscv/csr_test.c       |  126 ++
+ tools/testing/selftests/kvm/riscv/mmio_test.c      |  184 +++
+ virt/kvm/Kconfig.debug                             |   16 +
+ virt/kvm/Makefile.kvm                              |    1 +
+ virt/kvm/kvm_main.c                                |    8 +
+ virt/kvm/mmio_test.c                               |   95 ++
+ virt/kvm/mmio_test.h                               |   18 +
+ 36 files changed, 2897 insertions(+), 1006 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 02/16] riscv: alternatives: Use generated instruction
+Author: Charlie Jenkins via B4 Relay <devnull+thecharlesjenkins.gmail.com@kernel.org>
+
+
+Migrate the alternatives patching code to use the generated instruction
+headers instead of the hand-written instruction composition functions.
+
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+---
+
+These function expansions are very simple and almost expand to the same
+thing in the new and old version. The main difference is
+riscv_insn_auipc_extract_imm() in the new version expands to:
+
+((_insn >> 12 & GENMASK(19, 0)) << 12)
+
+while it expands to the following in the old version:
+
+((_insn >> 0) & GENMASK(31, 12))
+
+These are the same thing, but GCC is unable to properly optimize the
+second one so the first one ends up using almost half as many
+instructions. With this finding and other similar examples, I made
+the generated headers construct in the first way to help GCC optimize
+all of these functions.
+
+Brute force can also be checked with this code:
+
+void check_auipc_jalr() {
+	for (unsigned int auipc = 0; auipc < ((1ULL << 12) - 1); auipc++) {
+		for (unsigned int jalr = 0; jalr < ((1ULL << 20) - 1); jalr++) {
+			unsigned int auipc_t=riscv_insn_auipc(auipc, 0), jalr_t=riscv_insn_jalr(jalr, 0, 0), auipc_t2=riscv_insn_auipc(auipc, 0), jalr_t2=riscv_insn_jalr(jalr, 0, 0);
+			riscv_alternative_fix_auipc_jalr(&auipc_t, &jalr_t, 0);
+			riscv_alternative_fix_auipc_jalr2(&auipc_t2, &jalr_t2, 0);
+
+			if (auipc_t != auipc_t2) {
+				printf("auipcs don't match %u, %u: %u != %u\n", auipc, jalr, auipc_t, auipc_t2);
+				return;
+			}
+
+			if (jalr_t != jalr_t2) {
+				printf("jalrs don't match %u: %u != %u\n", i, jalr_t, jalr_t2);
+			}
+		}
+	}
+}
+---
+ arch/riscv/include/asm/insn.h   | 74 -----------------------------------------
+ arch/riscv/kernel/alternative.c | 23 +++++++++----
+ 2 files changed, 17 insertions(+), 80 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 2dd008eea to b1b9c44b3
+KVM mailing list update from 2dd008eea to b1b9c44b3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 linux.dev
+      1 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+      3  Fuad Tabba <fuad.tabba@linux.dev>
+      1  Sebastian Ott <sebott@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 2/2] KVM: arm64: selftests: Add MMIO sign-extending load test
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Add a test for sign-extending MMIO loads (LDRSB, LDRSH, LDRSW) into Xt
+and Wt destinations, with and without the sign bit set. The host supplies
+the MMIO data and checks the guest register holds the sign-extended value.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/arm64/mmio_sign_ext.c       | 133 ++++++++++++++++++
+ 2 files changed, 134 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: arm64: Fix and test MMIO sign-extending loads
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+A sign-extending load (LDRSB/LDRSH/LDRSW) from emulated MMIO returns a
+zero-extended value rather than the sign-extended one the architecture
+requires; vcpu_data_host_to_guest() strips the sign bits when it masks
+the data to the access width.
+
+If my git archeology is right, the masking dates to 2014 (b30070862edbd,
+big-endian support) and has been wrong ever since, but sign-extending
+loads from device memory are rare enough that nobody hit it. Patch 1
+fixes it; patch 2 adds a selftest so it doesn't regress.
+
+Cheers,
+/fuad
+
+Fuad Tabba (2):
+  KVM: arm64: Fix sign-extension of MMIO loads
+  KVM: arm64: selftests: Add MMIO sign-extending load test
+
+ arch/arm64/kvm/mmio.c                         |   7 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/arm64/mmio_sign_ext.c       | 133 ++++++++++++++++++
+ 3 files changed, 138 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: arm64: Fix sign-extension of MMIO loads
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+A sign-extending load from MMIO (LDRSB, LDRSH, LDRSW) delivers a
+zero-extended value: in kvm_handle_mmio_return(), vcpu_data_host_to_guest()
+masks the data to the access width after sign-extension, stripping the
+sign bits.
+
+Move vcpu_data_host_to_guest() ahead of sign-extension so the width mask
+runs first. trace_kvm_mmio() moves with it and keeps reporting the raw
+access-width data.
+
+Fixes: b30070862edbd ("ARM64: KVM: MMIO support BE host running LE code")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/mmio.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: fix steal_time for arm64 with host page size
+Author: Sebastian Ott <sebott@redhat.com>
+
+
+Fix the following failure when running with 16K host page size:
+==== Test Assertion Failure ====
+   lib/kvm_util.c:991: vm_adjust_num_guest_pages(vm->mode, npages) == npages
+   pid=873 tid=873 errno=0 - Success
+      1  0x0000000000405a27: vm_mem_add at kvm_util.c:991
+      2  0x000000000040241f: check_steal_time_uapi at steal_time.c:223 (discriminator 7)
+      3   (inlined by) main at steal_time.c:539 (discriminator 7)
+      4  0x00007fff8b57af3b: ?? ??:0
+      5  0x00007fff8b57b007: ?? ??:0
+      6  0x0000000000402b6f: _start at ??:?
+   Number of guest pages is not compatible with the host. Try npages=4
+
+Fixes: fc240715fc50 ("KVM: selftests: arm64: Fix steal_time test after UAPI refactoring")
+Reported-by: Zenghui Yu <zenghui.yu@linux.dev>
+Link: https://lore.kernel.org/kvmarm/7575a845-a542-4b16-b512-aec3126f97f3@linux.dev/T/#u
+Signed-off-by: Sebastian Ott <sebott@redhat.com>
+---
+  tools/testing/selftests/kvm/steal_time.c | 6 ++++--
+  1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
