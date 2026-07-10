@@ -1,0 +1,1881 @@
+
+On /root/mail/repo:
+From bbe1ddb6d to b83062dd9
+KVM mailing list update from bbe1ddb6d to b83062dd9
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     30 linux.ibm.com
+     30 kernel.org
+     23 google.com
+     10 gmail.com
+      6 huawei.com
+      6 amd.com
+      5 loongson.cn
+      4 suse.de
+      1 linux.intel.com
+      1 kylinos.cn
+      1 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+     30  Mark Brown <broonie@kernel.org>
+     23  Sean Christopherson <seanjc@google.com>
+     22  Christoph Schlameuss <schlameuss@linux.ibm.com>
+      6  Shivansh Dhiman <shivansh.dhiman@amd.com>
+      6  Hemanth Selam <hemanth.selam@gmail.com>
+      5  Bibo Mao <maobibo@loongson.cn>
+      4  Vishal Chourasia <vishalc@linux.ibm.com>
+      4  =?UTF-8?q?Carlos=20L=C3=B3pez?= <clopez@suse.de>
+      3  Tian Zheng <zhengtian10@huawei.com>
+      3  eillon <yezhenyu2@huawei.com>
+      2  Shrikanth Hegde <sshegde@linux.ibm.com>
+      2  "Bingyu.Xian" <Shanbeeyoo@gmail.com>
+      1  "Yuhang.chen" <yhchen312@gmail.com>
+      1  Steffen Eiden <seiden@linux.ibm.com>
+      1  sai madhu <suryasaimadhu369@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: SEV: Track the GPA of the guest-controlled VMSA
+[PATCH v4 01/18] KVM: SEV: Track the GPA of the guest-controlled VMSA
+Author: Sean Christopherson <seanjc@google.com>
+
+Track the GPA of the guest-provided VMSA used after AP_CREATION events when
+running SNP guests, instead of simply tracking whether or not the vCPU is
+using a guest-provided VMSA.  KVM needs to know the GPA of the VMSA that's
+actively being used so that it can react to MMU invalidation events, i.e.
+so that KVM can drop the VMSA if its backing guest_memfd page is punched
+out of existence.
+
+Opportunistically rename snp_vmsa_gpa to clarify that it tracks the pending
+VMSA GPA, whereas snp_guest_vmsa_gpa now tracks the in-use VMSA GPA.
+
+Note!  Take care to track the GPA, not the GFN, as VALID_PAGE() won't
+behave correctly if an invalid GFN is converted to a GPA for checking.
+
+Note #2!  Keep snp_has_guest_vmsa so that switching to a guest-provided
+VMSA is sticky, even if the guest-provided VMSA becomes invalid.
+
+No functional change intended.
+
+Cc: stable@vger.kernel.org # 6.12.x
+Reviewed-by: Michael Roth <michael.roth@amd.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 14 +++++++++-----
+ arch/x86/kvm/svm/svm.h |  3 ++-
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: Fix RMP #PF due to freeing in-use VMSA
+[PATCH v4 00/18] KVM: SEV: Fix RMP #PF due to freeing in-use VMSA
+Author: Sean Christopherson <seanjc@google.com>
+
+Rework KVM's handling of guest-provided (and always guest_memfd-backed) VMSAs
+to forcefully reclaim VMSA pages when the pages are being freed from their
+backing gmem instance, e.g. in response to PUNCH_HOLE.  In the worst case
+scenario, marking the page SHARED in the RMP will fail due to the page being
+IN_USE, ultimately leading to RMP #PF violations due to guest_memfd freeing
+the memory back to the kernel while it's still assigned to a VM.
+
+Note, the implementation nearly identical to that used by KVM for VMX's APIC
+access page (which isn't guest controlled, but is migratable and whose PA is
+shoved directly into a vCPU control structure).
+
+On the backend of the series, rework prepare()+invalidate() into a single
+convert() hook, to eliminate the misleading use of the term "invalidate", to
+(obviously) drop yet another callback, and to prepare for in-place conversion,
+e.g. so that KVM ends up with something like:
+
+	if (!to_private)
+		kvm_gmem_make_shared(inode, start, end);
+
+instead of a funky:
+
+	if (!to_private)
+		kvm_gmem_invalidate(inode, start, end);
+
+v4:
+ - Collect reviews. [Mike, Ackerley]
+ - Rework prepare()+invalidate() into a common convert() instead of simply
+   renaming invalidate() to reclaim_memory(). [Ackerley]
+ - Fix several (mostly benign) issues in the "prepare" flow.
+
+v3:
+ - https://lore.kernel.org/all/20260630222607.497895-1-seanjc@google.com
+ - Ensure disabling quirks while the VM is live won't result in KVM skipping
+   the back-half of "zap all fast". [Sashiko]
+ - s/gmem_free_folio/gmem_reclaim_memory. [Ackerley]
+ - Use {READ,WRITE}_ONCE() when accessing the guest's VMSA GPA outside of the
+   per-vCPU mutex, and comment. [Sashiko]
+
+v2:
+ - https://lore.kernel.org/all/20260626231416.3943216-1-seanjc@google.com
+ - Invalidate VMSAs if the memslot is DELETED or MOVED. [Sashiko]
+ - Limit stable@ patches without a Fixes to 6.12+.
+
+v1: https://lore.kernel.org/all/20260625222229.3367197-2-seanjc@google.com
+
+Sean Christopherson (18):
+  KVM: SEV: Track the GPA of the guest-controlled VMSA used for SNP
+    guests
+  KVM: SEV: Extract loading of guest-provided VMSA to a separate helper
+  KVM: SEV: Mark vCPU RUNNABLE after AP_CREATE, even if VMSA is unusable
+  KVM: SEV: Wire up kvm_x86_ops.gmem_xxx() if and only if
+    CONFIG_KVM_AMD_SEV=y
+  KVM: x86: Serialize writes to disabled_quirks using kvm->lock
+  KVM: x86: Ensure runtime reads of disabled_quirks are resolved once
+  KVM: x86/mmu: Fold kvm_mmu_zap_memslot() into
+    kvm_arch_flush_shadow_memslot()
+  KVM: x86/mmu: Split kvm_mmu_zap_all_fast() into "front" and "back"
+    halves
+  KVM: x86/mmu: Use split "zap all fast" helpers when invalidating
+    memslot
+  KVM: SEV: Forcefully invalidate SNP VMSA if its backing gmem page is
+    zapped
+  KVM: SEV: Mark vCPU has having guest-provided VMSA even if its invalid
+  KVM: x86: Guard .gmem_prepare() declarations with
+    HAVE_KVM_GMEM_PREPARE=y
+  KVM: guest_memfd: Pass GPA, not GFN, to prepare() hook
+  KVM: guest_memfd: Drop the redundant printk on arch gmem_prepare()
+    failure
+  KVM: guest_memfd: Fold __kvm_gmem_prepare_folio() into its sole caller
+  KVM: guest_memfd: Explicitly pass number of pages to
+    kvm_arch_gmem_prepare()
+  KVM: guest_memfd: Align the gfn as well as the pfn when "preparing" a
+    folio
+  KVM: guest_memfd: Combine .gmem_prepare()+.gmem_invalidate() into
+    .gmem_convert()
+
+ arch/x86/include/asm/kvm-x86-ops.h |   9 +-
+ arch/x86/include/asm/kvm_host.h    |  12 +-
+ arch/x86/kvm/Kconfig               |   2 +-
+ arch/x86/kvm/mmu/mmu.c             |  74 +++++++-----
+ arch/x86/kvm/svm/sev.c             | 186 ++++++++++++++++++++++-------
+ arch/x86/kvm/svm/svm.c             |   9 +-
+ arch/x86/kvm/svm/svm.h             |  19 +--
+ arch/x86/kvm/x86.c                 |  21 ++--
+ arch/x86/kvm/x86.h                 |   2 +-
+ include/linux/kvm_host.h           |   7 +-
+ virt/kvm/Kconfig                   |   2 +-
+ virt/kvm/guest_memfd.c             |  53 ++++----
+ 12 files changed, 256 insertions(+), 140 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64/sysreg: Define full value
+[PATCH v12 01/29] arm64/sysreg: Define full value
+Author: Mark Brown <broonie@kernel.org>
+
+We have read/modify write helpers for updating bitfields in sysregs if they
+have changed but we do not have them for updating the whole register.
+Define sysreg_cond_update() for that.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/sysreg.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Implement support for SME
+[PATCH v12 00/29] KVM: arm64: Implement support for SME
+Author: Mark Brown <broonie@kernel.org>
+
+[ Note: I've spoken with both Mark Rutland and James Morse both of whom
+  might potentially have some overlapping changes, they've both agreed
+  that they'll deal with any rebasing if it's a question of this getting
+  in or something else. ]
+
+I've removed the RFC tag from this version of the series, but the items
+that I'm looking for feedback on remains the same:
+
+ - The userspace ABI, in particular:
+  - The vector length used for the SVE registers, access to the SVE
+    registers and access to ZA and (if available) ZT0 depending on
+    the current state of PSTATE.{SM,ZA}.
+  - The use of a single finalisation for both SVE and SME.
+  - There was some review from the qemu people who seemed OK with the
+    structure, and there's some initial patches from them at:
+       https://patchew.org/QEMU/20260216034432.23912-1-richard.henderson@linaro.org/
+
+This series implements support for SME use in non-protected KVM guests.
+Much of this is very similar to SVE, the main additional challenge that
+SME presents is that it introduces a new vector length similar to the
+SVE vector length and two new controls which change the registers seen
+by guests:
+
+ - PSTATE.ZA enables the ZA matrix register and, if SME2 is supported,
+   the ZT0 LUT register.
+ - PSTATE.SM enables streaming mode, a new floating point mode which
+   uses the SVE register set with the separately configured SME vector
+   length.  In streaming mode implementation of the FFR register is
+   optional.
+
+It is also permitted to build systems which support SME without SVE, in
+this case when not in streaming mode no SVE registers or instructions
+are available.  Further, there is no requirement that there be any
+overlap in the set of vector lengths supported by SVE and SME in a
+system, this is expected to be a common situation in practical systems.
+
+Since there is a new vector length to configure we introduce a new
+feature parallel to the existing SVE one with a new pseudo register for
+the streaming mode vector length.  Due to the overlap with SVE caused by
+streaming mode rather than finalising SME as a separate feature we use
+the existing SVE finalisation to also finalise SME, a new define
+KVM_ARM_VCPU_VEC is provided to help make user code clearer.  Finalising
+SVE and SME separately would introduce complication with register access
+since finalising SVE makes the SVE registers writeable by userspace and
+doing multiple finalisations results in an error being reported.
+Dealing with a state where the SVE registers are writeable due to one of
+SVE or SME being finalised but may have their VL changed by the other
+being finalised seems like needless complexity with minimal practical
+utility, it seems clearer to just express directly that only one
+finalisation can be done in the ABI.
+
+Access to the floating point registers follows the architecture:
+
+ - When both SVE and SME are present:
+   - If PSTATE.SM == 0 the vector length used for the Z and P registers
+     is the SVE vector length.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+     is the SME vector length.
+ - If only SME is present:
+   - If PSTATE.SM == 0 the Z and P registers are inaccessible and the
+     floating point state accessed via the encodings for the V registers.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+ - The SME specific ZA and ZT0 registers are only accessible if SVCR.ZA is 1.
+
+The VMM must understand this, in particular when loading state SVCR
+should be configured before other state.  It should be noted that while
+the architecture refers to PSTATE.SM and PSTATE.ZA these PSTATE bits are
+not preserved in SPSR_ELx, they are only accessible via SVCR.
+
+There are a large number of subfeatures for SME, most of which only
+offer additional instructions but some of which (SME2 and FA64) add
+architectural state. These are configured via the ID registers as per
+usual.
+
+Protected KVM is supported, with the implementation maintaining the
+existing restriction that the hypervisor will refuse to run if streaming
+mode or ZA is enabled.  This both simplfies the code and avoids the need
+to allocate storage for host ZA and ZT0 state, there seems to be little
+practical use case for supporting this and the memory usage would be
+non-trivial.  SME is not made available to protected guests, only normal
+guests.
+
+The new KVM_ARM_VCPU_VEC feature and ZA and ZT0 registers have not been
+added to the get-reg-list selftest, the idea of supporting additional
+features there without restructuring the program to generate all
+possible feature combinations has been rejected.  I will post a separate
+series which does that restructuring.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v12:
+- Resend with commit rather than tag object specified as the base.
+- Link to v11: https://patch.msgid.link/20260709-kvm-arm64-sme-v11-0-32799f66db9d@kernel.org
+
+Changes in v11:
+- Rebase onto v7.2-rc2.
+- Rework VL enumeration.
+- Refactor ZCR and SMCR value generation for the host into helper
+  functions.
+- Add handling of FEAT_IDST for hidden system registers.
+- Ensure we manage traps correctly for emulated EL2.
+- Always allocate space for ZT0 if the hardware supports it.
+- Tighten the register enumeration ABI to reflect current VM state.
+- Sanitise SMIDR_EL1.
+- Fix generation of invalid values in set_id_regs.
+- Various smaller fixups, including from Jean-Phillipe's review.
+- Link to v10: https://patch.msgid.link/20260306-kvm-arm64-sme-v10-0-43f7683a0fb7@kernel.org
+
+Changes in v10:
+- Define and use a SME_VQ_INVALID for the case where there is no
+  virtuablisable SME VL.
+- Fix handling of SMCR_EL2 accesses.
+- Correct VNCR constant for SMPRI_EL2.
+- Correct trapping for SMPRI_EL1.
+- Reject userspace access to FFR when in streaming mode without FA64.
+- Constrain the VL set by sme_cond_update_smcr() to fit within LEN.
+- Reject userspace access to ZA and ZT0 when SVCR.SM is 0.
+- Use -EACCESS for inaccessible SME registers.
+- Remove some unused functions.
+- Further bugfixes from review.
+- Commit log typo fixes.
+
+- Link to v9: https://patch.msgid.link/20251223-kvm-arm64-sme-v9-0-8be3867cb883@kernel.org
+
+Changes in v9:
+- Rebase onto v6.19-rc1.
+- ABI document clarifications.
+- Add changes dropping asserts on single bit wide bitfields in set_id_regs.
+- Link to v8: https://lore.kernel.org/r/20250902-kvm-arm64-sme-v8-0-2cb2199c656c@kernel.org
+
+Changes in v8:
+- Small fixes in ABI documentation.
+- Link to v7: https://lore.kernel.org/r/20250822-kvm-arm64-sme-v7-0-7a65d82b8b10@kernel.org
+
+Changes in v7:
+- Rebase onto v6.17-rc1.
+- Handle SMIDR_EL1 as a VM wide ID register and use this in feat_sme_smps().
+- Expose affinity fields in SMIDR_EL1.
+- Remove SMPRI_EL1 from vcpu_sysreg, the value is always 0 currently.
+- Prevent userspace writes to SMPRIMAP_EL2.
+- Link to v6: https://lore.kernel.org/r/20250625-kvm-arm64-sme-v6-0-114cff4ffe04@kernel.org
+
+Changes in v6:
+- Rebase onto v6.16-rc3.
+- Link to v5: https://lore.kernel.org/r/20250417-kvm-arm64-sme-v5-0-f469a2d5f574@kernel.org
+
+Changes in v5:
+- Rebase onto v6.15-rc2.
+- Add pKVM guest support.
+- Always restore SVCR.
+- Link to v4: https://lore.kernel.org/r/20250214-kvm-arm64-sme-v4-0-d64a681adcc2@kernel.org
+
+Changes in v4:
+- Rebase onto v6.14-rc2 and Mark Rutland's fixes.
+- Expose SME to nested guests.
+- Additional cleanups and test fixes following on from the rebase.
+- Flush register state on VMM PSTATE.{SM,ZA}.
+- Link to v3: https://lore.kernel.org/r/20241220-kvm-arm64-sme-v3-0-05b018c1ffeb@kernel.org
+
+Changes in v3:
+- Rebase onto v6.12-rc2.
+- Link to v2: https://lore.kernel.org/r/20231222-kvm-arm64-sme-v2-0-da226cb180bb@kernel.org
+
+Changes in v2:
+- Rebase onto v6.7-rc3.
+- Configure subfeatures based on host system only.
+- Complete nVHE support.
+- There was some snafu with sending v1 out, it didn't make it to the
+  lists but in case it hit people's inboxes I'm sending as v2.
+
+---
+Mark Brown (29):
+      arm64/sysreg: Define full value read/modify/write helpers
+      arm64/fpsimd: Update FA64 and ZT0 enables when loading SME state
+      arm64/fpsimd: Decide to save ZT0 and streaming mode FFR at bind time
+      arm64/sve: Factor virtualizable VL discovery out of SVE specific code
+      arm64/fpsimd: Determine maximum virtualisable SME vector length
+      KVM: arm64: Handle FEAT_IDST for guest accesses to hidden registers
+      KVM: arm64: Pull ctxt_has_ helpers to start of sysreg-sr.h
+      KVM: arm64: Rename SVE finalization constants to be more general
+      KVM: arm64: Define internal features for SME
+      KVM: arm64: Rename sve_state_reg_region
+      KVM: arm64: Store vector lengths in an array
+      KVM: arm64: Factor SVE code out of fpsimd_lazy_switch_to_host()
+      KVM: arm64: Document the KVM ABI for SME
+      KVM: arm64: Implement SME vector length configuration
+      KVM: arm64: Support SME control registers
+      KVM: arm64: Support TPIDR2_EL0
+      KVM: arm64: Support SME identification registers for guests
+      KVM: arm64: Support SME priority registers
+      KVM: arm64: Support userspace access to streaming mode Z and P registers
+      KVM: arm64: Flush register state on writes to SVCR.SM and SVCR.ZA
+      KVM: arm64: Expose SME specific state to userspace
+      KVM: arm64: Context switch SME state for guests
+      KVM: arm64: Handle SME exceptions
+      KVM: arm64: Expose SME to nested guests
+      KVM: arm64: Provide interface for configuring and enabling SME for guests
+      KVM: arm64: selftests: Remove spurious check for single bit safe values
+      KVM: arm64: selftests: Skip impossible invalid value tests
+      KVM: arm64: selftests: Add SME system registers to get-reg-list
+      KVM: arm64: selftests: Add SME to set_id_regs test
+
+ Documentation/virt/kvm/api.rst                   | 124 +++++---
+ arch/arm64/include/asm/fpsimd.h                  |  17 +-
+ arch/arm64/include/asm/kvm_emulate.h             |  16 +
+ arch/arm64/include/asm/kvm_host.h                | 113 ++++++-
+ arch/arm64/include/asm/kvm_hyp.h                 |   2 +-
+ arch/arm64/include/asm/kvm_nested.h              |   2 +
+ arch/arm64/include/asm/kvm_pkvm.h                |   2 +-
+ arch/arm64/include/asm/sysreg.h                  |   8 +
+ arch/arm64/include/asm/vncr_mapping.h            |   2 +
+ arch/arm64/include/uapi/asm/kvm.h                |  34 +++
+ arch/arm64/kernel/cpufeature.c                   |   2 -
+ arch/arm64/kernel/fpsimd.c                       | 134 ++++----
+ arch/arm64/kvm/arm.c                             |  10 +
+ arch/arm64/kvm/config.c                          |  12 +-
+ arch/arm64/kvm/emulate-nested.c                  |   6 +-
+ arch/arm64/kvm/fpsimd.c                          |  27 +-
+ arch/arm64/kvm/guest.c                           | 369 ++++++++++++++++++++---
+ arch/arm64/kvm/handle_exit.c                     |  14 +
+ arch/arm64/kvm/hyp/include/hyp/switch.h          | 234 +++++++++++---
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h       |  96 +++---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c               | 129 ++++++--
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                   |  90 ++++--
+ arch/arm64/kvm/hyp/nvhe/switch.c                 |   2 +
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c               |   6 +
+ arch/arm64/kvm/hyp/vhe/switch.c                  |  17 +-
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c               |   7 +
+ arch/arm64/kvm/inject_fault.c                    |  15 +
+ arch/arm64/kvm/nested.c                          |   8 +-
+ arch/arm64/kvm/reset.c                           | 159 +++++++---
+ arch/arm64/kvm/sys_regs.c                        | 152 +++++++++-
+ include/uapi/linux/kvm.h                         |   1 +
+ tools/testing/selftests/kvm/arm64/get-reg-list.c |  15 +-
+ tools/testing/selftests/kvm/arm64/set_id_regs.c  |  96 +++++-
+ 33 files changed, 1554 insertions(+), 367 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: SEV: Verify unsupported VM types are rejected at creation
+[PATCH v2 1/2] KVM: selftests: SEV: Verify unsupported VM types are rejected at creation
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+test_vm_types() only exercised creation of the SEV/SEV-ES/SEV-SNP VM
+types that the platform actually supports, leaving the previously noted
+TODO ("check that unsupported types cannot be created") unaddressed.
+
+Add test_create_invalid_type() which issues a raw KVM_CREATE_VM for a
+given type and asserts it fails with -EINVAL, and invoke it for
+KVM_X86_SEV_ES_VM / KVM_X86_SNP_VM whenever the corresponding capability
+is not advertised. Because vm_create_barebones_type() asserts that
+KVM_CREATE_VM succeeds, the check is issued directly against the KVM fd
+so the negative path can be observed.
+
+TEST_ASSERT() aborts the program when its condition fails, so the helper
+releases the fd and latches errno before asserting: if KVM_CREATE_VM
+ever wrongly succeeds, the VM fd is closed rather than leaked, and errno
+is captured before close() can clobber it.
+
+While here, stop shadowing the file-scope kvm_fd with a local in main()
+so the new helper can use it.
+
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ .../selftests/kvm/x86/sev_init2_tests.c       | 27 +++++++++++++++----
+ 1 file changed, 22 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: SEV: address two TODOs in the SEV tests
+[PATCH v2 0/2] KVM: selftests: SEV: address two TODOs in the SEV tests
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+This small series fills in two pre-existing TODOs in the x86 SEV
+selftests. Both are test-only changes; there is no functional change to
+the kernel.
+
+Patch 1 adds negative coverage to sev_init2_tests: when the platform
+does not support a given SEV VM type (SEV-ES or SEV-SNP), it verifies
+that KVM_CREATE_VM rejects that type with -EINVAL. Previously the test
+only exercised the VM types that were supported, so a mismatch between
+KVM_CAP_VM_TYPES and the actual KVM_CREATE_VM enforcement would have
+gone unnoticed.
+
+Patch 2 makes sev_smoke_test capture the launch measurement returned by
+KVM_SEV_LAUNCH_MEASURE for SEV and SEV-ES guests and asserts that it is
+not all zeros, instead of discarding it. A full attestation-style
+validation is not possible from the selftest (userspace does not hold
+the transport keys used to derive the measurement), but a non-zero
+check catches a PSP/plumbing failure that silently leaves the buffer
+untouched. SEV-SNP uses a different launch flow and is skipped.
+
+Testing: built and run on an AMD EPYC 9755 (Turin) host running this
+tree (7.2.0-rc2), with sev/sev_es/sev_snp all enabled. Both tests pass.
+The new rejection path was additionally exercised by reloading kvm_amd
+with sev_snp=0 so the unsupported types are rejected: under strace,
+KVM_CREATE_VM for the SEV-ES and SNP types both return -EINVAL and the
+test passes. checkpatch --strict is clean on both patches.
+
+Changes in v2:
+ - Patch 1: fix unreachable fd cleanup in test_create_invalid_type().
+   TEST_ASSERT() aborts on failure, so the trailing "if (fd >= 0)
+   close(fd)" could never run; close the fd (and latch errno) before
+   the assert instead, so an unexpectedly-created VM is not leaked.
+   Reported-by: Sashiko AI review.
+ - Trimmed the added in-code comments to short high-level notes and
+   moved the detailed rationale into the commit messages.
+ - No functional change to patch 2.
+
+v1: https://lore.kernel.org/all/20260709164751.621326-1-hemanth.selam@gmail.com/
+
+Hemanth Selam (2):
+  KVM: selftests: SEV: Verify unsupported VM types are rejected at
+    creation
+  KVM: selftests: SEV: Sanity check the launch measurement
+
+ .../selftests/kvm/x86/sev_init2_tests.c       | 27 +++++++++++++++++--
+ .../selftests/kvm/x86/sev_smoke_test.c        | 23 +++++++++++++++--
+ 2 files changed, 46 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v2 1/2] KVM: selftests: SEV: Verify unsupported VM types are rejected at creation
+ Skip: [PATCH v1 1/2] KVM: selftests: SEV: Verify unsupported VM types are rejected at creation
+Exist: [PATCH v2 0/2] KVM: selftests: SEV: address two TODOs in the SEV tests
+ Skip: [PATCH v1 0/2] KVM: selftests: SEV: address two TODOs in the SEV tests
+New:  KVM: Add missing debugfs cleanup in kvm_init error path
+[PATCH] KVM: Add missing debugfs cleanup in kvm_init error path
+Author: Steffen Eiden <seiden@linux.ibm.com>
+
+If any initialization after kvm_init_debug() fails the cleanup code did
+not remove the debugfs entries. Therefore, the corresponding debugfs
+entries where still alive but the backing fops are already freed,
+creating a use-after-free scenario. Fix this by removing the debugfs
+entries if vfio init fails.
+
+Fixes: 2b0128127373 ("KVM: Register /dev/kvm as the _very_ last thing during initialization")
+Signed-off-by: Steffen Eiden <seiden@linux.ibm.com>
+---
+ virt/kvm/kvm_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Remove double 64bscao feature check
+[PATCH 01/21] KVM: s390: Remove double 64bscao feature check
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+sclp.has_64bscao is already verified in the guard clause a few lines
+above this. So we cannot reach this code if it is not true.
+
+Reviewed-by: Hendrik Brueckner <brueckner@linux.ibm.com>
+Reviewed-by: Eric Farman <farman@linux.ibm.com>
+Reviewed-by: Janosch Frank <frankja@de.ibm.com>
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: vsie: Add VSIE SIGP Interpretation
+[PATCH 00/21] KVM: s390: vsie: Add VSIE SIGP Interpretation
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+In the IBM Z machine generation z17 the s390x architecture does have a
+VSIE Interpretation Extension Facility (vsie_sigpif) to improve guest-3
+guest performance.
+
+To exploit the machine support the guest-1 KVM needs to create and
+maintain shadow structures pointing to the original state descriptions
+and system control areas of currently running guest-3 configurations.
+These pointers are followed by the machines firmware and modifications
+of the original SCA for guest-3 (located in guest-2) are monitored and
+handled by firmware. This results in fewer VSIE exits.
+
+The SIGP orders EXTERNAL CALL (2) and SENSE RUNNING STATUS (21) can be
+handled if requested by the setting the ECA_SIGPI respective ECB_SRSI
+state description bits.
+
+The series includes some changes to the non sigpi path as well.
+- original SCA is pinning is lazily kept after exiting vsie
+- addr_to_page radix_tree usage is replaced by xarray
+
+Due to no ESCA support in old g2 kernel and qemu the patches do
+introduce a limitation for setups with a unaware g2 when g1 KVM has
+vsie_sigpif=true the g2 kernel will report KVM_CAP_MAX_VCPUS=64.
+
+---
+Changes from RFC:
+- fix locking and vsie_page reuse to run stable
+- pull some methods out of the main patch to simplify the review
+- rework kvm_s390_handle_vsie() to allocate vsie_sca first to store
+  vsie_page references directly
+- move sie_uses_esca() to patch 1 as it is used there as well - thanks
+  Eric
+- change pointers in {read,write}_scao() to generic 'unsigned long' to
+  not imply gpa or hpa as it can in fact be either depending on the
+  situation - thanks Claudio
+- simplify code in sca_mcn_equals() using memcmp() - thanks Janosch
+- copy mcn into vsie_sca using memcpy() instead of loop
+- only shadow sca if the g3 wants and can to use sigpif - thanks Janosch
+- change vsie_sca->ssca from pointer to embedded struct to as vsie_sca
+  is only needed when we actually also want the ssca
+- fix kvm_s390_handle_vsie() cleanup order
+- rename sca variables to vsie_sca
+- cleanup error paths
+- adjust some comments
+
+---
+Christoph Schlameuss (21):
+      KVM: s390: Remove double 64bscao feature check
+      KVM: s390: vsie: Remove duplicate assertion
+      KVM: s390: vsie: Convert shift to phys_to_pfn()
+      KVM: s390: vsie: Add SCAO read and write helpers
+      KVM: s390: vsie: Move SCAO validation into a function
+      KVM: s390: vsie: Add vsie_sigpif detection
+      KVM: s390: vsie: Add ssca_block and ssca_entry structs for vsie_ie
+      KVM: s390: vsie: Move pin/unpin_scb methods
+      KVM: s390: vsie: Move pin/unpin guest page
+      KVM: s390: vsie: Move release/acquire gmap shadow
+      KVM: s390: vsie: Create helpers to alloc and free vsie_pages
+      KVM: s390: vsie: Replace radix_tree with xarray addr_to_page
+      KVM: s390: vsie: Add helper to pin multiple guest pages
+      KVM: s390: vsie: Add helper to release gmap shadow
+      KVM: s390: vsie: Add struct vsie_sca with pin and unpin
+      KVM: s390: vsie: Shadow VSIE SCA in guest-1
+      KVM: s390: vsie: Allow guest-3 cpu add and remove with vsie sigpif
+      KVM: s390: vsie: Add VSIE max shadow configuration
+      KVM: s390: vsie: Add VSIE shadow stat counters
+      KVM: s390: vsie: Create minimal scb shadows for not running g3 blocks
+      KVM: s390: vsie: Enable VSIE SIGPI
+
+ arch/s390/include/asm/kvm_host.h               |   28 +-
+ arch/s390/include/asm/kvm_host_types.h         |   28 +-
+ arch/s390/include/asm/sclp.h                   |    1 +
+ arch/s390/kvm/kvm-s390.c                       |   18 +-
+ arch/s390/kvm/vsie.c                           | 1185 +++++++++++++++++++-----
+ drivers/s390/char/sclp_early.c                 |    1 +
+ tools/testing/selftests/kvm/include/s390/sie.h |    2 +-
+ 7 files changed, 1001 insertions(+), 262 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: pci: Fix handling of AIF enable without AISB
+[PATCH] KVM: s390: pci: Fix handling of AIF enable without AISB
+Author: Matthew Rosato <mjrosato@linux.ibm.com>
+
+When a guest seeks to register IRQs without a summary bit specified,
+ensure that the associated GAITE then stores 0 for the guest AISB
+location instead of virt_to_phys(page_address(NULL)).
+
+Fixes: 3c5a1b6f0a18 ("KVM: s390: pci: provide routines for enabling/disabling interrupt forwarding")
+Cc: stable@vger.kernel.org
+Reviewed-by: Farhan Ali <alifm@linux.ibm.com>
+Signed-off-by: Matthew Rosato <mjrosato@linux.ibm.com>
+---
+ arch/s390/kvm/pci.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Move update_cr8_intercept() to lapic.c
+[PATCH 7.1.y 1/3] KVM: x86: Move update_cr8_intercept() to lapic.c
+Author: Carlos López <clopez@suse.de>
+
+
+[ Upstream Commit c7722e5e1daeeabbd9f969554d52bb7158120b27 ]
+
+Move update_cr8_intercept() to lapic.c so that it's globally visible
+in anticipation of extracting most of the register-specific code out of
+x86.c and into a new compilation unit.  Opportunistically prefix the
+helper kvm_lapic_ to make its role/scope more obvious.
+
+No functional change intended.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+Link: https://patch.msgid.link/20260529222223.870923-14-seanjc@google.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ arch/x86/kvm/lapic.c | 26 ++++++++++++++++++++++++++
+ arch/x86/kvm/lapic.h |  1 +
+ arch/x86/kvm/x86.c   | 34 +++-------------------------------
+ 3 files changed, 30 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Backports for VM entry failure due to stale CR8 intercept
+[PATCH 7.1.y 0/3] KVM: x86: Backports for VM entry failure due to stale CR8 intercept
+Author: Carlos López <clopez@suse.de>
+
+Backport for bb365a506b1e ("KVM: x86: Unconditionally recompute CR8
+intercept on PPR update") with two prerequisite patches.
+
+Carlos López (1):
+  KVM: x86: Unconditionally recompute CR8 intercept on PPR update
+
+Sean Christopherson (2):
+  KVM: x86: Move update_cr8_intercept() to lapic.c
+  KVM: VMX: Grab vmcs12 on CR8 interception update iff vCPU is in guest
+    mode
+
+ arch/x86/kvm/lapic.c   | 28 ++++++++++++++++++++++++++++
+ arch/x86/kvm/lapic.h   |  1 +
+ arch/x86/kvm/vmx/vmx.c |  3 +--
+ arch/x86/kvm/x86.c     | 35 ++---------------------------------
+ 4 files changed, 32 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Allow safe G-stage PMD block mappings for VM_PFNMAP
+[PATCH RFC 1/1] KVM: riscv: Allow safe G-stage PMD block mappings for VM_PFNMAP
+Author: Bingyu.Xian <shanbeeyoo@gmail.com>
+
+
+RISC-V KVM currently forces all VM_PFNMAP (device MMIO) faults to
+PAGE_SIZE, preventing G-stage block mappings for VFIO-assigned device
+BARs:
+
+    if (logging || (vma->vm_flags & VM_PFNMAP))
+        vma_pagesize = PAGE_SIZE;
+
+A 256 MB VFIO BAR therefore requires 65 536 G-stage PTEs instead of
+128 PMD blocks, incurring excessive G-stage faults, page-table memory
+and TLB pressure.
+
+The arm64 patch "Try stage2 block mapping for host device MMIO"
+(commit 2aa53d68cee6) addressed this by deriving the host physical
+address from vma->vm_pgoff.  However, vma->vm_pgoff is unreliable for
+VM_PFNMAP since the VFIO unmap_mapping_range() changes discussed on the
+RISC-V list in 2025 ("Remove automatic I/O mapping for VM_PFNMAP").
+
+This patch takes a different, more conservative approach:
+pfnmap_mapping_size() walks the host page tables via the existing
+get_hva_mapping_size().  If the host mm itself installed a PMD leaf,
+physical contiguity within that 2 MB block is already guaranteed and
+KVM can safely use a G-stage PMD block.  Otherwise it falls back to
+PAGE_SIZE, exactly as before.
+
+RISC-V has a natural advantage here: the memory type is derived from
+the physical address' PMA (Physical Memory Attribute), independent of
+the G-stage PTE size, so promoting 4 KB -> 2 MB does not alter the
+memory-type semantics.  arm64 requires extra care with the stage-2
+PTE MemAttr field in this situation.
+
+The eligibility helper fault_supports_gstage_huge_mapping() is
+generalized to accept a map_size parameter (previously hardcoded to
+PMD_SIZE) so it can be reused for both THP and PFNMAP checks.
+
+The gfn alignment calculation is fixed to use vma_pagesize instead of
+huge_page_mask(hstate_vma(vma)), since PFNMAP VMAs are not hugetlb.
+
+A new tracepoint kvm_mmu_map is added to aid debugging and performance
+analysis, recording GPA, HVA, HFN, mapping size and whether the fault
+was a VM_PFNMAP region.
+
+This first version is conservative:
+  - Only PMD (2 MB) blocks, not PUD (1 GB)
+  - dirty logging still forces PAGE_SIZE
+  - falls back to PAGE_SIZE whenever contiguity/alignment cannot be
+    proven
+
+Testing: verified on QEMU (rv64, h=true, sstc=true) with a custom
+kernel module that installs a PMD leaf in the host page table for a
+VM_PFNMAP VMA.  Tracepoint confirms:
+  - anonymous memory:   size=4KB   pfnmap=0  (control)
+  - /dev/mem (4KB PTE): size=4KB   pfnmap=1  (safe fallback)
+  - PMD leaf module:    size=2048KB pfnmap=1 (block mapping success)
+  
+Signed-off-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Bingyu.Xian <Shanbeeyoo@gmail.com>
+Cc: Anup Patel <anup@brainfault.org>
+Cc: Atish Patra <atish.patra@linux.dev>
+Cc: kvm@vger.kernel.org
+Cc: kvm-riscv@lists.infradead.org
+Cc: linux-riscv@lists.infradead.org
+---
+ arch/riscv/kvm/mmu.c   | 45 ++++++++++++++++++++++++++++++++++++------
+ arch/riscv/kvm/trace.h | 29 +++++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: G-stage PMD block mappings for VM_PFNMAP
+[PATCH RFC 0/1] KVM: riscv: G-stage PMD block mappings for VM_PFNMAP
+Author: Bingyu.Xian <shanbeeyoo@gmail.com>
+
+
+This RFC adapts the arm64 "stage-2 block mapping for host device MMIO"
+idea (commit 2aa53d68cee6) to RISC-V KVM, allowing VM_PFNMAP regions
+such as VFIO-assigned PCI BARs to use 2 MB G-stage PMD block mappings
+instead of being forced to 4 KB PTEs.
+
+=== Why this matters for RISC-V ===
+
+1. RISC-V virtualization is maturing rapidly.  The H-extension was
+   ratified in 2021 and KVM/riscv has been upstream since v5.15, but
+   many performance optimizations that exist on arm64 and x86 are still
+   missing.  This patch closes one of those gaps.
+
+2. Server-class RISC-V platforms are on the roadmap.  Device passthrough
+   (VFIO) for GPUs, NPUs, and high-speed NICs is essential for
+   data-center workloads.  These devices have BARs ranging from tens of
+   MB to multiple GB.  Without this patch, a single 256 MB GPU BAR
+   requires 65 536 G-stage PTEs (512 KB of page-table memory and 65 536
+   G-stage faults), compared to 128 PMD blocks with this optimization.
+
+3. RISC-V IOMMU specification was ratified in March 2023 and Linux
+   driver support is under active development.  Once RISC-V IOMMU
+   hardware becomes available, VFIO passthrough will be a first-class
+   use case.  This KVM G-stage optimization is a prerequisite for
+   acceptable passthrough performance.
+
+4. RISC-V has a natural advantage over arm64 here: the memory type is
+   determined by the physical address' PMA (Physical Memory Attribute),
+   not by the G-stage PTE attributes.  So promoting 4 KB -> 2 MB does
+   not alter memory-type semantics, unlike arm64 where the stage-2 PTE
+   MemAttr field requires careful handling.
+
+=== Design choices ===
+
+Unlike arm64's original implementation which derives the host physical
+address from vma->vm_pgoff, this patch walks the host page tables via
+get_hva_mapping_size().  This is more conservative but safer: if the
+host mm itself has not installed a PMD leaf, KVM falls back to 4 KB
+exactly as before.  The vm_pgoff approach is unreliable since the VFIO
+unmap_mapping_range() changes discussed on the RISC-V list in 2025.
+
+The first version is deliberately conservative:
+  - Only PMD (2 MB) blocks, not PUD (1 GB)
+  - dirty logging still forces PAGE_SIZE
+  - falls back to PAGE_SIZE whenever contiguity/alignment cannot be
+    proven
+
+=== Testing ===
+
+Verified on QEMU (rv64, h=true, sstc=true) with a custom kernel module
+(pfnmap-huge-test.ko) that installs a PMD leaf in the host page table
+for a VM_PFNMAP VMA, simulating a VFIO BAR with a 2 MB host mapping.
+
+Tracepoint kvm_mmu_map confirms all three scenarios:
+  - anonymous memory:      size=4KB    pfnmap=0  (control group)
+  - /dev/mem (4KB host):   size=4KB    pfnmap=1  (safe fallback works)
+  - PMD leaf module:       size=2048KB pfnmap=1  (block mapping works!)
+
+I welcome feedback on:
+  - Whether the host-page-table-walk approach is preferred over the
+    arm64 vm_pgoff approach
+  - Whether PUD (1 GB) block support should be added now or deferred
+  - Whether the tracepoint should be kept or removed before non-RFC
+    submission
+
+Bingyu.Xian (1):
+  KVM: riscv: Allow safe G-stage PMD block mappings for VM_PFNMAP
+
+ arch/riscv/kvm/mmu.c   | 45 ++++++++++++++++++++++++++++++++++++------
+ arch/riscv/kvm/trace.h | 29 +++++++++++++++++++++++++++
+ 2 files changed, 68 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Add kvm-riscv.wfi_trap_policy to control VS-mode WFI trapping
+[PATCH] RISC-V: KVM: Add kvm-riscv.wfi_trap_policy to control VS-mode WFI trapping
+Author: Yuhang.chen <yhchen312@gmail.com>
+
+Add a kernel command-line option, kvm-riscv.wfi_trap_policy=trap|notrap,
+that controls whether a WFI executed by a VS-mode guest traps into KVM
+(HS-mode) or executes natively.
+
+Measured results (wfi_exit_stat delta / guest wake count over 3 s):
+
+  policy        WFI_EXITS   WAKE_CNT
+  ----------    ---------   --------
+  default       295         294      (== trap, no regression)
+  trap          295         294
+  notrap          0         298
+
+Assisted-by: YuanSheng:deepseek-v4-pro
+Co-developed-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Yuhang.chen <yhchen312@gmail.com>
+---
+ .../admin-guide/kernel-parameters.txt         | 14 ++++++
+ arch/riscv/kvm/vcpu.c                         | 44 ++++++++++++++++++-
+ 2 files changed, 57 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+[PATCH v4 1/6] KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+Author: Tian Zheng <zhengtian10@huawei.com>
+
+
+FEAT_HDBSS speeds up guest memory dirty tracking by avoiding a page fault
+and saving the entry in a tracking structure.
+
+That may be a problem when we have guest memory backed by hugepages or
+transparent huge pages, as it's not possible to do on-demand hugepage
+splitting, relying only on eager hugepage splitting.
+
+So, at stage2 initialization, enable eager hugepage splitting with
+chunk = 256K * PAGE_SIZE if the system supports HDBSS.
+
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Support the FEAT_HDBSS introduced in Armv9.5
+[PATCH v4 0/6] Support the FEAT_HDBSS introduced in Armv9.5
+Author: Tian Zheng <zhengtian10@huawei.com>
+
+This series of patches add support to the Hardware Dirty state tracking
+Structure (HDBSS) feature, which is introduced by the ARM architecture
+in the DDI0601 (ID121123) version.
+
+The HDBSS feature is an extension to the architecture that enhances
+tracking translation table descriptors' dirty state, identified as
+FEAT_HDBSS. This feature utilizes hardware assistance to achieve dirty
+page tracking, aiming to significantly reduce the overhead of scanning
+for dirty pages.
+
+The purpose of this feature is to make the execution overhead of live
+migration lower to both the guest and the host, compared to existing
+approaches (write-protect or search stage-2 tables).
+
+The required sysreg definitions for FEAT_HDBSS have been merged into
+arm64 /sysregs:
+  [1/5] arm64/sysreg: Add HDBSS related register information
+        https://git.kernel.org/arm64/c/72f7be0c2e30
+
+
+After these patches, the kernel automatically enables HDBSS when dirty
+logging is enabled on any memslot, and disables HDBSS when dirty logging
+is disabled on all memslots. This series does not support dirty ring
+mode.
+
+Depends-on: "KVM: arm64: Enable eager hugepage splitting if HDBSS is available"
+	https://lore.kernel.org/linux-arm-kernel/20260629111820.1873540-3-leo.bras@arm.com/
+
+This dependency is mandatory. Unlike v3, where DBM was added lazily on
+the first dirty access via a page fault, v4 injects DBM into pgt->flags
+at stage-2 MMU initialization time. Combined with HDBSS being auto-enabled
+during migration setup, the first dirty access no longer triggers a page
+fault. Consequently, if lazy hugepage splitting were relied upon (which
+requires a page fault to trigger splitting), hugepages would never be
+split, leading to guest hang after migration. Leonardo's patch above
+ensures eager hugepage splitting is enabled (chunk_size != 0) when HDBSS
+is available, guaranteeing that hugepages are properly split before
+migration starts.
+
+v3: https://lore.kernel.org/linux-arm-kernel/20260225040421.2683931-1-zhengtian10@huawei.com/
+
+v3->v4 changes:
+- Merge sysreg definitions into the FEAT_HDBSS detection patch (was a
+  separate patch in v3).
+- Add auto DBM (Dirty Bit Modifier) support as a new patch, suggested
+  by Leonardo Bras. DBM is now controlled as a page-table level flag
+  (KVM_PGTABLE_S2_DBM) rather than per-PTE. Note that DBM is injected
+  at stage-2 MMU creation time, not lazily on first dirty access. This
+  means the first write to a dirty-logged page does not generate a
+  page fault, which is a key reason for the mandatory dependency on
+  Leonardo's eager hugepage splitting patch (see Depends-on above).
+- Split the v3 "Enable HDBSS support and handle HDBSSF events" patch
+  into three patches: per-vCPU buffer management, fault handling and
+  buffer flush, and auto enable/disable on dirty logging change. This
+  implements kernel-managed automatic HDBSS enable/disable.
+- Remove the KVM_CAP_ARM_HW_DIRTY_STATE_TRACK ioctl for manual HDBSS
+  on/off. HDBSS is now automatically enabled/disabled based on dirty
+  logging state via kvm_arch_commit_memory_region().
+- Change HDBSS buffer flush triggers to vcpu_put, check_vcpu_requests,
+  and kvm_handle_guest_abort.
+- Store hdbss_order at VM level (kvm->arch.hdbss_order) instead of
+  per-vCPU, since all vCPUs share the same order.
+- Document patch is not included in this version; will be sent in a
+  follow-up series.
+
+Leonardo Bras (1):
+  KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+
+Tian Zheng (2):
+  KVM: arm64: Add support for FEAT_HDBSS
+  KVM: arm64: Add auto DBM support for hardware dirty tracking
+
+eillon (3):
+  KVM: arm64: Add HDBSS per-vCPU buffer management
+  KVM: arm64: Add HDBSS fault handling and buffer flush
+  KVM: arm64: Add auto HDBSS enable/disable on dirty logging change
+
+ arch/arm64/include/asm/cpufeature.h    |   5 +
+ arch/arm64/include/asm/esr.h           |   5 +
+ arch/arm64/include/asm/kvm_dirty_bit.h |  29 ++++
+ arch/arm64/include/asm/kvm_host.h      |  14 ++
+ arch/arm64/include/asm/kvm_pgtable.h   |   4 +
+ arch/arm64/include/asm/sysreg.h        |  11 ++
+ arch/arm64/kernel/cpufeature.c         |  12 ++
+ arch/arm64/kvm/Makefile                |   1 +
+ arch/arm64/kvm/arm.c                   |  29 ++++
+ arch/arm64/kvm/dirty_bit.c             | 219 +++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/pgtable.c           |  35 +++-
+ arch/arm64/kvm/hyp/vhe/switch.c        |  15 ++
+ arch/arm64/kvm/mmu.c                   |  19 ++-
+ arch/arm64/kvm/reset.c                 |   4 +
+ arch/arm64/tools/cpucaps               |   1 +
+ 15 files changed, 399 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: powerpc: Use generic xfer to guest work function
+[PATCH v4 1/2] KVM: powerpc: Use generic xfer to guest work function
+Author: Vishal Chourasia <vishalc@linux.ibm.com>
+
+Since commit 2cd571245b43 ("sched/fair: Add related data structure for
+task based throttle") in v6.18, CFS bandwidth throttling no longer
+dequeues a task directly; it queues task_work via TWA_RESUME and sets
+TIF_NOTIFY_RESUME, relying on that work running before the task returns
+to guest/user mode. The powerpc KVM run loops only checked for reschedule
+and signals, never TIF_NOTIFY_RESUME, so the deferred throttle never ran
+while a vCPU stayed in the run loop: a CPU-bound guest that rarely exits
+to userspace ran far past its cpu.max quota and then appeared frozen for
+minutes while the accrued throttle debt was repaid.
+
+Use the generic infrastructure to check for and handle pending work
+before transitioning into guest mode, replacing the open-coded
+need_resched() and cond_resched() checks in the Book3S HV run loops and
+in the common kvmppc_prepare_to_enter() used by the Book3S PR and BookE
+run loops. The redundant signal_pending() recheck (and its sigpend label)
+in kvmhv_run_single_vcpu() is also dropped, as
+xfer_to_guest_mode_work_pending() is a superset of it.
+
+This picks up handling for TIF_NOTIFY_RESUME, which was previously
+ignored, meaning task work will now be correctly handled on every
+guest re-entry.
+
+Selecting VIRT_XFER_TO_GUEST_WORK disables RCU's last-resort self-IPI
+fallback for vCPU tasks (see rcu_irq_work_resched()), which on
+nohz_full CPUs was what forced a reschedule for deferred rcuog wakeups
+queued right before guest entry. Take over that obligation the same way
+x86 and s390 do: call xfer_to_guest_mode_prepare() with IRQs disabled
+immediately before the final xfer_to_guest_mode_work_pending() check at
+each guest-entry gate (kvmhv_run_single_vcpu(), kvmppc_run_core() and
+kvmppc_prepare_to_enter()).
+
+In kvmppc_prepare_to_enter(), IRQs are now disabled with
+local_irq_disable() before hard_irq_disable(): on 32-bit,
+hard_irq_disable() is a raw MSR[EE] clear that bypasses the
+lockdep/irq-tracing state, and the strict xfer_to_guest_mode helpers
+assert that IRQs are seen as disabled. This also allows upgrading the
+racy __xfer_to_guest_mode_work_pending() check to the asserting
+variant, as this loop is the terminal gate for the PR and BookE paths.
+
+In kvmhv_run_single_vcpu(), the -EINTR exit and the pre-existing
+kvmhv_setup_mmu() failure exit now leave via the done label instead of
+returning directly, keeping the run_vcpu enter/exit tracepoints
+balanced and vcpu->arch.ret consistent with the returned value.
+
+In kvmppc_prepare_to_enter() the generic helper accounts the signal exit
+(vcpu->stat.signal_exits and KVM_EXIT_INTR) but does not set the exit
+type, so kvmppc_set_exit_type(SIGNAL_EXITS) is retained on the signal
+path to preserve the E500 CONFIG_KVM_EXIT_TIMING histogram; it is a no-op
+otherwise.
+
+Signed-off-by: Vishal Chourasia <vishalc@linux.ibm.com>
+---
+ arch/powerpc/kvm/Kconfig     |  1 +
+ arch/powerpc/kvm/book3s_hv.c | 39 +++++++++++++++++++++++-------------
+ arch/powerpc/kvm/booke.c     |  1 +
+ arch/powerpc/kvm/powerpc.c   | 37 +++++++++++++++++++++++++---------
+ 4 files changed, 55 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v4 1/2] KVM: powerpc: Use generic xfer to guest work function
+ Skip: [PATCH v4 0/2] KVM: powerpc: Use generic xfer to guest work function
+New:  KVM: SVM: Refactor svm_update_lbrv()
+[PATCH v3 1/5] KVM: SVM: Refactor svm_update_lbrv()
+Author: Shivansh Dhiman <shivansh.dhiman@amd.com>
+
+Rewrite the enable_lbrv computation in svm_update_lbrv() as a series of
+'if' statements, and use nested_vmcb12_has_lbrv() instead of open-coding
+the nested LBRV check.
+
+No functional change intended.
+
+Suggested-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Shivansh Dhiman <shivansh.dhiman@amd.com>
+---
+Changelog:
+v3:
+ * New patch.
+ * Refactor the enable_lbrv computation into 'if' statements (Yosry Ahmed).
+
+---
+ arch/x86/kvm/svm/nested.c |  2 +-
+ arch/x86/kvm/svm/svm.c    | 10 +++++++---
+ arch/x86/kvm/svm/svm.h    |  1 +
+ 3 files changed, 9 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Add Bus Lock Detect support and refactor LBRV
+[PATCH v3 0/5] KVM: SVM: Add Bus Lock Detect support and refactor LBRV
+Author: Shivansh Dhiman <shivansh.dhiman@amd.com>
+
+Bus Lock Detect (BLD) is a CPU feature that raises a #DB trap when an
+instruction acquires a bus lock, allowing software to detect and act on bus
+locks. It is enabled via MSR_IA32_DEBUGCTLMSR bit 2.
+
+This series adds BLD support to AMD SVM and exposes the capability to the
+guest. On AMD, MSR_IA32_DEBUGCTLMSR is virtualized only when LBR
+Virtualization (LBRV) is enabled, so BLD depends on LBRV. Enabling that
+dependency cleanly required first refactoring the LBRV handling, so the bulk
+of the series is preparatory:
+
+  1: Refactor svm_update_lbrv() so new LBRV dependencies are trivial to add.
+  2: Sanitize V_LBR in the nested control cache and drop the now-redundant 
+     X86_FEATURE_LBRV checks.
+  3: Use kvm_dr6_fixed() for nested DR6 so DR6_BUS_LOCK (bit 11) is forced
+     per guest CPUID instead of unconditionally.
+  4: Compute DEBUGCTL reserved bits per-vCPU so DEBUGCTLMSR_BUS_LOCK_DETECT
+     is only accepted when the guest supports BLD.
+  5: Add Bus Lock Detect support, wiring BLD to LBRV and exposing the cap.
+
+Regards,
+Shivansh
+
+---
+Changelog:
+v2 -> v3:
+ * Reworked the single v2 patch into a prep series (patches 1-4) plus the
+   feature.
+ * Rewrite svm_update_lbrv() as 'if' statements so the BLD LBRV
+   dependency can be added cleanly (Yosry Ahmed).
+ * Sanitize V_LBR in the nested control cache like NP/GMET and drop the
+   redundant X86_FEATURE_LBRV checks (Yosry Ahmed).
+ * Use kvm_dr6_fixed() for nested DR6 instead of DR6_FIXED_1 | DR6_RTM.
+ * Compute DEBUGCTL reserved bits per-vCPU, gating BUS_LOCK_DETECT on
+   guest CPUID rather than a static macro.
+
+v2 resend:
+ * Rebased on kvm-x86-next-2026.06.24.
+
+v1 -> v2:
+ * Used guest_cpu_cap_has() instead of guest_cpuid_has().
+
+v2 Resend: https://lore.kernel.org/kvm/20260629081018.60618-1-shivansh.dhiman@amd.com/
+v2: https://lore.kernel.org/kvm/20251121081228.426974-1-shivansh.dhiman@amd.com/
+v1: https://lore.kernel.org/all/20240808062937.1149-5-ravi.bangoria@amd.com
+
+---
+Shivansh Dhiman (5):
+  KVM: SVM: Refactor svm_update_lbrv()
+  KVM: nSVM: Disable LBRV in nested control cache when unsupported
+  KVM: nSVM: Sanitize nested DR6 using kvm_dr6_fixed()
+  KVM: SVM: Compute DEBUGCTL reserved bits dynamically
+  KVM: SVM: Add Bus Lock Detect support
+
+ arch/x86/kvm/regs.c       |  3 ++-
+ arch/x86/kvm/regs.h       |  1 +
+ arch/x86/kvm/svm/nested.c | 21 ++++++++++++---------
+ arch/x86/kvm/svm/svm.c    | 27 ++++++++++++++++++++-------
+ arch/x86/kvm/svm/svm.h    | 13 +++++++++++--
+ 5 files changed, 46 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Set default MAILBOX access size with 8
+[PATCH v4 1/4] LoongArch: KVM: Set default MAILBOX access size with 8
+Author: Bibo Mao <maobibo@loongson.cn>
+
+With IOCSR instruction emulation in function kvm_emu_iocsr(), the possible
+size combination is 1/2/4/8 and no other combinations. Here remove the
+old default case and replace the default case with 8 in read_mailbox()
+and write_mailbox().
+
+Signed-off-by: Bibo Mao <maobibo@loongson.cn>
+---
+ arch/loongarch/kvm/intc/ipi.c | 9 ++-------
+ 1 file changed, 2 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Harden interrupt injection
+[PATCH v4 0/4] LoongArch: KVM: Harden interrupt injection
+Author: Bibo Mao <maobibo@loongson.cn>
+
+API kvm_vcpu_ioctl_interrupt() is mainly to used to deliver interrupt
+from user mode, and internal APIs kvm_queue_irq() and kvm_dequeue_irq()
+are used in kernel mode, also moves IPI interrupt handling within lock
+protection.
+
+Also this patch replaces kvm_err() with WARN_ONCE() to avoid noise
+kernel log.
+
+---
+v3 ... v4:
+  1. From AI assist, replace kvm_err() with kvm_pr_unimpl() rather than
+     WARN_ONCE(), since host may crash with WARN_ONCE() when kernel
+     parameter panic_on_warn=1 is set.
+  2. Add one new patch 3 which returns directly when IPI address is not
+     aligned, rather than only print WARN_ON_ONCE() and continue to run.
+
+v2 ... v3:
+  1. Split the patches into three smaller ones, the first patch removes
+     old default case and kvm_err() since it is impossible to happen.
+     And the second patch replaces kvm_err() with WARN_ONCE().
+
+v1 ... v2:
+  1. Add border check with ipnum in eiointc_set_sw_coreisr() and
+     eiointc_update_irq(), so that injected interrupt vector is valid.
+
+  2. Move IPI inject and ack within lock to avoid contention in
+     ipi_set() and ipi_clear().
+
+  3. Add kvm_arch_irqchip_in_kernel() check in user mode irq injection
+    in function kvm_vcpu_ioctl_interrupt(), contention of user mode irq
+    injection is assured from user mode VMM.
+---
+Bibo Mao (4):
+  LoongArch: KVM: Set default MAILBOX access size with 8
+  LoongArch: KVM: Replace kvm_err() with kvm_pr_unimpl()
+  LoongArch: KVM: Return directly when IPI address is not aligned
+  LoongArch: KVM: Use internal API to deliver interrupt in kernel mode
+
+ arch/loongarch/kvm/exit.c         | 16 +++----
+ arch/loongarch/kvm/intc/dmsintc.c | 15 ++++---
+ arch/loongarch/kvm/intc/eiointc.c | 32 +++++++------
+ arch/loongarch/kvm/intc/ipi.c     | 75 +++++++++++++------------------
+ arch/loongarch/kvm/intc/pch_pic.c | 12 ++---
+ arch/loongarch/kvm/vcpu.c         |  5 ++-
+ 6 files changed, 76 insertions(+), 79 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH 7.1.y 1/3] KVM: x86: Move update_cr8_intercept() to lapic.c
+ Skip: [PATCH RESEND 6.18.y 1/3] KVM: x86: Move update_cr8_intercept() to lapic.c
+Exist: [PATCH 7.1.y 0/3] KVM: x86: Backports for VM entry failure due to stale CR8 intercept
+ Skip: [PATCH RESEND 6.18.y 0/3] KVM: x86: Backports for VM entry failure due to stale CR8 intercept
+Exist: [PATCH v4 1/2] KVM: powerpc: Use generic xfer to guest work function
+ Skip: [PATCH v3 1/2] KVM: powerpc: Use generic xfer to guest work function
+Exist: [PATCH v4 1/2] KVM: powerpc: Use generic xfer to guest work function
+ Skip: [PATCH v3 0/2] KVM: powerpc: Use generic xfer to guest work function
+New:  KVM: PPC: Book3S HV: Set irqfd->producer only on success
+[PATCH] KVM: PPC: Book3S HV: Set irqfd->producer only on success
+Author: leixiang <leixiang@kylinos.cn>
+
+Set irqfd->producer only after kvmppc_set_passthru_irq() succeeds to
+avoid leaving a dangling pointer on failure. The bypass manager does
+not register a failed producer, so the pointer is never cleared.
+
+Fixes: c57875f5f9be ("KVM: PPC: Book3S HV: Enable IRQ bypass")
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: leixiang <leixiang@kylinos.cn>
+---
+ arch/powerpc/kvm/book3s_hv.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Preserve KVM_EXIT_DEBUG on emulated HLT with single-step
+[PATCH] KVM: x86: Preserve KVM_EXIT_DEBUG on emulated HLT with single-step
+Author: suryasaimadhu <SaiMadhu.KoyyalaHariVenkata@amd.com>
+
+
+kvm_emulate_halt() calls kvm_skip_emulated_instruction() before
+kvm_emulate_halt_noskip(). When single-step debugging is active,
+the skip path can trigger a debug exception and set exit_reason to
+KVM_EXIT_DEBUG, but halt emulation then overwrites it with
+KVM_EXIT_HLT on the userspace LAPIC path. Return immediately when
+a debug exit is already pending so userspace debuggers receive the
+correct event.
+
+Signed-off-by: sai madhu <suryasaimadhu369@gmail.com>
+---
+ arch/x86/kvm/x86.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 202accbdc to 0a3e0f8f6
+KVM mailing list update from 202accbdc to 0a3e0f8f6
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     34 kernel.org
+      6 huawei.com
+      3 suse.de
+      3 arm.com
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     30  Mark Brown <broonie@kernel.org>
+      4  Marc Zyngier <maz@kernel.org>
+      3  =?UTF-8?q?Carlos=20L=C3=B3pez?= <clopez@suse.de>
+      3  Tian Zheng <zhengtian10@huawei.com>
+      3  eillon <yezhenyu2@huawei.com>
+      1  Mark Rutland <mark.rutland@arm.com>
+      1  Leonardo Bras <leo.bras@arm.com>
+      1  Colton Lewis <coltonlewis@google.com>
+      1  Ahmed Genidi <ahmed.genidi@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  arm64: sysreg: Add layout for ID_AA64MMFR4_EL1
+[PATCH 6.6 v3 1/6] arm64: sysreg: Add layout for ID_AA64MMFR4_EL1
+Author: Colton Lewis <coltonlewis@google.com>
+
+
+[ Upstream commit cfc680bb04c54e61faa51a34d8383a0aa25b583f ]
+
+ARMv9.5 has infroduced ID_AA64MMFR4_EL1 with a bunch of new features.
+Add the corresponding layout.
+
+This is extracted from the public ARM SysReg_xml_A_profile-2023-09
+delivery, timestamped d55f5af8e09052abe92a02adf820deea2eaed717.
+
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+Reviewed-by: Miguel Luis <miguel.luis@oracle.com>
+Link: https://lore.kernel.org/r/20240122181344.258974-5-maz@kernel.org
+Signed-off-by: Oliver Upton <oliver.upton@linux.dev>
+Signed-off-by: Colton Lewis <coltonlewis@google.com>
+---
+ arch/arm64/tools/sysreg | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  arm64: KVM: Backport VHE-only boot fixes
+[PATCH 6.6 v3 0/6] arm64: KVM: Backport VHE-only boot fixes
+Author: Colton Lewis <coltonlewis@google.com>
+
+Architectural updates retroactively made FEAT_E2H0 optional, meaning
+hardware can implement FEAT_VHE without FEAT_E2H0. On such CPUs,
+HCR_EL2.E2H can reset to an unknown state and must be initialized early
+so later code can reliably detect whether E2H mode is active.
+
+Without these fixes, booting 6.6.y as a guest under KVM nested
+virtualization will hang at boot.
+
+This series targets 6.6.y specifically because these patches are all
+present in 6.12.y and applying these patches to 6.1.y and presumably
+older kernels has more conflicts and results in other issues booting
+as a guest under nested virtualization. More work is needed to enable
+that.
+
+Changes in v3:
+- Added Signed-off-by: Colton Lewis <coltonlewis@google.com> to all commits.
+- Added explicit '[ Backport: ... ]' conflict resolution notes indicating why
+  conflicts occurred and how they were resolved (Patches 4, 5, and 6,
+  including Patch 4 where the conflict was trivial).
+
+v2:
+https://lore.kernel.org/kvmarm/20260708225124.4130846-1-coltonlewis@google.com/
+
+v1:
+https://lore.kernel.org/kvmarm/20260701204342.2654385-1-coltonlewis@google.com/
+
+Ahmed Genidi (1):
+  KVM: arm64: Initialize SCTLR_EL1 in __kvm_hyp_init_cpu()
+
+Marc Zyngier (4):
+  arm64: sysreg: Add layout for ID_AA64MMFR4_EL1
+  arm64: Treat HCR_EL2.E2H as RES1 when ID_AA64MMFR4_EL1.E2H0 is
+    negative
+  arm64: Fix early handling of FEAT_E2H0 not being implemented
+  arm64: Revamp HCR_EL2.E2H RES1 detection
+
+Mark Rutland (1):
+  KVM: arm64: Initialize HCR_EL2.E2H early
+
+ arch/arm64/include/asm/el2_setup.h   | 56 ++++++++++++++++++++++++++--
+ arch/arm64/kernel/head.S             | 20 ++++------
+ arch/arm64/kvm/hyp/nvhe/hyp-init.S   |  3 +-
+ arch/arm64/kvm/hyp/nvhe/psci-relay.c |  3 ++
+ arch/arm64/tools/sysreg              | 37 ++++++++++++++++++
+ 5 files changed, 101 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64/sysreg: Define full value
+[PATCH v12 01/29] arm64/sysreg: Define full value
+Author: Mark Brown <broonie@kernel.org>
+
+We have read/modify write helpers for updating bitfields in sysregs if they
+have changed but we do not have them for updating the whole register.
+Define sysreg_cond_update() for that.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/sysreg.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Implement support for SME
+[PATCH v12 00/29] KVM: arm64: Implement support for SME
+Author: Mark Brown <broonie@kernel.org>
+
+[ Note: I've spoken with both Mark Rutland and James Morse both of whom
+  might potentially have some overlapping changes, they've both agreed
+  that they'll deal with any rebasing if it's a question of this getting
+  in or something else. ]
+
+I've removed the RFC tag from this version of the series, but the items
+that I'm looking for feedback on remains the same:
+
+ - The userspace ABI, in particular:
+  - The vector length used for the SVE registers, access to the SVE
+    registers and access to ZA and (if available) ZT0 depending on
+    the current state of PSTATE.{SM,ZA}.
+  - The use of a single finalisation for both SVE and SME.
+  - There was some review from the qemu people who seemed OK with the
+    structure, and there's some initial patches from them at:
+       https://patchew.org/QEMU/20260216034432.23912-1-richard.henderson@linaro.org/
+
+This series implements support for SME use in non-protected KVM guests.
+Much of this is very similar to SVE, the main additional challenge that
+SME presents is that it introduces a new vector length similar to the
+SVE vector length and two new controls which change the registers seen
+by guests:
+
+ - PSTATE.ZA enables the ZA matrix register and, if SME2 is supported,
+   the ZT0 LUT register.
+ - PSTATE.SM enables streaming mode, a new floating point mode which
+   uses the SVE register set with the separately configured SME vector
+   length.  In streaming mode implementation of the FFR register is
+   optional.
+
+It is also permitted to build systems which support SME without SVE, in
+this case when not in streaming mode no SVE registers or instructions
+are available.  Further, there is no requirement that there be any
+overlap in the set of vector lengths supported by SVE and SME in a
+system, this is expected to be a common situation in practical systems.
+
+Since there is a new vector length to configure we introduce a new
+feature parallel to the existing SVE one with a new pseudo register for
+the streaming mode vector length.  Due to the overlap with SVE caused by
+streaming mode rather than finalising SME as a separate feature we use
+the existing SVE finalisation to also finalise SME, a new define
+KVM_ARM_VCPU_VEC is provided to help make user code clearer.  Finalising
+SVE and SME separately would introduce complication with register access
+since finalising SVE makes the SVE registers writeable by userspace and
+doing multiple finalisations results in an error being reported.
+Dealing with a state where the SVE registers are writeable due to one of
+SVE or SME being finalised but may have their VL changed by the other
+being finalised seems like needless complexity with minimal practical
+utility, it seems clearer to just express directly that only one
+finalisation can be done in the ABI.
+
+Access to the floating point registers follows the architecture:
+
+ - When both SVE and SME are present:
+   - If PSTATE.SM == 0 the vector length used for the Z and P registers
+     is the SVE vector length.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+     is the SME vector length.
+ - If only SME is present:
+   - If PSTATE.SM == 0 the Z and P registers are inaccessible and the
+     floating point state accessed via the encodings for the V registers.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+ - The SME specific ZA and ZT0 registers are only accessible if SVCR.ZA is 1.
+
+The VMM must understand this, in particular when loading state SVCR
+should be configured before other state.  It should be noted that while
+the architecture refers to PSTATE.SM and PSTATE.ZA these PSTATE bits are
+not preserved in SPSR_ELx, they are only accessible via SVCR.
+
+There are a large number of subfeatures for SME, most of which only
+offer additional instructions but some of which (SME2 and FA64) add
+architectural state. These are configured via the ID registers as per
+usual.
+
+Protected KVM is supported, with the implementation maintaining the
+existing restriction that the hypervisor will refuse to run if streaming
+mode or ZA is enabled.  This both simplfies the code and avoids the need
+to allocate storage for host ZA and ZT0 state, there seems to be little
+practical use case for supporting this and the memory usage would be
+non-trivial.  SME is not made available to protected guests, only normal
+guests.
+
+The new KVM_ARM_VCPU_VEC feature and ZA and ZT0 registers have not been
+added to the get-reg-list selftest, the idea of supporting additional
+features there without restructuring the program to generate all
+possible feature combinations has been rejected.  I will post a separate
+series which does that restructuring.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v12:
+- Resend with commit rather than tag object specified as the base.
+- Link to v11: https://patch.msgid.link/20260709-kvm-arm64-sme-v11-0-32799f66db9d@kernel.org
+
+Changes in v11:
+- Rebase onto v7.2-rc2.
+- Rework VL enumeration.
+- Refactor ZCR and SMCR value generation for the host into helper
+  functions.
+- Add handling of FEAT_IDST for hidden system registers.
+- Ensure we manage traps correctly for emulated EL2.
+- Always allocate space for ZT0 if the hardware supports it.
+- Tighten the register enumeration ABI to reflect current VM state.
+- Sanitise SMIDR_EL1.
+- Fix generation of invalid values in set_id_regs.
+- Various smaller fixups, including from Jean-Phillipe's review.
+- Link to v10: https://patch.msgid.link/20260306-kvm-arm64-sme-v10-0-43f7683a0fb7@kernel.org
+
+Changes in v10:
+- Define and use a SME_VQ_INVALID for the case where there is no
+  virtuablisable SME VL.
+- Fix handling of SMCR_EL2 accesses.
+- Correct VNCR constant for SMPRI_EL2.
+- Correct trapping for SMPRI_EL1.
+- Reject userspace access to FFR when in streaming mode without FA64.
+- Constrain the VL set by sme_cond_update_smcr() to fit within LEN.
+- Reject userspace access to ZA and ZT0 when SVCR.SM is 0.
+- Use -EACCESS for inaccessible SME registers.
+- Remove some unused functions.
+- Further bugfixes from review.
+- Commit log typo fixes.
+
+- Link to v9: https://patch.msgid.link/20251223-kvm-arm64-sme-v9-0-8be3867cb883@kernel.org
+
+Changes in v9:
+- Rebase onto v6.19-rc1.
+- ABI document clarifications.
+- Add changes dropping asserts on single bit wide bitfields in set_id_regs.
+- Link to v8: https://lore.kernel.org/r/20250902-kvm-arm64-sme-v8-0-2cb2199c656c@kernel.org
+
+Changes in v8:
+- Small fixes in ABI documentation.
+- Link to v7: https://lore.kernel.org/r/20250822-kvm-arm64-sme-v7-0-7a65d82b8b10@kernel.org
+
+Changes in v7:
+- Rebase onto v6.17-rc1.
+- Handle SMIDR_EL1 as a VM wide ID register and use this in feat_sme_smps().
+- Expose affinity fields in SMIDR_EL1.
+- Remove SMPRI_EL1 from vcpu_sysreg, the value is always 0 currently.
+- Prevent userspace writes to SMPRIMAP_EL2.
+- Link to v6: https://lore.kernel.org/r/20250625-kvm-arm64-sme-v6-0-114cff4ffe04@kernel.org
+
+Changes in v6:
+- Rebase onto v6.16-rc3.
+- Link to v5: https://lore.kernel.org/r/20250417-kvm-arm64-sme-v5-0-f469a2d5f574@kernel.org
+
+Changes in v5:
+- Rebase onto v6.15-rc2.
+- Add pKVM guest support.
+- Always restore SVCR.
+- Link to v4: https://lore.kernel.org/r/20250214-kvm-arm64-sme-v4-0-d64a681adcc2@kernel.org
+
+Changes in v4:
+- Rebase onto v6.14-rc2 and Mark Rutland's fixes.
+- Expose SME to nested guests.
+- Additional cleanups and test fixes following on from the rebase.
+- Flush register state on VMM PSTATE.{SM,ZA}.
+- Link to v3: https://lore.kernel.org/r/20241220-kvm-arm64-sme-v3-0-05b018c1ffeb@kernel.org
+
+Changes in v3:
+- Rebase onto v6.12-rc2.
+- Link to v2: https://lore.kernel.org/r/20231222-kvm-arm64-sme-v2-0-da226cb180bb@kernel.org
+
+Changes in v2:
+- Rebase onto v6.7-rc3.
+- Configure subfeatures based on host system only.
+- Complete nVHE support.
+- There was some snafu with sending v1 out, it didn't make it to the
+  lists but in case it hit people's inboxes I'm sending as v2.
+
+---
+Mark Brown (29):
+      arm64/sysreg: Define full value read/modify/write helpers
+      arm64/fpsimd: Update FA64 and ZT0 enables when loading SME state
+      arm64/fpsimd: Decide to save ZT0 and streaming mode FFR at bind time
+      arm64/sve: Factor virtualizable VL discovery out of SVE specific code
+      arm64/fpsimd: Determine maximum virtualisable SME vector length
+      KVM: arm64: Handle FEAT_IDST for guest accesses to hidden registers
+      KVM: arm64: Pull ctxt_has_ helpers to start of sysreg-sr.h
+      KVM: arm64: Rename SVE finalization constants to be more general
+      KVM: arm64: Define internal features for SME
+      KVM: arm64: Rename sve_state_reg_region
+      KVM: arm64: Store vector lengths in an array
+      KVM: arm64: Factor SVE code out of fpsimd_lazy_switch_to_host()
+      KVM: arm64: Document the KVM ABI for SME
+      KVM: arm64: Implement SME vector length configuration
+      KVM: arm64: Support SME control registers
+      KVM: arm64: Support TPIDR2_EL0
+      KVM: arm64: Support SME identification registers for guests
+      KVM: arm64: Support SME priority registers
+      KVM: arm64: Support userspace access to streaming mode Z and P registers
+      KVM: arm64: Flush register state on writes to SVCR.SM and SVCR.ZA
+      KVM: arm64: Expose SME specific state to userspace
+      KVM: arm64: Context switch SME state for guests
+      KVM: arm64: Handle SME exceptions
+      KVM: arm64: Expose SME to nested guests
+      KVM: arm64: Provide interface for configuring and enabling SME for guests
+      KVM: arm64: selftests: Remove spurious check for single bit safe values
+      KVM: arm64: selftests: Skip impossible invalid value tests
+      KVM: arm64: selftests: Add SME system registers to get-reg-list
+      KVM: arm64: selftests: Add SME to set_id_regs test
+
+ Documentation/virt/kvm/api.rst                   | 124 +++++---
+ arch/arm64/include/asm/fpsimd.h                  |  17 +-
+ arch/arm64/include/asm/kvm_emulate.h             |  16 +
+ arch/arm64/include/asm/kvm_host.h                | 113 ++++++-
+ arch/arm64/include/asm/kvm_hyp.h                 |   2 +-
+ arch/arm64/include/asm/kvm_nested.h              |   2 +
+ arch/arm64/include/asm/kvm_pkvm.h                |   2 +-
+ arch/arm64/include/asm/sysreg.h                  |   8 +
+ arch/arm64/include/asm/vncr_mapping.h            |   2 +
+ arch/arm64/include/uapi/asm/kvm.h                |  34 +++
+ arch/arm64/kernel/cpufeature.c                   |   2 -
+ arch/arm64/kernel/fpsimd.c                       | 134 ++++----
+ arch/arm64/kvm/arm.c                             |  10 +
+ arch/arm64/kvm/config.c                          |  12 +-
+ arch/arm64/kvm/emulate-nested.c                  |   6 +-
+ arch/arm64/kvm/fpsimd.c                          |  27 +-
+ arch/arm64/kvm/guest.c                           | 369 ++++++++++++++++++++---
+ arch/arm64/kvm/handle_exit.c                     |  14 +
+ arch/arm64/kvm/hyp/include/hyp/switch.h          | 234 +++++++++++---
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h       |  96 +++---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c               | 129 ++++++--
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                   |  90 ++++--
+ arch/arm64/kvm/hyp/nvhe/switch.c                 |   2 +
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c               |   6 +
+ arch/arm64/kvm/hyp/vhe/switch.c                  |  17 +-
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c               |   7 +
+ arch/arm64/kvm/inject_fault.c                    |  15 +
+ arch/arm64/kvm/nested.c                          |   8 +-
+ arch/arm64/kvm/reset.c                           | 159 +++++++---
+ arch/arm64/kvm/sys_regs.c                        | 152 +++++++++-
+ include/uapi/linux/kvm.h                         |   1 +
+ tools/testing/selftests/kvm/arm64/get-reg-list.c |  15 +-
+ tools/testing/selftests/kvm/arm64/set_id_regs.c  |  96 +++++-
+ 33 files changed, 1554 insertions(+), 367 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: Fix race between LPI release and re-registration
+[PATCH v5 1/2] KVM: arm64: vgic: Fix race between LPI release and re-registration
+Author: Carlos López <clopez@suse.de>
+
+Fix a potential race between decrementing an LPI's reference count and
+evicting that structure from the LPI xarray.
+
+LPI structures are maintained in the VGIC LPI xarray (dist->lpi_xa).
+When the reference count of an LPI structure drops to zero,
+vgic_release_lpi_locked() removes the structure from the xarray and
+frees it under the xarray lock.
+
+However, the release of an LPI can race with a concurrent LPI
+re-registration with the same INTID via vgic_add_lpi() on another CPU,
+since the reference count drop and the xarray eviction are not performed
+in a single atomic step. This can happen e.g. if the guest issues a
+DISCARD while the LPI is still referenced from a vCPU's active-pending
+list (ap_list), and the same INTID is re-mapped via MAPTI.
+
+Particularly, vgic_release_lpi_locked() is called from two distinct
+paths: direct release via vgic_put_irq(), and deferred release via
+vgic_release_deleted_lpis(). During direct release, the issue can result
+in deleting a newly registered LPI from the xarray:
+
+  CPU0 (Releasing LPI)                    CPU1 (Adding new LPI)
+  ====================                    =====================
+  vgic_put_irq()
+      __vgic_put_irq()
+          refcount_dec_and_test()
+                                          vgic_add_lpi()
+                                              xa_lock_irqsave()
+                                              old_irq = xa_load(.., intid)
+                                              vgic_try_get_irq_ref(old_irq) == false
+                        new IRQ inserted -->  __xa_store(.., intid, ..)
+                                              xa_unlock_irqrestore()
+  xa_lock_irqsave();
+  vgic_release_lpi_locked()
+      __xa_erase(.., irq->intid)   <-- BUG: new IRQ is erased
+      kfree_rcu(old_irq)
+
+During the deferred release path, the old IRQ can be leaked:
+
+  CPU0 (Releasing LPI)                    CPU1 (Adding new LPI)
+  ====================                    =====================
+  vgic_put_irq_norelease()
+      __vgic_put_irq()
+          refcount_dec_and_test()
+      irq->pending_release = true
+                                          vgic_add_lpi()
+                                              xa_lock_irqsave()
+                                              old_irq = xa_load(.., intid)
+                                              vgic_try_get_irq_ref(oldirq) == false
+                 BUG: old IRQ overwritten --> __xa_store(.., intid, ..)
+                                              xa_unlock_irqrestore()
+
+  vgic_release_deleted_lpis()
+      xa_lock_irqsave()
+      xa_for_each() { .. } <-- old IRQ with pending_release = true
+                               is gone, so it cannot be released
+
+To fix the direct release path, move the reference count drop inside
+the xarray lock, making sure that vgic_add_lpi() never encounters the
+to-be-released LPI.
+
+To fix the deferred release path, since the refcount drop must happen
+under a raw spinlock, the same solution does not work. Instead, update
+vgic_add_lpi(), so that if it evicts a non-NULL refcount=0 LPI from the
+xarray, it takes on the responsibility of releasing it. If this happens,
+vgic_release_deleted_lpis() will iterate the xarray normally and will
+simply not find the already released structure.
+
+Reported-by: Claude:claude-opus-4-6
+Fixes: 3a08a6ca7c37 ("KVM: arm64: vgic-v3: Use bare refcount for VGIC LPIs")
+Fixes: d54594accf73 ("KVM: arm64: vgic-v3: Erase LPIs from xarray outside of raw spinlocks")
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ arch/arm64/kvm/vgic/vgic-its.c | 15 ++++++++++++++-
+ arch/arm64/kvm/vgic/vgic.c     | 10 ++++++----
+ 2 files changed, 20 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: Fix racy LPI release and re-registration handling
+[PATCH v5 0/2] KVM: arm64: vgic: Fix racy LPI release and re-registration handling
+Author: Carlos López <clopez@suse.de>
+
+Fix a couple of potential issues that could arise from racy LPI release
+and re-registration for the same INTID.
+
+The issue fixed in patch 1 can manifest itself through either a
+leaked LPI structure, or a prematurely deleted LPI. The issue fixed
+in patch 2 could materialize as a spurious -ENOMEM failure when
+registering an LPI.
+
+v5:
+* Make sure evicted IRQs on the registration path are pending
+  release (Oliver Upton).
+
+v4:
+* Add __GFP_ACCOUNT to patch 2 (Sashiko).
+
+v3:
+* Use refcount_dec_and_lock_irqsave() instead of unconditionally
+  grabbing the xarray lock in patch 1.
+* Add patch 2.
+
+v2:
+* Address Sashiko's review. Fix the direct release path by decrementing
+  the refcount under the xarray spinlock, preventing a UAF that would
+  have been introduced in v1.
+
+Carlos López (2):
+  KVM: arm64: vgic: Fix race between LPI release and re-registration
+  KVM: arm64: vgic: Mitigate potential LPI registration failure
+
+ arch/arm64/kvm/vgic/vgic-its.c | 16 +++++++++++++++-
+ arch/arm64/kvm/vgic/vgic.c     | 10 ++++++----
+ 2 files changed, 21 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Support the FEAT_HDBSS introduced in Armv9.5
+[PATCH v4 0/6] Support the FEAT_HDBSS introduced in Armv9.5
+Author: Tian Zheng <zhengtian10@huawei.com>
+
+This series of patches add support to the Hardware Dirty state tracking
+Structure (HDBSS) feature, which is introduced by the ARM architecture
+in the DDI0601 (ID121123) version.
+
+The HDBSS feature is an extension to the architecture that enhances
+tracking translation table descriptors' dirty state, identified as
+FEAT_HDBSS. This feature utilizes hardware assistance to achieve dirty
+page tracking, aiming to significantly reduce the overhead of scanning
+for dirty pages.
+
+The purpose of this feature is to make the execution overhead of live
+migration lower to both the guest and the host, compared to existing
+approaches (write-protect or search stage-2 tables).
+
+The required sysreg definitions for FEAT_HDBSS have been merged into
+arm64 /sysregs:
+  [1/5] arm64/sysreg: Add HDBSS related register information
+        https://git.kernel.org/arm64/c/72f7be0c2e30
+
+
+After these patches, the kernel automatically enables HDBSS when dirty
+logging is enabled on any memslot, and disables HDBSS when dirty logging
+is disabled on all memslots. This series does not support dirty ring
+mode.
+
+Depends-on: "KVM: arm64: Enable eager hugepage splitting if HDBSS is available"
+	https://lore.kernel.org/linux-arm-kernel/20260629111820.1873540-3-leo.bras@arm.com/
+
+This dependency is mandatory. Unlike v3, where DBM was added lazily on
+the first dirty access via a page fault, v4 injects DBM into pgt->flags
+at stage-2 MMU initialization time. Combined with HDBSS being auto-enabled
+during migration setup, the first dirty access no longer triggers a page
+fault. Consequently, if lazy hugepage splitting were relied upon (which
+requires a page fault to trigger splitting), hugepages would never be
+split, leading to guest hang after migration. Leonardo's patch above
+ensures eager hugepage splitting is enabled (chunk_size != 0) when HDBSS
+is available, guaranteeing that hugepages are properly split before
+migration starts.
+
+v3: https://lore.kernel.org/linux-arm-kernel/20260225040421.2683931-1-zhengtian10@huawei.com/
+
+v3->v4 changes:
+- Merge sysreg definitions into the FEAT_HDBSS detection patch (was a
+  separate patch in v3).
+- Add auto DBM (Dirty Bit Modifier) support as a new patch, suggested
+  by Leonardo Bras. DBM is now controlled as a page-table level flag
+  (KVM_PGTABLE_S2_DBM) rather than per-PTE. Note that DBM is injected
+  at stage-2 MMU creation time, not lazily on first dirty access. This
+  means the first write to a dirty-logged page does not generate a
+  page fault, which is a key reason for the mandatory dependency on
+  Leonardo's eager hugepage splitting patch (see Depends-on above).
+- Split the v3 "Enable HDBSS support and handle HDBSSF events" patch
+  into three patches: per-vCPU buffer management, fault handling and
+  buffer flush, and auto enable/disable on dirty logging change. This
+  implements kernel-managed automatic HDBSS enable/disable.
+- Remove the KVM_CAP_ARM_HW_DIRTY_STATE_TRACK ioctl for manual HDBSS
+  on/off. HDBSS is now automatically enabled/disabled based on dirty
+  logging state via kvm_arch_commit_memory_region().
+- Change HDBSS buffer flush triggers to vcpu_put, check_vcpu_requests,
+  and kvm_handle_guest_abort.
+- Store hdbss_order at VM level (kvm->arch.hdbss_order) instead of
+  per-vCPU, since all vCPUs share the same order.
+- Document patch is not included in this version; will be sent in a
+  follow-up series.
+
+Leonardo Bras (1):
+  KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+
+Tian Zheng (2):
+  KVM: arm64: Add support for FEAT_HDBSS
+  KVM: arm64: Add auto DBM support for hardware dirty tracking
+
+eillon (3):
+  KVM: arm64: Add HDBSS per-vCPU buffer management
+  KVM: arm64: Add HDBSS fault handling and buffer flush
+  KVM: arm64: Add auto HDBSS enable/disable on dirty logging change
+
+ arch/arm64/include/asm/cpufeature.h    |   5 +
+ arch/arm64/include/asm/esr.h           |   5 +
+ arch/arm64/include/asm/kvm_dirty_bit.h |  29 ++++
+ arch/arm64/include/asm/kvm_host.h      |  14 ++
+ arch/arm64/include/asm/kvm_pgtable.h   |   4 +
+ arch/arm64/include/asm/sysreg.h        |  11 ++
+ arch/arm64/kernel/cpufeature.c         |  12 ++
+ arch/arm64/kvm/Makefile                |   1 +
+ arch/arm64/kvm/arm.c                   |  29 ++++
+ arch/arm64/kvm/dirty_bit.c             | 219 +++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/pgtable.c           |  35 +++-
+ arch/arm64/kvm/hyp/vhe/switch.c        |  15 ++
+ arch/arm64/kvm/mmu.c                   |  19 ++-
+ arch/arm64/kvm/reset.c                 |   4 +
+ arch/arm64/tools/cpucaps               |   1 +
+ 15 files changed, 399 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+[PATCH v4 1/6] KVM: arm64: Enable eager hugepage splitting if HDBSS is available
+Author: Tian Zheng <zhengtian10@huawei.com>
+
+
+FEAT_HDBSS speeds up guest memory dirty tracking by avoiding a page fault
+and saving the entry in a tracking structure.
+
+That may be a problem when we have guest memory backed by hugepages or
+transparent huge pages, as it's not possible to do on-demand hugepage
+splitting, relying only on eager hugepage splitting.
+
+So, at stage2 initialization, enable eager hugepage splitting with
+chunk = 256K * PAGE_SIZE if the system supports HDBSS.
+
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
