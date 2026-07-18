@@ -1,0 +1,1927 @@
+
+On /root/mail/repo:
+From bfdea469d to 78fa3e750
+KVM mailing list update from bfdea469d to 78fa3e750
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     10 linux.intel.com
+      8 linux.ibm.com
+      5 intel.com
+      4 google.com
+      2 kernel.org
+      2 gmail.com
+      1 zte.com.cn
+      1 iscas.ac.cn
+      1 digiscrypt.com
+
+Top 15 contributors (Based on Email Body)
+
+      9  "Kirill A. Shutemov" <kirill.shutemov@linux.intel.com>
+      6  Heiko Carstens <hca@linux.ibm.com>
+      4  Jim Mattson <jmattson@google.com>
+      3  Rick Edgecombe <rick.p.edgecombe@intel.com>
+      2  Peter Fang <peter.fang@intel.com>
+      2  Christian Borntraeger <borntraeger@linux.ibm.com>
+      1  Yosry Ahmed <yosry@kernel.org>
+      1  Wang Yechao <wang.yechao255@zte.com.cn>
+      1  Shivank Sharma <shivanksharma2376543@gmail.com>
+      1  Pengpeng Hou <pengpeng@iscas.ac.cn>
+      1  Naveed Khan <naveed@digiscrypt.com>
+      1  Namhyung Kim <namhyung@kernel.org>
+      1  Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] RISC-V: KVM: Allow memslots ending at the GPA limit
+Author: Pengpeng Hou <pengpeng@iscas.ac.cn>
+
+KVM memslots describe half-open ranges [base_gfn, base_gfn + npages). A
+slot ending exactly at the guest physical-address limit has its final page
+below that limit and is valid.
+
+The current greater-than-or-equal comparison rejects a valid boundary case.
+Use a strict greater-than comparison, matching equivalent KVM architecture
+checks.
+
+Fixes: 9d05c1fee837 ("RISC-V: KVM: Implement stage2 page table programming")
+Signed-off-by: Pengpeng Hou <pengpeng@iscas.ac.cn>
+---
+ arch/riscv/kvm/mmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 11/11] x86/virt/tdx: Optimize tdx_pamt_get/put()
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The Dynamic PAMT get/put helpers use a global spinlock to serialize all
+refcount updates and SEAMCALL invocations. This gives correct behavior for
+concurrent callers, but leads to contention. It is especially bad from the
+KVM side, which is designed to allow faulting in EPT under a shared lock.
+With the global spinlock, not only is the lock an exclusive one, but it is
+for all TDs instead of just a single one.
+
+But taking the global lock each time is actually unnecessary. Only the 0->1
+and 1->0 refcount transitions actually need the lock (to pair with
+SEAMCALLs that actually add and remove with the Dynamic PAMT pages). The
+common case of incrementing or decrementing a non-zero refcount can be
+done locklessly.
+
+So create a fast and slow path. Check the refcount outside the lock and
+only take it for the slow path (0->1 and 1->0 transitions).
+
+On the put side make the refcount adjustment and lock taking atomic so if
+a 'get' happens between them, it doesn't cause the Dynamic PAMT to be
+freed incorrectly. On the get side there is no technique for doing the
+refcount adjustment and lock atomically, so check the refcount again
+inside the lock.
+
+AI was used under supervision to collect/apply feedback, review code and
+workshop logs. It assisted in identifying/evaluating the stale
+conditionals for the races resolved from the atomic_dec_and_lock() change.
+Separate from atomic_dec_and_lock() fallout, it suggested to change
+atomic_inc() to atomic_set(pamt_refcount, 1) in the put error path for the
+sake of being more precise, which Kiryl had also suggested in the past.
+The model also suggested updated comments following the
+atomic_dec_and_lock() change based on some directed prompting. The
+comments were subsequently edited or further prompted for fine tuning.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+ - Move to end of the series
+ - Use atomic_inc_not_zero() in this patch inside the spin_lock(), as
+   suggested on non-optimized patch by. (Dave)
+
+v6:
+ - Fix "tdx_pamt_add()" typo to "tdx_pamt_get()" in lost-race comment
+ - Fix error path bug: set ret = -EIO and use WARN_ON_ONCE() instead of
+   pr_err() for unexpected PAMT.ADD failures (Sean)
+ - Use "set the refcount 0->1" wording to match atomic_set() usage
+ - Wrap comments to 80 columns
+ - Switch to atomic_dec_and_lock() and remove handling of races that are
+   no longer needed as a result. Adjust comments as appropriate. (Dave)
+ - Adjustments from dropping error helper patches
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 44 ++++++++++++++++++++++++-------------
+ 1 file changed, 29 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 08/11] KVM: TDX: Get/put PAMT pages when (un)mapping private memory
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Add Dynamic PAMT support to KVM's S-EPT MMU by "getting" a PAMT page when
+adding guest memory (PAGE.ADD or PAGE.AUG), and "putting" the page when
+removing guest memory (PAGE.REMOVE).
+
+To access the per-vCPU PAMT caches without plumbing @vcpu throughout the
+TDP MMU, begrudgingly use kvm_get_running_vcpu() to get the vCPU, and bug
+the VM if KVM attempts to set an S-EPT leaf without an active vCPU.  KVM
+only supports creating _new_ mappings in page (pre)fault paths, all of
+which require an active vCPU.
+
+The PAMT memory holds metadata for TDX protected memory. With Dynamic
+PAMT, PAMT_4K is allocated on demand. The kernel supplies the TDX module
+with a few pages that cover 2MB of host physical memory.
+
+Releases are balanced via tdx_pamt_put(): every control-page free goes
+through tdx_free_control_page(), and guest data pages are put directly on
+the successful tdh_mem_page_remove() path and in the
+tdx_mem_page_add/aug() error path.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+[rick: enhance log, reviewing, rebase, with help from AI tooling]
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Don't do to_tdx() before NULL check for readability (Binbin, Sean)
+ - Fixup tags (Sean)
+ - Export tdx_supports_dynamic_pamt() since it's used in KVM here and no
+   longer an static inline.
+v6:
+ - Don't have topup op take a min param (Yan, Sean)
+ - Make log match style of the rest of the series
+ - Adjustments from dropping error helper patches
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  2 +
+ arch/x86/kvm/mmu/mmu.c             |  4 ++
+ arch/x86/kvm/vmx/tdx.c             | 63 ++++++++++++++++++++++++++----
+ arch/x86/kvm/vmx/tdx.h             |  2 +
+ arch/x86/virt/vmx/tdx/tdx.c        |  1 +
+ 6 files changed, 65 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 10/11] Documentation/x86: Add documentation for TDX's Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Expand TDX documentation to include information on the Dynamic PAMT
+feature.
+
+The new section explains PAMT support in the TDX module and how Dynamic
+PAMT affects the kernel memory use.
+
+AI was used under supervision to review the docs.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Spell out PAMT acronym (Binbin)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+ - Add info about kernel parameter
+
+v6:
+ - Add missing word (Binbin)
+ - Use "::" instead of ":"
+ - Make format of dmesg example accurate
+---
+ .../admin-guide/kernel-parameters.txt         |  3 ++
+ Documentation/arch/x86/tdx.rst                | 28 +++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 09/11] x86/virt/tdx: Enable Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The Physical Address Metadata Table (PAMT) holds TDX metadata for
+physical memory and must be allocated by the kernel during TDX module
+initialization. Dynamic PAMT is a TDX module feature that can reduce this
+memory use by allocating part of the PAMT dynamically.
+
+The TDX module exposes whether Dynamic PAMT is supported via a bit in the
+'features0' metadata. Unfortunately, the TDX module exposes the feature as
+supported even when it does not support using it with the number of keyids
+currently configured in the BIOS. Since no TDX modules exist today with
+that issue fixed, make the feature default off to prevent users from
+upgrading their kernel and encountering TDX erroring out when trying to
+enable Dynamic PAMT.
+
+For the decision of whether to make it a boot time option and/or compile
+time option, consider that Dynamic PAMT's memory savings are significant
+enough to make it a good default configuration. That is most TDX users
+should want it unless they have strange keyid configurations.
+
+The feature increases the kernel size by 2KB (when TDX is configured in the
+build).
+
+All pieces are in place to enable Dynamic PAMT if it is supported and the
+user passes a kernel parameter.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Add kernel parameter following some twists and turns, derriving
+   originally from a comment by (Chao)
+
+v6:
+ - After Nikolai pointed out that the TDX docs actually have the Dynamic
+   PAMT pages-per-2MB region fixed at 2 instead of variable sized, I
+   checked over the docs more closely looking for anything else that might
+   have been missed. Spotted this 48 bit physical address bit check in the
+   docs, so added it.
+---
+ .../admin-guide/kernel-parameters.txt         |  7 +++++++
+ arch/x86/include/asm/tdx.h                    |  1 +
+ arch/x86/virt/vmx/tdx/tdx.c                   | 21 +++++++++++++++++--
+ 3 files changed, 27 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 06/11] KVM: TDX: Allocate PAMT memory for TD and vCPU control structures
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Use control page helpers for allocating and freeing TD control structures,
+such that these operations can work for Dynamic PAMT.
+
+The TDX module tracks some state for each page of physical memory that it
+might use. It calls this state the PAMT. It includes separate state for
+each page size a physical page could be utilized at within the TDX module
+(1GB, 2MB, 4KB). In Dynamic PAMT, only the 4KB page size state is
+allocated dynamically. So the kernel must ensure PAMT backing is installed
+for any 4KB page being gifted to the TDX module, and must tear down the
+backing when all associated gifted pages are reclaimed.
+
+TD scoped control pages (TDR, TDCS) and vCPU scoped control pages (TDVPR,
+TDCX) are all handed to the TDX module at 4KB page size and are therefore
+subject to this requirement. Replace the raw alloc_page()/__free_page()
+calls for these pages with tdx_alloc/free_control_page().
+
+Switching between special Dynamic PAMT operations or normal page
+alloc/free operations is handled internally in
+tdx_alloc/free_control_page(). So don't check for Dynamic PAMT around these
+calls. Just call them unconditionally. Similarly, drop the NULL checks
+before freeing, as tdx_free_control_page() handles NULL internally.
+
+No functional change intended when Dynamic PAMT is not in use.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+[sean: handle alloc+free+reclaim in one patch]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+[rick: enhance log, reviewing, rebase, with help from AI tooling]
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Fixup tags (Sean)
+ - Missing word in log (Binbin)
+ - Log smoothness (Yan)
+---
+ arch/x86/kvm/vmx/tdx.c | 35 ++++++++++++++---------------------
+ 1 file changed, 14 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 07/11] x86/tdx: Add APIs to support Dynamic PAMT ops from KVM's fault path
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+When handling an EPT violation, KVM holds a spinlock while manipulating
+the EPT. Before entering the spinlock it doesn't know how many EPT page
+tables will need to be installed or whether a huge page will be used. For
+this reason it allocates a worst case number of page tables that it might
+need as part of servicing the EPT violation.
+
+Under Dynamic PAMT these pre-allocated pages will potentially need to have
+Dynamic PAMT backing pages installed for them. KVM already has helpers to
+manage topping up page caches before taking the MMU lock, but they cannot
+be passed from KVM to arch/x86 code.
+
+The problem of how and when to install the Dynamic PAMT backing pages for
+the pages given to the TDX module during the fault path has had a lot of
+design attempts.
+ - Extracting KVM's MMU caches requires too much inlined code added to
+   headers.
+ - A few varieties of installing Dynamic PAMT backing when allocating the
+   S-EPT page tables. (see links)
+ - Using mempool_t to transfer the pages between KVM and arch/x86 doesn't
+   work because the component is designed more around maintaining a pool
+   of pages, rather than topping up a continually drained cache.
+
+So don't do these as they all had various problems. Instead just create a
+small simple data structure to use for handing a pre-allocated list of
+pages between KVM and arch/x86 code. Model this on KVM's existing MMU
+memory caches.
+
+Add a tdx_pamt_cache arg to tdx_pamt_get() so it can draw pages from a
+cache when needed. Not all Dynamic PAMT page installations will happen
+under spinlock, for example TD and vCPU scoped control pages. So have
+tdx_pamt_get() maintain the existing behavior of allocating from the page
+allocator when NULL is passed for the struct tdx_pamt_cache arg. This
+prevents excess allocations for cases where it can be avoided.
+
+Export the new helpers for KVM.
+
+AI was used under supervision to review code and workshop logs.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+Link: https://lore.kernel.org/kvm/aXENNKjAKTM9UJNH@google.com/
+Link: https://lore.kernel.org/kvm/20260129011517.3545883-20-seanjc@google.com/
+Link: https://lore.kernel.org/kvm/aYW5CbUvZrLogsWF@yzhao56-desk.sh.intel.com/
+---
+v7:
+ - Log/comment tweaks (Yan)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+
+v6:
+ - Filled out log from Sean's series
+---
+ arch/x86/include/asm/tdx.h  | 17 ++++++++++
+ arch/x86/virt/vmx/tdx/tdx.c | 65 +++++++++++++++++++++++++++++++++----
+ 2 files changed, 76 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 04/11] x86/virt/tdx: Allocate refcounts for Dynamic PAMT memory
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The PAMT memory holds metadata for all possible TDX protected memory. Each
+physical address range is covered by PAMT entries at three levels (1GB,
+2MB, 4KB). With Dynamic PAMT, the 4KB level of PAMT is allocated on
+demand. The kernel supplies the TDX module with page pairs to store the
+4KB level entries, which cover 2MB of host physical memory. The kernel must
+provide this page pair before using pages from the range for TDX. If this
+is not done, SEAMCALLs that give the pages to be protected by the TDX
+module will fail.
+
+Allocate reference counters for every 2MB range to track TDX memory usage.
+This can be used to handle concurrent get/put callers, in order to
+accurately determine when the dynamic 4KB level of Dynamic PAMT needs to
+be allocated and when it can be freed.
+
+This allocation will currently consume 2MB for every 1TB of address
+space from 0 to max_pfn. The allocation size will depend on how the RAM is
+physically laid out. In a worst case scenario where the entire 52 bit
+address space is covered this would be 8GB. Then the Dynamic PAMT refcount
+allocations could hypothetically cause the savings from Dynamic PAMT to go
+negative on exotic platforms with sparse, small amounts of memory.
+
+Future changes could reduce this refcount overhead to be only allocating
+refcounts for physical ranges that contain memory that TDX can use.
+However, this is left for future work.
+
+AI was used under supervision to collect/apply feedback, review code and
+workshop logs.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Annote functions __init (Chao)
+ - Log tweaks (Yan)
+ - Stanardize on memory units in the text (Sohil)
+ - Delete unneeded comment (Sohil)
+ - Use vzalloc() (Sohil)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+
+v6:
+ - Remove confusing reference to allocating PAMT memory in
+   pamt_refcounts comment. (Yan)
+ - Rename "metadata" function names that really deal with refcounts, as
+   metadata already has a different meaning in TDX.
+ - Move tdx_find_pamt_refcount() to this patch to aid in reviewability
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 53 ++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 52 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 05/11] x86/virt/tdx: Handle multiple callers in tdx_pamt_get/put()
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+tdx_pamt_get()/tdx_pamt_put() unconditionally add or remove Dynamic PAMT
+backing for the 2MB region covering the passed page. However, multiple
+callers can add or remove 4KB pages that fall within the same 2MB region
+and in that scenario only a single PAMT entry is required.
+
+Make the helpers handle only adding/removing Dynamic PAMT backing when
+required, by refcounting each 2MB range. Gate the actual Dynamic PAMT add
+and remove on refcount transitions (0->1 and 1->0). Serialize the refcount
+check and SEAMCALL with a global spinlock so the read-decide-act sequence
+is atomic. This also avoids TDX module BUSY errors, as the Dynamic PAMT add
+and remove SEAMCALLs take internal TDX module locks for the 2MB ranges of
+the specified PFN and the PAMT page pair PFNs. So simultaneous attempts on
+the same 2MB ranges of the PFNs would otherwise encounter an error, which
+would not be handleable in the put case.
+
+The lock is global and heavyweight. Use simple conditional logic to keep
+correctness obvious. This will be optimized in a later change.
+
+The pamt_refcounts[] are atomic_t's. They do not strictly need to be
+because all access is protected by pamt_lock. The overhead of an atomic_t
+in this situation is minuscule compared to the global lock. Leave the
+atomic_t in place to enable future optimization with minimal churn.
+
+AI was used under supervision to collect/apply feedback, split patches,
+review code and workshop logs.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Convert scoped_guard() blocks to use normal spin_un/lock() for the
+   sake of making next patches diff cleaner
+ - Drop __maybe_unused from tdx_find_pamt_refcount() (Binbin)
+ - Switch to atomic_inc_not_zero() (Dave)
+ - Justify use of atomic_t in log (Sohil)
+ - Log/comments (Yan)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+
+v6:
+ - Split from "x86/virt/tdx: Add tdx_alloc/free_control_page() helpers"
+ - Return 0 instead of ret to be clearer (Binbin)
+ - Clarify log (Nikolay)
+ - Justify why the patch is not optimized in response to comments by
+   (Nikolay)
+ - Move tdx_find_pamt_refcount() to faciliate patch re-order
+ - Adjustments from dropping error helper patches
+ - Log tweaks
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 48 +++++++++++++++++++++++++++++++++----
+ 1 file changed, 43 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 03/11] x86/virt/tdx: Add tdx_alloc/free_control_page() helpers
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+Add helpers to use when allocating or preparing pages that are handed to
+the TDX module for use as control/S-EPT pages, and thus need Dynamic PAMT
+adjustments.
+
+The TDX module tracks some state for each page of physical memory that it
+might use. It calls this state the PAMT. It includes separate state for
+each page size a physical page could be utilized at within the TDX module
+(1GB, 2MB, 4KB). In Dynamic PAMT, only the 4KB page size state is
+allocated dynamically.
+
+KVM will need to hand pages to the TDX module that it will use at 4KB
+granularity. So these pages will need Dynamic PAMT backing added before
+they are used by the TDX module, and removed afterwards.
+
+Add tdx_alloc_control_page() and tdx_free_control_page() to handle both
+page allocation and Dynamic PAMT installation. Make them behave like
+normal alloc/free functions where allocation can fail in the case of no
+memory, but free (with any necessary Dynamic PAMT release) always
+succeeds. Do this so they can support the existing TDX flows that require
+teardowns to succeed.
+
+Also create tdx_pamt_get/put() to handle installing Dynamic PAMT 4KB
+backing for pages that are already allocated (such as KVM's use of S-EPT
+page tables or guest private memory). Have them take a pfn instead of a
+struct page, as future changes will want to use these helpers for guest
+pages which are tracked by PFN.
+
+Don't CLFLUSH the Dynamic PAMT pages handed to the TDX module, as is done
+for some other SEAMCALLs, as the TDX docs specify that this is only
+needed on "TD private memory or TD control structure page".
+
+Since these allocations will be easily user triggerable, account the
+memory.
+
+Leave logic to handle concurrency issues for future changes.
+
+AI was used under supervision to collect/apply feedback, split patches,
+review code and workshop logs.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Comment improvements (Chao)
+ - Drop unneeded addition of mm.h header include (Binbin)
+ - Log clarity, code style nits (Sohil)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+
+v6:
+The major change was to split out the concurrency stuff into a future
+patch. It makes it easier to explain in the log. This one is the basic
+functionality. Then the simple version of the concurrency and why in the
+next patch. Also, to get rid of the dynamically sized DPAMT backing
+support which was not based on a formal spec.
+
+Details:
+ - Split out concurrency stuff into next patch because the log was too long
+ - Switch to fixed size pamt page arrays (Nikolay)
+ - Rename tdx_alloc_page()/tdx_free_page() to tdx_alloc_control_page()/
+   tdx_free_control_page() to reflect control/S-EPT purpose (Sean)
+ - Take gfp from the caller in tdx_alloc_control_page() (Sean)
+ - Narrow external API: make tdx_pamt_get()/tdx_pamt_put() static and
+   export only tdx_alloc_control_page()/tdx_free_control_page() (note:
+   dropped inline helpers since the discussion on Sean's series resulted
+   in them not being needed)
+ - Switch EXPORT_SYMBOL_GPL to EXPORT_SYMBOL_FOR_KVM (Sean)
+ - Use WARN_ON_ONCE() instead of pr_err() for TDX module failures (Sean)
+ - Fold alloc_pamt_array()/free_pamt_array() helpers back in and fix the
+   error-unwind index bug (dpamt_pages[i] -> [j])
+ - Adjustments after struct page->pfn
+ - Adjustments from dropping error helper patches
+ - Make the free error paths more normal
+ - Drop gfp_t arg in tdx_alloc_control_page(). In the Sean mega v5, it
+   was really needed because the kvm_mmu_memory_cache had a gfp_t it
+   needed something to do with. But this was still weird because that
+   version didn't handle allocating the DPAMT pages as the gfp_t. And in
+   the end all the callers pass GFP_KERNEL_ACCOUNT. So just drop the arg.
+ - Log tweaks
+---
+ arch/x86/include/asm/tdx.h  |   6 ++
+ arch/x86/virt/vmx/tdx/tdx.c | 163 ++++++++++++++++++++++++++++++++++++
+ arch/x86/virt/vmx/tdx/tdx.h |   2 +
+ 3 files changed, 171 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 02/11] x86/virt/tdx: Allocate page bitmap for Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+
+The TDX Physical Address Metadata Table (PAMT) holds data about the
+physical memory used by TDX, and must be allocated by the kernel during
+TDX module initialization.
+
+The exact size of the required PAMT memory is determined by the TDX module
+and may vary between TDX module versions. Currently it is approximately
+0.4% of the system memory. This is a significant commitment, especially if
+it is not known upfront whether the machine will run any TDX guests.
+
+Each memory region that the TDX module might use needs three separate PAMT
+allocations. One for each supported page size (1GB, 2MB, 4KB). The
+TDX module supports a new feature designed to reduce PAMT overhead called
+Dynamic PAMT. Under Dynamic PAMT the 4KB level is allocated dynamically
+during runtime, while the 1GB and 2MB levels remain allocated on TDX
+module initialization.
+
+However, in the details, Dynamic PAMT still needs some smaller per 4KB
+page scoped data (currently it is 1 bit per page). The TDX module exposes
+the number of bits as a separate piece of metadata than the 4KB static
+allocation for normal PAMT. Although the size is enumerated differently,
+it is handed to the TDX module in the same way the 4KB page size PAMT
+allocation is for normal PAMT.
+
+Begin to implement Dynamic PAMT in the kernel by reading the bits-per-page
+needed for Dynamic PAMT. Calculate the size needed for the bitmap,
+and use it instead of the 4KB size determined for normal PAMT, in the case
+of Dynamic PAMT.
+
+The existing metadata reading code was generated by a script, but the
+current plan is to stop generating this code, as the script has continued
+to need adjustments. So add manually written code and adjust the comment
+about it being autogenerated to be more generic. Start to adopt a more
+normal kernel code style without the ternary statements and if
+conditionals assignments that the auto generated code has.
+
+AI was used under supervision to collect/apply feedback, review code and
+workshop logs.
+
+Signed-off-by: Kirill A. Shutemov <kirill.shutemov@linux.intel.com>
+Co-developed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Vishal Annapurve <vannapurve@google.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+---
+v7:
+ - Re-order pamt size calculations for greater readability (Kiryl)
+ - Move comment to its own line in tdx_supports_dynamic_pamt() (Yan,
+   Sohil)
+ - Log tweak (Sohil)
+ - Make comment in metadata reading more appropriate (Sohil)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+ - Move tdx_supports_dynamic_pamt() to not static inline to reduce
+   churn in later changes
+
+v6:
+ - Improve comment (Binbin)
+ - Log tweaks
+ - Mark tdmr_get_pamt_bitmap_sz() __init in response to upstream
+   changes
+ - Switch to more normal kernel code style, even though it differs from
+   the existing auto generated code.
+---
+ arch/x86/include/asm/tdx.h                  |  2 ++
+ arch/x86/include/asm/tdx_global_metadata.h  |  3 +++
+ arch/x86/virt/vmx/tdx/tdx.c                 | 29 +++++++++++++++++++--
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c | 23 +++++++++++++++-
+ 4 files changed, 54 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 01/11] x86/virt/tdx: Simplify PAMT layout calculation
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+For each memory region that the TDX module might use (called TDMR), three
+separate traditional PAMT allocations are needed. There is one for each
+supported page size (1GB, 2MB, 4KB). These store information on each page
+in the TDMR. In Linux, they are allocated out of one physically contiguous
+block, in order to more efficiently use some internal TDX module
+bookkeeping resources. So some simple math is needed to break the single
+large allocation into three smaller allocations for each page size.
+
+There are some commonalities in the math needed to calculate the base and
+size for each smaller allocation, and so an effort was made to share logic
+across the three. Unfortunately doing this turned out unnaturally tortured,
+with a loop iterating over the three page sizes, only to call into a
+function with case statements for each page size. In the future Dynamic
+PAMT will add more logic that is special to the 4KB page size, making the
+benefit of the math sharing even more questionable.
+
+Three is not a very high number, so get rid of the loop and just duplicate
+the small calculation three times. In doing so, setup for future Dynamic
+PAMT changes.
+
+Since the loop that iterates over it is gone, further simplify the code by
+dropping the array of intermediate size and base storage. Just store the
+values to their final locations. Accept the small complication of having
+to clear tdmr->pamt_4k_base in the error path, so that tdmr_do_pamt_func()
+will not try to operate on the TDMR struct when attempting to free it.
+
+AI was used under supervision to collect/apply feedback, review code and
+workshop logs.
+
+Signed-off-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Reviewed-by: Chao Gao <chao.gao@intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v7:
+ - Remove accidentital whitespace changes (Kiryl)
+ - Drop stale sentence in log (Chao)
+ - Better patch subject (Yan)
+ - Drop Assisted-by tag and cover AI use in log (Dave)
+
+v6:
+ - Drop {} by moving a comment (Binbin)
+ - Log tweaks
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 90 ++++++++++++-------------------------
+ 1 file changed, 28 insertions(+), 62 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 00/11] Dynamic PAMT
+Author: Rick Edgecombe <rick.p.edgecombe@intel.com>
+
+Hi,
+
+This is hopefully the last revision of Dynamic PAMT TDX series. Thank you 
+to all the reviewers that helped polish off the last rough spots in v6[0]. 
+Sean please consider acking the two KVM patches. Dave, please consider 
+taking through tip.
+
+Kiryl and Vishal, I left your RBs because the other changes were trivial.
+Please shout if you prefer to drop them.
+
+Background
+==========
+Dynamic PAMT is a TDX feature that allows saving memory by allocating some 
+of its page tracking metadata dynamically, instead of statically at boot. 
+These static allocations take roughly 0.4% of system memory. The savings 
+are variable depending on system and TDX usage, but could be up to 100x. 
+For more Dynamic PAMT background, please refer to [1]. For more analysis 
+of the savings in different scenarios, see the v6 coverleter[0].
+
+It occurred to me that since the Dynamic PAMT effort began, RAM has become
+much more expensive. Consequently, this feature is even more valuable now.
+It would be good to enable it for TDX users.
+
+Changes
+=======
+Besides the polishing type comments, there were two substantial ones. These
+ended up getting addressed with the same small change.
+
+Chao asked why the TDX module doesn't do the keyid range checks itself 
+that it requires, and then only expose the Dynamic PAMT feature0 bit when 
+it actually can support Dynamic PAMT. It seems the TDX module is open to 
+this change, but in any case, no modules exist today that have it. Since 
+Dynamic PAMT enablement failure will cause TDX enablement to fail, Dynamic 
+PAMT is made an opt-in for now by adding a kernel parameter for it. Then 
+the kernel side keyid checks are dropped.
+
+The other significant comment was Dave asking whether the "x86/virt/tdx: 
+Optimize tdx_pamt_get/put()" was really needed. Later we discussed offline 
+to keep the patch for the sake of maintaining performance and being kind 
+to KVM's efforts to fault under a shared lock. However, now that the 
+feature requires an opt-in, it could be for limited use and not disturb any
+kernel upgraders. Then the optimization patch actually does become more 
+optional. So here it is moved to the end. I think the patch is in good 
+shape, but if there are any doubts we can drop it out of the initial
+support.
+
+Base
+====
+This is based on v7.2-rc3. A full branch can be found here: [2].
+
+Testing
+=======
+This series was tested in the usual suite, and also with the optimization
+patch removed.
+
+
+[0] https://lore.kernel.org/lkml/20260526023515.288829-1-rick.p.edgecombe@intel.com/
+[1] https://lore.kernel.org/lkml/20250918232224.2202592-1-rick.p.edgecombe@intel.com/
+[2] https://github.com/intel-staging/tdx/tree/dpamt_v7
+
+Kiryl Shutsemau (9):
+  x86/virt/tdx: Allocate page bitmap for Dynamic PAMT
+  x86/virt/tdx: Add tdx_alloc/free_control_page() helpers
+  x86/virt/tdx: Allocate refcounts for Dynamic PAMT memory
+  x86/virt/tdx: Handle multiple callers in tdx_pamt_get/put()
+  KVM: TDX: Allocate PAMT memory for TD and vCPU control structures
+  KVM: TDX: Get/put PAMT pages when (un)mapping private memory
+  x86/virt/tdx: Enable Dynamic PAMT
+  Documentation/x86: Add documentation for TDX's Dynamic PAMT
+  x86/virt/tdx: Optimize tdx_pamt_get/put()
+
+Rick Edgecombe (2):
+  x86/virt/tdx: Simplify PAMT layout calculation
+  x86/tdx: Add APIs to support Dynamic PAMT ops from KVM's fault path
+
+ .../admin-guide/kernel-parameters.txt         |  10 +
+ Documentation/arch/x86/tdx.rst                |  28 ++
+ arch/x86/include/asm/kvm-x86-ops.h            |   1 +
+ arch/x86/include/asm/kvm_host.h               |   2 +
+ arch/x86/include/asm/tdx.h                    |  26 +
+ arch/x86/include/asm/tdx_global_metadata.h    |   3 +
+ arch/x86/kvm/mmu/mmu.c                        |   4 +
+ arch/x86/kvm/vmx/tdx.c                        |  98 ++--
+ arch/x86/kvm/vmx/tdx.h                        |   2 +
+ arch/x86/virt/vmx/tdx/tdx.c                   | 452 +++++++++++++++---
+ arch/x86/virt/vmx/tdx/tdx.h                   |   2 +
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c   |  23 +-
+ 12 files changed, 559 insertions(+), 92 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] KVM: x86: Flush guest TLB on MTRR MSR writes
+Author: Jim Mattson <jmattson@google.com>
+
+Per both the AMD APM and the Intel SDM, writing to an MTRR with WRMSR is an
+implicit TLB invalidation that invalidates all TLB entries (including
+global entries). [The APM uses the word, "update," which could be construed
+to mean "modify," but it is unclear.]
+
+Previously, kvm_mtrr_set_msr() stored the updated MTRR state without
+requesting a TLB flush. This broke x86 architectural compliance by leaving
+existing TLB entries in hardware. Additionally, on AMD CPUs supporting
+ERAPS, omitting the TLB flush request meant VCPU_REG_ERAPS was never
+dirtied on MTRR writes, leaving the Return Address Predictor (RAP/RSB)
+uncleared.
+
+Issue a KVM_REQ_TLB_FLUSH_GUEST request on every MTRR MSR write to match
+x86 architectural semantics.
+
+Fixes: 9ba075a664df ("KVM: MTRR support")
+Assisted-by: Gemini:Gemini-Next
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/mtrr.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] KVM: SVM: Dirty ERAPS register on all ASID TLB flushes
+Author: Jim Mattson <jmattson@google.com>
+
+Per the AMD APM, ERAPS clears the Return Address Predictor (RAP/RSB) on all
+implicit TLB invalidations (e.g. modifying certain CR[04] bits).
+
+Move kvm_register_mark_dirty(vcpu, VCPU_REG_ERAPS) into
+svm_flush_tlb_asid() so that any ASID-level TLB flush marks ERAPS dirty.
+Centralizing the ERAPS dirty call in svm_flush_tlb_asid() ensures that all
+ASID flushes (flush_tlb_current, flush_tlb_all, flush_tlb_guest) properly
+set ERAP_CONTROL_CLEAR_RAP on the next VMRUN.
+
+Remove the now redundant svm_flush_tlb_guest() wrapper.
+
+Fixes: db5e82496492 ("KVM: SVM: Virtualize and advertise support for ERAPS")
+Assisted-by: Gemini:Gemini-Next
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/svm.c | 11 +++--------
+ 1 file changed, 3 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] KVM: SVM: Configure ALLOW_LARGER_RAP in svm_vcpu_after_set_cpuid()
+Author: Jim Mattson <jmattson@google.com>
+
+On initial vCPU creation, init_vmcb() is called before userspace configures
+guest CPUID via KVM_SET_CPUID2. Consequently, ERAP_CONTROL_ALLOW_LARGER_RAP
+is never set during initial vCPU creation. If an AP later receives an INIT
+signal after CPUID has been set, init_vmcb() would set the bit for that AP,
+but the BSP would be left with ALLOW_LARGER_RAP clear.
+
+Configure ALLOW_LARGER_RAP in svm_vcpu_after_set_cpuid() to handle the BSP.
+
+Keep the code in init_vmcb() to restore ALLOW_LARGER_RAP after the VMCB has
+been cleared on the VCPU triple-fault reset path.
+
+Fixes: db5e82496492 ("KVM: SVM: Virtualize and advertise support for ERAPS")
+Assisted-by: Gemini:Gemini-Next
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/svm.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] KVM: x86/SVM: Fixes for AMD ERAPS virtualization
+Author: Jim Mattson <jmattson@google.com>
+
+This series fixes three issues in KVM's virtualization of Enhanced Return
+Address Predictor Security (ERAPS):
+
+Patch 1 adds ALLOW_LARGER_RAP configuration to svm_vcpu_after_set_cpuid()
+so that the BSP will be properly configured. The ALLOW_LARGER_RAP
+configuration in init_vmcb() is retained to restore the bit after the VMCB
+is cleared on the VCPU triple fault path.
+
+Patch 2 moves ERAPS dirty tracking into svm_flush_tlb_asid(). AMD ERAPS
+architecturally requires clearing the Return Address Predictor (RAP/RSB) on
+all implicit TLB invalidations. Centralizing dirty tracking in
+svm_flush_tlb_asid() ensures that local/current ASID flushes
+(e.g. same-value CR3 reloads under shadow paging, CR4.PAE/SMEP toggles,
+single-context INVPCID) correctly mark ERAPS dirty and clear the RAP on the
+next VMRUN.
+
+Patch 3 adds a KVM_REQ_TLB_FLUSH_GUEST request to kvm_mtrr_set_msr() when
+MTRR MSRs are written via WRMSR. Per AMD APM and Intel SDM, MTRR writes are
+implicit TLB invalidations. Requesting a guest TLB flush restores x86
+architectural compliance and ensures ERAPS RAP clearing on MTRR writes.
+
+v1 -> v2:
+
+* Restored the ALLOW_LARGER_RAP configuration in init_vmcb() [Sashiko]
+
+v1: https://lore.kernel.org/kvm/20260716232524.2092085-1-jmattson@google.com/
+
+Jim Mattson (3):
+  KVM: SVM: Configure ALLOW_LARGER_RAP in svm_vcpu_after_set_cpuid()
+  KVM: SVM: Dirty ERAPS register on all ASID TLB flushes
+  KVM: x86: Flush guest TLB on MTRR MSR writes
+
+ arch/x86/kvm/mtrr.c    |  1 +
+ arch/x86/kvm/svm/svm.c | 16 ++++++++--------
+ 2 files changed, 9 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/2] virt: tdx-guest: Allocate Quote buffer dynamically
+Author: Peter Fang <peter.fang@intel.com>
+
+
+The TDX attestation driver currently uses a fixed 128 KB Quote buffer
+shared with the host VMM. This may be too small for Quotes using schemes
+such as post-quantum cryptography (PQC), where larger certificate chains
+can increase the Quote size significantly.
+
+Allocate the Quote buffer based on the size reported by the TDX module
+instead of always reserving a fixed-size buffer. This avoids wasting
+memory on platforms that do not require larger Quotes. Older platforms
+fall back to the default 128 KB buffer.
+
+Because the Quote buffer must be physically contiguous, its size is
+bound by the buddy allocator's maximum page order (4 MB), which should
+be sufficient for current attestation needs.
+
+struct tdx_quote_buf has a trailing flexible array, so use struct_size_t()
+to calculate the buffer size.
+
+Signed-off-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Reviewed-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Peter Fang <peter.fang@intel.com>
+---
+v2:
+ - Use struct_size_t() instead of offsetof() to compute the buffer size. [Kiryl, Binbin]
+ - Pass __GFP_NOWARN to alloc_pages_exact() so an oversized size fails quietly. [sashiko]
+ - Reword the description to avoid implying Quotes can exceed the 4 MB limit. [Binbin]
+ - Rename quote_data_size to quote_data_len. [Sathya]
+ - Drop the Assisted-by tags, as the code was not written by AI.
+---
+ drivers/virt/coco/tdx-guest/tdx-guest.c | 55 ++++++++++++++++++-------
+ 1 file changed, 40 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/2] x86/tdx: Add helper to query maximum TD Quote size
+Author: Peter Fang <peter.fang@intel.com>
+
+TDX attestation report ("Quote") sizes can grow with newer cryptographic
+schemes, so guests can no longer rely on a fixed-size buffer for the
+Quote.
+
+Newer TDX modules report the maximum Quote size via a TD-scope metadata
+field. Add a helper to query the size instead of exposing tdg_vm_rd()
+directly, as it can read arbitrary metadata fields.
+
+Thanks to Xu Yilun for suggesting this in an off-list discussion.
+
+Reviewed-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Signed-off-by: Peter Fang <peter.fang@intel.com>
+---
+v2:
+ - Keep the explicit (u32) cast to document the metadata field width. [Binbin]
+ - Note that Xu Yilun's suggestion was made in an off-list discussion. [Sathya]
+ - Drop the Assisted-by tags, as the code was not written by AI.
+---
+ arch/x86/coco/tdx/tdx.c           | 19 +++++++++++++++++++
+ arch/x86/include/asm/shared/tdx.h |  1 +
+ arch/x86/include/asm/tdx.h        |  2 ++
+ 3 files changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/2] tdx-guest: Make Quote buffer size dynamic
+Author: Peter Fang <peter.fang@intel.com>
+
+Hi,
+
+This series changes the TDX attestation driver's Quote buffer size from
+a fixed constant to a value queried from the TDX module. So effectively:
+
+  s/FIXED_BUF_SIZE/queried_buf_size/g
+
+...in the TDX guest driver.
+
+Terminology
+===========
+
+A "TD Quote" is an attestation structure signed with a platform key. It
+contains information about a TDX guest and the platform it's running on.
+
+The "Quote buffer" in the TDX guest driver is a memory buffer shared
+between the TDX guest and the host VMM to retrieve TD Quotes. It has a
+header defined in the GHCI spec [1].
+
+Device Identifier Composition Engine ("DICE") provides a framework for
+layering attestation evidence. This replaces the SGX model of contacting
+an Intel server to obtain a certificate.
+
+Problem
+=======
+
+The fixed-size Quote buffer approach is not sustainable. As
+cryptographic algorithms evolve, TD Quote sizes also grow. A previous
+commit [2] increased the guest driver's fixed-size Quote buffer to 128
+KB to accommodate DICE Quotes, but it may still be insufficient when
+those Quotes use post-quantum cryptography (PQC). PQC certificate chains
+are roughly 10x-15x larger than conventional ones, which can increase
+Quote sizes significantly.
+
+What's in this series
+=====================
+
+To avoid changing the driver whenever the Quote buffer becomes too
+small, newer TDX modules report their maximum Quote size via a metadata
+field. The guest driver uses this value for its Quote buffer when
+available. Older TDX modules continue to use the 128 KB buffer.
+
+The changes do not affect configfs-tsm-report ABIs.
+
+Patch 1/2: Add a helper to read the QUOTE_MAX_SIZE metadata field.
+Patch 2/2: Replace the fixed Quote buffer size with the queried value,
+           when available.
+
+AI use
+======
+
+I used Claude:claude-opus-4-8 to proofread this cover letter and the
+changelogs. The series also underwent AI code review (Claude:claude-opus-4-7),
+but the feedback was limited to style suggestions.
+
+v1: https://lore.kernel.org/all/20260612110853.3188196-1-peter.fang@intel.com/
+
+Changes in v2:
+ - Collect Reviewed-by tags. [Kiryl, Xiaoyao, Binbin, Sathya]
+ - Keep the explicit (u32) cast in tdx_get_max_quote_size(). [Binbin]
+ - Calculate the Quote buffer size with struct_size_t(). [Kiryl, Binbin]
+ - Add __GFP_NOWARN to the allocation since its size comes from the
+   host. [sashiko]
+ - Rename quote_data_size to quote_data_len. [Sathya]
+ - Drop the Assisted-by tags, as AI was not used to write the code.
+
+[1] Guest Hypervisor Communication Interface (GHCI) Specification,
+    Version 1.5, Section "TDG.VP.VMCALL<GetQuote>"
+[2] 43185067c6fd ("configfs-tsm-report: tdx_guest: Increase Quote buffer
+    size to 128KB")
+
+Kuppuswamy Sathyanarayanan (1):
+  virt: tdx-guest: Allocate Quote buffer dynamically
+
+Peter Fang (1):
+  x86/tdx: Add helper to query maximum TD Quote size
+
+ arch/x86/coco/tdx/tdx.c                 | 19 +++++++++
+ arch/x86/include/asm/shared/tdx.h       |  1 +
+ arch/x86/include/asm/tdx.h              |  2 +
+ drivers/virt/coco/tdx-guest/tdx-guest.c | 55 ++++++++++++++++++-------
+ 4 files changed, 62 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] percpu: Add missing DECLARE_PER_CPU_DECRYPTED
+Author: Namhyung Kim <namhyung@kernel.org>
+
+The commit ac26963a1175 ("percpu: Introduce DEFINE_PER_CPU_DECRYPTED")
+introduced the DECLARE_ macro as well but it's not defined when
+CONFIG_AMD_MEM_ENCRYPT=n.  Let's add it.
+
+Cc: Brijesh Singh <brijesh.singh@amd.com>
+Signed-off-by: Namhyung Kim <namhyung@kernel.org>
+---
+ include/linux/percpu-defs.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+
+Author: Naveed Khan <naveed@digiscrypt.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: Fix typos in x86 and riscv tests
+Author: Shivank Sharma <shivanksharma2376543@gmail.com>
+
+Fix spelling typos found by an automated checker in the KVM
+selftests for x86 and RISC-V.
+
+Signed-off-by: Shivank Sharma <shivanksharma2376543@gmail.com>
+---
+ tools/testing/selftests/kvm/riscv/sbi_pmu_test.c              | 4 ++--
+ tools/testing/selftests/kvm/x86/hyperv_clock.c                | 4 ++--
+ tools/testing/selftests/kvm/x86/hyperv_evmcs.c                | 2 +-
+ .../selftests/kvm/x86/vmx_invalid_nested_guest_state.c        | 2 +-
+ 4 files changed, 6 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost-scsi: Prevent OOM from invalid protection SGL count
+Author: Jia Jia <physicalmtea@gmail.com>
+
+The protection SGL path passes the result of vhost_scsi_calc_sgls()
+directly to sg_alloc_table_chained(). The helper returns a negative
+errno when the iterator is invalid or the request exceeds the segment
+limit. The negative errno is then treated as a very large unsigned count
+and sends the request into the SGL allocation path with an invalid size.
+
+Repeated malformed T10-PI submissions from a host-side application caused
+memory usage to rise sharply. MemAvailable fell to about 200 MB, and PSI
+full avg10 reached about 1.46. The OOM killer terminated several userspace
+processes before the endpoint cleanup completed. The kernel log included:
+
+    [17036.451028] Out of memory: Killed process 2345 (systemd)
+    [17036.493325] Out of memory: Killed process 2349 (sd-pam)
+    [17078.265127] Out of memory: Killed process 1793 (networkd-dispat)
+
+Return the calculation error before setting up the protection SGL. This
+keeps the protection path consistent with the data SGL path and prevents
+the invalid count from entering the allocation path.
+
+Fixes: bca939d5bcd0 ("vhost-scsi: Dynamically allocate scatterlists")
+Cc: stable@vger.kernel.org
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/scsi.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: s390: pv: ignore ultravisor donated storage for kmemleak
+Author: Christian Borntraeger <borntraeger@linux.ibm.com>
+
+ignore ultravisor base storage memory that was donated early on for
+kmemleak to avoid kernel crashes when accessing such memory.
+
+Signed-off-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+---
+v1->v2: rebase on linux/master
+ arch/s390/kernel/uv.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] s390/mm: Add missing vm_start <= addr check to do_secure_storage_access()
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+do_secure_storage_access() uses find_vma() without verifying that the
+faulting address is within the returned vma. Add this missing check by
+converting to lock_mm_and_find_vma().
+
+This is not a critical fix, since the worst that could happen is
+WARN_ON_ONCE() in folio_walk_start().
+
+Reported-by: sashiko-bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260717093904.E4A421F00A3E@smtp.kernel.org/
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/mm/fault.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: s390: pv: ignore ultravisor donated storage for kmemleak
+Author: Christian Borntraeger <borntraeger@linux.ibm.com>
+
+ignore ultravisor donated memory for kmemleak to avoid kernel crashes
+when accessing such memory.
+
+Signed-off-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+---
+ arch/s390/kernel/uv.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/4] KVM: s390: pv: Use VM_SPARSE area for guest variable storage area
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+The guest variable storage area is allocated with vmalloc and then
+donated to the ultravisor. Any kernel access to that area will result
+in a secure storage access exception (aka fault).
+
+This is a problem if such a memory area is read via /proc/kcore. This
+causes an exception via vread_iter() and results in an unexpected short
+read. Avoid this by allocating a custom VM_SPARSE area. If such an area
+is read, vread_iter() returns zeroes for the entire area.
+
+Note that the function which frees the area does not update ptes. This
+is intentional to allow for deferred / lazy pte updates and TLB flushing
+like the generic vfree() code is doing that. See vunmap_pte_range().
+
+This assumes that s390 will gain full support for lazy_mmu_mode_enable()
+and lazy_mmu_mode_disable() in the future, since as of now the used
+ptep_get_and_clear() in vunmap_pte_range() does indeed invalidate and
+flush every single pte entry, but only for s390.
+
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/include/asm/uv.h |  2 ++
+ arch/s390/kernel/uv.c      | 65 ++++++++++++++++++++++++++++++++++++++
+ arch/s390/kvm/pv.c         |  6 ++--
+ 3 files changed, 70 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/4] s390/mm: Remove folio handling for secure storage access exceptions
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+Remove folio handling for secure storage access exceptions that happen
+via the kernel mapping. Using folio_try_get() for exceptions via the
+kernel mapping is racy: for example such an exception may happen on one
+CPU, while a different CPU frees the corresponding page. Subsequently the
+page can be part of a folio of different size, before the faulting CPU
+executes folio_try_get(). This may lead to data corruption.
+
+As of now this scenario does not seem to be possible, however with the
+upcoming load_unaligned_zeropad() this is possible.
+
+As a side effect PG_arch_1 is not cleared anymore for such faults via the
+kernel mapping. However given that this bit is over-indicating it
+shouldn't matter.
+
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/mm/fault.c | 8 +-------
+ 1 file changed, 1 insertion(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/4] s390/mm: Fix handling of secure storage access exceptions in vmalloc area
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+Secure storage access exceptions in vmalloc area need to be handled
+separately since folio_try_get() or virt_to_phys() do not work on such
+addresses. Given that there cannot be a valid access let such exceptions
+fail immediately. The kernel will either fixup or crash.
+
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/mm/fault.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/4] s390: Add support for DCACHE_WORD_ACCESS (again)
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+Implement load_unaligned_zeropad() and enable DCACHE_WORD_ACCESS to
+speed up string operations in fs/dcache.c and fs/namei.c.
+
+With the secure storage access exception cases addressed, add support
+for DCACHE_WORD_ACCESS again.
+
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/Kconfig                      |  1 +
+ arch/s390/include/asm/asm-extable.h    |  4 ++++
+ arch/s390/include/asm/word-at-a-time.h | 22 ++++++++++++++++++++++
+ arch/s390/mm/extable.c                 | 18 ++++++++++++++++++
+ 4 files changed, 45 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/4] s390: Reintroduce support for DCACHE_WORD_ACCESS
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+v2:
+- Explicitely PAGE_ALIGN size in uv_alloc_stor_var() [Sashiko]
+- Document that lazy PTE update / TLB flushing is intended [Sashiko]
+
+v1:
+Support for DCACHE_WORD_ACCESS was recently removed [1] since it caused
+problems with the incomplete handling of secure storage access
+exceptions. It looked like fixing the exception handler would be a larger
+effort; therefore support for DCACHE_WORD_ACCESS was removed as a work
+around.
+
+Address the potential problems that exist with secure storage access
+exceptions and add support for DCACHE_WORD_ACCESS again.
+
+In particular address the following problems:
+
+- Reading the guest variable storage area via the /proc/kcore interface
+  results in short reads. Address this by using a VM_SPARSE area for the
+  guest variable storage area. VM_SPARSE areas will be handled like
+  memory holes (zeros will be read).
+
+- Fix handling of secure storage access exceptions in vmalloc area.
+
+- Remove folio handling for secure storage access exceptions to avoid
+  potential data corruption.
+
+[1] 37540b8c287f ("s390: Revert support for DCACHE_WORD_ACCESS")
+
+Heiko Carstens (4):
+  KVM: s390: pv: Use VM_SPARSE area for guest variable storage area
+  s390/mm: Fix handling of secure storage access exceptions in vmalloc area
+  s390/mm: Remove folio handling for secure storage access exceptions
+  s390: Add support for DCACHE_WORD_ACCESS (again)
+
+ arch/s390/Kconfig                      |  1 +
+ arch/s390/include/asm/asm-extable.h    |  4 ++
+ arch/s390/include/asm/uv.h             |  2 +
+ arch/s390/include/asm/word-at-a-time.h | 22 +++++++++
+ arch/s390/kernel/uv.c                  | 65 ++++++++++++++++++++++++++
+ arch/s390/kvm/pv.c                     |  6 +--
+ arch/s390/mm/extable.c                 | 18 +++++++
+ arch/s390/mm/fault.c                   | 10 ++--
+ 8 files changed, 118 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Improve dirty log clearing by skipping zero bits in mask
+Author: Wang Yechao <wang.yechao255@zte.com.cn>
+
+The existing kvm_riscv_gstage_wp_range() walks the entire [start, end)
+range to apply write protection for dirty log clearing, even when the
+provided mask has zero bits (i.e., many GFNs do not need protection).
+This leads to unnecessary page table walks when the mask is sparse.
+
+Replace the range-based approach with a new function
+kvm_riscv_gstage_wp_pt_masked() that iterates only over the set bits in
+the mask. For each set bit, it looks up the leaf PTE and applies write
+protection. Once a huge page is encountered, the entire huge-page range
+is processed in one go, and the corresponding bits in the mask are cleared
+using bitmap_clear().
+
+Performance was measured with KVM selftests dirty_log_perf_test on a
+Spacemit k3 host with the following configuration:
+- vCPUs: 2 (-v 2)
+- Memory: 1GB (-b 1G)
+- Iterations: 3 (-i 3)
+- Write percentage varied via -w parameter to simulate different
+  dirty mask densities.
+
+The following data shows the time spent in the clear-dirty-log phase
+(i.e., the KVM_CLEAR_DIRTY_LOG ioctl) under each configuration.
+
++------------------+------------------+------------------+-------------+
+| Write Percentage | Original (s)     | Patched (s)      | Improvement |
++------------------+------------------+------------------+-------------+
+| 10%              | 0.012905         | 0.009213         | +28.6%      |
+| 30%              | 0.014217         | 0.010287         | +27.6%      |
+| 50%              | 0.014606         | 0.011772         | +19.4%      |
+| 70%              | 0.014735         | 0.013199         | +10.4%      |
+| 100%             | 0.014759         | 0.015294         | -3.6%       |
++------------------+------------------+------------------+-------------+
+
+The performance improvement is most significant when the dirty mask is
+sparse (low write percentage), which is common in real-world scenarios
+with low to moderate memory write intensity. In the worst-case scenario
+where the mask is fully set (100% write), the optimization introduces
+a slight 3.6% overhead due to the additional bit operations, which is
+acceptable given the substantial gains in common cases.
+
+This change significantly reduces the number of page-table walks when
+the dirty mask has many zero bits, improving the efficiency of
+KVM_CLEAR_DIRTY_LOG and related ioctls.
+
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/include/asm/kvm_gstage.h |  3 ++
+ arch/riscv/kvm/gstage.c             | 59 +++++++++++++++++++++++++++++
+ arch/riscv/kvm/mmu.c                |  2 +-
+ 3 files changed, 63 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nVMX: Only update last_vpid on a successful nested VM-Enter
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Delay calling nested_vmx_transition_tlb_flush() in the nested VM-Enter
+path until all the checks are completed, and performing any requested
+TLB flushes for L2 is guaranteed (i.e.
+kvm_service_local_tlb_flush_requests() is called in L2's context),
+either before L2 is run in vcpu_enter_guest() or as part of a "full"
+nested VM-Exit (i.e.  through __nested_vmx_vmexit()).
+
+nested_vmx_transition_tlb_flush() checks if L1 changed L2's VPID in
+vmcs12 (among other things), updates last_vpid accordingly, and requests
+a TLB flush (through KVM_REQ_TLB_FLUSH_GUEST). With the current code
+path, it is possible for the nested VM-Enter to fail after
+nested_vmx_transition_tlb_flush() already updates last_vpid, but in this
+case KVM will *not* call kvm_service_local_tlb_flush_requests() in L2's
+context, and flushing L2's VPID will missed. If L1 later runs L2 with
+the same VPID, nested_vmx_transition_tlb_flush() won't detect a change
+in VPID, and L2's VPID will not be flushed.
+
+Fixes: 5c614b3583e7 ("KVM: nVMX: nested VPID emulation")
+Cc: stable@vger.kernel.org
+Reported-by: Sashiko <sashiko-bot@kernel.org> # Internal review
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+
+Note: I was able to reproduce the bug by hacking a nested TLB flushes
+selftest I am working on as part of nSVM TLB optimizations. I haven't
+sent out a new version that includes the selftest yet, but basically the
+test includes one test case where L1 updates a mapping and changes L2's
+VPID to effectively flush the TLB. Inserting a failed VM-Enter before
+the correct VM-Enter makes that test case fail. This patch fixes it.
+
+This is probably too vague, so I will reply to this patch when I send
+out the selftest with exact diff needed to repro. This is me just
+pointing out that a repro exists, and that I will add a pointer to it
+later.
+
+
+---
+ arch/x86/kvm/vmx/nested.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 053f15ef4 to 5517d1b85
+KVM mailing list update from 053f15ef4 to 5517d1b85
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 linux.dev
+      3 google.com
+      2 grrlz.net
+      1 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      6  Fuad Tabba <fuad.tabba@linux.dev>
+      3  Mostafa Saleh <smostafa@google.com>
+      2  Bradley Morgan <include@grrlz.net>
+      1  Wei-Lin Chang <weilin.chang@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: arm64: ptdump: Flush the last region
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Currently the stage-2 ptdump calls note_page() at each leaf entry visit.
+This simply misses the output of the last region, because note_page()
+only dumps output when it detects a change in level/prot, or when the
+walk enters a next marker section. The last region in the guest IPA
+space with the same level/prot is not dumped since there is no change
+after it.
+
+To dump the final region, manually issue a note_page() call with address
+BIT(ia_bits) (end of guest IPA space) and level == -1 to trigger a level
+change after the last region. Additionally treat level == -1 as a last
+flushing note_page() call and avoid dumping the name of the next marker
+for this case.
+
+Fixes: 7c4f73548ed1 ("KVM: arm64: Register ptdump with debugfs on guest creation")
+Reported-by: Sashiko AI <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/kvmarm/20260630122758.891011F00A3A@smtp.kernel.org/
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+---
+ arch/arm64/kvm/ptdump.c | 8 +++++---
+ arch/arm64/mm/ptdump.c  | 5 +++--
+ 2 files changed, 8 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 2/2] KVM: arm64: Support BBM level 3
+Author: Mostafa Saleh <smostafa@google.com>
+
+If the system supports hardware Break-Before-Make (BBM) level 3, use it
+to replace stage-2 PTEs directly instead of falling back to the software
+break-before-make sequence.
+
+1) Get a reference count on the containing table for the new PTE.
+2) Atomically update the PTE with the new valid descriptor.
+3) Invalidate the TLB for the old PTE.
+4) Drop the reference count holding the old PTE.
+
+One interesting case, as BBML3 will update the PTE atomically, it
+can only know it raced with another core at the point of the cmpxchg
+failing, unlike the SW implementation which locks the PTE first.
+And as we must issue CMOs to the new mapped page before the update,
+that means with BBML3 racing cores will issue redundant CMOs,
+to improve this:
+- We only use BBML3 if the old PTE was live.
+- To reduce the window of the race, an early check is added before
+  the CMO to exit early, but that does not eliminate the race.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 53 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 46 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 1/2] KVM: arm64: Add stage2_clean_old_pte()
+Author: Mostafa Saleh <smostafa@google.com>
+
+At the moment, the pgtable code rely on BBM in SW which looks like:
+Break: stage2_try_break_pte()
+	1) Break PTE and lock it
+	2) TLBI
+	3) Put the ref on the old PTE
+
+Make: stage2_make_pte()
+	1) Get a ref on the new PTE
+	2) Install the live PTE
+
+With BBML3, the sequence will look as
+	1) Get ref on the new PTE
+	2) Install new PTE
+	3) TLBI
+	4) Put the ref on the old PTE
+
+Which requires moving step #2 #3 from the break function to the make
+function, although it is possible to do that for SW BBM also, that
+means the stage2_try_break_pte() did not fully break the PTE as it
+is referenced in TLBs, although that works it seems fragile.
+
+Instead, move this logic to a new function stage2_clean_old_pte()
+that can be called from BBML3.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/pgtable.c | 67 ++++++++++++++++++++----------------
+ 1 file changed, 37 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 0/2] KVM: arm64: Support BBM level 3
+Author: Mostafa Saleh <smostafa@google.com>
+
+This patch series adds support for BBM level 3 to KVM pgtable, it
+depends on [1]
+
+Motivation
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D
+I have been looking into this for the context of:
+- Page table sharing between the host CPU stage-2 and the SMMUv3 for
+  protected KVM.
+- Use the pagtable code to populate SMMUv3 stage-2 shadowed
+  page table [2]
+
+However, BBM level 3 is still useful for CPU only operations as it
+avoids intermediately breaking translation.
+
+Design
+=3D=3D=3D=3D=3D=3D
+Some of the conditions that BBM level 3 will be useful in (RWHZWS):
+1) A change to a PTE memory type, shareability, cacheability or OA
+2) Changing from block to table
+3) Changing from table to block
+
+At the moment in the hyp page table code:
+- For #1) stage2_map_walker_try_leaf(): Replaces a leaf with another
+  one which does not match the same OA/perms/attrs.
+
+- For #2) Switch block to table is used from:
+  - kvm_pgtable_stage2_split(): Explicitly splitting a block (used
+    for dirty logging), where a block is replaced by a table with
+    the same attributes.
+  - stage2_map_walk_leaf(): Updating a mapping that is partially
+    part of an existing block.
+
+- #3) Does not exist in the code at the moment as coalescing is not
+  supported.
+
+The first patch is a preparation to be able to clean up the old pte
+for BBML3, the second patch adds the main logic.
+
+Initially, I encapsulated the full logic of BBM in one function,
+which was not readable, due to different ordering and dealing with
+CMO, TLBI.
+
+Instead, I kept the logic into 2 functions, where BBML3 is added in
+the make step.
+
+One interesting case, as BBML3 will update the PTE atomically, it
+can only know it raced with another core at the point of the cmpxchg
+failing, unlike the SW implementation which locks the PTE first.
+And as we must issue CMOs to the new mapped page before the update,
+that means with BBML3 racing cores will issue redundant CMOs, to
+improve this:
+- We only use BBML3 if the old PTE was live
+- To reduce the window of the race an early check is added before
+  the CMO to exit early, but that does not eliminate the race.
+
+Testing
+=3D=3D=3D=3D=3D=3D=3D
+This was tested:
+- C1-Pro cores, unfortunately the version I have does not run
+  upstream, I backported the patches to Android kernel (6.18).
+
+- mainline(7.2-rc3) kernel on a Qualcomm X1 with a hacked cpufeature
+  as it does not support BBM, I did not see conflict aborts or TLB
+  corruption.
+
+I tested with VHE and protected (hvhe) modes, running VMs
+(and protected), and running some selftests, that might exercise and
+stress this path tools/testing/selftests/kvm:
+- demand_paging_test
+- memslot_perf_test
+- memslot_modification_stress_test
+- dirty_log_test
+
+Future work
+=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D=3D
+Some other changes that would be useful for the SMMUv3:
+- Eagerly install table on block split, we can now replace a block
+  with a fully populated table atomically when we unmap a partial
+  part of the block.
+
+There is more to support page table sharing (such as dealing with
+TLB invalidation, coherency=E2=80=A6), I submitted a talk to LPC to discuss
+this further.
+
+[1] https://lore.kernel.org/linux-arm-kernel/20260715053408.1950475-1-linu.=
+cherian@arm.com/
+[2] https://lore.kernel.org/linux-iommu/20260715115906.2664882-1-smostafa@g=
+oogle.com/
+
+Mostafa Saleh (2):
+  KVM: arm64: Add stage2_clean_old_pte()
+  KVM: arm64: Support BBM level 3
+
+ arch/arm64/kvm/hyp/pgtable.c | 118 ++++++++++++++++++++++++-----------
+ 1 file changed, 82 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 7/7] KVM: arm64: selftests: Add stage-2 block transition test
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Add a test for the two stage-2 granularity changes dirty logging forces
+at fault time, asserting the guest completes with no KVM_RUN error. The
+first scenario collapses a page into a hugetlb-backed block: it writes
+under logging, re-write-protects the page via GET_DIRTY_LOG, then writes
+again with logging off. The second splits blocks: it faults in several
+non-executable 2M blocks, enables logging, then executes in each block so
+an execute permission fault splits it. It is skipped when CTR_EL0.DIC is
+set, since mappings are then executable and no execute fault occurs.
+
+Both paths make the fault handler allocate under mmu_lock, so a backend
+that fails to stage that memory returns a KVM_RUN error or crashes the
+host. The property holds on any host. On a pKVM host, where a
+non-protected guest uses the pkvm_pgtable_*() backend, it also guards
+that backend's fault-time staging.
+
+Assisted-by: Antigravity:gemini-3.1-pro
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/arm64/stage2_block_transitions.c      | 226 ++++++++++++++++++
+ 2 files changed, 227 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 6/7] KVM: arm64: Don't advertise eager page splitting under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Under pKVM the stage-2 walker resolves to pkvm_pgtable_stage2_split(), a
+WARN_ON_ONCE(1) stub, yet KVM_CAP_ARM_EAGER_SPLIT_CHUNK_SIZE is still
+enabled and reported for non-protected guests: the capability check keys
+on the per-VM protected state while the walker dispatch keys on the
+host-global mode. Enabling the cap and then dirty-logging the guest
+reaches the stub, splatting a userspace-reachable WARN.
+
+Reject the capability, and stop reporting a chunk size and the
+supported block sizes, for every VM once pKVM is enabled, keyed on the
+host-global mode like the split dispatch. Gating only protected VMs
+would leave the non-protected guests that reach the stub still able to
+enable it. Userspace decides whether eager splitting is available from
+the block-size bitmap (QEMU falls back to no eager splitting when it
+reads 0), so leaving it advertised steers an explicit request into the
+enable failure instead of the fallback.
+
+Fixes: e912efed485a ("KVM: arm64: Introduce the EL1 pKVM MMU")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pkvm.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 5/7] KVM: arm64: Don't WARN on pKVM stage-2 map failures
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+pkvm_pgtable_stage2_map() wraps the __pkvm_host_share_guest() and
+__pkvm_host_donate_guest() return in WARN_ON(), but those hypercalls
+fail for reasons that are not EL1 invariant violations: -EINVAL for a
+pfn that is not memblock RAM (check_range_allowed_memory() rejects a
+device page mapped into a non-protected guest) and -ENOMEM under
+memcache pressure. Both are reachable from a guest fault, so the WARN
+splats on host input.
+
+Return the error without warning. The unshare and write-protect WARNs
+stay, since a failure there does signal a broken EL1 invariant.
+
+Fixes: 3669ddd8fa8b5 ("KVM: arm64: Add a range to pkvm_mappings")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/pkvm.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 4/7] KVM: arm64: Skip pKVM stage-2 flush when FWB is enabled
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+pkvm_pgtable_stage2_flush() cleans the D-cache for every mapping in the
+range even on hardware with stage-2 Force Write-Back, where FWB keeps
+guest memory coherent to the PoC and the maintenance is unnecessary. The
+generic kvm_pgtable_stage2_flush() returns early in that case, but the
+pKVM MMU does not, so it needlessly cleans the whole range on, e.g.,
+every set/way trap.
+
+Return early when FWB is enabled, matching the generic walker.
+
+Fixes: e912efed485a ("KVM: arm64: Introduce the EL1 pKVM MMU")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/pkvm.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 3/7] KVM: arm64: Top up stage-2 memcache for dirty logging faults
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+Dirty logging forces new stage-2 mappings to page size but does not
+always split an existing block first (eager splitting is best effort
+and off by default). A non-write permission fault on such a block, an
+instruction fetch, still needs a page-table page to split it, but the
+top-up is gated on write faults.
+
+With the cache empty, kvm_mmu_memory_cache_alloc() hits its
+guest-triggerable WARN_ON(!nobjs) and falls back to a GFP_ATOMIC
+allocation under mmu_lock, with a BUG_ON() if that fails.
+
+Top up the memcache for any permission fault while dirty logging is
+active.
+
+Fixes: 6f745f1bb5bf ("KVM: arm64: Convert user_mem_abort() to generic page-table API")
+Link: https://lore.kernel.org/all/20260623165634.699011F000E9@smtp.kernel.org/
+Signed-off-by: Bradley Morgan <include@grrlz.net>
+[tabba: reword the commit message for the generic, non-pKVM failure mode]
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/mmu.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 2/7] KVM: arm64: Top up the memcache for pKVM permission faults
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+A permission fault normally only relaxes a leaf, so user_mem_abort()
+skips the memcache top-up. Under pKVM such a fault can instead collapse
+pages into a block. That needs a fresh pkvm_mapping object, and without
+it cache->mapping is NULL, so pkvm_pgtable_stage2_map() dereferences NULL
+and faults the host under mmu_lock. Staging only the object is not
+enough: the hypervisor requires kvm_mmu_cache_min_pages in the memcache
+even for the allocation-free install, so under memcache pressure the
+collapse returns -ENOMEM and trips the WARN_ON(ret) in
+pkvm_pgtable_stage2_map() where a non-pKVM guest succeeds.
+
+Top up the full memcache for pKVM permission faults so both the mapping
+object and the min-pages are staged before mmu_lock.
+
+Fixes: db14091d8f75 ("KVM: arm64: Stage-2 huge mappings for np-guests")
+Reported-by: Bradley Morgan <include@grrlz.net>
+Link: https://lore.kernel.org/all/20260623161545.EA08E1F000E9@smtp.kernel.org/
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/mmu.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 1/7] KVM: arm64: Skip cache maintenance for non-cacheable pKVM mappings
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+The pKVM flush path walks its own pkvm_mappings list and cleans the
+data cache for every mapping, unlike the generic stage-2 walker it
+shadows, which skips non-cacheable leaves. Cleaning the cacheable
+alias of a non-cacheable mapping is pointless and can corrupt a
+device endpoint. Record whether a mapping is non-cacheable in spare
+bits of nr_pages and skip cache maintenance for it.
+
+Fixes: e912efed485a ("KVM: arm64: Introduce the EL1 pKVM MMU")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Bradley Morgan <include@grrlz.net>
+[tabba: use Marc's anonymous bitfield in place of the open-coded mask and helpers]
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pkvm.h |  5 ++++-
+ arch/arm64/kvm/pkvm.c             | 15 +++++++++------
+ 2 files changed, 13 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 0/7] KVM: arm64: pKVM stage-2 mapping and memcache fixes
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v4 [1]:
+  - Restored the permission-fault and dirty-logging memcache top-ups
+    that v4 dropped. Both fix real bugs.
+  - Patch 1 uses the anonymous bitfield encoding rather than the
+    open-coded mask and helpers. (Marc)
+  - Reshaped the permission-fault top-up to stage the full memcache
+    under pKVM, not just the mapping object. The object-only form still
+    returned -ENOMEM and tripped a WARN under the hypervisor's
+    unconditional min-pages check.
+  - Re-scoped the dirty-logging top-up to its generic, non-pKVM failure
+    mode, now that the permission-fault patch covers pKVM.
+  - Added three adjacent fixes found while going through the series, and
+    a selftest for the block transitions.
+  - Patches 1 and 3 keep Bradley's Signed-off-by from v3; my changes
+    to each are noted in a [tabba: ...] line.
+
+I picked this up while reviewing Bradley's "mapping cache" series [2]:
+v4 dropped two fixes from v3 that address real bugs, so I've collected
+the three fixes back together, reshaped patch 1 per Marc's review [3],
+added a few adjacent fixes I found along the way and a selftest, and am
+reposting as v5.
+
+Most of the fixes are in the pKVM stage-2 walker. On a pKVM host a
+non-protected guest's stage-2 faults go through pkvm_pgtable_*(), which
+diverges from the generic walker in several ways that are bugs: cache
+maintenance on non-cacheable mappings (patch 1), a missing memcache
+top-up on permission faults that under pKVM still allocate (patch 2), a
+full flush walk on FWB hardware (patch 4), a WARN on a guest-reachable
+map failure (patch 5), and an eager-split capability whose pKVM backend
+is only a stub (patch 6). These affect non-protected guests only, since
+dispatch and memcache selection key on the host-global pKVM mode, and
+protected guests take no permission faults.
+
+Patch 3 is not pKVM-specific. During dirty logging a non-write
+permission fault, an instruction fetch, still needs a page-table page
+to split a block, but the memcache top-up is gated on write faults.
+That fault path is generic, so the fix is too.
+
+The two memcache top-ups came from sashiko review-bot findings [4][5],
+and both check out against the code.
+
+The series is structured as follows:
+
+  1:    Skip cache maintenance for non-cacheable mappings.
+  2-3:  Top up the memcache for the permission and dirty-logging faults
+        that force stage-2 block transitions.
+  4-6:  Adjacent pkvm_pgtable_*() fixes: FWB flush early-out, drop a
+        spurious map WARN, and gate the eager-split capability.
+  7:    Selftest for the block-collapse and block-split transitions.
+
+Testing: the selftest in patch 7 covers the two dirty-logging block
+transitions (page->block collapse and block->page split) that patch 2
+stages; on the base kernel the collapse oopses the host in
+pkvm_pgtable_stage2_map() with a NULL dereference under mmu_lock, and
+with the series applied it passes. It is a standalone test rather than
+an extension of kvm_page_table_test, whose default anonymous-4K backing
+forms no huge-page blocks, so an automated run never exercises these
+transitions, and whose worker/stage harness does not fit the multi-stage
+logging sequence. Run it with 2M hugepages
+reserved and, for the split half, on a CPU with CTR_EL0.DIC == 0 (e.g.
+-cpu cortex-a710 under QEMU); it self-skips those otherwise. It also
+passes on a non-pKVM host (VHE and nVHE), where patch 3's generic change
+applies. The other fixes are not exercised by the selftest and rest on
+the analysis in their commit messages: patch 3's fault path is generic
+and non-pKVM (under pKVM patch 2 already tops it up, and its failure is
+a WARN_ON(!nobjs) in kvm_mmu_memory_cache_alloc(), not a KVM_RUN error),
+and patches 1 and 4-6 each need a specific pKVM configuration to hit.
+
+Based on Linux v7.2-rc3 (a13c140cc289).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/r/20260701192428.17430-1-include@grrlz.net
+[2] https://lore.kernel.org/r/20260624160028.15591-1-include@grrlz.net
+[3] https://lore.kernel.org/r/86qzllpy1g.wl-maz@kernel.org
+[4] https://lore.kernel.org/all/20260623161545.EA08E1F000E9@smtp.kernel.org/
+[5] https://lore.kernel.org/all/20260623165634.699011F000E9@smtp.kernel.org/
+
+Bradley Morgan (2):
+  KVM: arm64: Skip cache maintenance for non-cacheable pKVM mappings
+  KVM: arm64: Top up stage-2 memcache for dirty logging faults
+
+Fuad Tabba (5):
+  KVM: arm64: Top up the memcache for pKVM permission faults
+  KVM: arm64: Skip pKVM stage-2 flush when FWB is enabled
+  KVM: arm64: Don't WARN on pKVM stage-2 map failures
+  KVM: arm64: Don't advertise eager page splitting under pKVM
+  KVM: arm64: selftests: Add stage-2 block transition test
+
+ arch/arm64/include/asm/kvm_pkvm.h             |   8 +-
+ arch/arm64/kvm/mmu.c                          |   9 +-
+ arch/arm64/kvm/pkvm.c                         |  21 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/arm64/stage2_block_transitions.c      | 226 ++++++++++++++++++
+ 5 files changed, 254 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
