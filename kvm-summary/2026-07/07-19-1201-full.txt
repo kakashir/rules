@@ -1,0 +1,286 @@
+
+On /root/mail/repo:
+From 78fa3e750 to 56b9c9005
+KVM mailing list update from 78fa3e750 to 56b9c9005
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 phil.gs
+      3 iscas.ac.cn
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      3  Phil Rosenthal <phil@phil.gs>
+      3  Pengpeng Hou <pengpeng@iscas.ac.cn>
+      1  Guidong Han <2045gemini@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v3] KVM: x86/mmu: Fix use-after-free on vendor module
+Author: Phil Rosenthal via B4 Relay <devnull+phil.phil.gs@kernel.org>
+
+
+mmu_destroy_caches() destroys pte_list_desc_cache and
+mmu_page_header_cache, but leaves both pointers unchanged.  The pointers
+live in kvm.ko, and therefore survive when a vendor module is unloaded
+while kvm.ko remains loaded.
+
+If creation of pte_list_desc_cache fails during a subsequent vendor
+module load, its assignment sets pte_list_desc_cache to NULL and the
+error path calls mmu_destroy_caches().  mmu_page_header_cache still
+points to the cache destroyed during the preceding vendor module
+unload.  Passing that stale pointer to kmem_cache_destroy() causes a
+slab use-after-free.
+
+Reproduce the issue on a v7.1.3 kernel with CONFIG_KASAN=y,
+CONFIG_KASAN_GENERIC=y, CONFIG_KVM=m, and CONFIG_KVM_INTEL=m.  A
+one-shot test hook forces pte_list_desc_cache to NULL on the second
+invocation of kvm_mmu_vendor_module_init():
+
+  1. Load kvm.ko and kvm-intel.ko, creating both caches.
+  2. Unload only kvm_intel, leaving kvm.ko loaded.
+  3. Reload kvm_intel and force initialization through the -ENOMEM path.
+
+KASAN reports:
+
+  BUG: KASAN: slab-use-after-free in
+  kvm_mmu_vendor_module_init+0x5b/0x170 [kvm]
+  ...
+  kmem_cache_destroy+0x21/0x1d0
+  kvm_mmu_vendor_module_init+0x5b/0x170 [kvm]
+  ...
+  Allocated by task 16817:
+  __kmem_cache_create_args+0x12c/0x3b0
+  __kmem_cache_create.constprop.0+0xb6/0xf0 [kvm]
+  kvm_mmu_vendor_module_init+0x13b/0x170 [kvm]
+  ...
+  Freed by task 16820:
+  kmem_cache_destroy+0x117/0x1d0
+  kvm_mmu_vendor_module_exit+0x21/0x30 [kvm]
+
+Clear both pointers immediately after destroying their caches so that
+the stored state reflects the caches' lifetime and repeated cleanup is
+safe.
+
+With the fix applied, the same injected vendor module reload fails with
+-ENOMEM as expected and produces no KASAN report.
+
+Fixes: cb498ea2ce1d ("KVM: Portability: Combine kvm_init and kvm_init_x86")
+Cc: stable@vger.kernel.org
+Signed-off-by: Phil Rosenthal <phil@phil.gs>
+---
+Apologies for the extra churn.  The v2 diff was corrupted by my mail
+client; v3 is sent through b4 and restores the correct tabs.
+
+Changes in v3:
+  - Restore tabs in the diff that were converted to spaces by the mail
+    client.
+  - Describe the failure as a slab use-after-free rather than a
+    double-free.
+  - Document the exact one-shot fault-injection reproduction and include
+    a shortened KASAN trace.
+  - Drop the self-applied Tested-by trailer.
+
+v2: https://lore.kernel.org/r/8292444A-CE2C-4E1C-AE13-5B21D4D1A884@phil.gs/
+v1: https://lore.kernel.org/r/3FD1B35F-ECF8-476D-B2F1-6A43E6E0B641@phil.gs/
+---
+ arch/x86/kvm/mmu/mmu.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Fix PMU event info array size overflow
+Author: Guidong Han <2045gemini@gmail.com>
+
+SBI PMU EVENT_GET_INFO stores guest-controlled
+num_events * sizeof(*einfo) in an int. On RV64, num_events = 0x10000001
+makes 0x100000010 truncate to 16. KVM then allocates one entry but loops
+over the original num_events, causing out-of-bounds reads and writes. A
+nested guest triggered:
+
+BUG: KASAN: slab-out-of-bounds in kvm_riscv_vcpu_pmu_event_info+0xa4/0x142
+Read of size 4 at addr ff600000074d46b0 by task init/1
+Call Trace:
+[<ffffffff8006471c>] kvm_riscv_vcpu_pmu_event_info+0xa4/0x142
+[<ffffffff800690c0>] kvm_sbi_ext_pmu_handler+0xca/0x268
+[<ffffffff8006779e>] kvm_riscv_vcpu_sbi_ecall+0xec/0x1e6
+[<ffffffff8006008c>] kvm_riscv_vcpu_exit+0x48c/0x540
+[<ffffffff8005ea0a>] kvm_arch_vcpu_ioctl_run+0x37e/0xc80
+Allocated by task 1:
+ __kmalloc_noprof+0x19e/0x4b0
+ kvm_riscv_vcpu_pmu_event_info+0x72/0x142
+ kvm_sbi_ext_pmu_handler+0xca/0x268
+ kvm_riscv_vcpu_sbi_ecall+0xec/0x1e6
+ kvm_riscv_vcpu_exit+0x48c/0x540
+ kvm_arch_vcpu_ioctl_run+0x37e/0xc80
+The buggy address is located 0 bytes to the right of
+ allocated 16-byte region [ff600000074d46a0, ff600000074d46b0)
+
+Store the shared-memory size in size_t and reject multiplication overflow.
+Reject sizes beyond KMALLOC_MAX_SIZE to avoid triggering WARN_ON_ONCE_GFP()
+for an impossible allocation order. Use an unsigned long loop index to
+match num_events.
+
+Fixes: e309fd113b9f ("RISC-V: KVM: Implement get event info function")
+Cc: stable@vger.kernel.org
+Signed-off-by: Guidong Han <2045gemini@gmail.com>
+---
+ arch/riscv/kvm/vcpu_pmu.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: x86/mmu: Fix double-free of mmu_page_header_cache on
+Author: Phil Rosenthal <phil@phil.gs>
+
+mmu_destroy_caches() destroys pte_list_desc_cache and
+mmu_page_header_cache, but leaves both pointers unchanged.  The pointer
+variables live in kvm.ko, so their stale values survive when a vendor
+module is unloaded while kvm.ko remains loaded.
+
+If creation of pte_list_desc_cache fails during a subsequent vendor
+module load, the assignment sets pte_list_desc_cache to NULL and the
+error path calls mmu_destroy_caches().  mmu_page_header_cache still
+points to the cache destroyed during the preceding vendor module
+unload.  Passing that stale pointer to kmem_cache_destroy() causes a
+slab use-after-free.
+
+A concrete trigger is:
+
+1. Load kvm.ko and a vendor module, creating both caches.
+2. Unload only the vendor module, leaving kvm.ko loaded.  Both caches
+   are destroyed, but their pointers remain dangling.
+3. Reload the vendor module and fail creation of pte_list_desc_cache.
+   The error path attempts to destroy the stale mmu_page_header_cache.
+
+Clear both pointers immediately after destroying their caches so that
+the stored state reflects the destruction and repeated cleanup is safe.
+
+Reproduce the issue on a KASAN-enabled v7.1.3 kernel by forcing the
+second vendor module load through the cache-initialization error path.
+Without the fix, KASAN reports a slab use-after-free in
+kmem_cache_destroy() called from kvm_mmu_vendor_module_init().  The
+allocation stack points to the initial vendor module load, while the
+free stack points to kvm_mmu_vendor_module_exit() during the intervening
+unload.
+
+With the fix applied, the same injected vendor module load fails with
+-ENOMEM as expected and produces no KASAN report.
+
+Fixes: cb498ea2ce1d ("KVM: Portability: Combine kvm_init and kvm_init_x86")
+Cc: stable@vger.kernel.org
+Tested-by: Phil Rosenthal <phil@phil.gs>
+Signed-off-by: Phil Rosenthal <phil@phil.gs>
+---
+v2:
+  - Add Fixes and Cc stable trailers.
+  - Describe the failure as a use-after-free during repeated cache
+    destruction.
+  - Document the KASAN reproduction and fixed-kernel validation.
+
+v1: https://lore.kernel.org/r/3FD1B35F-ECF8-476D-B2F1-6A43E6E0B641@phil.gs/
+
+ arch/x86/kvm/mmu/mmu.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86/mmu: Fix double-free of mmu_page_header_cache on
+Author: Phil Rosenthal <phil@phil.gs>
+
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Avoid one-word masks for SBI v0.1 all-harts
+Author: Pengpeng Hou <pengpeng@iscas.ac.cn>
+
+KVM already treats a NULL hart-mask pointer in SBI v0.1 calls as all
+harts, matching OpenSBI's legacy handling. The current handler builds that
+target set as (1UL << online_vcpus) - 1 before iterating the mask.
+
+That expression shifts by the type width once the VM has BITS_PER_LONG
+online vCPUs, and a single word cannot represent larger VMs. A count-based
+mask also selects the wrong IDs when vCPU IDs are sparse.
+
+Handle SEND_IPI with a NULL hart-mask by iterating all online vCPUs
+directly. For remote fence calls, use the existing hbase == -1UL
+convention so the common fence request helper targets the whole VM
+without consulting hmask.
+
+Non-NULL guest hart masks keep the existing v0.1 behavior.
+
+Fixes: a046c2d8578c ("RISC-V: KVM: Reorganize SBI code by moving SBI v0.1 to its own file")
+Signed-off-by: Pengpeng Hou <pengpeng@iscas.ac.cn>
+---
+ arch/riscv/kvm/vcpu_sbi_v01.c | 52 ++++++++++++++++++++---------------
+ 1 file changed, 30 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Guard HFENCE range loops against overflow
+Author: Pengpeng Hou <pengpeng@iscas.ac.cn>
+
+The local HFENCE range helpers build the loop end with addr + size and
+then step through the range by the requested page order. If addr + size
+wraps, a small range near the top of the address space can be treated as
+empty and skip the intended fence. The final loop step can also wrap
+before the loop condition is evaluated again.
+
+Treat wrapped ranges conservatively as full-range HFENCE requests and stop
+each bounded loop before the next step can wrap past the computed end. This
+keeps the existing large-range fallback and only changes local GVMA/VVMA
+range construction.
+
+Fixes: 2415e46e3a9a ("RISC-V: KVM: Introduce range based local HFENCE functions")
+Signed-off-by: Pengpeng Hou <pengpeng@iscas.ac.cn>
+---
+ arch/riscv/kvm/tlb.c | 71 ++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 59 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Reject overlapping AIA IMSIC address fields
+Author: Pengpeng Hou <pengpeng@iscas.ac.cn>
+
+KVM lets userspace configure the IMSIC guest, HART, group-width, and
+group-shift fields independently. The individual bounds allow a layout
+such as guest_bits=7, hart_bits=6, group_bits=1, and group_shift=24.
+
+That layout places the group index bit at bit 24 while the lower
+guest+HART field also extends through bit 24. The IMSIC address helpers
+later consume these values as one address layout: aia_imsic_ppn() masks
+the lower guest+HART field and the group field, while
+aia_imsic_hart_index() combines the group and HART index. Allowing an
+overlapping configuration therefore gives one address bit two different
+meanings.
+
+Reject group-index layouts that start before the end of the guest+HART
+field before initializing the in-kernel irqchip.
+
+Fixes: 89d01306e34d ("RISC-V: KVM: Implement device interface for AIA irqchip")
+Signed-off-by: Pengpeng Hou <pengpeng@iscas.ac.cn>
+---
+ arch/riscv/kvm/aia_device.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 5517d1b85 to 9f3bee753
+KVM mailing list update from 5517d1b85 to 9f3bee753
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
