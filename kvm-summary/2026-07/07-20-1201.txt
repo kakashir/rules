@@ -1,0 +1,1110 @@
+
+On /root/mail/repo:
+From 56b9c9005 to df7169ed5
+KVM mailing list update from 56b9c9005 to df7169ed5
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     37 kernel.org
+      8 linux.ibm.com
+      5 gmail.com
+      1 rsg.ci.i.u-tokyo.ac.jp
+      1 phil.gs
+
+Top 15 contributors (Based on Email Body)
+
+     37  Mark Brown <broonie@kernel.org>
+      7  Heiko Carstens <hca@linux.ibm.com>
+      5  Nicholas Piggin <npiggin@gmail.com>
+      1  Phil Rosenthal <phil@phil.gs>
+      1  Chinmay Rath <rathc@linux.ibm.com>
+      1  Akihiko Odaki <odaki@rsg.ci.i.u-tokyo.ac.jp>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  arm64/sysreg: Define full value
+[PATCH v13 01/32] arm64/sysreg: Define full value
+Author: Mark Brown <broonie@kernel.org>
+
+We have read/modify write helpers for updating bitfields in sysregs if they
+have changed but we do not have them for updating the whole register.
+Define sysreg_cond_update() for that.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/sysreg.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Implement support for SME
+[PATCH v13 00/32] KVM: arm64: Implement support for SME
+Author: Mark Brown <broonie@kernel.org>
+
+[ Note: I've spoken with both Mark Rutland and James Morse both of whom
+  might potentially have some overlapping changes, they've both agreed
+  that they'll deal with any rebasing if it's a question of this getting
+  in or something else. ]
+
+I've removed the RFC tag from this version of the series, but the items
+that I'm looking for feedback on remains the same:
+
+ - The userspace ABI, in particular:
+  - The vector length used for the SVE registers, access to the SVE
+    registers and access to ZA and (if available) ZT0 depending on
+    the current state of PSTATE.{SM,ZA}.
+  - The use of a single finalisation for both SVE and SME.
+  - There was some review from the qemu people who seemed OK with the
+    structure, and there's some initial patches from them at:
+       https://patchew.org/QEMU/20260216034432.23912-1-richard.henderson@linaro.org/
+
+This series implements support for SME use in non-protected KVM guests.
+Much of this is very similar to SVE, the main additional challenge that
+SME presents is that it introduces a new vector length similar to the
+SVE vector length and two new controls which change the registers seen
+by guests:
+
+ - PSTATE.ZA enables the ZA matrix register and, if SME2 is supported,
+   the ZT0 LUT register.
+ - PSTATE.SM enables streaming mode, a new floating point mode which
+   uses the SVE register set with the separately configured SME vector
+   length.  In streaming mode implementation of the FFR register is
+   optional.
+
+It is also permitted to build systems which support SME without SVE, in
+this case when not in streaming mode no SVE registers or instructions
+are available.  Further, there is no requirement that there be any
+overlap in the set of vector lengths supported by SVE and SME in a
+system, this is expected to be a common situation in practical systems.
+
+Since there is a new vector length to configure we introduce a new
+feature parallel to the existing SVE one with a new pseudo register for
+the streaming mode vector length.  Due to the overlap with SVE caused by
+streaming mode rather than finalising SME as a separate feature we use
+the existing SVE finalisation to also finalise SME, a new define
+KVM_ARM_VCPU_VEC is provided to help make user code clearer.  Finalising
+SVE and SME separately would introduce complication with register access
+since finalising SVE makes the SVE registers writeable by userspace and
+doing multiple finalisations results in an error being reported.
+Dealing with a state where the SVE registers are writeable due to one of
+SVE or SME being finalised but may have their VL changed by the other
+being finalised seems like needless complexity with minimal practical
+utility, it seems clearer to just express directly that only one
+finalisation can be done in the ABI.
+
+Access to the floating point registers follows the architecture:
+
+ - When both SVE and SME are present:
+   - If PSTATE.SM == 0 the vector length used for the Z and P registers
+     is the SVE vector length.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+     is the SME vector length.
+ - If only SME is present:
+   - If PSTATE.SM == 0 the Z and P registers are inaccessible and the
+     floating point state accessed via the encodings for the V registers.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+ - The SME specific ZA and ZT0 registers are only accessible if SVCR.ZA is 1.
+
+The VMM must understand this, in particular when loading state SVCR
+should be configured before other state.  It should be noted that while
+the architecture refers to PSTATE.SM and PSTATE.ZA these PSTATE bits are
+not preserved in SPSR_ELx, they are only accessible via SVCR.
+
+There are a large number of subfeatures for SME, most of which only
+offer additional instructions but some of which (SME2 and FA64) add
+architectural state. These are configured via the ID registers as per
+usual.
+
+Protected KVM is supported, with the implementation maintaining the
+existing restriction that the hypervisor will refuse to run if streaming
+mode or ZA is enabled.  This both simplfies the code and avoids the need
+to allocate storage for host ZA and ZT0 state, there seems to be little
+practical use case for supporting this and the memory usage would be
+non-trivial.  SME is not made available to protected guests, only normal
+guests.
+
+The new KVM_ARM_VCPU_VEC feature and ZA and ZT0 registers have not been
+added to the get-reg-list selftest, the idea of supporting additional
+features there without restructuring the program to generate all
+possible feature combinations has been rejected.  I will post a separate
+series which does that restructuring.
+
+There is some room for optimisation here, for example we could do more
+work to suppress isb()s on SMCR changes (we don't really try in the
+hypervisor), but this is already a very large series.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v13:
+- Rebase onto v7.2-rc3.
+- Remove existing special casing of ZCR_EL2 as an access trap and the
+  corresponding newly added SMCR_EL2 handling.
+- Fix handling of nested EZT0/FA64, factoring out shared initialisation
+  for both SMCR_EL2 and nested EL2 traps.
+- Document why we isb() after updating SMCR, and suppress redundant
+  isb()s for the host kernel.
+- Add missing isb()s in the hypervisor.
+- Use generic RES0 handling for SMPRIMAP_EL2.
+- Fix comment on SMPRI_EL1.
+- Emulate SCMR_EL2.EZT0 traps for nested guests.
+- Remove a bitrotted comment on the SVE exit handler.
+- Don't restore SMCR_EL1 after running non-SME guests with pKVM.
+- Add an explicit reset of ZCR_EL1.
+- Add a missing __init annotation to vec_virtualisable_vl().
+- Add SMIDR_EL1 to the ABI documentation for KVM_CAP_ARM_WRITABLE_IMP_ID_REGS.
+- Block attempts to set ID_AA64PFR1_EL1.SME to 0 when SME is enabled.
+- Process vCPU resets before enumerating registers.
+- Changelog updates.
+- Link to v12: https://patch.msgid.link/20260709-kvm-arm64-sme-v12-0-d0301d79ef58@kernel.org
+
+Changes in v12:
+- Resend with commit rather than tag object specified as the base.
+- Link to v11: https://patch.msgid.link/20260709-kvm-arm64-sme-v11-0-32799f66db9d@kernel.org
+
+Changes in v11:
+- Rebase onto v7.2-rc2.
+- Rework VL enumeration.
+- Refactor ZCR and SMCR value generation for the host into helper
+  functions.
+- Add handling of FEAT_IDST for hidden system registers.
+- Ensure we manage traps correctly for emulated EL2.
+- Always allocate space for ZT0 if the hardware supports it.
+- Tighten the register enumeration ABI to reflect current VM state.
+- Sanitise SMIDR_EL1.
+- Fix generation of invalid values in set_id_regs.
+- Various smaller fixups, including from Jean-Phillipe's review.
+- Link to v10: https://patch.msgid.link/20260306-kvm-arm64-sme-v10-0-43f7683a0fb7@kernel.org
+
+Changes in v10:
+- Define and use a SME_VQ_INVALID for the case where there is no
+  virtuablisable SME VL.
+- Fix handling of SMCR_EL2 accesses.
+- Correct VNCR constant for SMPRI_EL2.
+- Correct trapping for SMPRI_EL1.
+- Reject userspace access to FFR when in streaming mode without FA64.
+- Constrain the VL set by sme_cond_update_smcr() to fit within LEN.
+- Reject userspace access to ZA and ZT0 when SVCR.SM is 0.
+- Use -EACCESS for inaccessible SME registers.
+- Remove some unused functions.
+- Further bugfixes from review.
+- Commit log typo fixes.
+
+- Link to v9: https://patch.msgid.link/20251223-kvm-arm64-sme-v9-0-8be3867cb883@kernel.org
+
+Changes in v9:
+- Rebase onto v6.19-rc1.
+- ABI document clarifications.
+- Add changes dropping asserts on single bit wide bitfields in set_id_regs.
+- Link to v8: https://lore.kernel.org/r/20250902-kvm-arm64-sme-v8-0-2cb2199c656c@kernel.org
+
+Changes in v8:
+- Small fixes in ABI documentation.
+- Link to v7: https://lore.kernel.org/r/20250822-kvm-arm64-sme-v7-0-7a65d82b8b10@kernel.org
+
+Changes in v7:
+- Rebase onto v6.17-rc1.
+- Handle SMIDR_EL1 as a VM wide ID register and use this in feat_sme_smps().
+- Expose affinity fields in SMIDR_EL1.
+- Remove SMPRI_EL1 from vcpu_sysreg, the value is always 0 currently.
+- Prevent userspace writes to SMPRIMAP_EL2.
+- Link to v6: https://lore.kernel.org/r/20250625-kvm-arm64-sme-v6-0-114cff4ffe04@kernel.org
+
+Changes in v6:
+- Rebase onto v6.16-rc3.
+- Link to v5: https://lore.kernel.org/r/20250417-kvm-arm64-sme-v5-0-f469a2d5f574@kernel.org
+
+Changes in v5:
+- Rebase onto v6.15-rc2.
+- Add pKVM guest support.
+- Always restore SVCR.
+- Link to v4: https://lore.kernel.org/r/20250214-kvm-arm64-sme-v4-0-d64a681adcc2@kernel.org
+
+Changes in v4:
+- Rebase onto v6.14-rc2 and Mark Rutland's fixes.
+- Expose SME to nested guests.
+- Additional cleanups and test fixes following on from the rebase.
+- Flush register state on VMM PSTATE.{SM,ZA}.
+- Link to v3: https://lore.kernel.org/r/20241220-kvm-arm64-sme-v3-0-05b018c1ffeb@kernel.org
+
+Changes in v3:
+- Rebase onto v6.12-rc2.
+- Link to v2: https://lore.kernel.org/r/20231222-kvm-arm64-sme-v2-0-da226cb180bb@kernel.org
+
+Changes in v2:
+- Rebase onto v6.7-rc3.
+- Configure subfeatures based on host system only.
+- Complete nVHE support.
+- There was some snafu with sending v1 out, it didn't make it to the
+  lists but in case it hit people's inboxes I'm sending as v2.
+
+---
+Mark Brown (32):
+      arm64/sysreg: Define full value read/modify/write helpers
+      arm64/fpsimd: Ensure all of ZCR_EL1 is initialised from idle
+      arm64/fpsimd: Configure all ZCR/SMCR bits when loading task state
+      arm64/fpsimd: Decide to save ZT0 and streaming mode FFR at bind time
+      arm64/sve: Factor virtualizable VL discovery out of SVE specific code
+      arm64/fpsimd: Determine maximum virtualisable SME vector length
+      KVM: arm64: Remove bitrotted comment on handle_sve()
+      KVM: arm64: Handle FEAT_IDST for guest accesses to hidden registers
+      KVM: arm64: Pull ctxt_has_ helpers to start of sysreg-sr.h
+      KVM: arm64: Rename SVE finalization constants to be more general
+      KVM: arm64: Remove special case for FP state loading from ZCR_EL2 traps
+      KVM: arm64: Define internal features for SME
+      KVM: arm64: Rename sve_state_reg_region
+      KVM: arm64: Store vector lengths in an array
+      KVM: arm64: Factor SVE code out of fpsimd_lazy_switch_to_host()
+      KVM: arm64: Document the KVM ABI for SME
+      KVM: arm64: Implement SME vector length configuration
+      KVM: arm64: Support SME control registers
+      KVM: arm64: Support TPIDR2_EL0
+      KVM: arm64: Support SME identification registers for guests
+      KVM: arm64: Support SME priority registers
+      KVM: arm64: Support userspace access to streaming mode Z and P registers
+      KVM: arm64: Flush register state on writes to SVCR.SM and SVCR.ZA
+      KVM: arm64: Expose SME specific state to userspace
+      KVM: arm64: Context switch SME state for guests
+      KVM: arm64: Handle SME exceptions
+      KVM: arm64: Expose SME to nested guests
+      KVM: arm64: Provide interface for configuring and enabling SME for guests
+      KVM: arm64: selftests: Remove spurious check for single bit safe values
+      KVM: arm64: selftests: Skip impossible invalid value tests
+      KVM: arm64: selftests: Add SME system registers to get-reg-list
+      KVM: arm64: selftests: Add SME to set_id_regs test
+
+ Documentation/virt/kvm/api.rst                   | 127 +++++---
+ arch/arm64/include/asm/fpsimd.h                  |  11 +-
+ arch/arm64/include/asm/kvm_emulate.h             |  16 +
+ arch/arm64/include/asm/kvm_host.h                | 117 ++++++-
+ arch/arm64/include/asm/kvm_hyp.h                 |   2 +-
+ arch/arm64/include/asm/kvm_nested.h              |   2 +
+ arch/arm64/include/asm/kvm_pkvm.h                |   2 +-
+ arch/arm64/include/asm/sysreg.h                  |   8 +
+ arch/arm64/include/asm/vncr_mapping.h            |   2 +
+ arch/arm64/include/uapi/asm/kvm.h                |  34 +++
+ arch/arm64/kernel/cpufeature.c                   |   2 -
+ arch/arm64/kernel/fpsimd.c                       | 144 ++++-----
+ arch/arm64/kernel/suspend.c                      |   2 +-
+ arch/arm64/kvm/arm.c                             |  19 ++
+ arch/arm64/kvm/config.c                          |  13 +-
+ arch/arm64/kvm/emulate-nested.c                  |   6 +-
+ arch/arm64/kvm/fpsimd.c                          |  27 +-
+ arch/arm64/kvm/guest.c                           | 369 ++++++++++++++++++++---
+ arch/arm64/kvm/handle_exit.c                     |  23 +-
+ arch/arm64/kvm/hyp/include/hyp/switch.h          | 262 +++++++++++++---
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h       |  96 +++---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c               | 133 ++++++--
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                   |  90 ++++--
+ arch/arm64/kvm/hyp/nvhe/switch.c                 |   2 +
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c               |   6 +
+ arch/arm64/kvm/hyp/vhe/switch.c                  |  28 +-
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c               |   7 +
+ arch/arm64/kvm/inject_fault.c                    |  15 +
+ arch/arm64/kvm/nested.c                          |  15 +-
+ arch/arm64/kvm/reset.c                           | 159 +++++++---
+ arch/arm64/kvm/sys_regs.c                        | 155 +++++++++-
+ include/uapi/linux/kvm.h                         |   1 +
+ tools/testing/selftests/kvm/arm64/get-reg-list.c |  15 +-
+ tools/testing/selftests/kvm/arm64/set_id_regs.c  |  96 +++++-
+ 34 files changed, 1602 insertions(+), 404 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Skip rmap aging when the rmap lock was
+[PATCH] KVM: x86/mmu: Skip rmap aging when the rmap lock was
+Author: Phil Rosenthal via B4 Relay <devnull+phil.phil.gs@kernel.org>
+
+
+__kvm_rmap_lock() deliberately elides the rmap lock when it observes an
+empty rmap.  In that case kvm_rmap_lock_readonly() also re-enables
+preemption and returns zero, so the caller holds neither the rmap lock
+nor a preemption reference.  The elision documents the invariant it
+relies on:
+
+	 * Elide the lock if the rmap is empty, as lockless walkers (read-only
+	 * mode) don't need to (and can't) walk an empty rmap, nor can they add
+	 * entries to the rmap.  I.e. the only paths that process empty rmaps
+	 * do so while holding mmu_lock for write, and are mutually exclusive.
+
+kvm_rmap_age_gfn_range() ignores the returned value and unconditionally
+enters for_each_rmap_spte_lockless().  The iterator starts with
+rmap_get_first(), which re-reads rmap_head->val rather than using the
+value returned by the lock.  If a writer populates the rmap between the
+lock's read and the iterator's re-read, the aging path walks the newly
+installed rmap without holding its lock.
+
+For a KVM_RMAP_MANY rmap this leaves the walker following a
+pte_list_desc chain that it never locked.  A writer holding mmu_lock for
+write may free that chain (e.g. kvm_zap_all_rmap_sptes() on the recycle
+path, or any rmap zap) via kmem_cache_free() while the walk is in
+progress, giving a slab use-after-free.  Nothing serialises the two: the
+aging path runs without mmu_lock when CONFIG_KVM_MMU_LOCKLESS_AGING=y,
+and the rmap lock that would otherwise exclude the writer was elided.
+Because the empty path re-enables preemption, the interval between the
+two reads can span an arbitrary scheduling delay.
+
+Skip the walk when locking returned zero, as required by the
+lock-elision invariant.  kvm_rmap_unlock_readonly() already treats zero
+as requiring no unlock, so the early continue does not leak a lock or a
+preemption reference.  Missing an SPTE installed after the empty
+observation is harmless because aging is best-effort.
+
+Fixes: af3b6a9eba48 ("KVM: x86/mmu: Walk rmaps (shadow MMU) without holding mmu_lock when aging gfns")
+Cc: stable@vger.kernel.org
+Signed-off-by: Phil Rosenthal <phil@phil.gs>
+---
+This bug was identified and confirmed with AI assistance; per
+Documentation/process/security-bugs.rst it is therefore reported in the
+open rather than via the security list.
+
+The static analysis and runtime evidence are described separately.
+
+Static: the invariant quoted above is stated by __kvm_rmap_lock(), and
+kvm_rmap_age_gfn_range() is the one caller that violates it by walking
+after an elided (zero) lock.  This holds regardless of any runtime
+result.
+
+Runtime: I confirmed the use-after-free is reachable on a KASAN build
+(CONFIG_KASAN_GENERIC=y, CONFIG_KVM_MMU_LOCKLESS_AGING=y, kvm.tdp_mmu=0,
+kvm_intel.ept=0 so shared pages build multi-SPTE pte_list_desc rmaps).
+This is not a natural reproducer: it is a test-only race amplifier.  A
+test hook widens two windows (a delay after the zero-lock observation,
+and a delay after the iterator has cached iter->desc) and schedules the
+real lockless aging function onto recently recycled gfns.  The alloc and
+free are unmodified production paths; only the scheduling of the aging
+walk and the two delays are injected.  The test-only instrumentation is
+available privately on request.  KASAN then reports a
+slab-use-after-free, read in the rmap_get_next() step of
+for_each_rmap_spte_lockless() (the symbol is
+kvm_rmap_age_gfn_range.isra.0 in the instrumented build):
+
+  BUG: KASAN: slab-use-after-free in kvm_rmap_age_gfn_range.isra.0+0x7e4/0xa60 [kvm]
+  Read of size 8 at addr ffff88814690c6d8 by task kworker/12:2/81966
+  Workqueue: events age_race_workfn [kvm]     <- test hook: lockless aging, no mmu_lock
+   kvm_rmap_age_gfn_range.isra.0+0x7e4/0xa60 [kvm]
+   age_race_workfn+0x14b/0x1a0 [kvm]
+   process_one_work+0x6c8/0x1020
+  Allocated by task 94096:
+   kmem_cache_alloc_noprof+0x179/0x460
+   __kvm_mmu_topup_memory_cache+0x136/0x540 [kvm]
+   paging64_page_fault+0x2b6/0x1e70 [kvm]      <- one vCPU faults, allocs the desc
+  Freed by task 94095:
+   kmem_cache_free+0x11d/0x4a0
+   kvm_zap_all_rmap_sptes+0xe9/0x1a0 [kvm]
+   __rmap_add+0x2c4/0x5e0 [kvm]
+   mmu_set_spte+0x6d6/0x1060 [kvm]
+   paging64_page_fault+0x1385/0x1e70 [kvm]     <- another vCPU, under mmu_lock,
+                                                  recycles and frees the desc
+  The buggy address belongs to the object at ffff88814690c6c0
+   which belongs to the cache pte_list_desc of size 128
+
+The three tasks are distinct (read 81966 / alloc 94096 / free 94095),
+confirming genuine concurrency rather than a self-inflicted free.  With
+the fix applied under the same injection load, the zero -> populated
+window is still observed but the walk is skipped and no KASAN report is
+produced.
+
+Alternative fix: this patch fixes the only current caller that ignores
+an empty return.  A class-wide alternative would pass the value returned
+by kvm_rmap_lock_readonly() into the iterator instead of having
+rmap_get_first() re-read the rmap, so no lockless walker could
+reintroduce the bug.  I chose the smaller change for ease of
+backporting, and can send the larger one if preferred.
+---
+ arch/x86/kvm/mmu/mmu.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Report set_id_reg reads of
+[PATCH v6 1/3] KVM: selftests: arm64: Report set_id_reg reads of
+Author: Mark Brown <broonie@kernel.org>
+
+Currently when we run guest code to validate that the values we wrote to
+the registers are seen by the guest we assert that these values match using
+a KVM selftests level assert, resulting in unclear diagnostics if the test
+fails. Replace this assert with reporting a kselftest test per register.
+
+In order to support getting the names of the registers we repaint the array
+of ID_ registers to store the names and open code the rest.
+
+Reviewed-by: Ben Horgan <ben.horgan@arm.com>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 82 +++++++++++++++++++------
+ 1 file changed, 63 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Improve diagnostics from
+[PATCH v6 0/3] KVM: selftests: arm64: Improve diagnostics from
+Author: Mark Brown <broonie@kernel.org>
+
+While debugging issues related to aarch64 only systems I ran into
+speedbumps due to the lack of detail in the results reported when the
+guest register read and reset value preservation tests were run, they
+generated an immediately fatal assert without indicating which register
+was being tested. Update these tests to non-fatally report a standard
+kselftest result per register, making it much easier to see what the
+problem being reported is.
+
+A similar issue exists with the validation of the individual bitfields
+in registers due to the use of immediately fatal asserts. Update those
+asserts to be standard kselftest reports.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v6:
+- Rebase onto v7.2-rc3.
+- Drop changes to handling of aarch32 related registers on 64 bit only
+  systems, an in kernel solution is preferred for those.
+- Use a define to count the non-test_regs registers.
+- Link to v5: https://patch.msgid.link/20260317-kvm-arm64-set-id-regs-aarch64-v5-0-a60f2b956e22@kernel.org
+
+Changes in v5:
+- Rebase onto v7.0-rc1.
+- Link to v4: https://patch.msgid.link/20260106-kvm-arm64-set-id-regs-aarch64-v4-0-c7ef4551afb3@kernel.org
+
+Changes in v4:
+- Correct check for 32 bit ID registers.
+- Link to v3: https://patch.msgid.link/20251219-kvm-arm64-set-id-regs-aarch64-v3-0-bfa474ec3218@kernel.org
+
+Changes in v3:
+- Rebase onto v6.19-rc1.
+- Link to v2: https://patch.msgid.link/20251114-kvm-arm64-set-id-regs-aarch64-v2-0-672f214f41bf@kernel.org
+
+Changes in v2:
+- Add a fix for spurious failures with 64 bit only guests.
+- Link to v1: https://patch.msgid.link/20251030-kvm-arm64-set-id-regs-aarch64-v1-0-96fe0d2b178e@kernel.org
+
+---
+Mark Brown (3):
+      KVM: selftests: arm64: Report set_id_reg reads of test registers as tests
+      KVM: selftests: arm64: Report register reset tests individually
+      KVM: selftests: arm64: Make set_id_regs bitfield validatity checks non-fatal
+
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 121 ++++++++++++++++++------
+ 1 file changed, 91 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  powerpc: add pmu tests
+[kvm-unit-tests PATCH v2 1/6] powerpc: add pmu tests
+Author: Chinmay Rath <rathc@linux.ibm.com>
+
+
+Add some initial PMU testing.
+
+- PMC5/6 tests
+- PMAE / PMI test
+- BHRB basic tests
+
+Signed-off-by: Nicholas Piggin <npiggin@gmail.com>
+Signed-off-by: Chinmay Rath <rathc@linux.ibm.com>
+---
+ lib/powerpc/asm/processor.h |   2 +
+ lib/powerpc/asm/reg.h       |   9 +
+ lib/powerpc/asm/setup.h     |   1 +
+ lib/powerpc/setup.c         |  20 ++
+ powerpc/Makefile.common     |   3 +-
+ powerpc/pmu.c               | 567 ++++++++++++++++++++++++++++++++++++
+ powerpc/unittests.cfg       |   3 +
+ 7 files changed, 604 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  powerpc improvements
+[kvm-unit-tests PATCH v2 0/6] powerpc improvements
+Author: Chinmay Rath <rathc@linux.ibm.com>
+
+This series aims to add a couple of new powerpc tests and improve the
+powerpc build structure.
+
+This is originally Nick's work. The last version (v10) of which can be seen here :
+https://lore.kernel.org/linuxppc-dev/20240612052322.218726-1-npiggin@gmail.com/
+Couple of patches from the series are already merged.
+
+Since it has been 2 years since this series was posted, I originally
+posted this as a RFC. This v1 series has changes accomodating the review comments
+received in the RFC :
+https://lore.kernel.org/kvm/20260602064806.3101025-1-rathc@linux.ibm.com/
+v1:
+https://lore.kernel.org/kvm/20260708105122.1177210-1-rathc@linux.ibm.com/
+
+I have rebased the patches to the upstream state.
+For the patches which did not require any changes in the existing upstream code,
+I have retained the "Reviewed-by"s and "Acked-by" (patch 3,5 & 6) from
+Nick's series. I have also added Andrew's "Reviewed-by" received on
+patch 2 in the RFC. Nick had originally introduced powernv tests as well.
+Removed it for now since it was causing CI failure in the current upstream.
+
+Link to Gitlab tree with patches :
+https://gitlab.com/rathc/kvm-unit-tests/-/tree/ppc64
+Link to Gitlab pipeline :
+https://gitlab.com/rathc/kvm-unit-tests/-/pipelines/2688519679
+
+Change log from RFC to v1:
+1. Patch 2: Added Andrew's "Reviewed-by".
+2. Patch 4: Removed usage of gitlab-ci group to run test - Thomas
+   It would be nice to make use of the gitlab-ci group, but doing the
+   change of all archs would make sense in a separate series. I look
+   forward to doing that.
+3. Patch 6: Removed addition of panic test in gitlab-ci group - Thomas
+
+There was a discussion on the build failing in Travis CI with Clang, in the
+RFC, which I have addressed there.
+
+Change log from v1 to v2:
+Patch 4: Addressed all comments by Thomas :
+1. Removed extra blank line.
+2. Removed accel=kvm test from gitlab-ci.
+3. smp = 2 preserved in atmoics test.
+
+Nicholas Piggin (6):
+  powerpc: add pmu tests
+  configure: Make arch_libdir a first-class entity
+  powerpc: Remove remnants of ppc64 directory and build structure
+  powerpc: gitlab CI update
+  scripts/arch-run.bash: Fix run_panic() success exit status
+  powerpc: Add a panic test
+
+ .gitlab-ci.yml                             |  18 +-
+ MAINTAINERS                                |   1 -
+ Makefile                                   |   2 +-
+ configure                                  |  21 +-
+ lib/{ppc64 => powerpc}/asm-offsets.c       |   0
+ lib/{ppc64 => powerpc}/asm/asm-offsets.h   |   0
+ lib/{ppc64 => powerpc}/asm/atomic.h        |   0
+ lib/{ppc64 => powerpc}/asm/barrier.h       |   4 +-
+ lib/{ppc64 => powerpc}/asm/bitops.h        |   4 +-
+ lib/{ppc64 => powerpc}/asm/io.h            |   4 +-
+ lib/{ppc64 => powerpc}/asm/mmu.h           |   0
+ lib/{ppc64 => powerpc}/asm/opal.h          |   4 +-
+ lib/{ppc64 => powerpc}/asm/page.h          |   6 +-
+ lib/{ppc64 => powerpc}/asm/pgtable-hwdef.h |   6 +-
+ lib/{ppc64 => powerpc}/asm/pgtable.h       |   2 +-
+ lib/powerpc/asm/processor.h                |   2 +
+ lib/{ppc64 => powerpc}/asm/ptrace.h        |   6 +-
+ lib/powerpc/asm/reg.h                      |   9 +
+ lib/powerpc/asm/rtas.h                     |   1 +
+ lib/powerpc/asm/setup.h                    |   1 +
+ lib/powerpc/asm/spinlock.h                 |   6 +
+ lib/powerpc/asm/stack.h                    |   3 +
+ lib/{ppc64 => powerpc}/asm/vpa.h           |   0
+ lib/{ppc64 => powerpc}/mmu.c               |   0
+ lib/{ppc64 => powerpc}/opal-calls.S        |   0
+ lib/{ppc64 => powerpc}/opal.c              |   0
+ lib/powerpc/rtas.c                         |  16 +
+ lib/powerpc/setup.c                        |  20 +
+ lib/{ppc64 => powerpc}/stack.c             |   0
+ lib/ppc64/.gitignore                       |   1 -
+ lib/ppc64/asm/handlers.h                   |   1 -
+ lib/ppc64/asm/hcall.h                      |   1 -
+ lib/ppc64/asm/memory_areas.h               |   6 -
+ lib/ppc64/asm/ppc_asm.h                    |   1 -
+ lib/ppc64/asm/processor.h                  |   1 -
+ lib/ppc64/asm/reg.h                        |   1 -
+ lib/ppc64/asm/rtas.h                       |   1 -
+ lib/ppc64/asm/setup.h                      |   1 -
+ lib/ppc64/asm/smp.h                        |   1 -
+ lib/ppc64/asm/spinlock.h                   |   6 -
+ lib/ppc64/asm/stack.h                      |  11 -
+ lib/ppc64/asm/time.h                       |   1 -
+ powerpc/Makefile                           | 111 +++-
+ powerpc/Makefile.common                    |  94 ----
+ powerpc/Makefile.ppc64                     |  31 --
+ powerpc/pmu.c                              | 567 +++++++++++++++++++++
+ powerpc/run                                |   2 +-
+ powerpc/selftest.c                         |  17 +-
+ powerpc/unittests.cfg                      |   8 +
+ scripts/arch-run.bash                      |   1 +
+ 50 files changed, 806 insertions(+), 194 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: pv: Use VM_SPARSE area for guest variable storage area
+[PATCH v3 1/6] KVM: s390: pv: Use VM_SPARSE area for guest variable storage area
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+The guest variable storage area is allocated with vmalloc and then
+donated to the ultravisor. Any kernel access to that area will result
+in a secure storage access exception (aka fault).
+
+This is a problem if such a memory area is read via /proc/kcore. This
+causes an exception via vread_iter() and results in an unexpected short
+read. Avoid this by allocating a custom VM_SPARSE area. If such an area
+is read, vread_iter() returns zeroes for the entire area.
+
+Note that the function which frees the area does not update ptes. This
+is intentional to allow for deferred / lazy pte updates and TLB flushing
+like the generic vfree() code is doing that. See vunmap_pte_range().
+
+This assumes that s390 will gain full support for lazy_mmu_mode_enable()
+and lazy_mmu_mode_disable() in the future, since as of now the used
+ptep_get_and_clear() in vunmap_pte_range() does indeed invalidate and
+flush every single pte entry, but only for s390.
+
+Tested-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ arch/s390/include/asm/uv.h |  2 ++
+ arch/s390/kernel/uv.c      | 65 ++++++++++++++++++++++++++++++++++++++
+ arch/s390/kvm/pv.c         |  6 ++--
+ 3 files changed, 70 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390: Reintroduce support for DCACHE_WORD_ACCESS
+[PATCH v3 0/6] s390: Reintroduce support for DCACHE_WORD_ACCESS
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+v3:
+- Fix two more pre-existing bugs reported by Sashiko
+- Add Christian's Tested-by tag to four of the six patches
+
+v2:
+- Explicitely PAGE_ALIGN size in uv_alloc_stor_var() [Sashiko]
+- Document that lazy PTE update / TLB flushing is intended [Sashiko]
+
+v1:
+Support for DCACHE_WORD_ACCESS was recently removed [1] since it caused
+problems with the incomplete handling of secure storage access
+exceptions. It looked like fixing the exception handler would be a larger
+effort; therefore support for DCACHE_WORD_ACCESS was removed as a work
+around.
+
+Address the potential problems that exist with secure storage access
+exceptions and add support for DCACHE_WORD_ACCESS again.
+
+In particular address the following problems:
+
+- Reading the guest variable storage area via the /proc/kcore interface
+  results in short reads. Address this by using a VM_SPARSE area for the
+  guest variable storage area. VM_SPARSE areas will be handled like
+  memory holes (zeros will be read).
+
+- Fix handling of secure storage access exceptions in vmalloc area.
+
+- Remove folio handling for secure storage access exceptions to avoid
+  potential data corruption.
+
+[1] 37540b8c287f ("s390: Revert support for DCACHE_WORD_ACCESS")
+
+Heiko Carstens (6):
+  KVM: s390: pv: Use VM_SPARSE area for guest variable storage area
+  s390/mm: Add missing mm check to do_secure_storage_access()
+  s390/mm: Use lock_mm_and_find_vma() in do_secure_storage_access()
+  s390/mm: Fix handling of vmalloc area in do_secure_storage_access()
+  s390/mm: Remove folio handling for kernel faults in do_secure_storage_access()
+  s390: Add support for DCACHE_WORD_ACCESS (again)
+
+ arch/s390/Kconfig                      |  1 +
+ arch/s390/include/asm/asm-extable.h    |  4 ++
+ arch/s390/include/asm/uv.h             |  2 +
+ arch/s390/include/asm/word-at-a-time.h | 22 +++++++++
+ arch/s390/kernel/uv.c                  | 65 ++++++++++++++++++++++++++
+ arch/s390/kvm/pv.c                     |  6 +--
+ arch/s390/mm/extable.c                 | 18 +++++++
+ arch/s390/mm/fault.c                   | 20 +++-----
+ 8 files changed, 122 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 9f3bee753 to 37140e779
+KVM mailing list update from 9f3bee753 to 37140e779
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     37 kernel.org
+      1 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+     37  Mark Brown <broonie@kernel.org>
+      1  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  arm64/sysreg: Define full value
+[PATCH v13 01/32] arm64/sysreg: Define full value
+Author: Mark Brown <broonie@kernel.org>
+
+We have read/modify write helpers for updating bitfields in sysregs if they
+have changed but we do not have them for updating the whole register.
+Define sysreg_cond_update() for that.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/sysreg.h | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Implement support for SME
+[PATCH v13 00/32] KVM: arm64: Implement support for SME
+Author: Mark Brown <broonie@kernel.org>
+
+[ Note: I've spoken with both Mark Rutland and James Morse both of whom
+  might potentially have some overlapping changes, they've both agreed
+  that they'll deal with any rebasing if it's a question of this getting
+  in or something else. ]
+
+I've removed the RFC tag from this version of the series, but the items
+that I'm looking for feedback on remains the same:
+
+ - The userspace ABI, in particular:
+  - The vector length used for the SVE registers, access to the SVE
+    registers and access to ZA and (if available) ZT0 depending on
+    the current state of PSTATE.{SM,ZA}.
+  - The use of a single finalisation for both SVE and SME.
+  - There was some review from the qemu people who seemed OK with the
+    structure, and there's some initial patches from them at:
+       https://patchew.org/QEMU/20260216034432.23912-1-richard.henderson@linaro.org/
+
+This series implements support for SME use in non-protected KVM guests.
+Much of this is very similar to SVE, the main additional challenge that
+SME presents is that it introduces a new vector length similar to the
+SVE vector length and two new controls which change the registers seen
+by guests:
+
+ - PSTATE.ZA enables the ZA matrix register and, if SME2 is supported,
+   the ZT0 LUT register.
+ - PSTATE.SM enables streaming mode, a new floating point mode which
+   uses the SVE register set with the separately configured SME vector
+   length.  In streaming mode implementation of the FFR register is
+   optional.
+
+It is also permitted to build systems which support SME without SVE, in
+this case when not in streaming mode no SVE registers or instructions
+are available.  Further, there is no requirement that there be any
+overlap in the set of vector lengths supported by SVE and SME in a
+system, this is expected to be a common situation in practical systems.
+
+Since there is a new vector length to configure we introduce a new
+feature parallel to the existing SVE one with a new pseudo register for
+the streaming mode vector length.  Due to the overlap with SVE caused by
+streaming mode rather than finalising SME as a separate feature we use
+the existing SVE finalisation to also finalise SME, a new define
+KVM_ARM_VCPU_VEC is provided to help make user code clearer.  Finalising
+SVE and SME separately would introduce complication with register access
+since finalising SVE makes the SVE registers writeable by userspace and
+doing multiple finalisations results in an error being reported.
+Dealing with a state where the SVE registers are writeable due to one of
+SVE or SME being finalised but may have their VL changed by the other
+being finalised seems like needless complexity with minimal practical
+utility, it seems clearer to just express directly that only one
+finalisation can be done in the ABI.
+
+Access to the floating point registers follows the architecture:
+
+ - When both SVE and SME are present:
+   - If PSTATE.SM == 0 the vector length used for the Z and P registers
+     is the SVE vector length.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+     is the SME vector length.
+ - If only SME is present:
+   - If PSTATE.SM == 0 the Z and P registers are inaccessible and the
+     floating point state accessed via the encodings for the V registers.
+   - If PSTATE.SM == 1 the vector length used for the Z and P registers
+ - The SME specific ZA and ZT0 registers are only accessible if SVCR.ZA is 1.
+
+The VMM must understand this, in particular when loading state SVCR
+should be configured before other state.  It should be noted that while
+the architecture refers to PSTATE.SM and PSTATE.ZA these PSTATE bits are
+not preserved in SPSR_ELx, they are only accessible via SVCR.
+
+There are a large number of subfeatures for SME, most of which only
+offer additional instructions but some of which (SME2 and FA64) add
+architectural state. These are configured via the ID registers as per
+usual.
+
+Protected KVM is supported, with the implementation maintaining the
+existing restriction that the hypervisor will refuse to run if streaming
+mode or ZA is enabled.  This both simplfies the code and avoids the need
+to allocate storage for host ZA and ZT0 state, there seems to be little
+practical use case for supporting this and the memory usage would be
+non-trivial.  SME is not made available to protected guests, only normal
+guests.
+
+The new KVM_ARM_VCPU_VEC feature and ZA and ZT0 registers have not been
+added to the get-reg-list selftest, the idea of supporting additional
+features there without restructuring the program to generate all
+possible feature combinations has been rejected.  I will post a separate
+series which does that restructuring.
+
+There is some room for optimisation here, for example we could do more
+work to suppress isb()s on SMCR changes (we don't really try in the
+hypervisor), but this is already a very large series.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v13:
+- Rebase onto v7.2-rc3.
+- Remove existing special casing of ZCR_EL2 as an access trap and the
+  corresponding newly added SMCR_EL2 handling.
+- Fix handling of nested EZT0/FA64, factoring out shared initialisation
+  for both SMCR_EL2 and nested EL2 traps.
+- Document why we isb() after updating SMCR, and suppress redundant
+  isb()s for the host kernel.
+- Add missing isb()s in the hypervisor.
+- Use generic RES0 handling for SMPRIMAP_EL2.
+- Fix comment on SMPRI_EL1.
+- Emulate SCMR_EL2.EZT0 traps for nested guests.
+- Remove a bitrotted comment on the SVE exit handler.
+- Don't restore SMCR_EL1 after running non-SME guests with pKVM.
+- Add an explicit reset of ZCR_EL1.
+- Add a missing __init annotation to vec_virtualisable_vl().
+- Add SMIDR_EL1 to the ABI documentation for KVM_CAP_ARM_WRITABLE_IMP_ID_REGS.
+- Block attempts to set ID_AA64PFR1_EL1.SME to 0 when SME is enabled.
+- Process vCPU resets before enumerating registers.
+- Changelog updates.
+- Link to v12: https://patch.msgid.link/20260709-kvm-arm64-sme-v12-0-d0301d79ef58@kernel.org
+
+Changes in v12:
+- Resend with commit rather than tag object specified as the base.
+- Link to v11: https://patch.msgid.link/20260709-kvm-arm64-sme-v11-0-32799f66db9d@kernel.org
+
+Changes in v11:
+- Rebase onto v7.2-rc2.
+- Rework VL enumeration.
+- Refactor ZCR and SMCR value generation for the host into helper
+  functions.
+- Add handling of FEAT_IDST for hidden system registers.
+- Ensure we manage traps correctly for emulated EL2.
+- Always allocate space for ZT0 if the hardware supports it.
+- Tighten the register enumeration ABI to reflect current VM state.
+- Sanitise SMIDR_EL1.
+- Fix generation of invalid values in set_id_regs.
+- Various smaller fixups, including from Jean-Phillipe's review.
+- Link to v10: https://patch.msgid.link/20260306-kvm-arm64-sme-v10-0-43f7683a0fb7@kernel.org
+
+Changes in v10:
+- Define and use a SME_VQ_INVALID for the case where there is no
+  virtuablisable SME VL.
+- Fix handling of SMCR_EL2 accesses.
+- Correct VNCR constant for SMPRI_EL2.
+- Correct trapping for SMPRI_EL1.
+- Reject userspace access to FFR when in streaming mode without FA64.
+- Constrain the VL set by sme_cond_update_smcr() to fit within LEN.
+- Reject userspace access to ZA and ZT0 when SVCR.SM is 0.
+- Use -EACCESS for inaccessible SME registers.
+- Remove some unused functions.
+- Further bugfixes from review.
+- Commit log typo fixes.
+
+- Link to v9: https://patch.msgid.link/20251223-kvm-arm64-sme-v9-0-8be3867cb883@kernel.org
+
+Changes in v9:
+- Rebase onto v6.19-rc1.
+- ABI document clarifications.
+- Add changes dropping asserts on single bit wide bitfields in set_id_regs.
+- Link to v8: https://lore.kernel.org/r/20250902-kvm-arm64-sme-v8-0-2cb2199c656c@kernel.org
+
+Changes in v8:
+- Small fixes in ABI documentation.
+- Link to v7: https://lore.kernel.org/r/20250822-kvm-arm64-sme-v7-0-7a65d82b8b10@kernel.org
+
+Changes in v7:
+- Rebase onto v6.17-rc1.
+- Handle SMIDR_EL1 as a VM wide ID register and use this in feat_sme_smps().
+- Expose affinity fields in SMIDR_EL1.
+- Remove SMPRI_EL1 from vcpu_sysreg, the value is always 0 currently.
+- Prevent userspace writes to SMPRIMAP_EL2.
+- Link to v6: https://lore.kernel.org/r/20250625-kvm-arm64-sme-v6-0-114cff4ffe04@kernel.org
+
+Changes in v6:
+- Rebase onto v6.16-rc3.
+- Link to v5: https://lore.kernel.org/r/20250417-kvm-arm64-sme-v5-0-f469a2d5f574@kernel.org
+
+Changes in v5:
+- Rebase onto v6.15-rc2.
+- Add pKVM guest support.
+- Always restore SVCR.
+- Link to v4: https://lore.kernel.org/r/20250214-kvm-arm64-sme-v4-0-d64a681adcc2@kernel.org
+
+Changes in v4:
+- Rebase onto v6.14-rc2 and Mark Rutland's fixes.
+- Expose SME to nested guests.
+- Additional cleanups and test fixes following on from the rebase.
+- Flush register state on VMM PSTATE.{SM,ZA}.
+- Link to v3: https://lore.kernel.org/r/20241220-kvm-arm64-sme-v3-0-05b018c1ffeb@kernel.org
+
+Changes in v3:
+- Rebase onto v6.12-rc2.
+- Link to v2: https://lore.kernel.org/r/20231222-kvm-arm64-sme-v2-0-da226cb180bb@kernel.org
+
+Changes in v2:
+- Rebase onto v6.7-rc3.
+- Configure subfeatures based on host system only.
+- Complete nVHE support.
+- There was some snafu with sending v1 out, it didn't make it to the
+  lists but in case it hit people's inboxes I'm sending as v2.
+
+---
+Mark Brown (32):
+      arm64/sysreg: Define full value read/modify/write helpers
+      arm64/fpsimd: Ensure all of ZCR_EL1 is initialised from idle
+      arm64/fpsimd: Configure all ZCR/SMCR bits when loading task state
+      arm64/fpsimd: Decide to save ZT0 and streaming mode FFR at bind time
+      arm64/sve: Factor virtualizable VL discovery out of SVE specific code
+      arm64/fpsimd: Determine maximum virtualisable SME vector length
+      KVM: arm64: Remove bitrotted comment on handle_sve()
+      KVM: arm64: Handle FEAT_IDST for guest accesses to hidden registers
+      KVM: arm64: Pull ctxt_has_ helpers to start of sysreg-sr.h
+      KVM: arm64: Rename SVE finalization constants to be more general
+      KVM: arm64: Remove special case for FP state loading from ZCR_EL2 traps
+      KVM: arm64: Define internal features for SME
+      KVM: arm64: Rename sve_state_reg_region
+      KVM: arm64: Store vector lengths in an array
+      KVM: arm64: Factor SVE code out of fpsimd_lazy_switch_to_host()
+      KVM: arm64: Document the KVM ABI for SME
+      KVM: arm64: Implement SME vector length configuration
+      KVM: arm64: Support SME control registers
+      KVM: arm64: Support TPIDR2_EL0
+      KVM: arm64: Support SME identification registers for guests
+      KVM: arm64: Support SME priority registers
+      KVM: arm64: Support userspace access to streaming mode Z and P registers
+      KVM: arm64: Flush register state on writes to SVCR.SM and SVCR.ZA
+      KVM: arm64: Expose SME specific state to userspace
+      KVM: arm64: Context switch SME state for guests
+      KVM: arm64: Handle SME exceptions
+      KVM: arm64: Expose SME to nested guests
+      KVM: arm64: Provide interface for configuring and enabling SME for guests
+      KVM: arm64: selftests: Remove spurious check for single bit safe values
+      KVM: arm64: selftests: Skip impossible invalid value tests
+      KVM: arm64: selftests: Add SME system registers to get-reg-list
+      KVM: arm64: selftests: Add SME to set_id_regs test
+
+ Documentation/virt/kvm/api.rst                   | 127 +++++---
+ arch/arm64/include/asm/fpsimd.h                  |  11 +-
+ arch/arm64/include/asm/kvm_emulate.h             |  16 +
+ arch/arm64/include/asm/kvm_host.h                | 117 ++++++-
+ arch/arm64/include/asm/kvm_hyp.h                 |   2 +-
+ arch/arm64/include/asm/kvm_nested.h              |   2 +
+ arch/arm64/include/asm/kvm_pkvm.h                |   2 +-
+ arch/arm64/include/asm/sysreg.h                  |   8 +
+ arch/arm64/include/asm/vncr_mapping.h            |   2 +
+ arch/arm64/include/uapi/asm/kvm.h                |  34 +++
+ arch/arm64/kernel/cpufeature.c                   |   2 -
+ arch/arm64/kernel/fpsimd.c                       | 144 ++++-----
+ arch/arm64/kernel/suspend.c                      |   2 +-
+ arch/arm64/kvm/arm.c                             |  19 ++
+ arch/arm64/kvm/config.c                          |  13 +-
+ arch/arm64/kvm/emulate-nested.c                  |   6 +-
+ arch/arm64/kvm/fpsimd.c                          |  27 +-
+ arch/arm64/kvm/guest.c                           | 369 ++++++++++++++++++++---
+ arch/arm64/kvm/handle_exit.c                     |  23 +-
+ arch/arm64/kvm/hyp/include/hyp/switch.h          | 262 +++++++++++++---
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h       |  96 +++---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c               | 133 ++++++--
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                   |  90 ++++--
+ arch/arm64/kvm/hyp/nvhe/switch.c                 |   2 +
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c               |   6 +
+ arch/arm64/kvm/hyp/vhe/switch.c                  |  28 +-
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c               |   7 +
+ arch/arm64/kvm/inject_fault.c                    |  15 +
+ arch/arm64/kvm/nested.c                          |  15 +-
+ arch/arm64/kvm/reset.c                           | 159 +++++++---
+ arch/arm64/kvm/sys_regs.c                        | 155 +++++++++-
+ include/uapi/linux/kvm.h                         |   1 +
+ tools/testing/selftests/kvm/arm64/get-reg-list.c |  15 +-
+ tools/testing/selftests/kvm/arm64/set_id_regs.c  |  96 +++++-
+ 34 files changed, 1602 insertions(+), 404 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Report set_id_reg reads of
+[PATCH v6 1/3] KVM: selftests: arm64: Report set_id_reg reads of
+Author: Mark Brown <broonie@kernel.org>
+
+Currently when we run guest code to validate that the values we wrote to
+the registers are seen by the guest we assert that these values match using
+a KVM selftests level assert, resulting in unclear diagnostics if the test
+fails. Replace this assert with reporting a kselftest test per register.
+
+In order to support getting the names of the registers we repaint the array
+of ID_ registers to store the names and open code the rest.
+
+Reviewed-by: Ben Horgan <ben.horgan@arm.com>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 82 +++++++++++++++++++------
+ 1 file changed, 63 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Improve diagnostics from
+[PATCH v6 0/3] KVM: selftests: arm64: Improve diagnostics from
+Author: Mark Brown <broonie@kernel.org>
+
+While debugging issues related to aarch64 only systems I ran into
+speedbumps due to the lack of detail in the results reported when the
+guest register read and reset value preservation tests were run, they
+generated an immediately fatal assert without indicating which register
+was being tested. Update these tests to non-fatally report a standard
+kselftest result per register, making it much easier to see what the
+problem being reported is.
+
+A similar issue exists with the validation of the individual bitfields
+in registers due to the use of immediately fatal asserts. Update those
+asserts to be standard kselftest reports.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v6:
+- Rebase onto v7.2-rc3.
+- Drop changes to handling of aarch32 related registers on 64 bit only
+  systems, an in kernel solution is preferred for those.
+- Use a define to count the non-test_regs registers.
+- Link to v5: https://patch.msgid.link/20260317-kvm-arm64-set-id-regs-aarch64-v5-0-a60f2b956e22@kernel.org
+
+Changes in v5:
+- Rebase onto v7.0-rc1.
+- Link to v4: https://patch.msgid.link/20260106-kvm-arm64-set-id-regs-aarch64-v4-0-c7ef4551afb3@kernel.org
+
+Changes in v4:
+- Correct check for 32 bit ID registers.
+- Link to v3: https://patch.msgid.link/20251219-kvm-arm64-set-id-regs-aarch64-v3-0-bfa474ec3218@kernel.org
+
+Changes in v3:
+- Rebase onto v6.19-rc1.
+- Link to v2: https://patch.msgid.link/20251114-kvm-arm64-set-id-regs-aarch64-v2-0-672f214f41bf@kernel.org
+
+Changes in v2:
+- Add a fix for spurious failures with 64 bit only guests.
+- Link to v1: https://patch.msgid.link/20251030-kvm-arm64-set-id-regs-aarch64-v1-0-96fe0d2b178e@kernel.org
+
+---
+Mark Brown (3):
+      KVM: selftests: arm64: Report set_id_reg reads of test registers as tests
+      KVM: selftests: arm64: Report register reset tests individually
+      KVM: selftests: arm64: Make set_id_regs bitfield validatity checks non-fatal
+
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 121 ++++++++++++++++++------
+ 1 file changed, 91 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Update Fuad Tabba's email address
+[PATCH] KVM: arm64: Update Fuad Tabba's email address
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Switch my KVM/arm64 reviewer entry to fuad.tabba@linux.dev, my canonical
+address for kernel work, and add a .mailmap entry so the existing
+tabba@google.com commits map onto it.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ .mailmap    | 1 +
+ MAINTAINERS | 2 +-
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
