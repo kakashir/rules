@@ -1,0 +1,464 @@
+
+On /root/mail/repo:
+From f82422d9b to 5806292ea
+KVM mailing list update from f82422d9b to 5806292ea
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     22 linux.ibm.com
+      2 gmail.com
+      1 nvidia.com
+      1 kylinos.cn
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     22  Eric Farman <farman@linux.ibm.com>
+      1  Weiming Shi <bestswngs@gmail.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Michael Gur <michaelgur@nvidia.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+      1  Hao Zhang <zhanghao1@kylinos.cn>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vsock/virtio: prevent workers from using deleted virtqueues
+[PATCH] vsock/virtio: prevent workers from using deleted virtqueues
+Author: Weiming Shi <bestswngs@gmail.com>
+
+The RX, TX and event workers read their virtqueue pointers before taking
+the mutex that protects the queue and its run flag. A work item delayed
+across freeze and restore can therefore retain a pointer deleted by
+virtio_vsock_vqs_del(), observe the run flag for the replacement queues,
+and use the freed pointer.
+
+RX has an additional path: when rx_run is clear, the common exit still
+refills the RX queue. A queued worker can consequently call
+virtqueue_add_sgs() immediately after freeze deletes the virtqueues.
+
+BUG: KASAN: slab-use-after-free in virtqueue_add_sgs
+Read of size 4 by task kworker/2:1
+Workqueue: virtio_vsock virtio_transport_rx_work
+Call Trace:
+ virtqueue_add_sgs (drivers/virtio/virtio_ring.c:2796)
+ virtio_vsock_rx_fill (net/vmw_vsock/virtio_transport.c:332)
+ virtio_transport_rx_work (net/vmw_vsock/virtio_transport.c:701)
+ process_one_work (kernel/workqueue.c:3314)
+ worker_thread (kernel/workqueue.c:3478)
+ kthread (kernel/kthread.c:436)
+ ret_from_fork (arch/x86/kernel/process.c:158)
+ ret_from_fork_asm (arch/x86/entry/entry_64.S:245)
+...
+Freed by task 141:
+ kfree (mm/slub.c:6566)
+ vp_del_vq (drivers/virtio/virtio_pci_common.c:259)
+ vp_del_vqs (drivers/virtio/virtio_pci_common.c:285)
+ virtio_vsock_freeze (net/vmw_vsock/virtio_transport.c:912)
+ virtio_device_freeze (drivers/virtio/virtio.c:658)
+ virtio_pci_freeze (drivers/virtio/virtio_pci_common.c:601)
+ pci_pm_freeze (drivers/pci/pci-driver.c:1098)
+ device_suspend (drivers/base/power/main.c:1968)
+Kernel panic - not syncing: KASAN: panic_on_warn set ...
+
+Read each worker's virtqueue under its mutex after confirming that the
+queue is running, and only refill RX while RX is running.
+
+Fixes: b917507e5ad9 ("vsock/virtio: stop workers during the .remove()")
+Cc: stable@vger.kernel.org
+Reported-by: Xiang Mei <xmei5@asu.edu>
+Assisted-by: OpenAI-Codex:gpt-5
+Signed-off-by: Weiming Shi <bestswngs@gmail.com>
+---
+ net/vmw_vsock/virtio_transport.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/vfio_ccw: free all memory if cp_init() fails
+[PATCH v6 01/10] s390/vfio_ccw: free all memory if cp_init() fails
+Author: Eric Farman <farman@linux.ibm.com>
+
+The routine cp_free() is called to unpin/free any memory once an I/O
+is completed successfully, or if cp_prefetch() fails. But if cp_init()
+fails, and cp->initialized is not enabled, the same routine cannot be
+used to free all the memory.
+
+An attempt to address this exists in ccwchain_handle_ccw(), where a
+single call to ccwchain_free() is made for the currently-processed
+CCW segment. But this will leak other segments (created as a result
+of a Transfer in Channel) that had been allocated as part of the same
+channel program.
+
+Address this by performing the cleanup outside of the recursive
+ccwchain_handle_ccw()/ccwchain_loop_tic() logic.
+
+Fixes: 8b515be512a2 ("vfio-ccw: Fix memory leak and don't call cp_free in=
+ cp_init")
+Cc: stable@vger.kernel.org
+Reviewed-by: Farhan Ali<alifm@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+Signed-off-by: Eric Farman <farman@linux.ibm.com>
+---
+ drivers/s390/cio/vfio_ccw_cp.c | 22 ++++++++++++++++++----
+ 1 file changed, 18 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/vfio_ccw fixes
+[PATCH v6 00/10] s390/vfio_ccw fixes
+Author: Eric Farman <farman@linux.ibm.com>
+
+This series addresses some pre-existing issues found in the
+s390 vfio_ccw (DASD passthrough) driver.
+
+v1: https://lore.kernel.org/r/20260714232208.1683788-1-farman@linux.ibm.c=
+om/
+v2: https://lore.kernel.org/r/20260720201931.976660-1-farman@linux.ibm.co=
+m/
+v3: https://lore.kernel.org/r/20260723174751.1180334-1-farman@linux.ibm.c=
+om/
+v4: https://lore.kernel.org/r/20260725152705.3958100-1-farman@linux.ibm.c=
+om/
+v5: https://lore.kernel.org/r/20260726040129.2946151-1-farman@linux.ibm.c=
+om/
+v5->v6:
+ - [sashiko] Add cancel_work_sync() to vfio_ccw_mdev_close_dev() as the "=
+usual"
+   cleanup, and keep them in vfio_ccw_mdev_release_dev() to cover corner =
+cases
+ - [MR; offlist] Remove the proposed notoper_work queue, and move the cp_=
+free
+   from the FSM to vfio_ccw_mdev_close_dev() to ensure we cover the case =
+where
+   a device becomes not operational (due to sch_event) while I/O is in fl=
+ight.=20
+
+Eric Farman (10):
+  s390/vfio_ccw: free all memory if cp_init() fails
+  s390/vfio_ccw: limit the number of channel program segments
+  s390/vfio_ccw: fix out of bounds check on CCW array
+  s390/vfio_ccw: ensure first IDAW remains constant
+  s390/vfio_ccw: calculate idal length based on idaw type
+  s390/vfio_ccw: ensure index for read/write regions are within range
+  s390/vfio_ccw: cancel existing workqueues
+  s390/vfio_ccw: move cp cleanup out of not operational
+  s390/vfio_ccw: implement a channel program mutex
+  s390/vfio_ccw: implement a crw lock
+
+ drivers/s390/cio/vfio_ccw_async.c   | 16 +++++
+ drivers/s390/cio/vfio_ccw_chp.c     | 31 ++++++++--
+ drivers/s390/cio/vfio_ccw_cp.c      | 96 ++++++++++++++++++++++-------
+ drivers/s390/cio/vfio_ccw_cp.h      | 10 +++
+ drivers/s390/cio/vfio_ccw_drv.c     | 10 +++
+ drivers/s390/cio/vfio_ccw_fsm.c     | 23 ++++---
+ drivers/s390/cio/vfio_ccw_ops.c     | 40 ++++++++++--
+ drivers/s390/cio/vfio_ccw_private.h |  7 +++
+ 8 files changed, 191 insertions(+), 42 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost_net: reject unsafe feature changes after activation
+[PATCH] vhost_net: reject unsafe feature changes after activation
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_net_set_features() is reachable through VHOST_SET_FEATURES and
+VHOST_SET_FEATURES_ARRAY. A successful VHOST_NET_SET_BACKEND with a
+socket backend invokes vhost_net_set_backend() and enables a virtqueue;
+a later VHOST_SET_FEATURES can still change feature-dependent state.
+
+When ACCESS_PLATFORM is first enabled, vhost_net_set_features() calls
+vhost_init_device_iotlb(). vhost_get_vq_desc() calls translate_desc(),
+which prefers dev->iotlb over dev->umem. Clearing ACCESS_PLATFORM
+updates acked_features but does not clear dev->iotlb, so the old IOTLB
+and its HVA entries remain in the descriptor path.
+
+With IN_ORDER disabled, vhost_get_vq_desc() reads the next head from
+the guest's avail ring but still advances vq->next_avail_head after a
+successful consume. Enabling IN_ORDER later makes vhost use that
+existing cursor without resetting it, so the next descriptor may not
+be the one from the guest's avail ring.
+
+Keep feature negotiation fixed after the first successful backend
+activation, except for VHOST_F_LOG_ALL. Reject clearing
+ACCESS_PLATFORM while a device IOTLB exists, and avoid rebuilding an
+existing IOTLB for a log-only update. Use VHOST_RESET_OWNER before
+starting a new feature negotiation.
+
+Fixes: 6b1e6cc7855b ("vhost: new device IOTLB API")
+Fixes: 45347e79b544 ("vhost_net: basic in_order support")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/net.c | 42 ++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 40 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v6 00/10] s390/vfio_ccw fixes
+ Skip: [PATCH v5 00/10] s390/vfio_ccw fixes
+Exist: [PATCH v6 01/10] s390/vfio_ccw: free all memory if cp_init() fails
+ Skip: [PATCH v5 01/10] s390/vfio_ccw: free all memory if cp_init() fails
+On /root/mail/repo_armkvm:
+From 96354c5f9 to 1b9a4287f
+KVM mailing list update from 96354c5f9 to 1b9a4287f
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 redhat.com
+      3 linux.dev
+      1 nutanix.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     15  Eric Auger <eric.auger@redhat.com>
+      3  Fuad Tabba <fuad.tabba@linux.dev>
+      3  Cornelia Huck <cohuck@redhat.com>
+      1  Shaju Abraham <shaju.abraham@nutanix.com>
+      1  Karl Mehltretter <kmehltretter@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+[RFC PATCH v7 01/18] scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and outputs the list of ID regs in target/arm/cpu-sysregs.h.inc
+under the form of DEF(<name>, <op0>, <op1>, <crn>, <crm>, <op2>).
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+[CH: note correct op1 range, don't skip CCSIDR]
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Message-ID: <20251208163751.611186-2-eric.auger@redhat.com>
+---
+ scripts/update-aarch64-cpu-sysregs-header.py | 134 +++++++++++++++++++
+ 1 file changed, 134 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  kvm/arm: Introduce a customizable aarch64 KVM host model
+[RFC PATCH v7 00/18] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields. 
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+
+The end goal is to get more flexibility when migrating guests
+between different host hardware.
+
+QEMU retrieves the writable ID fields from KVM UAPI [1] and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file. It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction. 
+
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+The list of SYSREG_ID properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion [2].
+
+For the record, Jinqian was able to migrate between Hisilicon KunPeng
+HIP09 and HIP12 chips with this series using this kind of command:
+
+-cpu host,pauth=off,pmu=off,sve=off,\
+SYSREG_ID_AA64PFR1_EL1_NMI=0x0,\
+SYSREG_ID_AA64ISAR1_EL1_LS64=0x0,\
+SYSREG_ID_AA64ISAR1_EL1_XS=0x0,\
+SYSREG_ID_AA64ISAR1_EL1_LRCPC=0x2,\
+SYSREG_ID_AA64ISAR2_EL1_RPRFM=0x0,\
+SYSREG_ID_AA64ISAR2_EL1_CLRBHB=0x0,\
+SYSREG_ID_AA64ISAR2_EL1_PAC_frac=0x0,\
+SYSREG_ID_AA64ISAR2_EL1_BC=0x0,\
+SYSREG_ID_AA64ISAR2_EL1_RPRES=0x0,\
+SYSREG_ID_AA64ISAR2_EL1_WFxT=0x0,\
+SYSREG_ID_AA64MMFR0_EL1_FGT=0x0,\
+SYSREG_ID_AA64MMFR0_EL1_BigEnd=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_ECBHB=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_CMOW=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_TIDCP1=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_nTLBPA=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_AFP=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_HCX=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_ETS=0x0,\
+SYSREG_ID_AA64MMFR1_EL1_PAN=0x2,\
+SYSREG_ID_AA64MMFR1_EL1_HAFDBS=0x2,\
+SYSREG_ID_AA64MMFR2_EL1_CnP=0x0,\
+SYSREG_ID_AA64MMFR3_EL1_TCRX=0x0,\
+SYSREG_ID_AA64DFR0_EL1_PMUVer=0x6,\
+SYSREG_ID_AA64DFR0_EL1_DebugVer=0x9,\
+SYSREG_ID_AA64DFR0_EL1_DoubleLock=0xf,\
+SYSREG_ID_AA64ZFR0_EL1_F64MM=0x0,\
+SYSREG_ID_AA64ZFR0_EL1_F32MM=0x0,\
+SYSREG_ID_AA64ZFR0_EL1_SM4=0x0,\
+SYSREG_ID_AA64ZFR0_EL1_SHA3=0x0,\
+SYSREG_ID_AA64ZFR0_EL1_BitPerm=0x0,\
+SYSREG_ID_AA64ZFR0_EL1_AES=0x0,\
+SYSREG_ID_AA64ZFR0_EL1_SVEver=0x0,\
+SYSREG_CTR_EL0_L1Ip=0x2 \
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v7
+
+History:
+--------
+v6 -> v7:
+- query-cpu-model-expansion now applies the sysreg props
+  onto a scratch vcpu (POC) allowing a finer validation of settings
+  (not perfect though as init may be revisited depending on
+  settings)
+- Properly handle ValueRange (Khushit)
+- Remove cpu parameter in get_host_cpu_idregs call chain
+  (Khushit)
+
+v5 -> v6:
+v6 is mostly for Khushit to see how he may work on top
+of this series. It fulfills some of his requirements:
+- Upon Khushit request I added description for enum values
+  and reserved fields
+- set_sysreg_prop checks the input value against enum values
+  if any
+- writable_bitmap is now dispatched into the sysreg descripton
+  and not stored in vcpu state anymore (besides it is VM wide)
+- implemented write for qmp inspection. However this is not
+  yet checked against KVM. That's the next step I think, ie.
+  instantiate a scratch vcpu to test if the field value can be
+  applied?
+- if some inconsistencies between writable mask and idreg
+  field, reserved fields only produce traces
+- this version does not yet fix some reported issues about host
+  supporting nested virt. I will further sync with Khushit.
+  so this is definitively not candidate to be applied, hence the
+  RFC tag.
+
+Cornelia Huck (3):
+  target/arm/kvm: Retrieve writable ID reg map
+  arm/cpu-features: document ID reg properties
+  arm-qmp-cmds: introspection for ID register props
+
+Eric Auger (14):
+  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+  target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  scripts: Introduce scripts/aarch64_sysreg_helpers module
+  scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+  target/arm/cpu-idregs.h.inc: generate with script
+  target/arm/cpu-idregs.h.inc: Generate enum values
+  arm/kvm: Initialize all writable ID registers from host
+  target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+  target/arm/cpu: Expose writable ID reg field properties on the kvm
+    host vcpu model
+  target/arm/cpu-idregs.h.inc: Generate reserved fields
+  target/arm/kvm: Ignore and trace unexpected writable reserved fields
+  target/arm/kvm: add utility to write idregs in scratch vcpu
+
+Shaju Abraham (1):
+  target/arm/cpu_idregs: generate tables for Arm64 ID registers and
+    fields
+
+ docs/system/arm/cpu-features.rst              |  106 +-
+ target/arm/cpu-idregs.h                       |   41 +
+ target/arm/kvm_arm.h                          |   13 +
+ target/arm/cpu-idregs.h.inc                   | 2164 +++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |   57 +-
+ target/arm/arm-qmp-cmds.c                     |   98 +
+ target/arm/cpu-idregs.c                       |   96 +
+ target/arm/cpu64.c                            |    5 +
+ target/arm/kvm-stub.c                         |    6 +
+ target/arm/kvm.c                              |  360 ++-
+ scripts/aarch64_sysreg_helpers.py             |  109 +
+ .../update-aarch64-cpu-sysreg-properties.py   |  290 +++
+ scripts/update-aarch64-cpu-sysregs-header.py  |   51 +
+ target/arm/meson.build                        |    1 +
+ target/arm/trace-events                       |    8 +
+ 15 files changed, 3373 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Flush external_mdscr_el1 to the pKVM hyp vCPU
+[PATCH 1/2] KVM: arm64: Flush external_mdscr_el1 to the pKVM hyp vCPU
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+flush_debug_state() propagates the guest's debug_owner and the
+owner-selected debug register state to the hyp vCPU, but not
+external_mdscr_el1. While the host owns the debug registers, the world
+switch loads MDSCR_EL1 from external_mdscr_el1 (ctxt_mdscr_el1()),
+where the host's KDE/MDE/SS bits live. A non-protected guest under
+KVM_GUESTDBG_USE_HW or single-step therefore runs with MDSCR_EL1.MDE/SS
+clear in hardware, and its watchpoints, breakpoints and single-step
+never fire.
+
+Propagate external_mdscr_el1 to the hyp vCPU alongside the host-owned
+debug state.
+
+Fixes: 4ad3a0b87f2ec ("KVM: arm64: Don't hijack guest context MDSCR_EL1")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Fix host-directed debug for non-protected pKVM guests
+[PATCH 0/2] KVM: arm64: Fix host-directed debug for non-protected pKVM guests
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Under pKVM, host-directed hardware debug of a non-protected guest
+(KVM_GUESTDBG_USE_HW) and userspace single-step never fire.
+
+When the host owns the debug registers, the world switch loads
+MDSCR_EL1 from external_mdscr_el1, where the host's MDE/KDE/SS bits
+live. flush_debug_state() copies the guest's debug_owner and the
+owner-selected debug register state to the hyp vCPU, but not
+external_mdscr_el1, so the field reaches hardware as zero and the debug
+exceptions stay disabled. Patch 1 propagates it.
+
+Patch 2 adds a debug-exceptions selftest for a userspace watchpoint,
+which the suite did not cover: it checks that the watchpoint fires and
+reports the accessed address in debug.arch.far. It fails without patch
+1 and passes with it. The existing single-step test passes even when
+stepping never fires, so it does not catch this.
+
+Found while adding self-hosted debug support for protected VMs.
+
+Based on Linux 7.2-rc4 (1590cf0329716).
+
+Cheers,
+/fuad
+
+Fuad Tabba (2):
+  KVM: arm64: Flush external_mdscr_el1 to the pKVM hyp vCPU
+  KVM: arm64: selftests: Add a userspace watchpoint test
+
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            | 10 ++++-
+ .../selftests/kvm/arm64/debug-exceptions.c    | 41 +++++++++++++++++++
+ 2 files changed, 49 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
