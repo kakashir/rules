@@ -1,0 +1,4153 @@
+
+On /root/mail/repo:
+From a4820d840 to ff31b8f2a
+KVM mailing list update from a4820d840 to ff31b8f2a
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     30 kernel.org
+     17 linux.ibm.com
+     14 google.com
+     10 open-hieco.net
+      9 zhaoxin.com
+      6 tu-dortmund.de
+      5 gmail.com
+      4 chromium.org
+      3 nvidia.com
+      2 redhat.com
+      1 rivosinc.com
+      1 lanxincomputing.com
+
+Top 15 contributors (Based on Email Body)
+
+     30  Marc Zyngier <maz@kernel.org>
+     15  Claudio Imbrenda <imbrenda@linux.ibm.com>
+     11  Sean Christopherson <seanjc@google.com>
+     10  Tina Zhang <zhang_wei@open-hieco.net>
+      8  Frank Zhu <frankzhu@zhaoxin.com>
+      6  Simon Schippers <simon.schippers@tu-dortmund.de>
+      4  Dmytro Maluka <dmaluka@chromium.org>
+      3  Josh Hilke <jrhilke@google.com>
+      3  Alex Williamson <alex.williamson@nvidia.com>
+      2  Sergio Lopez <slp@redhat.com>
+      2  Guidong Han <2045gemini@gmail.com>
+      1  "Yuhang.Chen" <yhchen312@gmail.com>
+      1  "=?UTF-8?B?RXdhbiBIYWktb2M=?=" <ewanhai-oc@zhaoxin.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+      1  Irene Wang <yiranirenewang@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v9 5/5] vfio: selftests: igb: Recover after DMA-read faults
+Author: Josh Hilke <jrhilke@google.com>
+
+
+The mix_and_match test intentionally submits a TX descriptor with an
+unmapped source IOVA so that the DMA read fails.  On real 82576
+hardware the resulting fault leaves the descriptor engine unable to
+service subsequent valid descriptors, so the next memcpy in the same
+test iteration times out.
+
+The 82576 datasheet (section 4.2.1.6.1) describes CTRL.RST as the
+software mechanism to recover from a hung device.  Empirically
+CTRL.RST alone is not sufficient in this state: the visible queue
+registers are reinitialized, but the next valid memcpy still posts
+descriptors without any TDH/TDT progress in the same process.  A
+fresh device open after the failure works, which points to a reset
+scope broader than CTRL.RST being required.  The 82576 advertises
+PCIe FLR; VFIO_DEVICE_RESET drives FLR and supplies that scope while
+preserving the selftest process and its DMA mappings.
+
+Add igb_error_reset_and_reinit() implementing the recovery sequence:
+issue VFIO_DEVICE_RESET, re-arm the kernel-side MSI-X trigger against
+the still-valid eventfd via vfio_pci_irq_reenable() (this does not
+touch the eventfd, which test fixtures may have cached), and
+re-program the device via igb_hw_init().  FLR clears EICR and leaves
+EIMS=0, so no explicit interrupt mask or cause writes are needed.
+igb_hw_init() resets tx_tail/rx_tail to 0 and igb_memcpy_start() zeros
+each descriptor before submission, so no ring memset is needed either.
+
+Call this from igb_memcpy_wait() on completion timeout. Lock contention
+during reset (e.g. if PCIe/IOMMU/AER error handling triggered by the
+just-observed DMA fault holds the device lock) is handled by the retry
+logic now present inside vfio_pci_device_reset(). The failed memcpy still
+returns -ETIMEDOUT; reset recovery only ensures the next operation starts
+from a usable device state.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/vfio/lib/drivers/igb/igb.c | 38 +++++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 4/5] vfio: selftests: Retry on EAGAIN during device reset
+Author: Josh Hilke <jrhilke@google.com>
+
+Add retry logic to vfio_pci_device_reset() to handle the case where PCI
+resets fail due to lock contention, in which case
+pci_try_reset_function() returns -EAGAIN.
+
+Suggested-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../vfio/lib/include/libvfio/vfio_pci_device.h       |  1 +
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c   | 20 +++++++++++++++++++-
+ 2 files changed, 20 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 3/5] vfio: selftests: igb: Factor hardware programming into igb_hw_init()
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Split the device register programming out of igb_init() into a new
+igb_hw_init() helper so that the same sequence can be re-run after a
+VFIO_DEVICE_RESET to restore the registers that CTRL.RST clears.  No
+functional change for the initial path.
+
+igb_init() now performs the one-shot setup: region size assertion, BAR
+mapping, CTRL.RST + IMC mask-all to put the device into a known state,
+and vfio_pci_msix_enable() to set up the kernel-side IRQ trigger.
+igb_hw_init() does the rest: ring pointer setup and IOVA calc,
+CTRL_EXT, PCI bus master, GCR, PHY loopback, descriptor rings, RCTL,
+TCTL, GPIE/EIAC/EIAM/EIMS/IVAR, and driver-state initialization.
+
+vfio_pci_msix_enable() moves from after RCTL/TCTL to before all
+device-side programming.  Its only side effects are the VFIO kernel
+IRQ trigger setup and the PCI MSI-X capability bits in config space;
+neither has any ordering dependency on the 82576 device register
+writes performed in igb_hw_init().  Performing it once in igb_init()
+keeps igb_hw_init() reusable from the reset recovery path (which uses
+vfio_pci_irq_reenable() to re-arm the existing trigger).
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/vfio/lib/drivers/igb/igb.c | 41 ++++++++++++++++------
+ 1 file changed, 31 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/5] vfio: selftests: Add helpers to re-enable interrupts
+Author: Josh Hilke <jrhilke@google.com>
+
+
+Selftest drivers that recover from a fault by issuing VFIO_DEVICE_RESET
+need to re-arm device interrupts afterwards.  VFIO_DEVICE_RESET tears
+down the kernel-side IRQ trigger so a subsequent VFIO_DEVICE_SET_IRQS
+is required, but the user-side eventfds (and any fd cached in a test
+fixture) are still valid and must be preserved.
+
+vfio_pci_irq_enable() refuses to be called for vectors that already
+have an eventfd (VFIO_ASSERT_LT), and vfio_pci_irq_disable() closes
+all eventfds before resetting the trigger, so neither is suitable.
+
+Add vfio_pci_irq_reenable(device, index, vector, count) which asserts
+that the requested range has existing eventfds and re-issues
+VFIO_DEVICE_SET_IRQS using them.  Signature mirrors vfio_pci_irq_enable().
+
+Add vfio_pci_msi{,x}_reenable() wrappers around vfio_pci_irq_reenable()
+for additional ease of use and readability.
+
+Assisted-by: Claude:claude-opus-4-7
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: David Matlack <dmatlack@google.com>
+---
+ .../vfio/lib/include/libvfio/vfio_pci_device.h     | 14 ++++++++++++++
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c | 22 ++++++++++++++++++++++
+ 2 files changed, 36 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 1/5] vfio: selftests: igb: Add driver for Intel 82576 device
+Author: Josh Hilke <jrhilke@google.com>
+
+Add a VFIO selftest driver for the Intel Gigabit Ethernet controller
+(IGB), specifically targeting the 82576 device. IGB is fully virtualized
+in QEMU which makes it easy to run VFIO selftests without needing any
+specific hardware.
+
+All VFIO selftest drivers must implement DMA/memcpy operations, but IGB
+doesn't have a native memcpy feature, so the loopback feature (described
+in section 3.5.6.3 of IGB specification) is used to implement it. To
+support testing on both QEMU and physical hardware, the driver uses PHY
+internal loopback with some QEMU-specific fallbacks. The driver also
+supports MSI-X routing and interrupt management, and disables PCIe
+completion timeout retries to ensure clean recovery during invalid-DMA
+tests.
+
+Users can verify the driver works in QEMU by building the kernel,
+building VFIO selftests, and then running the vfio_pci_driver_test using
+this command:
+
+vng \
+--run arch/x86/boot/bzImage \
+--user root \
+--disable-microvm \
+--memory 32G \
+--cpus 8 \
+--qemu-opts="-M q35,accel=kvm,kernel-irqchip=split" \
+--qemu-opts="-device intel-iommu,intremap=on,caching-mode=on,device-iotlb=on" \
+--qemu-opts="-netdev user,id=net0 -device igb,netdev=net0,addr=09.0" \
+--append "console=ttyS0 earlyprintk=ttyS0 intel_iommu=on iommu=pt" \
+--exec "modprobe vfio-pci && \
+  ./tools/testing/selftests/vfio/scripts/setup.sh 0000:00:09.0 && \
+  ./tools/testing/selftests/vfio/scripts/run.sh ./tools/testing/selftests/vfio/vfio_pci_driver_test"
+
+Assisted-by: Claude:claude-opus-4-7
+Assisted-by: Gemini:gemini-3.1-pro-preview
+Co-developed-by: Alex Williamson <alex.williamson@nvidia.com>
+Signed-off-by: Alex Williamson <alex.williamson@nvidia.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+ .../selftests/vfio/lib/drivers/igb/e1000_82575.h   |   1 +
+ .../selftests/vfio/lib/drivers/igb/e1000_defines.h |   1 +
+ .../selftests/vfio/lib/drivers/igb/e1000_regs.h    |   1 +
+ tools/testing/selftests/vfio/lib/drivers/igb/igb.c | 520 +++++++++++++++++++++
+ tools/testing/selftests/vfio/lib/libvfio.mk        |   1 +
+ tools/testing/selftests/vfio/lib/vfio_pci_driver.c |   3 +-
+ 6 files changed, 526 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 0/5] vfio: selftests: Add driver for Intel Ethernet Gigabit
+Author: Josh Hilke <jrhilke@google.com>
+
+This v9 of a series which adds a VFIO selftest driver for the Intel
+Gigabit Ethernet controller (IGB), specifically targeting the 82576
+device. IGB is fully virtualized in QEMU, making it suitable for running
+VFIO selftests without specialized hardware.
+
+v8: https://lore.kernel.org/kvm/20260729-igb_v3_b4-v8-0-3ed236272b4e@google.com/
+
+Version 9 enables Pad Short Packets (PSP) to support short packet
+transfers, per Sashiko's comments, and fixes an inaccurate comment. I
+also squashed patch 2 from v8 into patch 1 so that Sashiko wouldn't
+complain about issues in patch 1 that were fixed by patch 2.
+
+Testing
+=======
+- VFIO selftests builds clean at every commit
+- vfio_pci_driver_test passes using IGB driver + QEMU. Use the following
+  command to run the tests:
+
+  vng \
+  --run arch/x86/boot/bzImage \
+  --user root \
+  --disable-microvm \
+  --memory 32G \
+  --cpus 8 \
+  --qemu-opts="-M q35,accel=kvm,kernel-irqchip=split" \
+  --qemu-opts="-device intel-iommu,intremap=on,caching-mode=on,device-iotlb=on" \
+  --qemu-opts="-netdev user,id=net0 -device igb,netdev=net0,addr=09.0" \
+  --append "console=ttyS0 earlyprintk=ttyS0 intel_iommu=on iommu=pt" \
+  --exec "modprobe vfio-pci && \
+          ./tools/testing/selftests/vfio/scripts/setup.sh 0000:00:09.0 && \
+          ./tools/testing/selftests/vfio/scripts/run.sh ./tools/testing/selftests/vfio/vfio_pci_driver_test"
+--------
+Changelog:
+
+v8 -> v9:
+- Enable Pad Short Packets (PSP) in TCTL to support transfers < 60 bytes. (Sashiko)
+- Correct misleading comment about interrupt delivery in Patch 1. (Sashiko)
+
+v7 -> v8:
+- Rebase onto linux-next branch. (Alex)
+- Implement retry limit in vfio_pci_device_reset(). (Alex)
+- Carry David's reviewed-by tag onto the patches that haven't been
+  touched since v6.
+
+v6 -> v7:
+- Allow the driver to be used on any architecture. (Alex) 
+- Fix regression in reset logic for the physical device. (Alex)
+
+v5 -> v6:
+- Retry on EAGAIN during device reset to handle transient lock contention (Sashiko).
+
+v4 -> v5:
+- Reordered igb_remove() to reset the device before disabling MSI-X (Sashiko)
+- Refactored hardware reset logic into igb_reset() helper.
+- Simplified reset completion check to usleep + assertion instead of retry loop (Sashiko).
+- Allow arbitrary test data by enabling Multicast Promiscuous (MPE)
+  and Broadcast Accept (BAM) modes (Sashiko).
+- Fixed igb_send_msi() to use MSIX_VECTOR_MASK instead of magic number (Sashiko).
+
+v3 -> v4
+- Enable MSI-X mode in GPIE (Sashiko)
+- Fix hardware initilization order to avoid race conditions (Alex/Sashiko)
+- Add memory barrier to prevent speculative reads (Alex/Sashiko)
+- Clean up stale references in commit messages and comments (Alex/Sashiko)
+- Add a comment to address software/firmware semaphore (Alex/Sashiko)
+
+v2 -> v3
+- Poll reset bit and document the required wait time (David/Sashiko)
+- Fix the logic for enabling PCI_COMMAND_MEMORY (David/Sashiko)
+- Fail the test if autonegotation fails (David/Sashiko)
+- Handle endianness conversions (David/Sashiko)
+- Use real IGB headers at the start of the series (David)
+- Add E1000_TXD_CMD_IFCS to the TX descriptor command word (Sashiko)
+
+v1 -> v2
+- Removed the chunking loop in igb_memcpy_start() (David)
+- Removed redundant writes to status_error and hdr_addr (David)
+- Include official IGB header files (David)
+
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+Alex Williamson (3):
+      vfio: selftests: Add helpers to re-enable interrupts
+      vfio: selftests: igb: Factor hardware programming into igb_hw_init()
+      vfio: selftests: igb: Recover after DMA-read faults
+
+Josh Hilke (2):
+      vfio: selftests: igb: Add driver for Intel 82576 device
+      vfio: selftests: Retry on EAGAIN during device reset
+
+ .../selftests/vfio/lib/drivers/igb/e1000_82575.h   |   1 +
+ .../selftests/vfio/lib/drivers/igb/e1000_defines.h |   1 +
+ .../selftests/vfio/lib/drivers/igb/e1000_regs.h    |   1 +
+ tools/testing/selftests/vfio/lib/drivers/igb/igb.c | 577 +++++++++++++++++++++
+ .../vfio/lib/include/libvfio/vfio_pci_device.h     |  15 +
+ tools/testing/selftests/vfio/lib/libvfio.mk        |   1 +
+ tools/testing/selftests/vfio/lib/vfio_pci_device.c |  42 +-
+ tools/testing/selftests/vfio/lib/vfio_pci_driver.c |   3 +-
+ 8 files changed, 639 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v13 1/5] tun/tap: add IFF_BACKPRESSURE flag
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+Add the IFF_BACKPRESSURE flag to the UAPI header and to TUN_FEATURES so
+that it can be set via TUNSETIFF. The flag has no effect yet, it is the
+gate for the qdisc backpressure logic added by the following patches.
+
+Keeping the flag and its users in separate patches would either leave a
+window where backpressure is unconditional, or make the gate a later
+add-on. Adding the flag first lets every following patch be a no-op
+unless it is set.
+
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ drivers/net/tun.c                 | 3 ++-
+ include/uapi/linux/if_tun.h       | 4 ++++
+ tools/include/uapi/linux/if_tun.h | 4 ++++
+ 3 files changed, 10 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v13 0/5] tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch series deals with tun/tap & vhost-net which drop incoming
+SKBs whenever their internal ptr_ring buffer is full. Instead, with this
+patch series, the associated netdev queue is stopped, but only when the
+new IFF_BACKPRESSURE flag is set and a qdisc is attached. Without the
+flag, or if no qdisc is present, the existing behavior is preserved. The
+XDP transmit path is not affected. This patch series touches tun/tap and
+vhost-net, as they share common logic and must be updated together.
+Modifying only one of them would break the other.
+
+By applying proper backpressure, this change allows the connected qdisc to
+operate correctly, as reported in [1], and significantly improves
+performance in real-world scenarios, as demonstrated in our paper [2]. For
+example, we observed a 36% TCP throughput improvement for an OpenVPN
+connection between Germany and the USA.
+
+The previous version of this work was applied and then reverted in 7.2,
+because the backpressure was unconditional: it caused a significant
+throughput drop in an IPv6 multicast testcase with multiple iperf3 TCP
+threads sending on Brett Sheffield's librecast testbed [3]. This version
+therefore makes the behavior opt-in via IFF_BACKPRESSURE from the very
+first patch, so that a tun/tap device which does not set the flag behaves
+exactly as before.
+
+The series is ordered so that no patch changes how packets are handled
+unless the flag is set:
+
+- Patch 1 adds the flag only. It has no effect yet.
+- Patches 2 and 3 add the consumer side, which wakes a stopped netdev
+  queue. __tun_wake_queue() returns early unless IFF_BACKPRESSURE is set,
+  and no queue is stopped at this point anyway.
+- Patch 4 is a pure ptr_ring refactor required by patch 5.
+- Patch 5 adds the queue stopping, gated on IFF_BACKPRESSURE, together
+  with the wake needed when the flag is cleared again.
+
+That way no intermediate commit changes the behavior of an existing
+tun/tap user beyond the added checks, and bisecting inside the series can
+not hit the regression that led to the revert.
+
+Thanks!
+
+[1] Link: https://unix.stackexchange.com/questions/762935/traffic-shaping-ineffective-on-tun-device
+[2] Link: https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+[3] Link: https://lore.kernel.org/netdev/akVnoOYQOrt8k-Gu@karahi.librecast.net/
+
+---
+Changelog:
+v13:
+--> Apart from the three items below, the resulting code is identical to
+    v12 plus the separate IFF_BACKPRESSURE patch [4]:
+- tuntap.rst does not name a kernel version anymore.
+- Add the IFF_BACKPRESSURE comment to tools/include/uapi/linux/if_tun.h
+  as well (Sashiko).
+- Add a comment explaining the __ptr_ring_empty() check in
+  __tun_detach() (MST).
+
+- Include the IFF_BACKPRESSURE opt-in into the series instead of adding it
+  as a follow-up fix, so that the series can not be bisected into the
+  regression that got v12 reverted.
+--> New patch 1 adds the flag on its own.
+- Patch 2 carries the IFF_BACKPRESSURE gate in __tun_wake_queue() from
+  the start and introduces tun_force_wake_queue(), which is used by
+  tun_attach() and tun_queue_resize().
+- Patch 5 gates the queue stopping on IFF_BACKPRESSURE and calls
+  tun_force_wake_queue() for the attached tfiles in tun_set_iff(), so
+  clearing the flag can not leave a queue stopped.
+- Dropped the pktgen numbers from patches 2 and 3, as they only measured
+  the consumer side without any queue stopping.
+
+[4] Link: https://lore.kernel.org/netdev/20260709095511.168235-1-simon.schippers@tu-dortmund.de/
+
+v12: https://lore.kernel.org/netdev/20260510151529.43895-1-simon.schippers@tu-dortmund.de/
+Patch 1:
+- Revert tun_queue_purge() to plain ptr_ring_consume() and instead
+  explicitly wake the queue in __tun_detach() for the ntfile taking
+  over the queue slot (if its ring is empty).
+- Inlined tun_reset_cons_cnt(), because only tun_attach() uses it.
+
+- Patches 2-4 and cover letter unchanged.
+- Compiled and short pktgen test.
+
+v11:
+- Renamed __ptr_ring_produce_peek() to __ptr_ring_check_produce()
+  (Sashiko)
+- Add return code -EINVAL to __ptr_ring_check_produce() which lets
+  tun_net_xmit() stop the queue only on -ENOSPC. (MST)
+- Resolve race on tfile->queue_index by locking tx_ring.consumer_lock
+  in __tun_detach(). (Sashiko)
+- Wake the queue in tun_queue_resize() to avoid possible stalls.
+- Other minor adjustments & reran the benchmarks.
+
+v10: https://lore.kernel.org/netdev/20260506141033.180450-1-simon.schippers@tu-dortmund.de/
+- Changed the term "Transmitted" to "Received" in the benchmarks,
+  as correctly pointed out by MST, and reran the benchmarks.
+
+Addressed the Sashiko AI review:
+- Avoid a data race on tfile->cons_cnt by always locking.
+- Correctly count the number of consumed packets for vhost-net.
+- Corrected a typo in the commit message of commit 3.
+- Added a missing barrier on the consumer side.
+--> The barriers now follow the "store buffering" principle.
+- No longer return NETDEV_TX_BUSY at all, because it is unsafe.
+--> Result: There are still a few drops with multiple senders, which
+            would be avoided by disabling LLTX.
+
+V9: https://lore.kernel.org/netdev/20260428123859.19578-1-simon.schippers@tu-dortmund.de/
+- Addressed minor nit by MST in patches 1 and 2.
+- Rebased patch 3 because of commit d748047
+  ("ptr_ring: disable KCSAN warnings").
+- Documented the pair of the smp_mb__after_atomic() in tun_net_xmit()
+  with tun_ring_consume().
+  --> It simply pairs with the test_and_clear_bit() inside of
+      netif_wake_subqueue().
+- Use 1 ptr_ring consumer spinlock instead of 2.
+- Ran pktgen benchmarks with pg_set SHARED for 50 iterations on
+  latest kernel
+  --> No significant performance difference noticed
+
+V8: https://lore.kernel.org/netdev/20260312130639.138988-1-simon.schippers@tu-dortmund.de/
+- Drop code changes in drivers/net/tap.c; The code there deals with
+  ipvtap/macvtap which are unrelated to the goal of this patch series
+  and I did not realize that before
+-> Greatly simplified logic, 4 instead of 9 commits
+-> No more duplicated logics and distinction in vhost required
+- Only wake after the queue stopped and half of the ring was consumed
+  as suggested by MST
+-> Performance improvements for TAP, but still slightly slower
+- Better benchmarking with pinned threads, XDP drop program for
+  tap+vhost-net and disabling CPU mitigations (and newer Ryzen 5 5600X
+  processor) as suggested by Jason Wang
+
+V7: https://lore.kernel.org/netdev/20260107210448.37851-1-simon.schippers@tu-dortmund.de/
+- Switch to an approach similar to veth (excluding the recently fixed
+variant), as suggested by MST, with minor adjustments discussed in V6
+- Rename the cover-letter title
+- Add multithreaded pktgen and iperf3 benchmarks, as suggested by Jason
+Wang
+- Rework __ptr_ring_consume_created_space() so it can also be used after
+batched consume
+
+...
+
+Simon Schippers (5):
+  tun/tap: add IFF_BACKPRESSURE flag
+  tun/tap: add ptr_ring consume helper with netdev queue wakeup
+  vhost-net: wake queue of tun/tap after ptr_ring consume
+  ptr_ring: move free-space check into separate helper
+  tun/tap & vhost-net: stop tail-drop when IFF_BACKPRESSURE is set
+
+ Documentation/networking/tuntap.rst |  22 +++++
+ drivers/net/tun.c                   | 139 ++++++++++++++++++++++++++--
+ drivers/vhost/net.c                 |  21 +++--
+ include/linux/if_tun.h              |   3 +
+ include/linux/ptr_ring.h            |  20 +++-
+ include/uapi/linux/if_tun.h         |   4 +
+ tools/include/uapi/linux/if_tun.h   |   4 +
+ 7 files changed, 195 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v13 2/5] tun/tap: add ptr_ring consume helper with netdev queue wakeup
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+Introduce tun_ring_consume() that wraps ptr_ring_consume() and calls
+__tun_wake_queue(). The latter wakes the stopped netdev subqueue once
+half of the ring capacity has been consumed, tracked via the new
+cons_cnt field in tun_file. As a safety net, the queue is also woken on
+the last consumed entry if it leaves the ring empty. The point is to
+allow the queue to be stopped when it gets full, which is required for
+traffic shaping, implemented by the following "stop tail-drop when
+IFF_BACKPRESSURE is set".
+
+__tun_wake_queue() returns early unless IFF_BACKPRESSURE is set, so for a
+tun/tap device that does not opt in only the added check on the consume
+path remains.
+
+Some implementation details:
+- tun_ring_recv() replaces ptr_ring_consume() with tun_ring_consume()
+  to properly wake the queue.
+- __tun_detach() locks the tx_ring.consumer_lock to avoid races with
+  the consumer on the queue_index.
+- The ptr_ring_consume() call in tun_queue_purge() is not replaced with
+  tun_ring_consume(). Instead, within the same tx_ring.consumer_lock
+  in __tun_detach(), the netdev queue is woken for the ntfile taking
+  it over, to avoid a possible stall. This does not matter for
+  tun_detach_all(), as it is called during device teardown and no tfile
+  takes over any queue. The queue is only woken if the ring of
+  the ntfile is empty, as otherwise the consumer wakes it after
+  consuming the remaining entries.
+- Ensure detached queues are woken on re-attach by calling the new
+  tun_force_wake_queue() helper from tun_attach(), and reuse it across
+  the existing wake paths. Unlike __tun_wake_queue() it ignores
+  IFF_BACKPRESSURE, so a queue can not stay stopped after the flag is
+  cleared.
+- The aforementioned upcoming patch explains the pairing of the smp_mb()
+  of __tun_wake_queue().
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ drivers/net/tun.c | 77 ++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 73 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v13 3/5] vhost-net: wake queue of tun/tap after ptr_ring consume
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+Add tun_wake_queue() to tun.c and export it for use by vhost-net. The
+function validates that the file belongs to a tun/tap device and that
+the tfile exists, dereferences the tun_struct under RCU, and delegates
+to __tun_wake_queue().
+
+vhost_net_buf_produce() now calls tun_wake_queue() after a successful
+batched consume of the ring to allow the netdev subqueue to be woken up.
+The point is to allow the queue to be stopped when it gets full, which
+is required for traffic shaping, implemented by the following
+"stop tail-drop when IFF_BACKPRESSURE is set".
+As __tun_wake_queue() returns early unless IFF_BACKPRESSURE is set, a
+tun/tap device that does not opt in only pays for the added check.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ drivers/net/tun.c      | 23 +++++++++++++++++++++++
+ drivers/vhost/net.c    | 21 +++++++++++++++------
+ include/linux/if_tun.h |  3 +++
+ 3 files changed, 41 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v13 5/5] tun/tap & vhost-net: stop tail-drop when IFF_BACKPRESSURE is set
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This commit prevents tail-drop when IFF_BACKPRESSURE is set, a qdisc is
+present and the ptr_ring becomes full. Once the ring reaches capacity
+after a produce attempt, the netdev queue is stopped instead of dropping
+subsequent packets. Without the flag, or if no qdisc is present, the
+previous tail-drop behavior is preserved.
+
+The unconditional version of this behavior was reverted because it caused
+a significant throughput drop in an IPv6 multicast testcase on Brett
+Sheffield's librecast testbed: with 8 iperf3 TCP threads sending, the
+throughput dropped from 13.5 Gbit/s to 9.13 Gbit/s. This is why the queue
+stopping is now gated on IFF_BACKPRESSURE.
+
+If producing an entry fails anyway due to a race, tun_net_xmit() drops
+the packet. Such rare races are expected because LLTX is enabled and the
+transmit path operates without the usual locking.
+
+Since the flag can be cleared again by a later TUNSETIFF, tun_set_iff()
+calls tun_force_wake_queue() for the attached tfiles, so that no queue
+stays stopped without a consumer that would wake it.
+
+The __tun_wake_queue() function of the consumer races with the producer
+for waking/stopping the netdev queue, which could result in a stalled
+queue. Therefore, an smp_mb__after_atomic() is introduced that pairs
+with the smp_mb() of the consumer. It follows the principle of store
+buffering described in tools/memory-model/Documentation/recipes.txt:
+
+- The producer in tun_net_xmit() first sets __QUEUE_STATE_DRV_XOFF,
+  followed by an smp_mb__after_atomic() (= smp_mb()), and then reads the
+  ring with __ptr_ring_check_produce().
+
+- The consumer in __tun_wake_queue() first writes zero to the ring in
+  __ptr_ring_consume(), followed by an smp_mb(), and then reads the queue
+  status with netif_tx_queue_stopped().
+
+=> Following the aforementioned principle, it is impossible for the
+   producer to see a full ring (and therefore not wake the queue on the
+   re-check) while the consumer simultaneously fails to see a stopped
+   queue (and therefore also does not wake it).
+
+The documentation in tuntap.rst is updated accordingly.
+
+Benchmarks:
+My own benchmarks show a slight regression in raw transmission performance
+when using two sending threads. Packet loss also occurs only in the
+two-thread sending case; no packet loss was observed with a single
+sending thread.
+
+Test setup:
+AMD Ryzen 5 5600X at 4.3 GHz, 3200 MHz RAM, isolated QEMU threads;
+Average over 50 runs @ 100,000,000 packets. SRSO and spectre v2
+mitigations disabled.
+
+Note for tap+vhost-net:
+XDP drop program active in VM -> ~2.5x faster; slower for tap due to
+more syscalls (high utilization of entry_SYSRETQ_unsafe_stack in perf)
+
++--------------------------+--------------+----------------+----------+
+| 1 thread                 | Stock        | Patched with   | diff     |
+| sending                  |              | fq_codel qdisc |          |
++------------+-------------+--------------+----------------+----------+
+| TAP        | Received    | 1.132 Mpps   | 1.123 Mpps     | -0.8%    |
+|            +-------------+--------------+----------------+----------+
+|            | Lost/s      | 3.765 Mpps   | 0 pps          |          |
++------------+-------------+--------------+----------------+----------+
+| TAP        | Received    | 3.857 Mpps   | 3.901 Mpps     | +1.1%    |
+|            +-------------+--------------+----------------+----------+
+| +vhost-net | Lost/s      | 0.802 Mpps   | 0 pps          |          |
++------------+-------------+--------------+----------------+----------+
+
++--------------------------+--------------+----------------+----------+
+| 2 threads                | Stock        | Patched with   | diff     |
+| sending                  |              | fq_codel qdisc |          |
++------------+-------------+--------------+----------------+----------+
+| TAP        | Received    | 1.115 Mpps   | 1.081 Mpps     | -3.0%    |
+|            +-------------+--------------+----------------+----------+
+|            | Lost/s      | 8.490 Mpps   | 391 pps        |          |
++------------+-------------+--------------+----------------+----------+
+| TAP        | Received    | 3.664 Mpps   | 3.555 Mpps     | -3.0%    |
+|            +-------------+--------------+----------------+----------+
+| +vhost-net | Lost/s      | 5.330 Mpps   | 938 pps        |          |
++------------+-------------+--------------+----------------+----------+
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Link: https://lore.kernel.org/netdev/akVnoOYQOrt8k-Gu@karahi.librecast.net/
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ Documentation/networking/tuntap.rst | 22 ++++++++++++++++++
+ drivers/net/tun.c                   | 36 +++++++++++++++++++++++++----
+ 2 files changed, 53 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v13 4/5] ptr_ring: move free-space check into separate helper
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch moves the check for available free space for a new entry into
+a separate function. Existing callers that only check for a non-zero
+return value are unaffected; __ptr_ring_produce() now returns -EINVAL
+for a zero-size ring and -ENOSPC when full, whereas before both cases
+returned -ENOSPC. The new helper allows callers to determine in advance
+whether subsequent __ptr_ring_produce() calls will succeed. This
+information can, for example, be used to temporarily stop producing until
+__ptr_ring_check_produce() indicates that space is available again.
+
+Co-developed-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Signed-off-by: Tim Gebauer <tim.gebauer@tu-dortmund.de>
+Acked-by: Michael S. Tsirkin <mst@redhat.com>
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ include/linux/ptr_ring.h | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 9/9] KVM: selftests: Clean up global constants in hardware
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename the global constants in the hardware disable test to better
+capture what they control, and open code the literal number of sleeping
+tasks and iterations instead of using power-of-2 math to express values
+that are 100% arbitrary.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c      | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 8/9] KVM: selftests: Add KVM syscall wrappers for pthread_{g,s}etaffinity_np()
+Author: Sean Christopherson <seanjc@google.com>
+
+Add and use KVM wrappers for pthread_{g,s}etaffinity_np() so that selftests
+don't need to manually assert that the syscalls succeeded, and so that they
+don't need to manually pass in sizeof(cpu_set_t) for the size.
+
+Note, the steal time test didn't assert success, but the TEST_ASSERT() one
+line later makes it quite clear the test relies on pthread_getaffinity_np()
+succeeding.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c        | 12 ++----------
+ .../testing/selftests/kvm/include/kvm_syscalls.h | 16 ++++++++++++++++
+ tools/testing/selftests/kvm/steal_time.c         |  2 +-
+ 3 files changed, 19 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 7/9] KVM: selftests: Add helper APIs to cancel+join pthreads
+Author: Sean Christopherson <seanjc@google.com>
+
+Deduplicate test code that does cancel()+join() on pthreads by adding a
+collection of syscall wrappers.  The tests that asynchronously cancel
+pthreads, i.e. use PTHREAD_CANCEL_ASYNCHRONOUS, are particularly ugly,
+especially since it's not immediately obvious why those tests assert on
+the thread being CANCELED, whereas others do not.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/include/kvm_syscalls.h      | 24 +++++++++++++++++++
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c  | 15 ++----------
+ .../selftests/kvm/x86/hyperv_tlb_flush.c      | 15 ++----------
+ .../selftests/kvm/x86/recalc_apic_map_test.c  |  3 +--
+ .../selftests/kvm/x86/sync_regs_test.c        |  3 +--
+ .../selftests/kvm/x86/xapic_ipi_test.c        | 15 ++----------
+ .../selftests/kvm/x86/xen_shinfo_test.c       |  3 +--
+ 7 files changed, 33 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 6/9] KVM: selftests: Add KVM syscall wrappers for pthread_{cancel,join}()
+Author: Sean Christopherson <seanjc@google.com>
+
+Add and use KVM wrappers for pthread_{cancel,join}() so that selftests
+don't need to manually assert that the syscalls succeeded.
+
+Note, the vast majority tests don't actually assert success, but they all
+obviously rely on the syscall to succeed.
+
+Other than explicitly failing if a syscall fails, no functional change
+intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c             |  4 ++--
+ tools/testing/selftests/kvm/arm64/vgic_irq.c         |  4 ++--
+ tools/testing/selftests/kvm/arm64/vgic_lpi_stress.c  |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c         |  2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h   |  2 ++
+ tools/testing/selftests/kvm/irq_test.c               |  2 +-
+ tools/testing/selftests/kvm/irqfd_test.c             |  2 +-
+ tools/testing/selftests/kvm/kvm_page_table_test.c    |  2 +-
+ tools/testing/selftests/kvm/lib/memstress.c          |  2 +-
+ tools/testing/selftests/kvm/lib/userfaultfd_util.c   |  3 +--
+ tools/testing/selftests/kvm/memslot_perf_test.c      |  2 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c        |  2 +-
+ tools/testing/selftests/kvm/pre_fault_memory_test.c  |  2 +-
+ tools/testing/selftests/kvm/rseq_test.c              |  2 +-
+ tools/testing/selftests/kvm/s390/memop.c             |  2 +-
+ tools/testing/selftests/kvm/set_memory_region_test.c |  4 ++--
+ tools/testing/selftests/kvm/steal_time.c             |  2 +-
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c         | 10 ++--------
+ tools/testing/selftests/kvm/x86/hyperv_tlb_flush.c   | 10 ++--------
+ .../selftests/kvm/x86/private_mem_conversions_test.c |  2 +-
+ .../selftests/kvm/x86/private_mem_kvm_exits_test.c   |  2 +-
+ .../testing/selftests/kvm/x86/recalc_apic_map_test.c |  4 ++--
+ tools/testing/selftests/kvm/x86/sev_migrate_tests.c  |  2 +-
+ tools/testing/selftests/kvm/x86/sync_regs_test.c     |  4 ++--
+ tools/testing/selftests/kvm/x86/tsc_scaling_sync.c   |  2 +-
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c     | 12 ++----------
+ tools/testing/selftests/kvm/x86/xen_shinfo_test.c    |  8 ++------
+ 27 files changed, 38 insertions(+), 61 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/9] KVM: selftests: Add KVM syscall wrapper for pthread_create()
+Author: Sean Christopherson <seanjc@google.com>
+
+Add and use a KVM wrapper for pthread_create() syscall so that selftests
+don't need to manually assert that the syscall succeeded.
+
+Note, most tests don't actually assert success, but they all obviously
+rely on the syscall to succeed.
+
+Other than explicitly failing if pthread_create() fails, no functional
+change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c          | 14 ++++----------
+ tools/testing/selftests/kvm/arm64/vgic_irq.c      | 10 +++-------
+ .../testing/selftests/kvm/arm64/vgic_lpi_stress.c |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c      |  2 +-
+ .../testing/selftests/kvm/hardware_disable_test.c | 15 +++------------
+ .../testing/selftests/kvm/include/kvm_syscalls.h  |  5 +++++
+ tools/testing/selftests/kvm/irq_test.c            |  2 +-
+ tools/testing/selftests/kvm/irqfd_test.c          |  2 +-
+ tools/testing/selftests/kvm/kvm_page_table_test.c |  4 ++--
+ tools/testing/selftests/kvm/lib/memstress.c       |  2 +-
+ .../testing/selftests/kvm/lib/userfaultfd_util.c  |  4 ++--
+ tools/testing/selftests/kvm/memslot_perf_test.c   |  2 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c     |  2 +-
+ .../testing/selftests/kvm/pre_fault_memory_test.c |  2 +-
+ tools/testing/selftests/kvm/rseq_test.c           |  4 ++--
+ tools/testing/selftests/kvm/s390/memop.c          |  2 +-
+ .../selftests/kvm/set_memory_region_test.c        |  2 +-
+ tools/testing/selftests/kvm/steal_time.c          |  2 +-
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c      | 11 ++++-------
+ .../testing/selftests/kvm/x86/hyperv_tlb_flush.c  |  9 +++------
+ .../kvm/x86/private_mem_conversions_test.c        |  2 +-
+ .../kvm/x86/private_mem_kvm_exits_test.c          |  5 ++---
+ .../selftests/kvm/x86/recalc_apic_map_test.c      |  2 +-
+ .../testing/selftests/kvm/x86/sev_migrate_tests.c |  2 +-
+ tools/testing/selftests/kvm/x86/sync_regs_test.c  |  2 +-
+ .../testing/selftests/kvm/x86/tsc_scaling_sync.c  |  2 +-
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c  |  8 ++------
+ tools/testing/selftests/kvm/x86/xen_shinfo_test.c |  3 +--
+ 28 files changed, 50 insertions(+), 76 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/9] KVM: selftests: Drop unreachable, dead code from hardware
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop all of the code that is unreachable in the hardware disable test, as
+it adds a lot of noise that makes the test seem far more complicated than
+it actually is.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c     | 42 +++++++------------
+ 1 file changed, 14 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/9] KVM: selftests: Affine child tasks to other pCPUs in
+Author: Sean Christopherson <seanjc@google.com>
+
+When possible, affine child tasks to a different pCPU than the parent task
+in the hardware disable test.  On preemptible kernels, running 4 + 4*16
+child tasks on the same 4 pCPUs as the parent can result in runtimes of
+several minutes due to the children making it difficult for the parent to
+make forward progress.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c     | 28 ++++++++++++++-----
+ 1 file changed, 21 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/9] KVM: selftests: Extract picking of random CPU from
+Author: Sean Christopherson <seanjc@google.com>
+
+Extract kvm_pick_random_cpu() out of pin_task_to_random_cpu() so that tests
+can choose a random CPU without having to immediately pin a task to that
+CPU.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h | 11 ++++++++++-
+ tools/testing/selftests/kvm/lib/kvm_util.c     |  7 ++-----
+ 2 files changed, 12 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/9] KVM: selftests: Return the target CPU from pin_task_to_random_cpu()
+Author: Sean Christopherson <seanjc@google.com>
+
+When pinning a task to a random CPU, return which CPU the task was pinned
+to so that the caller can do things like avoid running other tasks on the
+target CPU.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h | 2 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c     | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/9] KVM: selftests: Add more syscall wrappers, fix hardware_disable_test
+Author: Sean Christopherson <seanjc@google.com>
+
+Buried in the middle of this is a fix for the hardware_disable_test where
+it can end up with a runtime of multiple minutes on preemptible kernels due
+to blindly pinning 68 spinning tasks to pCPUs 0-4, which is "mildly"
+problematic if the parent is also affined to those CPUs (or the scheduler
+keeps trying to run the parent on those CPUs for whatever reason).
+
+After wasting almost half a day bisecting the kernel to the auto-enablement
+of PREEMPT_LAZY, I got fed up with the test and went scorched earth on it,
+to try and clean up its many warts.
+
+The vast, vast majority of the changes are adding kvm_xxx() syscall wrappers
+so that tests don't need to manually assert that a syscall succeeds (the
+hardware disable test had some ugly equivalents).
+
+Note, this somewhat unfortunately applies on top of the bad-in-hindsight
+"irq_test" branch in kvm-x86, as I didn't want to re-invent the "pick a
+random CPU from a cpuset" functionality.  Luckily, AFAICT none of the nearly
+tree-wide changes conflict with anything else that's in-flight in other
+KVM arch trees, so I'm planning on smashing the "I'm Feeling Lucky" button
+on this and throwing it on top of the irq_test (though I'll rename the branch
+so it's not completely ridiculous).
+
+Tested on x86 and arm64, compile tested on other architectures.
+
+Sean Christopherson (9):
+  KVM: selftests: Return the target CPU from pin_task_to_random_cpu()
+  KVM: selftests: Extract picking of random CPU from cpu_set_t to
+    separate API
+  KVM: selftests: Affine child tasks to other pCPUs in hardware disable
+    test
+  KVM: selftests: Drop unreachable, dead code from hardware disable test
+  KVM: selftests: Add KVM syscall wrapper for pthread_create()
+  KVM: selftests: Add KVM syscall wrappers for pthread_{cancel,join}()
+  KVM: selftests: Add helper APIs to cancel+join pthreads
+  KVM: selftests: Add KVM syscall wrappers for
+    pthread_{g,s}etaffinity_np()
+  KVM: selftests: Clean up global constants in hardware disable test
+
+ tools/testing/selftests/kvm/arch_timer.c      |  18 ++--
+ tools/testing/selftests/kvm/arm64/vgic_irq.c  |  14 +--
+ .../selftests/kvm/arm64/vgic_lpi_stress.c     |   8 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |   4 +-
+ .../selftests/kvm/hardware_disable_test.c     | 101 ++++++++----------
+ .../selftests/kvm/include/kvm_syscalls.h      |  47 ++++++++
+ .../testing/selftests/kvm/include/kvm_util.h  |  11 +-
+ tools/testing/selftests/kvm/irq_test.c        |   4 +-
+ tools/testing/selftests/kvm/irqfd_test.c      |   4 +-
+ .../selftests/kvm/kvm_page_table_test.c       |   6 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  10 +-
+ tools/testing/selftests/kvm/lib/memstress.c   |   4 +-
+ .../selftests/kvm/lib/userfaultfd_util.c      |   7 +-
+ .../testing/selftests/kvm/memslot_perf_test.c |   4 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c |   4 +-
+ .../selftests/kvm/pre_fault_memory_test.c     |   4 +-
+ tools/testing/selftests/kvm/rseq_test.c       |   6 +-
+ tools/testing/selftests/kvm/s390/memop.c      |   4 +-
+ .../selftests/kvm/set_memory_region_test.c    |   6 +-
+ tools/testing/selftests/kvm/steal_time.c      |   6 +-
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c  |  32 ++----
+ .../selftests/kvm/x86/hyperv_tlb_flush.c      |  30 +-----
+ .../kvm/x86/private_mem_conversions_test.c    |   4 +-
+ .../kvm/x86/private_mem_kvm_exits_test.c      |   7 +-
+ .../selftests/kvm/x86/recalc_apic_map_test.c  |   5 +-
+ .../selftests/kvm/x86/sev_migrate_tests.c     |   4 +-
+ .../selftests/kvm/x86/sync_regs_test.c        |   5 +-
+ .../selftests/kvm/x86/tsc_scaling_sync.c      |   4 +-
+ .../selftests/kvm/x86/xapic_ipi_test.c        |  31 +-----
+ .../selftests/kvm/x86/xen_shinfo_test.c       |  10 +-
+ 30 files changed, 179 insertions(+), 225 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/3] Documentation: KVM: Clarify that KVM_CAP_MAX_VCPU_ID is exclusive
+Author: Dmytro Maluka <dmaluka@chromium.org>
+
+The KVM_CAP_MAX_VCPU_ID capability value is exclusive, i.e. valid APIC
+ID values are only values below this value, not including it. Its
+documentation doesn't make that clear, and even suggests otherwise.
+Fix it and explicitly state that it is exclusive.
+
+Signed-off-by: Dmytro Maluka <dmaluka@chromium.org>
+---
+ Documentation/virt/kvm/api.rst | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/3] KVM: x86: Fix off-by-one in max_vcpu_ids bounds checks
+Author: Dmytro Maluka <dmaluka@chromium.org>
+
+max_vcpu_ids and KVM_CAP_MAX_VCPU_ID are exclusive, i.e. the maximum
+allowed vcpu_id value is max_vcpu_ids minus one, not max_vcpu_ids.
+
+Fix sanity checks for KVM_SET_BOOT_CPU_ID and KVM_CAP_MAX_VCPU_ID to
+fail when bsp_vcpu_id is incorrectly set to max_vcpu_ids, not to a value
+below max_vcpu_ids.
+
+Fixes: 7c305d5118e6 ("KVM: x86: Limit check IDs for KVM_SET_BOOT_CPU_ID")
+Fixes: d29bf2ca1404 ("KVM: x86: Prevent excluding the BSP on setting max_vcpu_ids")
+Signed-off-by: Dmytro Maluka <dmaluka@chromium.org>
+---
+ arch/x86/kvm/x86.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/3] KVM: selftests: Fix treating KVM_CAP_MAX_VCPU_ID as inclusive
+Author: Dmytro Maluka <dmaluka@chromium.org>
+
+KVM_CAP_MAX_VCPU_ID is (confusingly) exclusive, i.e. the maximum allowed
+vcpu_id value is KVM_CAP_MAX_VCPU_ID minus one.
+
+Some tests in x86/max_vcpuid_cap_test.c and kvm/x86/set_boot_cpu_id.c
+mistakenly treat it as inclusive, in particular, assume that setting
+bsp_vcpu_id to KVM_CAP_MAX_VCPU_ID is valid and should succeed. Fix
+those tests.
+
+Fixes: 4b451a57809c ("KVM: selftests: Test max vCPU IDs corner cases")
+Fixes: 438a496b9041 ("KVM: selftests: Test vCPU boot IDs above 2^32 and MAX_VCPU_ID")
+Signed-off-by: Dmytro Maluka <dmaluka@chromium.org>
+---
+ .../selftests/kvm/x86/max_vcpuid_cap_test.c     | 17 ++++++++++-------
+ .../testing/selftests/kvm/x86/set_boot_cpu_id.c |  4 ++--
+ 2 files changed, 12 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/3] KVM: x86: Fix off-by-one in max_vcpu_ids bounds checks
+Author: Dmytro Maluka <dmaluka@chromium.org>
+
+max_vcpu_ids and KVM_CAP_MAX_VCPU_ID are exclusive, i.e. the maximum
+allowed vcpu_id value is max_vcpu_ids minus one, not max_vcpu_ids.
+
+Fix the sanity checks for KVM_SET_BOOT_CPU_ID and KVM_CAP_MAX_VCPU_ID
+and the selftests for them (added in series [1]) to fail when
+bsp_vcpu_id is incorrectly set to max_vcpu_ids, not to a value below
+max_vcpu_ids.
+
+Also clarify that in the documentation of KVM_CAP_MAX_VCPU_ID, in an
+attempt to make this a bit less confusing.
+
+[1] https://lore.kernel.org/all/20240614202859.3597745-1-minipli@grsecurity.net/
+
+Dmytro Maluka (3):
+  KVM: selftests: Fix treating KVM_CAP_MAX_VCPU_ID as inclusive
+  KVM: x86: Fix off-by-one in max_vcpu_ids bounds checks
+  Documentation: KVM: Clarify that KVM_CAP_MAX_VCPU_ID is exclusive
+
+ Documentation/virt/kvm/api.rst                  | 13 ++++++++-----
+ arch/x86/kvm/x86.c                              |  6 +++---
+ .../selftests/kvm/x86/max_vcpuid_cap_test.c     | 17 ++++++++++-------
+ .../testing/selftests/kvm/x86/set_boot_cpu_id.c |  4 ++--
+ 4 files changed, 23 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH] x86: pci: Support unaligned register access in PCI config read/write
+Author: Irene Wang <yiranirenewang@gmail.com>
+
+Per the PCI Local Bus Specification (Section 3.2.2.3.2, "Configuration
+Mechanism #1"), port 0xCF8 (CONFIG_ADDRESS) requires a DWORD-aligned
+register offset (bits [1:0] = 00b), while byte and word offsets within
+the DWORD must be selected via data port 0xCFC + (reg & 3).
+
+Previously, PCI_CONF1_ADDRESS did not clear bits [1:0], and 8-bit /
+16-bit helpers always accessed base port 0xCFC directly. This worked
+in QEMU because its PCI host bridge emulation preserves unaligned bits
+in CONFIG_ADDRESS and uses them during CONFIG_DATA accesses. However,
+in strictly spec-compliant VMMs (and potentially real hardware), bits
+[1:0] of 0xCF8 are ignored, causing non-aligned reads/writes at port
+0xCFC to erroneously target byte 0 of the DWORD. In practice, this
+causes pci_find_dev() to read the vendor ID twice instead of reading
+the vendor ID and device ID.
+
+Fix this by masking `reg` with `~3` in PCI_CONF1_ADDRESS and adding
+the `(reg & 3)` offset to the CONFIG_DATA port for 8-bit and 16-bit
+accessors, ensuring compatibility across QEMU and other VMMs.
+
+Assisted-by: Gemini:gemini-3.6-flash
+Signed-off-by: Irene Wang <yiranirenewang@gmail.com>
+---
+ lib/x86/asm/pci.h | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: Only link to VFIO library on x86
+Author: Sean Christopherson <seanjc@google.com>
+
+Link to the VFIO library only on architectures where it's actually needed,
+i.e. only on architectures that support irq_test, which is currently
+x86-only.  The irq_test series, which pulled in VFIO support, effectively
+raced with commit e65f1bf8a2db ("vfio: selftests: Extend container/iommufd
+setup for passing vf_token").  I.e. when the KVM test was posted, pulling
+in libvfio.mk didn't require linking to any new libraries other than VFIO
+itself.
+
+Now that libvfio.mk pulls in luuid, unconditionally linking in support for
+VFIO is quite onerous, especially when cross-compiling, as it requires
+installing what is effectively an unused library on four architectures.
+
+Eventually KVM selftests will likely support irq_test and thus need to link
+to VFIO on architectures other than x86, but at least then there will be
+some amount of gain for the pain.
+
+Fixes: a262fc49e0aa ("KVM: selftests: Build and link selftests/vfio/lib into KVM selftests")
+Cc: David Matlack <dmatlack@google.com>
+Cc: Josh Hilke <jrhilke@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 04/14] KVM: s390: ucontrol: Fix sca_clear_ext_call()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When cleaning up a UCONTROL VM, sca_clear_ext_call() will touch memory
+outside of the allocated ESCA block, and UCONTROL VMs don't even use
+ESCA.
+
+Fix by not touching ESCA for UCONTROL VMs, and fence the
+KVM_S390_INTERRUPT ioctl altogether.
+
+Opportunistically add checks in sca_ext_call_pending() and
+sca_inject_ext_call() to make sure UCONTROL VMs won't call those
+functions ever.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: 7d43bafcff17 ("KVM: s390: Make provisions for ESCA utilization")
+---
+ arch/s390/kvm/interrupt.c | 19 ++++++++++++++-----
+ arch/s390/kvm/kvm-s390.c  |  3 +++
+ 2 files changed, 17 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 01/14] KVM: s390: Fix unlikely NULL gmap dereference
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When creating a new vCPU, kvm_vm_ioctl_create_vcpu() will call
+kvm_arch_vcpu_postcreate() after the file descriptor for the new vCPU
+has been created. The new file descriptor has not been returned yet,
+but a malicious userspace program could try to guess it.
+
+If a malicious userspace program manages to start the newly created vCPU
+before kvm_arch_vcpu_postcreate() is called, __vcpu_run() will try to
+dereference vcpu->arch.gmap and trigger a NULL pointer dereference.
+
+Fix this by adding a new field to struct kvm_vcpu_arch to keep track of
+the initialization status of the vCPU. Refuse to run a vCPU that is not
+fully initialized.
+
+Fixes: dafd032a15f8 ("KVM: s390: move vcpu specific initalization to a later point")
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Steffen Eiden <seiden@linux.ibm.com>
+Reviewed-by: Janosch Frank <frankja@linux.ibm.com>
+Reviewed-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+---
+ arch/s390/include/asm/kvm_host.h |  1 +
+ arch/s390/kvm/kvm-s390.c         | 11 +++++++++++
+ 2 files changed, 12 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 14/14] KVM: s390: Move DAT table updates to kvm_arch_prepare_memory_region()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Currently, when a memslot is changed, the changes in the page tables
+are performed in kvm_arch_commit_memory_region(), which is assumed to
+never fail, as it cannot return an error code.
+
+If memory is tight, the allocation of page tables can fail, a warning
+is printed, and the system is left in an inconsistent state.
+
+Move the whole page table update into kvm_arch_prepare_memory_region()
+instead. This function can fail and return an appropriate error code,
+thus not leaving the system in an inconsistent state.
+
+Fixes: 598841ca9919 ("[S390] use gmap address spaces for kvm guest images")
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 87 ++++++++++++++++++----------------------
+ 1 file changed, 40 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 11/14] KVM: s390: Fix ordering when adding to SCA
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When adding a new vCPU to the SCA area, the validity bit in the MCN was
+set before the pointer to the state description, potentially allowing
+for a race.
+
+Fix by setting the pointer before setting the bit.
+
+Fixes: 14542a0a54c5 ("KVM: S390: Remove sca_lock")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Steffen Eiden <seiden@linux.ibm.com>
+Reviewed-by: Janosch Frank <frankja@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 08/14] KVM: s390: ucontrol: Add missing locking around gmap_remove_child()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+gmap_remove_child() needs to be called while holding the children_lock
+of the parent gmap. This was not the case in the error handling path of
+kvm_arch_vcpu_create() for UCONTROL guests.
+
+Fix by adding the missing lock.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Steffen Eiden <seiden@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 12/14] KVM: s390: Fix cleanup in kvm_s390_pv_create_cpu()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+If creating a protected vCPU in kvm_s390_pv_create_cpu() fails,
+kvm_s390_pv_destroy_cpu() was called, which checks whether the vCPU has
+a PV handle and exits doing nothing otherwise. At that point, due to
+not having created the protected vCPU, the PV handle will not be set,
+and kvm_s390_pv_destroy_cpu() will do nothing, thus leaking the
+allocated memory.
+
+Fix by factoring out the code to free and reset a PV vCPU; call it from
+kvm_s390_pv_destroy_cpu() and kvm_s390_pv_create_cpu().
+
+Opportunistically fix the return value of kvm_s390_pv_destroy_cpu() in
+case of errors: return -EIO instead if EIO.
+
+Fixes: d4074324b07a ("KVM: s390: pv: avoid double free of sida page")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Steffen Eiden <seiden@linux.ibm.com>
+---
+ arch/s390/kvm/pv.c | 41 +++++++++++++++++++++--------------------
+ 1 file changed, 21 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 10/14] KVM: s390: Return -EINTR if a signal is pending while faulting-in
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+If a fatal signal is pending while trying to fault-in a page, return
+-EINTR instead of -EAGAIN.
+
+Also fix unpack_one() to handle -EINTR properly.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: e907ae530133 ("KVM: s390: Add helper functions for fault handling")
+---
+ arch/s390/kvm/faultin.c | 6 +++---
+ arch/s390/kvm/pv.c      | 2 +-
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 02/14] KVM: s390: Fix kvm_s390_vcpu_unsetup_cmma()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+In some cases kvm_s390_vcpu_unsetup_cmma() can be called with a 0
+cbrlo; in such cases, if running with V != R, free_page() will attempt
+to free physical page 0.
+
+Fix by freeing cbrlo only if it's non-zero.
+
+Fixes: b31605c12f4e ("KVM: s390: make cmma usage conditionally")
+Fixes: 29b40f105ec8 ("KVM: s390: protvirt: Add initial vm and cpu lifecycle handling")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 09/14] KVM: s390: Free the mmu cache when kvm_arch_vcpu_create() fails
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+The mmu cache is the first thing that is allocated in
+kvm_arch_vcpu_create(), but in case of failure it was not freed.
+
+Fix by freeing the mmu cache in case of failure.
+
+Refactor kvm_arch_vcpu_create() to use scope-based cleanup instead of
+gotos.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+---
+ arch/s390/kvm/kvm-s390.c | 40 ++++++++++++++++++----------------------
+ 1 file changed, 18 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 06/14] KVM: s390: Fix race in __do_essa()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+An unlikely race between __do_essa() and kvm_s390_vm_start_migration(),
+kvm_s390_vm_stop_migration(), or dat_get_cmma() was possible.
+
+Fix by locking kvm->slots_arch_lock. Since this is not a hot path, the
+overhead of an additional mutex is negligible.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 20 ++++++++++----------
+ arch/s390/kvm/priv.c     |  5 +++--
+ 2 files changed, 13 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 13/14] KVM: s390: Fix kvm_arch_commit_memory_region() when low on memory
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When low on memory, kvm_arch_commit_memory_region() might not perform
+the required action completely, and instead just print a warning and
+return. This allows the VM to continue running with an inconsistent
+state.
+
+Fix by refilling the struct kvm_s390_mmu_cache and trying again. A true
+failure only happens if the refill fails, or if the cache cannot be
+allocated at all; in such case print a warning and kill the VM. Such a
+failure cannot currently happen.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+---
+ arch/s390/kvm/kvm-s390.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 05/14] KVM: s390: Fix leaking of PGM_ADDRESSING to userspace
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+If kvm_s390_set_cmma_bits() is asked to set CMMA values outside of a
+memslot, PGM_ADDRESSING (5) is returned, instead of a negative error
+value.
+
+Same issue with kvm_s390_{g,s}et_skeys(), kvm_s390_keyop(), and
+dat_reset_reference_bit().
+
+Fix by returning -EFAULT whenever the return value would be > 0, which
+is consistent with the behaviour before the gmap rewrite.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/dat.c      | 16 ++++++++++------
+ arch/s390/kvm/dat.h      |  2 +-
+ arch/s390/kvm/kvm-s390.c | 16 ++++++++--------
+ arch/s390/kvm/priv.c     |  5 +++--
+ 4 files changed, 22 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 07/14] KVM: s390: cmma: Fix dirty tracking when removing memslot
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When a memslot is removed, all ptes that mapped the slot are cleared or
+even deallocated. If this happens while the system is in migration
+mode, and if cmma-dirty pages are removed, the cmma-dirty counter will
+not reflect reality.
+
+Fix by appropriately decrementing the cmma-dirty counter when removing
+a memslot.
+
+Opportunistically improve kvm_arch_commit_memory_region() to use
+__free() for the struct kvm_s390_mmu_cache.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/dat.c      |  7 ++++++-
+ arch/s390/kvm/kvm-s390.c | 25 +++++++++++++++++++++++--
+ 2 files changed, 29 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 03/14] KVM: s390: Fix overclearing ESCA in case of error
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+If an attempt is made to create a vCPU with an already existing ID,
+the duplicated vCPU will be destroyed. When destroying a vCPU, its
+ESCA entry will be cleared. In the above scenario, the spurious
+duplicate vCPU is destroyed, but the ESCA entry corresponding to the
+original vCPU is cleared.
+
+Fix by skipping clearing the ESCA entry if the vCPU creation was not
+successful, i.e. if the pointer to the ESCA in the state description is
+not set.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Janosch Frank <frankja@linux.ibm.com>
+---
+ arch/s390/kvm/interrupt.c | 2 +-
+ arch/s390/kvm/kvm-s390.c  | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 00/14] KVM: s390: Misc fixes
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Fix a bunch of small issues that came up during the previous round of fixes.
+
+They are mostly extremely unlikely races, but they should be fixed
+nonetheless.
+
+v5->v6
+* Move the memory accesses in sca_ext_call_pending() and
+  sca_inject_ext_call() so that they only happen after the newly
+  introduced checks. Otherwise an out of bounds access was still possible.
+* Completely fence the KVM_S390_INTERRUPT ioctl for UCONTROL VMs.
+* Move page table updates from kvm_arch_commit_memory_region() to
+  kvm_arch_prepare_memory_region(), so that failures are not ignored.
+
+v4->v5
+* Improve / fix some comments
+* Undo handle_mvpg_pei() changes
+* cmma_d_count_pte() now clears the cmma_d bit, to avoid double counting
+* Improve some patch descriptions
+* Trigger KVM_BUG_ON() in sca_ext_call_pending() and
+  sca_inject_ext_call() if called on UCONTROL vCPUs
+* Reshuffle the order of the patches to hopefully get fewer false
+  positives from sashiko
+* Check and free cbrlo only if it's not zero
+
+v3->v4
+* Improve patch descriptions, add comments
+* Use smp_store_release and smp_load_acquire in the first patch
+* Multiple fixes in patch 4: potential NULL pointer dereference,
+  incorrect behaviour in low memory condition
+* Rework patch 8 to use scope-based cleanup instead of gotos.
+* Three new patches:
+  - KVM: s390: Fix kvm_arch_commit_memory_region() when low on memory
+  - KVM: s390: Fix kvm_s390_vcpu_unsetup_cmma()
+  - KVM: s390: Fix sca_clear_ext_call() for UCONTROL
+
+v2->v3
+* Use READ_ONCE to pair with WRITE_ONCE in the first patch
+* Fix leaking PGM_ADDRESSING also in kvm_s390_keyop() and related functions
+* Fix and improve commit messages
+* Use slots_arch_lock instead of slots_lock for ESSA operations
+* Use normal spin_{,un}lock() functions instead of scoped_guard to avoid
+  mixing the two styles
+* Use the newly introduced vcpu->arch.initialized to determine whether the
+  SCA entry needs to be cleared
+* Improve handling of -EINTR; handle_mvpg_pei() needed some refactoring to
+  deal with it properly
+* Three new patches:
+  - Free the mmu cache when kvm_arch_vcpu_create() fails
+  - Fix ordering when adding to SCA
+  - Fix cleanup in kvm_s390_pv_create_cpu()
+
+v1->v2
+* Drop some patches that have been picked upstream in the meantime.
+* Drop patch 3, as it was trying to fix a bug that does not exist
+* Avoid the NULL gmap dereference by using a flag
+* Fix the return value of kvm_s390_[gp]et_skeys too
+* Use kvm->slots_arch_lock instead of kvm->slots_lock for CMMA and ESSA
+  handling, to avoid potential deadlocks with the RCU.
+* Three new patches to fix other issues that came out while fixing the
+  other issues
+
+
+Claudio Imbrenda (14):
+  KVM: s390: Fix unlikely NULL gmap dereference
+  KVM: s390: Fix kvm_s390_vcpu_unsetup_cmma()
+  KVM: s390: Fix overclearing ESCA in case of error
+  KVM: s390: ucontrol: Fix sca_clear_ext_call()
+  KVM: s390: Fix leaking of PGM_ADDRESSING to userspace
+  KVM: s390: Fix race in __do_essa()
+  KVM: s390: cmma: Fix dirty tracking when removing memslot
+  KVM: s390: ucontrol: Add missing locking around gmap_remove_child()
+  KVM: s390: Free the mmu cache when kvm_arch_vcpu_create() fails
+  KVM: s390: Return -EINTR if a signal is pending while faulting-in
+  KVM: s390: Fix ordering when adding to SCA
+  KVM: s390: Fix cleanup in kvm_s390_pv_create_cpu()
+  KVM: s390: Fix kvm_arch_commit_memory_region() when low on memory
+  KVM: s390: Move DAT table updates to kvm_arch_prepare_memory_region()
+
+ arch/s390/include/asm/kvm_host.h |   1 +
+ arch/s390/kvm/dat.c              |  23 ++--
+ arch/s390/kvm/dat.h              |   2 +-
+ arch/s390/kvm/faultin.c          |   6 +-
+ arch/s390/kvm/interrupt.c        |  19 +++-
+ arch/s390/kvm/kvm-s390.c         | 187 ++++++++++++++++++-------------
+ arch/s390/kvm/priv.c             |  10 +-
+ arch/s390/kvm/pv.c               |  43 +++----
+ 8 files changed, 172 insertions(+), 119 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3] s390/vfio-ap: fix stale pqap_hook pointer on error in vfio_ap_mdev_set_kvm()
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+In vfio_ap_mdev_set_kvm(), kvm->arch.crypto.pqap_hook is set to
+&matrix_mdev->pqap_hook before the update locks are acquired and the
+mdev list is checked for a conflicting assignment. If another mdev is
+already attached to the same KVM instance, the function returns -EPERM
+without restoring the hook pointer, leaving kvm->arch.crypto.pqap_hook
+pointing at the failing matrix_mdev instead of the mdev that legitimately
+owns the KVM.
+
+Since matrix_mdev->kvm is never set on this error path,
+vfio_ap_mdev_unset_kvm() will not clean up the hook when matrix_mdev
+is later closed. If matrix_mdev is subsequently freed, any PQAP
+instruction executed by the guest will dereference the stale pointer
+through pqap_hook_rwsem, resulting in a use-after-free.
+
+Since kvm->arch.crypto.pqap_hook is only set in the vfio_ap_mdev_set_kvm()
+function and is cleared in the vfio_ap_mdev_unset_kvm() function, a check
+for 'kvm->arch.crypto.pqap_hook != NULL' is all that is needed to determine
+whether it belongs to another mdev. This will alleviate the need to iterate
+the matrix_dev->mdev_list list to see if the kvm object is assigned to
+another mdev.
+
+Note that the 'matrix_mdev' pointer retrieved via the 'container_of' macro
+in the 'vfio_ap_mdev_open_device()' callback will be available for the
+duration of that function because 'matrix_mdev' cannot be freed while
+'open_device' (which calls the 'vfio_ap_mdev_open_device()' function) is
+running.
+
+Fixes: 86956e70761b3 ("s390/vfio-ap: replace open coded locks for VFIO_GROUP_NOTIFY_SET_KVM notification")
+Cc: stable@vger.kernel.org
+
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 19 ++++++-------------
+ 1 file changed, 6 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/5] riscv: add support for SBI Supervisor Software Events extension
+Author: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+
+
+The SBI SSE extension allows the supervisor software to be notified by
+the SBI of specific events that are not maskable. The context switch is
+handled partially by the firmware which will save registers a6 and a7.
+When entering kernel we can rely on these 2 registers to setup the stack
+and save all the registers.
+
+Since SSE events can be delivered at any time to the kernel, including
+during exception handling, we need a way to locate the current_task for
+context tracking. On RISC-V, it is stored in scratch when in user space
+or tp when in kernel space (in which case SSCRATCH is zero). But at the
+beginning of exception handling, SSCRATCH is used to swap tp and
+check the origin of the exception. If interrupted at that point, then,
+there is no way to reliably know where is located the current
+task_struct. Even checking the interruption location won't work as SSE
+event can be nested on top of each other so the original interruption
+site might be lost at some point. In order to retrieve it reliably,
+store the current task in an additional __sse_entry_task per_cpu array.
+This array is then used to retrieve the current task based on the
+hart ID that is passed to the SSE event handler in a6.
+
+That being said, the way the current task struct is stored should
+probably be reworked to find a better reliable alternative.
+
+Since each event (and each CPU for local events) have their own
+context and can preempt each other, allocate a stack (and a shadow stack
+if needed) for each of them (and for each cpu for local events).
+
+The SSE handler runs as a synthetic handler episode, but completion must
+resume the context that was interrupted by the SSE event.  Preserve stvec
+and, when the hypervisor extension is present, hstatus across do_sse() so
+the handler episode does not leak trap-vector or virtualization state into
+the interrupted context.
+
+When completing the event, if we were coming from kernel with interrupts
+disabled, simply return there. If coming from userspace or kernel with
+interrupts enabled, simulate an interrupt exception by setting IE_SIE in
+CSR_IP to allow delivery of signals to user task. For instance this can
+happen when a RAS event has been generated by a user application and a
+SIGBUS has been sent to a task.
+
+Signed-off-by: Clément Léger <cleger@rivosinc.com>
+Co-developed-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+Signed-off-by: Zhanpeng Zhang <zhangzhanpeng.jasper@bytedance.com>
+---
+Thanks for reporting this. Please find a corrected replacement for v9 patch
+2/5 below. It fixes the truncated sbi_sse_entry.S; patches 3/5 through 5/5
+apply unchanged.
+
+I am still working through the final review and testing for v10. Sorry for
+keeping you waiting.
+
+ arch/riscv/include/asm/asm.h         |  14 +-
+ arch/riscv/include/asm/scs.h         |   7 +
+ arch/riscv/include/asm/sse.h         |  47 +++++++
+ arch/riscv/include/asm/switch_to.h   |  14 ++
+ arch/riscv/include/asm/thread_info.h |   1 +
+ arch/riscv/kernel/Makefile           |   1 +
+ arch/riscv/kernel/asm-offsets.c      |  14 ++
+ arch/riscv/kernel/sbi_sse.c          | 162 ++++++++++++++++++++++
+ arch/riscv/kernel/sbi_sse_entry.S    | 200 +++++++++++++++++++++++++++
+ 9 files changed, 457 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3] KVM: have hva_to_pfn_remapped write-upgrade PTEs
+Author: Sergio Lopez <slp@redhat.com>
+
+After 28e39181 ("drm/gem-shmem: Track folio accessed/dirty status in
+mmap") was merged, a guest write to an unpopulated PTE from a mapping
+backed by a DRM GEM BO triggers a VM exit with EFAULT, with
+hva_to_pfn_remapped setting p_pfn to KVM_PFN_ERR_RO_FAULT.
+
+This happens because that commit implements pfn_mkwrite for
+drm_gem_shmem_vm_ops. With that function present, vma_wants_writenotify
+returns true in vma_set_page_prot, clearing VM_SHARED and leading to the
+entry to be installed as read-only. This is done on purpose so the
+fault handler gets notified when the entry is going to be written.
+
+In KVM, hva_to_pfn_remapped calls to fixup_user_fault to trigger the
+fault handler but, as seen above, this one might install a read-only PTE
+even with FAULT_FLAG_WRITE present in fault_flags. The check at the end
+of hva_to_pfn_remapped notices that the entry is not writable despite
+this being a write fault and sets p_pfn to KVM_PFN_ERR_RO_FAULT.
+
+To address this issue, have hva_to_pfn_remapped issue a second
+fixup_user_fault call when needed for write-upgrading the PTE.
+
+Signed-off-by: Sergio Lopez <slp@redhat.com>
+---
+ virt/kvm/kvm_main.c | 25 ++++++++++++++++++++++---
+ 1 file changed, 22 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 9/9] KVM: selftests: Add nested SVM DecodeAssists test
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Add a nested SVM selftest for DecodeAssists.  Verify that KVM exposes
+the feature to L1 and provides architectural exit state for MOV CR/DR,
+CLTS, LMSW, SMSW, INTn, INVLPG, and INVLPGA intercepts.
+
+For data #NPF and intercepted #PF exits, cover instruction bytes from
+hardware, the emulator fetch cache, and on-demand fetching from L2 RIP.
+Verify that instruction-fetch #PF reports no bytes, that fetching stops
+at an unreadable page or non-canonical address, and that 32-bit linear
+addresses wrap correctly.
+
+Add regressions for a synthesized #NPF that follows a hardware #NPF in
+the same emulated instruction, and for a userspace-injected #PF while an
+emulated MMIO read is awaiting completion.
+
+The synthesized OUTSB #NPF and userspace-injected #PF paths run by
+default.  The remaining synthesized paths are covered when
+kvm.force_emulation_prefix=1 is enabled.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ .../kvm/x86/svm_nested_decode_assists_test.c  | 791 ++++++++++++++++++
+ 3 files changed, 793 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 5/9] KVM: x86: Track emulator-originated nested #PF VM-Exits
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Add has_emulator_context to kvm_queued_exception to record whether a
+queued exception VM-Exit originated from the current emulator exception.
+This provenance allows nested virtualization code to determine whether
+the emulator decode state can be used for a nested #PF VM-Exit.
+
+Explicit provenance is needed because a matching emulator RIP does not
+prove that the fetch cache describes the faulting instruction. For
+example, completing pending emulated I/O can advance RIP while leaving
+the fetch cache populated with the completed instruction.
+
+Determine provenance in kvm_inject_page_fault() and carry it through
+exception queueing so that it is stored as part of the nested VM-Exit
+event. Userspace-injected and other unrelated exceptions leave the flag
+clear.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/x86.c              | 33 ++++++++++++++++++++++-----------
+ 2 files changed, 23 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 8/9] KVM: nSVM: Advertise DecodeAssists to L1
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Advertise DecodeAssists to L1 now that KVM virtualizes the
+guest-visible DecodeAssist state in VMCB12: EXITINFO1 decode data for
+MOV CR/DR, INTn, and INVLPG exits, plus instruction bytes for nested
+page faults and intercepted #PF exits.  INVLPGA's linear address remains
+available directly from the saved guest rAX, as required by the APM.
+
+Expose the feature only when supported by hardware, as KVM still relies
+on hardware DecodeAssists for VM-Exits that are reflected directly from
+L2.
+
+With DecodeAssists exposed, QEMU configurations that require the feature
+(e.g. "-cpu ...,+decodeassists,...,enforce") are no longer rejected.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/svm.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/9] KVM: nSVM: Propagate hardware DecodeAssist bytes to VMCB12
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+DecodeAssists provides instruction bytes for nested page faults and
+intercepted page faults caused by data accesses.  When the feature is
+exposed to L1, copy fresh hardware-provided instruction bytes from VMCB02
+to VMCB12 for these exits.
+
+Clear the VMCB12 instruction-byte state before rebuilding it, and leave the
+length zero for instruction-fetch page faults, unrelated exits, and exits
+without fresh hardware bytes.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 49 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 49 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/9] KVM: nSVM: Enable DecodeAssists for nested guests
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+The SVM DecodeAssists feature provides decode state for selected
+VM-Exits.  KVM currently does not expose this feature to L1.  Some L1
+hypervisors may therefore treat the platform's SVM support as
+incomplete.
+
+In practice, this was observed with Hyper-V running on top of KVM.
+Hyper-V appears to require DecodeAssists before enabling nested SVM for
+its guests.  Virtualizing the feature lets users enable Hyper-V
+virtualization features inside a Windows VM when needed, e.g. to run
+QEMU/KVM in WSL.  Without DecodeAssists, Hyper-V does not enable nested
+SVM because DecodeAssists is missing from KVM's virtual SVM model.
+
+Virtualize DecodeAssists for nested SVM.  Propagate instruction bytes
+from VMCB02 for hardware-originated data #NPF and intercepted data #PF
+VM-Exits.  For KVM-generated exits, synthesize the architectural
+EXITINFO state and use matching bytes from the emulator when available,
+fetching missing bytes through L2's address translation only as a
+fallback.  Do not use the fallback for SEV guests, whose encrypted
+memory cannot provide plaintext instruction bytes to KVM.
+
+The selftest coverage in this version is intentionally broad and may be
+more extensive than necessary.  Some redundant cases can be removed in
+a later revision, but for now the series provides a comprehensive test
+set for users to exercise hardware-reflected, KVM-synthesized,
+userspace-injected, and boundary cases.
+
+The selftest has been run with kvm.force_emulation_prefix both disabled
+and enabled.
+
+Changes since v2:
+- Rebase onto kvm-x86/next.
+- Track hardware-provided instruction bytes independently of the VMCB02
+  exit code, and preserve the bytes when L0 handles an intercepted #PF
+  before reflecting it to L1.
+- Select the instruction-byte source using host-owned VMCB02 state
+  instead of control fields in guest-owned VMCB12.
+- Record whether a queued #PF VM-Exit has a matching emulator context,
+  so userspace-injected #PF exits do not consume stale emulator bytes.
+- Stop fallback instruction fetches at noncanonical addresses and at the
+  32-bit linear-address boundary.
+- Extend the selftest with regression coverage for replacing a hardware
+  #NPF with a synthesized #NPF and for userspace-injected #PF during
+  emulation, and harden its page layout and ucall handling.
+
+v2:
+https://lore.kernel.org/r/cover.1783999988.git.zhang_wei@open-hieco.net
+
+Tina Zhang (9):
+  KVM: x86: Add helper to provide intercept linear addresses
+  KVM: nSVM: Synthesize DecodeAssists EXITINFO for emulated intercepts
+  KVM: nSVM: Track hardware-provided instruction bytes
+  KVM: nSVM: Propagate hardware DecodeAssist bytes to VMCB12
+  KVM: x86: Track emulator-originated nested #PF VM-Exits
+  KVM: nSVM: Use emulator bytes for synthesized nested #NPF/#PF
+  KVM: nSVM: Fetch missing DecodeAssist bytes for synthesized #NPF/#PF
+  KVM: nSVM: Advertise DecodeAssists to L1
+  KVM: selftests: Add nested SVM DecodeAssists test
+
+ arch/x86/include/asm/kvm_host.h               |   1 +
+ arch/x86/kvm/emulate.c                        |  29 +-
+ arch/x86/kvm/kvm_emulate.h                    |   1 +
+ arch/x86/kvm/svm/nested.c                     | 181 +++-
+ arch/x86/kvm/svm/svm.c                        |  72 +-
+ arch/x86/kvm/svm/svm.h                        |  20 +-
+ arch/x86/kvm/x86.c                            |  33 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ .../kvm/x86/svm_nested_decode_assists_test.c  | 791 ++++++++++++++++++
+ 10 files changed, 1100 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/9] KVM: x86: Add helper to provide intercept linear addresses
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Add get_intercept_linear_addr() to compute the linear address for
+intercepts that report one, and pass the result through
+x86_instruction_info.
+
+Handle INVLPG as the initial user.  INVLPG's memory operand is decoded
+with NoAccess, and thus src_val does not contain the operand address.
+Compute the address from the decoded segment base and effective address
+in the emulator, where the operand state is available.
+
+This allows intercept handlers to use the linear address directly
+without duplicating the emulator's address calculation.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/emulate.c     | 29 +++++++++++++++++++++--------
+ arch/x86/kvm/kvm_emulate.h |  1 +
+ 2 files changed, 22 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 6/9] KVM: nSVM: Use emulator bytes for synthesized nested #NPF/#PF
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+SVM DecodeAssists provides instruction bytes for data-access #NPF and
+intercepted #PF exits. Hardware-reflected VM-Exits can use fresh VMCB02
+bytes, but KVM-synthesized exits have no hardware byte state to propagate.
+
+For a synthesized nested #NPF, use the emulator fetch cache only when the
+fault is the current emulator exception. For a synthesized intercepted #PF,
+require the queued exception VM-Exit to carry the same emulator provenance.
+
+Store the bytes in a one-shot buffer that is consumed while constructing
+VMCB12 and cleared before the next nested run. This prevents unrelated
+nested VM-Exits from reusing stale emulator bytes.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 54 ++++++++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/svm/svm.h    | 12 +++++++++
+ 2 files changed, 65 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 7/9] KVM: nSVM: Fetch missing DecodeAssist bytes for synthesized #NPF/#PF
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+The emulator fetch cache is not guaranteed to contain the full
+architected 15-byte DecodeAssist window, e.g. it may only contain the
+bytes needed to decode the instruction.
+
+Keep preparation of synthesized state limited to capturing a matching
+emulator fetch cache.  When constructing VMCB12, copy those bytes and
+fetch any missing tail through L2 guest page tables, stopping at a
+translation fault, read failure, non-canonical address, or CS limit
+overrun.  If no matching emulator bytes are available, fetch the full
+window from L2 RIP, e.g. for a #PF injected by userspace.
+
+For a non-64-bit L2, truncate each incremented linear address to 32 bits
+so that a fetch whose CS.base makes it cross the 4GB boundary wraps as
+required.
+
+Do not perform tail or fallback reads for SEV guests.  KVM cannot read
+plaintext instruction bytes from encrypted guest memory, and the
+existing SEV emulation path treats missing hardware DecodeAssist bytes
+as unavailable instead of decoding guest memory.  For nested SEV,
+report only matching emulator bytes that are already available,
+potentially a zero instruction-byte count.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 63 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 63 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/9] KVM: nSVM: Track hardware-provided instruction bytes
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+DecodeAssists provides instruction bytes for nested page faults and
+intercepted page faults caused by data accesses.  When reflecting such an
+exit to L1, KVM needs to distinguish bytes produced by the current hardware
+VM-Exit from stale VMCB02 state.
+
+Clear the VMCB02 instruction-byte fields before each nested run and track
+whether the nested VM-Exit being reflected originated from hardware.
+Preserve that state when a hardware #PF is processed by KVM and then
+reflected to L1.
+
+A subsequent change will use this state to propagate hardware-provided
+instruction bytes to VMCB12.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 17 +++++++++++++++--
+ arch/x86/kvm/svm/svm.c    | 22 ++++++++++++++--------
+ arch/x86/kvm/svm/svm.h    |  8 +++++++-
+ 3 files changed, 36 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/9] KVM: nSVM: Synthesize DecodeAssists EXITINFO for emulated intercepts
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+When the x86 emulator encounters an instruction intercepted by L1,
+svm_check_intercept() synthesizes a nested VM-Exit without fresh hardware
+DecodeAssist state.  Populate the architectural EXITINFO fields when
+DecodeAssists is exposed to L1.
+
+Generate EXITINFO1 with the GPR number for MOV CR/DR, the interrupt vector
+for INTn, and the linear address for INVLPG.  Set EXITINFO1 to zero for
+CLTS, LMSW, SMSW, and INVLPGA; the INVLPGA address remains in guest rAX.
+Clear EXITINFO2 for all covered intercepts and leave unrelated intercepts
+unchanged.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/svm.c | 48 ++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 5/8] KVM: selftests: Skip PERF_CAPABILITIES vCPU checks without PDCM
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+KVM allows userspace to query MSR_IA32_PERF_CAPABILITIES through
+KVM_GET_MSRS even when PDCM is not exposed in KVM_GET_SUPPORTED_CPUID.
+However, vCPU accesses to the MSR fail without PDCM.
+
+Keep the feature MSR query, but skip its checks when KVM does not
+expose PDCM, allowing feature_msrs_test to continue checking the
+remaining feature MSRs.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/x86/feature_msrs_test.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/8] KVM: selftests: Add Zhaoxin (ZX) CPU detection support
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+Add infrastructure to detect Zhaoxin CPUs in KVM selftests. Zhaoxin
+CPUs use vendor strings "CentaurHauls" or "  Shanghai  " and implement
+VMX-compatible virtualization technology.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/include/x86/processor.h | 7 +++++++
+ tools/testing/selftests/kvm/lib/x86/processor.c     | 3 +++
+ 2 files changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 0/8] KVM: selftests: Add Zhaoxin CPU support
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+Add Zhaoxin CPU detection to KVM's x86 selftests and enable tests whose
+VMX paths are applicable to Zhaoxin CPUs.  Zhaoxin CPUs report either
+"CentaurHauls" or "  Shanghai  " as vendor string and expose a
+VMX-compatible virtualization interface.
+
+Patch 1 adds the common vendor detection.
+Patches 2-4 allow applicable TDP, invalid guest state, and hypercall
+tests to run on Zhaoxin CPUs.
+Patch 5 keeps feature_msrs_test running when KVM does not expose PDCM,
+allowing the test to run on some Zhaoxin CPUs that do not support PDCM.
+Patches 6-8 handle the KVM-defined IA32_UCODE_REV initial value, Zhaoxin
+nested exception error codes, and optional APIC-access virtualization.
+
+The series is based on kvm-x86-next-2026.07.28.
+
+Tested on a system with a Zhaoxin CPU:
+    - feature_msrs_test
+    - fix_hypercall_test
+    - nested_exceptions_test
+    - vmx_apic_access_test
+    - vmx_exception_with_invalid_guest_state
+    - nx_huge_pages_test
+
+Frank Zhu (8):
+  KVM: selftests: Add Zhaoxin (ZX) CPU detection support
+  KVM: selftests: nx_huge_pages_test: Add TDP detection for Zhaoxin CPUs
+  KVM: selftests: vmx_exception_with_invalid_guest_state: Support
+    Zhaoxin CPUs
+  KVM: selftests: fix_hypercall_test: Add Zhaoxin CPU support
+  KVM: selftests: Skip PERF_CAPABILITIES vCPU checks without PDCM
+  KVM: selftests: feature_msrs_test: Extend MSR_IA32_UCODE_REV quirk to
+    Zhaoxin
+  KVM: selftests: nested_exceptions_test: Add Zhaoxin CPU support
+  KVM: selftests: vmx_apic_access_test: Check APIC virtualization
+    support
+
+ .../testing/selftests/kvm/include/x86/processor.h |  7 +++++++
+ tools/testing/selftests/kvm/include/x86/vmx.h     |  1 +
+ tools/testing/selftests/kvm/lib/x86/processor.c   |  5 ++++-
+ tools/testing/selftests/kvm/lib/x86/vmx.c         | 15 +++++++++++++++
+ .../testing/selftests/kvm/x86/feature_msrs_test.c | 15 ++++++++++++++-
+ .../selftests/kvm/x86/fix_hypercall_test.c        |  2 +-
+ .../selftests/kvm/x86/nested_exceptions_test.c    |  4 +++-
+ .../selftests/kvm/x86/vmx_apic_access_test.c      |  1 +
+ .../x86/vmx_exception_with_invalid_guest_state.c  |  2 +-
+ 9 files changed, 47 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/8] KVM: selftests: nx_huge_pages_test: Add TDP detection for Zhaoxin CPUs
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+Update the kvm_is_tdp_enabled() function to include Zhaoxin CPUs
+when checking for EPT (Extended Page Tables) support. This ensures
+that ZX CPUs use the appropriate TDP (Two-Dimensional Paging)
+parameter check, similar to Intel CPUs.
+
+The change modifies the condition to check for both Intel and ZX
+CPUs before querying the EPT parameter, maintaining compatibility
+with existing Intel systems while extending support to ZX CPU
+systems.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/lib/x86/processor.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/8] KVM: selftests: fix_hypercall_test: Add Zhaoxin CPU support
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+Zhaoxin CPUs offer a VMX-compatible interface with the same VMCALL
+instruction as Intel CPUs for hypercalls. Add host_cpu_is_zx to the
+Intel branch to allow the test to run correctly on Zhaoxin hardware.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/x86/fix_hypercall_test.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 7/8] KVM: selftests: nested_exceptions_test: Add Zhaoxin CPU support
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+In the test, the ERROR_CODE_EXT_FLAG bit should not be set in the #GP
+error code on Zhaoxin CPUs. Add GP_ERROR_CODE_ZX and use it when
+running on Zhaoxin hardware.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/x86/nested_exceptions_test.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 6/8] KVM: selftests: feature_msrs_test: Extend MSR_IA32_UCODE_REV quirk to Zhaoxin
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+Zhaoxin CPUs use KVM's VMX backend and therefore observe the same
+KVM-defined initial value as Intel vCPUs. Update feature_msrs_test to
+expect 0x100000000ULL for Zhaoxin vCPUs.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/x86/feature_msrs_test.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 8/8] KVM: selftests: vmx_apic_access_test: Check APIC virtualization support
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+Not all CPUs that support VMX necessarily support the "virtualize APIC
+accesses" secondary processor-based VM-execution control. For example,
+some Zhaoxin CPUs lack this feature. Add a capability check before
+running the test to properly skip on unsupported hardware instead of
+failing.
+
+Add kvm_cpu_has_vmx_apic_access_virt() helper to vmx.c, following the
+same pattern as kvm_cpu_has_ept().
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h     |  1 +
+ tools/testing/selftests/kvm/lib/x86/vmx.c         | 15 +++++++++++++++
+ .../selftests/kvm/x86/vmx_apic_access_test.c      |  1 +
+ 3 files changed, 17 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 3/8] KVM: selftests: vmx_exception_with_invalid_guest_state: Support Zhaoxin CPUs
+Author: Ewan Hai-oc <ewanhai-oc@zhaoxin.com>
+
+
+The vmx_exception_with_invalid_guest_state test currently requires an
+Intel CPU. However, Zhaoxin CPUs also support VMX and the relevant
+invalid guest state handling under KVM.
+
+Update the test requirement to allow execution on Zhaoxin platforms in
+addition to Intel, enabling broader coverage of VMX-related error paths.
+
+Signed-off-by: Frank Zhu <frankzhu@zhaoxin.com>
+Signed-off-by: Ewan Hai <ewanhai-oc@zhaoxin.com>
+---
+ .../selftests/kvm/x86/vmx_exception_with_invalid_guest_state.c  | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] riscv: KVM: Add hart-to-vCPU mapping for faster MSI injection
+Author: BillXiang <xiangwencheng@lanxincomputing.com>
+
+Replace linear searches over all vCPUs in MSI injection paths with a
+direct hart_index -> vCPU lookup table. This avoids O(n) scans on
+every injected interrupt and improves performance when the number of
+vCPUs is large.
+
+Both kvm_riscv_aia_inject_msi_by_id() and kvm_riscv_aia_inject_msi()
+now use the table instead of iterating over the vCPU list.
+
+Signed-off-by: BillXiang <xiangwencheng@lanxincomputing.com>
+---
+ arch/riscv/include/asm/kvm_aia.h |  2 +
+ arch/riscv/kvm/aia_device.c      | 67 +++++++++++++++++++++-----------
+ 2 files changed, 47 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 RESEND] RISC-V: KVM: Fix PMU event info array size overflow
+Author: Guidong Han <2045gemini@gmail.com>
+
+SBI PMU EVENT_GET_INFO stores guest-controlled
+num_events * sizeof(*einfo) in an int. On RV64, num_events = 0x10000001
+makes 0x100000010 truncate to 16. KVM then allocates one entry but loops
+over the original num_events, causing out-of-bounds reads and writes. A
+nested guest triggered:
+
+BUG: KASAN: slab-out-of-bounds in kvm_riscv_vcpu_pmu_event_info+0xa4/0x142
+Read of size 4 at addr ff600000074d46b0 by task init/1
+Call Trace:
+[<ffffffff8006471c>] kvm_riscv_vcpu_pmu_event_info+0xa4/0x142
+[<ffffffff800690c0>] kvm_sbi_ext_pmu_handler+0xca/0x268
+[<ffffffff8006779e>] kvm_riscv_vcpu_sbi_ecall+0xec/0x1e6
+[<ffffffff8006008c>] kvm_riscv_vcpu_exit+0x48c/0x540
+[<ffffffff8005ea0a>] kvm_arch_vcpu_ioctl_run+0x37e/0xc80
+Allocated by task 1:
+ __kmalloc_noprof+0x19e/0x4b0
+ kvm_riscv_vcpu_pmu_event_info+0x72/0x142
+ kvm_sbi_ext_pmu_handler+0xca/0x268
+ kvm_riscv_vcpu_sbi_ecall+0xec/0x1e6
+ kvm_riscv_vcpu_exit+0x48c/0x540
+ kvm_arch_vcpu_ioctl_run+0x37e/0xc80
+The buggy address is located 0 bytes to the right of
+ allocated 16-byte region [ff600000074d46a0, ff600000074d46b0)
+
+Store the shared-memory size in size_t and reject multiplication overflow.
+Allocate the guest-driven array with GFP_KERNEL_ACCOUNT so it is charged
+to kmemcg, and use __GFP_NOWARN to suppress allocation failure warnings.
+Use kvcalloc() to allow vmalloc fallback and an unsigned long loop index
+to match num_events.
+
+Reported-by: Naveed Khan <naveed@digiscrypt.com>
+Closes: https://lore.kernel.org/kvm/178345245327.72065.13249716450708539854@digiscrypt.com/
+Fixes: e309fd113b9f ("RISC-V: KVM: Implement get event info function")
+Cc: stable@vger.kernel.org
+Signed-off-by: Guidong Han <2045gemini@gmail.com>
+---
+RESEND:
+- Send v2 as a new top-level thread instead of replying to v1.
+
+Changes in v2:
+- Use an accounted, no-warning kvcalloc() allocation and kvfree(), as
+  suggested by Sashiko.
+- Naveed Khan reported the issue before v1. I missed his report at the
+  time, so add Reported-by and Closes tags to credit him.
+
+Link to v1: https://lore.kernel.org/kvm/20260718153620.829378-1-2045gemini@gmail.com/
+---
+ arch/riscv/kvm/vcpu_pmu.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] RISC-V: KVM: Fix PMU event info array size overflow
+Author: Guidong Han <2045gemini@gmail.com>
+
+SBI PMU EVENT_GET_INFO stores guest-controlled
+num_events * sizeof(*einfo) in an int. On RV64, num_events = 0x10000001
+makes 0x100000010 truncate to 16. KVM then allocates one entry but loops
+over the original num_events, causing out-of-bounds reads and writes. A
+nested guest triggered:
+
+BUG: KASAN: slab-out-of-bounds in kvm_riscv_vcpu_pmu_event_info+0xa4/0x142
+Read of size 4 at addr ff600000074d46b0 by task init/1
+Call Trace:
+[<ffffffff8006471c>] kvm_riscv_vcpu_pmu_event_info+0xa4/0x142
+[<ffffffff800690c0>] kvm_sbi_ext_pmu_handler+0xca/0x268
+[<ffffffff8006779e>] kvm_riscv_vcpu_sbi_ecall+0xec/0x1e6
+[<ffffffff8006008c>] kvm_riscv_vcpu_exit+0x48c/0x540
+[<ffffffff8005ea0a>] kvm_arch_vcpu_ioctl_run+0x37e/0xc80
+Allocated by task 1:
+ __kmalloc_noprof+0x19e/0x4b0
+ kvm_riscv_vcpu_pmu_event_info+0x72/0x142
+ kvm_sbi_ext_pmu_handler+0xca/0x268
+ kvm_riscv_vcpu_sbi_ecall+0xec/0x1e6
+ kvm_riscv_vcpu_exit+0x48c/0x540
+ kvm_arch_vcpu_ioctl_run+0x37e/0xc80
+The buggy address is located 0 bytes to the right of
+ allocated 16-byte region [ff600000074d46a0, ff600000074d46b0)
+
+Store the shared-memory size in size_t and reject multiplication overflow.
+Allocate the guest-driven array with GFP_KERNEL_ACCOUNT so it is charged
+to kmemcg, and use __GFP_NOWARN to suppress allocation failure warnings.
+Use kvcalloc() to allow vmalloc fallback and an unsigned long loop index
+to match num_events.
+
+Reported-by: Naveed Khan <naveed@digiscrypt.com>
+Closes: https://lore.kernel.org/kvm/178345245327.72065.13249716450708539854@digiscrypt.com/
+Fixes: e309fd113b9f ("RISC-V: KVM: Implement get event info function")
+Cc: stable@vger.kernel.org
+Signed-off-by: Guidong Han <2045gemini@gmail.com>
+---
+Changes in v2:
+- Use an accounted, no-warning kvcalloc() allocation and kvfree(), as
+  suggested by Sashiko.
+- Naveed Khan reported the issue before v1. I missed his report at the
+  time, so add Reported-by and Closes tags to credit him.
+
+Link to v1: https://lore.kernel.org/kvm/20260718153620.829378-1-2045gemini@gmail.com/
+---
+ arch/riscv/kvm/vcpu_pmu.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: have hva_to_pfn_remapped write-upgrade PTEs
+Author: Sergio Lopez <slp@redhat.com>
+
+After 28e39181 ("drm/gem-shmem: Track folio accessed/dirty status in
+mmap") was merged, a guest write to an unpopulated PTE from a mapping
+backed by a DRM GEM BO triggers a VM exit with EFAULT, with
+hva_to_pfn_remapped setting p_pfn to KVM_PFN_ERR_RO_FAULT.
+
+This happens because that commit implements pfn_mkwrite for
+drm_gem_shmem_vm_ops. With that function present, vma_wants_writenotify
+returns true in vma_set_page_prot, clearing VM_SHARED and leading to the
+entry to be installed as read-only. This is done on purpose so the
+fault handler gets nofitied when the entry is going to be written.
+
+In KVM, hva_to_pfn_remapped calls to fixup_user_fault to trigger the
+fault handler but, as seen above, this one might install a read-only PTE
+even with FAULT_FLAG_WRITE present in fault_flags. The check a the end
+of hvf_to_pfn_remapped notices that the entry is not writable despite
+this being a write fault and sets p_pfn to KVM_PFN_ERR_RO_FAULT.
+
+To address this issue, have hva_to_pfn_remapped issue a second
+fixup_user_fault call when needed for write-upgrading the PTE.
+
+Signed-off-by: Sergio Lopez <slp@redhat.com>
+---
+ virt/kvm/kvm_main.c | 42 +++++++++++++++++++++++++++++-------------
+ 1 file changed, 29 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 24/29] KVM: arm64: Engage NV3 ERET trap elision
+Author: Marc Zyngier <maz@kernel.org>
+
+When running on NV3 HW, always engage ERET trap elision when running
+the L1 context, as there is no benefit in not doing so.
+
+An L1 can itself engage trap elision by setting its own view of
+HCRX_EL2.NVTGE==1, which will subsequently be honored.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 10 ++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c      |  4 ++++
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 27/29] KVM: arm64: Expose FEAT_NV3 to guests
+Author: Marc Zyngier <maz@kernel.org>
+
+Further enable FEAT_NV3 by making it visible to NV guests.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 25/29] KVM: arm64: Engage NV3 TLBI trap elision
+Author: Marc Zyngier <maz@kernel.org>
+
+Similarly to the ERET elision mechanism, FEAT_NV3 can elide TLBIs
+that only affects the guest's S1 translation. Enable this, with the
+express condition that the guest isn't NV2 aware, as we otherwise
+need to trap these TLBIs to deal with VNCR mappings.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 26/29] KVM: arm64: Add FEAT_NV3 detection
+Author: Marc Zyngier <maz@kernel.org>
+
+Now that everything is in place to engage the FEAT_NV3 fast-path,
+add the detection code to cpufeature.c.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kernel/cpufeature.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 23/29] KVM: arm64: Add NVHCR_EL2 context switching
+Author: Marc Zyngier <maz@kernel.org>
+
+Since NVHCR_EL2 represents the HCR_EL2 state of the EL1 guest, it
+must be dealt with in some particular way:
+
+- for a guest in hyp context (an L1 by definition), NVHCR_EL2 directly
+  reflects HCR_EL2 as read and written by the guest itself. It must
+  therefore be eagerly synced back with the emulation code which only
+  knows about HCR_EL2. This is unconditional if NV3 is available on
+  the host.
+
+- For an L2 guest, NVHCR_EL2 is controlled by the L1 guest, and we
+  just context switch it like any other EL1 register. Yes, EL1, as
+  that's where this thing runs from the PoV of L1. This is conditioned
+  on the guest using NV3.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h | 11 +++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c            | 10 ++++++++--
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 20/29] KVM: arm64: Add sanitisation for NVHCR_EL2
+Author: Marc Zyngier <maz@kernel.org>
+
+Just like any other VNCR-based register, NVHCR_EL2 requires some
+level of sanitisation. Being specified as a live copy of HCR_EL2,
+it adopts the exact same format, but depends on FEAT_NV3 instead.
+
+A subtle aspect is that we only want to apply the sanitisation if
+FEAT_NV3 is actually present, as the VNCR location is otherwise
+used to back accesses to HCR_EL2.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/config.c | 15 +++++++++++++++
+ arch/arm64/kvm/nested.c |  4 ++++
+ 2 files changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/29] KVM: arm64: Add NV3 control bits to HCRX_EL2 sanitisation
+Author: Marc Zyngier <maz@kernel.org>
+
+Expose the FEAT_NV3 control bits to the sanitisation code so that
+KVM stops moaning about the unattributed bits.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/config.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 29/29] arm64: Add override for ID_AA64MMFR4_EL1.NV_frac
+Author: Marc Zyngier <maz@kernel.org>
+
+In a very unsurprising turn of events, there is a large class of
+firmware that is totally unable to deal with FEAT_NV3, and doesn't
+set the required SCR2_EL3.NV3En bit, leading to an UNDEF exception
+or an unhandled trap to EL3, depending on the implementation.
+
+Allow the unfortunate user to override ID_AA64MMFR4_EL1.NV_frac
+and get a working system. Hopefully firmware will be fixed before
+actually HW ships, but I have been there before... :-/
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/cpufeature.h   |  1 +
+ arch/arm64/kernel/cpufeature.c        |  4 +++-
+ arch/arm64/kernel/image-vars.h        |  1 +
+ arch/arm64/kernel/pi/idreg-override.c | 10 ++++++++++
+ 4 files changed, 15 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 28/29] KVM: arm64: selftest: Add NVHCR_EL2 to get-reg-list
+Author: Marc Zyngier <maz@kernel.org>
+
+Since we now expose a new system register on NV3-capable HW when
+the guest is exposed to it, add it to the existing checker.  FWIW.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ tools/testing/selftests/kvm/arm64/get-reg-list.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 22/29] KVM: arm64: Add routing for NVHCR_EL2 trap
+Author: Marc Zyngier <maz@kernel.org>
+
+NVHCR_EL2 accesses from EL1 are taken to EL2 when HCRX_EL2.NVTGE==0
+and HCR_EL2.NV==1. Describe this in the exception routing tables.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/emulate-nested.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 21/29] KVM: arm64: Add NVHCR_EL2 handling to the sysreg array
+Author: Marc Zyngier <maz@kernel.org>
+
+Expose NVHCR_EL2 to userspace, and treat the direct access as UNDEF,
+as that would only outline a bug in our exception routing.
+
+The generic accessors are also updated to deal with the relatively
+uncommon location of that register.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/sys_regs.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 19/29] KVM: arm64: Make HCR_EL2 a non-VNCR register
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_NV3 makes a fundamental change to the architecture, by moving
+guest-initiated HCR_EL2 accesses to the NVHCR_EL2 register. As the
+names suggests, this is HCR_EL2 for a NV guest.
+
+But where do NVHCR_EL2 accesses from a guest go? The are redirected
+to the VNCR page, right where HCR_EL2 is stored in the NV2 case.
+Does it hurt? Good. There's more coming.
+
+The challenge here is to make KVM work seamlessly, without rewriting
+everything. Which implies that things such as __vcpu_sys_reg(HCR_EL2)
+must work, no matter the underlying NV implementation.
+
+A simple way to deal with it is to move HCR_EL2's canonical storage
+outside of VNCR for the vast majority of the KVM code, and only have
+a copy at entry/exit times. Given that we don't really support NV3
+yet, this is pretty simple.
+
+In the process, advertise NVHCR_EL2 as the register that now holds
+offset 0x78 in the VNCR page.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_host.h     | 3 ++-
+ arch/arm64/include/asm/vncr_mapping.h | 2 +-
+ arch/arm64/kvm/hyp/vhe/switch.c       | 9 +++++++++
+ 3 files changed, 12 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/29] KVM: arm64: Split NV-specific exit fixups from the non-NV handling
+Author: Marc Zyngier <maz@kernel.org>
+
+In order to facilitate further changes, move the NV handling of
+early fixups in its own helper. This also makes the code slightly
+simpler to parse.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/vhe/switch.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 18/29] KVM: arm64: Add kvm_has_nv{2,3}() predicates
+Author: Marc Zyngier <maz@kernel.org>
+
+Add a new set of predicates indicating whether VM is capable of
+NV2, NV3, and is in a nested NV3 context.
+
+This is going to become useful as we start dealing with a mix of
+behaviours (NV2, NV3, NV2 on NV3...).
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/29] arm64: Add ARM64_HAS_NV3 capability
+Author: Marc Zyngier <maz@kernel.org>
+
+As a bunch of KVM code is going to depend on FEAT_NV3 being detected
+on the host, add a new capability that will describe it.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/cpucaps | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/29] KVM: arm64: Relax CPTR_EL2 handling when FEAT_NV2p1 is present
+Author: Marc Zyngier <maz@kernel.org>
+
+With FEAT_NV2P1, it is no longer necessary to trap CPTR_EL2 accesses
+via CPACR_EL1, as CPACR_EL1.TCPAC is guaranteed to be stateful.
+
+Prevent such trapping and context switch CPACTR_EL1 in NV contexts
+when NV2P1 is present.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 5 +++--
+ arch/arm64/kvm/hyp/vhe/switch.c         | 3 +++
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c      | 8 +++++---
+ arch/arm64/kvm/sys_regs.c               | 5 ++++-
+ 4 files changed, 15 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/29] KVM: arm64: Classify CPTR_EL2 as a SR_LOC_SPECIAL register
+Author: Marc Zyngier <maz@kernel.org>
+
+It may not be obvious unless you look at it closely, but CPTR_EL2
+is treated very differently from other registers. It is one the
+registers that, despite looking very similar between EL1 and EL2
+when E2H==1, have RES0 bits that get in the way.
+
+Make it clear that CPTR_EL2 is odd by classifying it as SR_LOC_SPECIAL,
+just like CNTHCTL_EL2 (and for the same reasons). This makes it
+possible to use vcpu_read_sys_reg() with it, and will be necessary
+once we support FEAT_NV2P1.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h |  2 +-
+ arch/arm64/kvm/sys_regs.c            | 20 ++++++++++++++++++--
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/29] arm64: sysreg: Add HCRX_EL2 bits related to FEAT_NV3
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_NV3 introduces 4 new HCRX_EL2 control bits. Describe them
+in the sysreg file.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/sysreg | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/29] arm64: sysreg: Add NVHCR_EL2 description as a mirror of HCR_EL2
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_NV3 introduces a new register that contains the HCR_EL2 value
+exposed to a NV guest. As such, it has the exact same layout as
+HCR_EL2.
+
+Describe NVHCR_EL2 as a mapping to HCR_EL2.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/sysreg | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/29] KVM: arm64: Relax CNTHCTL_EL2 handling when FEAT_NV2p1 is present
+Author: Marc Zyngier <maz@kernel.org>
+
+With NV2p1, it is no longer necessary to use the split approach
+where bits of CNTHCTL_EL2 cannot be accessed via CNTKCTL_EL1,
+and we can treat the CNTKCTL_EL1 accessor as if it was "normal".
+
+Key the special casing on FEAT_NV2P1 not being implemented.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/arch_timer.c        | 10 ++++++++--
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c | 13 ++++++++++---
+ arch/arm64/kvm/sys_regs.c          |  6 ++++--
+ 3 files changed, 22 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/29] KVM: arm64: Expose FEAT_NV2p1 to NV guests
+Author: Marc Zyngier <maz@kernel.org>
+
+Since NV2p1 is reducing the number of traps, it is valuable to expose
+it to NV guests. Do so.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/29] KVM: arm64: Plumb HCRX_EL2.SRMASKEn in HCRX_EL2 sanitisation
+Author: Marc Zyngier <maz@kernel.org>
+
+HCRX_EL2.SRMASKEn is a new bit enabling FEAT_SRMASK for a guest.
+We don't plan to support it any time soon, but it doesn't hurt to
+actively document it, specially as we are going to add more bits
+we actually care about.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/config.c | 1 +
+ arch/arm64/tools/sysreg | 4 +++-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/29] arm64: Add ARM64_HAS_NV2P1 capability
+Author: Marc Zyngier <maz@kernel.org>
+
+As we're about to deal with FEAT_NV2P1, add a new capability that
+will be used to key any support for it.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/cpucaps | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/29] arm64: Add FEAT_NV2p1 detection
+Author: Marc Zyngier <maz@kernel.org>
+
+Add the necessary NV2p1 probing to the cpufeature infrastructure.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kernel/cpufeature.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/29] KVM: arm64: Don't evaluate HCR_EL2.NV nor HFGITR_EL2.ERET on ERET fast path
+Author: Marc Zyngier <maz@kernel.org>
+
+We currently avoid using the ERET fast path if the guest has HCR_EL2.NV
+set. This is an odd check, as NV doesn't mean much if HCR_EL2.TGE==1.
+
+Similarly, evaluating HFGITR_EL2.ERET makes little sense, as
+this only applies to the nested context, while the ERET fast-path
+is purely for the benefit of L1.
+
+Replace these bizarre checks with is_nested_ctxt() which makes a lot
+more sense: if we are running an L2, the ERET trap must go to L1.
+
+Fixes: dd0717a998f77 ("KVM: arm64: nv: Fast-track 'InHost' exception returns")
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/vhe/switch.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/29] KVM: arm64: Merge guest's HCRX_EL2 using NV_HCRX_GUEST_EXCLUDE
+Author: Marc Zyngier <maz@kernel.org>
+
+The way we merge the guest-provided HCRX_EL2 value with the host's
+is bonkers. We try to make it look like the FGT registers by using
+positive and negative polarities for traps, but most of these bits
+are not strictly about trapping, as they actively change the way
+some architectural state is managed.
+
+It would be far better to deal with these bits like we do for
+HCR_EL2, by enumerating the list of bits we don't allow the guest
+to override. This is simplified by the fact that HCRX_EL2 only
+affects EL1, and not EL2.
+
+Re-jig the HCRX_EL2 handling with a macro that list the bits excluded
+from the merge (TMEA, PTTWI, EnIDCP128).
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/29] KVM: arm64: Add support for FEAT_NV2p1 and FEAT_NV3
+Author: Marc Zyngier <maz@kernel.org>
+
+This is the fourth (and hopefully last) version of a series adding
+support for two extensions targeting Nested Virt on arm64:
+
+- FEAT_NV2p1 is effectively a bug fix for two registers (CNTHCTL_EL2
+  and CPTR_EL2) that are missing stateful bits when accessed from EL1
+  in a NV configuration. When this is present, the hypervisor can
+  avoid a bunch of traps.
+
+- FEAT_NV3 is much more ambitious, and changes the way ERET behaves in
+  a NV environment. By moving EL1 accesses to HCR_EL2 from memory (via
+  VNCR) to a dedicated register (NVHCR_EL2), the HW can detect whether
+  the guest is performing an ERET for itself (NVHCR_EL2.TGE==1) or to
+  its own guest (NVHCR_EL2.TGE==0). In the former case, ERET is done
+  directly, and no trap occurs. Similar optimisations are available
+  for a class of TLBI instructions.
+
+The whole thing has been tested on an FVP model, and shown measurable
+improvements for an L1 guest (about 1.5% fewer instructions).
+
+Given that this isn't very convincing on its own, I have built an
+approximate emulation of FEAT_NV3 that L1 (and deeper levels) can use
+on actual production hardware. For these deeper levels, the numbers
+are in the double digit of percentage point reduction, see below for
+details.
+
+Does it make NV better? Yes!
+Does it make NV good? Get real!
+
+Anyway, patches on top of -rc4.
+
+* Side notes about performance evaluation with NV3 emulation:
+
+If you are interested in the NV3 emulation, I have a branch [0] that
+contains it all. Note that the improvement only kicks while running an
+L2 guest running at EL2 -- L1 will not see any improvement. But I get
+close to 40% improvements on L2, and 60% on L3 for the only workload
+that really matters (Debian Installer).
+
+If all your nested guests are running this hack, then you can pass
+"kvm-arm.mode=nested,nvtge" on the host command line, and all the
+nested guests will opt in the accelerated behaviour.
+
+If you like to live dangerously (or have a machine that does not have
+FEAT_HCX), you can instead pass 'kvm-arm.mode=nested,nvtge=force', and
+ERET will get the acceleration without even guest buy-in.
+
+* From v3 [3]:
+
+  - Fixed comment in the Mapping/Fields generator
+
+  - Dropped double semi-colon in HCRX configuration
+
+  - Simplified the kvm_has_nv3() predicate
+
+  - Added NVHCR_EL2 to the get-reg-list selftest
+
+  - Collected RBs from Yao Yuan, with thanks
+
+* From v2 [2]:
+
+  - Improved comments on the subtleties of trapping ERET in nested
+    contexts
+
+  - Rebased on top of v7.2-rc4
+
+  - Collected RBs from Yao Yuan, with thanks
+
+* From v1 [1]:
+
+  - Expanded generation of RESx and UNKN symbols to both Mapping and
+    Fields qualifiers
+
+  - Dropped HFGIRT_EL2.ERET checks on ERET fast-path
+
+  - Fixed the NVHCR_EL2 trap handling
+
+  - Added FORCE_RESx() to HCRX_EL2 constraints
+
+  - Fixed ID_AA64MMFR4_EL1 sanitisation
+
+  - Added NV3 acceleration for TLBIOS
+
+  - Collected RBs from Joey, with thanks
+
+[0] https://git.kernel.org/pub/scm/linux/kernel/git/maz/arm-platforms.git/log/?h=kvm-arm64/nv3
+[1] https://lore.kernel.org/r/20260702160248.1377250-1-maz@kernel.org
+[2] https://lore.kernel.org/r/20260714091641.1970822-1-maz@kernel.org
+[3] https://lore.kernel.org/r/20260722074234.3330999-1-maz@kernel.org
+
+Marc Zyngier (29):
+  arm64: sysreg: Emit RESx/UNKN values for Mapping/Fields definitions
+  arm64: Update ID_AA64MMFR4_EL1 description to 2026-03 JSON release
+  KVM: arm64: Merge guest's HCRX_EL2 using NV_HCRX_GUEST_EXCLUDE
+  KVM: arm64: Drop __HCRX_EL2_* masks
+  KVM: arm64: Plumb HCRX_EL2.SRMASKEn in HCRX_EL2 sanitisation
+  KVM: arm64: Classify CPTR_EL2 as a SR_LOC_SPECIAL register
+  KVM: arm64: Don't evaluate HCR_EL2.NV nor HFGITR_EL2.ERET on ERET fast
+    path
+  arm64: Add ARM64_HAS_NV2P1 capability
+  KVM: arm64: Relax CPTR_EL2 handling when FEAT_NV2p1 is present
+  KVM: arm64: Relax CNTHCTL_EL2 handling when FEAT_NV2p1 is present
+  KVM: arm64: Expose FEAT_NV2p1 to NV guests
+  arm64: Add FEAT_NV2p1 detection
+  arm64: sysreg: Add NVHCR_EL2 description as a mirror of HCR_EL2
+  arm64: sysreg: Add HCRX_EL2 bits related to FEAT_NV3
+  arm64: Add ARM64_HAS_NV3 capability
+  KVM: arm64: Split NV-specific exit fixups from the non-NV handling
+  KVM: arm64: Add NV3 control bits to HCRX_EL2 sanitisation
+  KVM: arm64: Add kvm_has_nv{2,3}() predicates
+  KVM: arm64: Make HCR_EL2 a non-VNCR register
+  KVM: arm64: Add sanitisation for NVHCR_EL2
+  KVM: arm64: Add NVHCR_EL2 handling to the sysreg array
+  KVM: arm64: Add routing for NVHCR_EL2 trap
+  KVM: arm64: Add NVHCR_EL2 context switching
+  KVM: arm64: Engage NV3 ERET trap elision
+  KVM: arm64: Engage NV3 TLBI trap elision
+  KVM: arm64: Add FEAT_NV3 detection
+  KVM: arm64: Expose FEAT_NV3 to guests
+  KVM: arm64: selftest: Add NVHCR_EL2 to get-reg-list
+  arm64: Add override for ID_AA64MMFR4_EL1.NV_frac
+
+ arch/arm64/include/asm/cpufeature.h           |  1 +
+ arch/arm64/include/asm/kvm_arm.h              | 15 -----
+ arch/arm64/include/asm/kvm_emulate.h          | 44 +++++++++++++-
+ arch/arm64/include/asm/kvm_host.h             |  3 +-
+ arch/arm64/include/asm/vncr_mapping.h         |  2 +-
+ arch/arm64/kernel/cpufeature.c                | 18 +++++-
+ arch/arm64/kernel/image-vars.h                |  1 +
+ arch/arm64/kernel/pi/idreg-override.c         | 10 ++++
+ arch/arm64/kvm/arch_timer.c                   | 10 +++-
+ arch/arm64/kvm/config.c                       | 27 ++++++++-
+ arch/arm64/kvm/emulate-nested.c               | 18 ++++--
+ arch/arm64/kvm/hyp/include/hyp/switch.h       | 27 +++++++--
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h    | 11 ++++
+ arch/arm64/kvm/hyp/vhe/switch.c               | 52 +++++++++++++----
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c            | 21 +++++--
+ arch/arm64/kvm/nested.c                       | 14 ++++-
+ arch/arm64/kvm/sys_regs.c                     | 57 +++++++++++++++++--
+ arch/arm64/tools/cpucaps                      |  2 +
+ arch/arm64/tools/gen-sysreg.awk               |  8 +--
+ arch/arm64/tools/sysreg                       | 44 ++++++++++++--
+ .../selftests/kvm/arm64/get-reg-list.c        |  2 +
+ 21 files changed, 322 insertions(+), 65 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/29] arm64: Update ID_AA64MMFR4_EL1 description to 2026-03 JSON release
+Author: Marc Zyngier <maz@kernel.org>
+
+ID_AA64MMFR4_EL1 has gained a few fields and enum values in the past
+few months, so resync its definition with the 2026-03 JSON release.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/sysreg | 32 ++++++++++++++++++++++++++++----
+ 1 file changed, 28 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/29] KVM: arm64: Drop __HCRX_EL2_* masks
+Author: Marc Zyngier <maz@kernel.org>
+
+The __HCRX_EL2_* masks are a leftover from a time where we didn't
+have much sanitisation for the system registers. Since we are now
+in a better place, rely on the existing checks to detect unhandled
+bits in HCRX_EL2.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_arm.h | 15 ---------------
+ arch/arm64/kvm/config.c          |  5 +++--
+ arch/arm64/kvm/emulate-nested.c  |  5 -----
+ 3 files changed, 3 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/29] arm64: sysreg: Emit RESx/UNKN values for Mapping/Fields definitions
+Author: Marc Zyngier <maz@kernel.org>
+
+The sysreg file is using the Mapping or Fields qualifiers to indicate
+that a given encoding is only a mapping to a particular register (or
+an instance of a more generic register definition).
+
+As a result, we don't output any definition, and instead expect
+the canonical definitions to be used.
+
+This works rather well for individual fields, but creates problems
+for macros that refer to more generic classes of bits such as RESx.
+
+Relax the above rule by emitting the RESx and UNKN values for Mapping
+and Fields qualifiers as well.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/gen-sysreg.awk | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] RISC-V: KVM: Add arch-specific tracepoints
+Author: Yuhang.Chen <yhchen312@gmail.com>
+
+Add RISC-V KVM tracepoints for events that are useful when debugging
+guest exits and in-kernel emulation paths. The existing kvm_entry and
+kvm_exit tracepoints are kept, with the kvm_entry PC format fixed to use
+zero-padded hexadecimal output.
+
+The newly added tracepoints cover:
+
+- kvm_vcpu_exit for synchronous guest traps
+- kvm_vcpu_irq for VS-mode interrupt set/clear
+- kvm_mmio_emulate for MMIO load/store emulation
+
+kvm_vcpu_exit reports the full trap context (sepc/scause/stval/htval/
+htinst) so userspace can filter by scause, and is placed after the
+interrupt early-return so it fires only for synchronous traps.
+kvm_vcpu_irq covers every set/unset_interrupt() caller from a single
+place.
+
+Example trace output:
+
+kvm_vcpu_exit:
+VCPU: 0, SEPC: 0x80200000, SCAUSE: 0x17,
+STVAL: 0x10000000, HTVAL: 0x4000000, HTINST: 0x2023
+
+kvm_mmio_emulate:
+VCPU: 0, Store MMIO at 0x10000000, len 4, insn 0x2023, sepc 0x80200000
+
+kvm_vcpu_irq:
+VCPU: 0, IRQ: 10, level: 1
+
+Testing:
+
+A QEMU-based test program was used to exercise:
+
+- Guest page faults
+- MMIO emulation
+- IRQ injection
+
+Verified trace output generation for:
+
+- kvm_vcpu_exit
+- kvm_vcpu_irq
+- kvm_mmio_emulate
+
+Assisted-by: YuanSheng:deepseek-v4-pro
+Co-developed-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Yuhang.Chen <yhchen312@gmail.com>
+---
+Changes in v2, per Anup Patel's review [1]:
+
+- Replace the per-cause tracepoints kvm_guest_fault, kvm_sbi_ecall,
+  kvm_wait_riscv and kvm_csr_access with a single generic kvm_vcpu_exit
+  tracepoint that reports the full trap context (sepc/scause/stval/
+  htval/htinst).
+- Replace kvm_irq_line and kvm_timer_update_irq with a single generic
+  kvm_vcpu_irq tracepoint covering all set/unset_interrupt() callers.
+- Keep kvm_mmio_emulate.
+- Drop the now-unused trace.h includes from vcpu_sbi.c, vcpu_timer.c
+  and vm.c.
+
+[1] https://lore.kernel.org/all/CAAhSdy2Qa2DGFzb27MgmoH5Pf1BOrgwaZBqP__U9eejs5-5Bsw@mail.gmail.com/
+---
+ arch/riscv/kvm/trace.h     | 81 +++++++++++++++++++++++++++++++++++++-
+ arch/riscv/kvm/vcpu.c      |  4 ++
+ arch/riscv/kvm/vcpu_exit.c |  4 ++
+ arch/riscv/kvm/vcpu_insn.c | 13 +++++-
+ 4 files changed, 98 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] MAINTAINERS: Update s390 specific vfio sections
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+Update all three s390 vfio sections to clarify that s390 specific
+vfio code normally will go upstream via the kvms390 git tree.
+Add a corresponding T entry to reflect that.
+
+For consistency with the other s390 specfic vfio sections rename
+"VFIO AP" to "VFIO-AP" and add an L entry for the kvm mailing list.
+
+Acked-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Acked-by: Matthew Rosato <mjrosato@linux.ibm.com>
+Acked-by: Eric Farman <farman@linux.ibm.com>
+Acked-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+Acked-by: Farhan Ali <alifm@linux.ibm.com>
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+ MAINTAINERS | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost/vsock: prevent stale IOTLB after ACCESS_PLATFORM changes
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_vsock_set_features() initializes dev->iotlb when
+VIRTIO_F_ACCESS_PLATFORM is enabled. It does not remove that IOTLB
+when the feature is later cleared. The virtqueue still points at the
+old IOTLB, and vhost_vsock_handle_tx_kick() passes descriptors to
+vhost_get_vq_desc(), which translates them through that mapping.
+
+A userspace backend can enable ACCESS_PLATFORM, install an IOTLB entry
+for a payload GPA, start the device, clear ACCESS_PLATFORM, replace the
+memory table, and reuse the old HVA before submitting the same GPA
+again. The feature state then says direct memory access is in use
+while the TX path still uses the old IOTLB HVA.
+
+Reject clearing ACCESS_PLATFORM while the device IOTLB exists. Also
+keep the existing IOTLB when a feature update leaves ACCESS_PLATFORM
+enabled; VHOST_SET_FEATURES is used for runtime log updates and must
+not discard the current translations by allocating an empty IOTLB.
+
+Fixes: e13a6915a03f ("vhost/vsock: add IOTLB API support")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/vsock.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From a9101aa3f to 7ff1521ef
+KVM mailing list update from a9101aa3f to 7ff1521ef
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     30 kernel.org
+     10 google.com
+      1 nxp.com
+
+Top 15 contributors (Based on Email Body)
+
+     30  Marc Zyngier <maz@kernel.org>
+     10  Sean Christopherson <seanjc@google.com>
+      1  Peng Fan <peng.fan@nxp.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 9/9] KVM: selftests: Clean up global constants in hardware
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename the global constants in the hardware disable test to better
+capture what they control, and open code the literal number of sleeping
+tasks and iterations instead of using power-of-2 math to express values
+that are 100% arbitrary.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c      | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 8/9] KVM: selftests: Add KVM syscall wrappers for pthread_{g,s}etaffinity_np()
+Author: Sean Christopherson <seanjc@google.com>
+
+Add and use KVM wrappers for pthread_{g,s}etaffinity_np() so that selftests
+don't need to manually assert that the syscalls succeeded, and so that they
+don't need to manually pass in sizeof(cpu_set_t) for the size.
+
+Note, the steal time test didn't assert success, but the TEST_ASSERT() one
+line later makes it quite clear the test relies on pthread_getaffinity_np()
+succeeding.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c        | 12 ++----------
+ .../testing/selftests/kvm/include/kvm_syscalls.h | 16 ++++++++++++++++
+ tools/testing/selftests/kvm/steal_time.c         |  2 +-
+ 3 files changed, 19 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 6/9] KVM: selftests: Add KVM syscall wrappers for pthread_{cancel,join}()
+Author: Sean Christopherson <seanjc@google.com>
+
+Add and use KVM wrappers for pthread_{cancel,join}() so that selftests
+don't need to manually assert that the syscalls succeeded.
+
+Note, the vast majority tests don't actually assert success, but they all
+obviously rely on the syscall to succeed.
+
+Other than explicitly failing if a syscall fails, no functional change
+intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c             |  4 ++--
+ tools/testing/selftests/kvm/arm64/vgic_irq.c         |  4 ++--
+ tools/testing/selftests/kvm/arm64/vgic_lpi_stress.c  |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c         |  2 +-
+ tools/testing/selftests/kvm/include/kvm_syscalls.h   |  2 ++
+ tools/testing/selftests/kvm/irq_test.c               |  2 +-
+ tools/testing/selftests/kvm/irqfd_test.c             |  2 +-
+ tools/testing/selftests/kvm/kvm_page_table_test.c    |  2 +-
+ tools/testing/selftests/kvm/lib/memstress.c          |  2 +-
+ tools/testing/selftests/kvm/lib/userfaultfd_util.c   |  3 +--
+ tools/testing/selftests/kvm/memslot_perf_test.c      |  2 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c        |  2 +-
+ tools/testing/selftests/kvm/pre_fault_memory_test.c  |  2 +-
+ tools/testing/selftests/kvm/rseq_test.c              |  2 +-
+ tools/testing/selftests/kvm/s390/memop.c             |  2 +-
+ tools/testing/selftests/kvm/set_memory_region_test.c |  4 ++--
+ tools/testing/selftests/kvm/steal_time.c             |  2 +-
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c         | 10 ++--------
+ tools/testing/selftests/kvm/x86/hyperv_tlb_flush.c   | 10 ++--------
+ .../selftests/kvm/x86/private_mem_conversions_test.c |  2 +-
+ .../selftests/kvm/x86/private_mem_kvm_exits_test.c   |  2 +-
+ .../testing/selftests/kvm/x86/recalc_apic_map_test.c |  4 ++--
+ tools/testing/selftests/kvm/x86/sev_migrate_tests.c  |  2 +-
+ tools/testing/selftests/kvm/x86/sync_regs_test.c     |  4 ++--
+ tools/testing/selftests/kvm/x86/tsc_scaling_sync.c   |  2 +-
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c     | 12 ++----------
+ tools/testing/selftests/kvm/x86/xen_shinfo_test.c    |  8 ++------
+ 27 files changed, 38 insertions(+), 61 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 7/9] KVM: selftests: Add helper APIs to cancel+join pthreads
+Author: Sean Christopherson <seanjc@google.com>
+
+Deduplicate test code that does cancel()+join() on pthreads by adding a
+collection of syscall wrappers.  The tests that asynchronously cancel
+pthreads, i.e. use PTHREAD_CANCEL_ASYNCHRONOUS, are particularly ugly,
+especially since it's not immediately obvious why those tests assert on
+the thread being CANCELED, whereas others do not.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/include/kvm_syscalls.h      | 24 +++++++++++++++++++
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c  | 15 ++----------
+ .../selftests/kvm/x86/hyperv_tlb_flush.c      | 15 ++----------
+ .../selftests/kvm/x86/recalc_apic_map_test.c  |  3 +--
+ .../selftests/kvm/x86/sync_regs_test.c        |  3 +--
+ .../selftests/kvm/x86/xapic_ipi_test.c        | 15 ++----------
+ .../selftests/kvm/x86/xen_shinfo_test.c       |  3 +--
+ 7 files changed, 33 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/9] KVM: selftests: Add KVM syscall wrapper for pthread_create()
+Author: Sean Christopherson <seanjc@google.com>
+
+Add and use a KVM wrapper for pthread_create() syscall so that selftests
+don't need to manually assert that the syscall succeeded.
+
+Note, most tests don't actually assert success, but they all obviously
+rely on the syscall to succeed.
+
+Other than explicitly failing if pthread_create() fails, no functional
+change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/arch_timer.c          | 14 ++++----------
+ tools/testing/selftests/kvm/arm64/vgic_irq.c      | 10 +++-------
+ .../testing/selftests/kvm/arm64/vgic_lpi_stress.c |  4 ++--
+ tools/testing/selftests/kvm/dirty_log_test.c      |  2 +-
+ .../testing/selftests/kvm/hardware_disable_test.c | 15 +++------------
+ .../testing/selftests/kvm/include/kvm_syscalls.h  |  5 +++++
+ tools/testing/selftests/kvm/irq_test.c            |  2 +-
+ tools/testing/selftests/kvm/irqfd_test.c          |  2 +-
+ tools/testing/selftests/kvm/kvm_page_table_test.c |  4 ++--
+ tools/testing/selftests/kvm/lib/memstress.c       |  2 +-
+ .../testing/selftests/kvm/lib/userfaultfd_util.c  |  4 ++--
+ tools/testing/selftests/kvm/memslot_perf_test.c   |  2 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c     |  2 +-
+ .../testing/selftests/kvm/pre_fault_memory_test.c |  2 +-
+ tools/testing/selftests/kvm/rseq_test.c           |  4 ++--
+ tools/testing/selftests/kvm/s390/memop.c          |  2 +-
+ .../selftests/kvm/set_memory_region_test.c        |  2 +-
+ tools/testing/selftests/kvm/steal_time.c          |  2 +-
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c      | 11 ++++-------
+ .../testing/selftests/kvm/x86/hyperv_tlb_flush.c  |  9 +++------
+ .../kvm/x86/private_mem_conversions_test.c        |  2 +-
+ .../kvm/x86/private_mem_kvm_exits_test.c          |  5 ++---
+ .../selftests/kvm/x86/recalc_apic_map_test.c      |  2 +-
+ .../testing/selftests/kvm/x86/sev_migrate_tests.c |  2 +-
+ tools/testing/selftests/kvm/x86/sync_regs_test.c  |  2 +-
+ .../testing/selftests/kvm/x86/tsc_scaling_sync.c  |  2 +-
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c  |  8 ++------
+ tools/testing/selftests/kvm/x86/xen_shinfo_test.c |  3 +--
+ 28 files changed, 50 insertions(+), 76 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/9] KVM: selftests: Drop unreachable, dead code from hardware
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop all of the code that is unreachable in the hardware disable test, as
+it adds a lot of noise that makes the test seem far more complicated than
+it actually is.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c     | 42 +++++++------------
+ 1 file changed, 14 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/9] KVM: selftests: Affine child tasks to other pCPUs in
+Author: Sean Christopherson <seanjc@google.com>
+
+When possible, affine child tasks to a different pCPU than the parent task
+in the hardware disable test.  On preemptible kernels, running 4 + 4*16
+child tasks on the same 4 pCPUs as the parent can result in runtimes of
+several minutes due to the children making it difficult for the parent to
+make forward progress.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/hardware_disable_test.c     | 28 ++++++++++++++-----
+ 1 file changed, 21 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/9] KVM: selftests: Extract picking of random CPU from
+Author: Sean Christopherson <seanjc@google.com>
+
+Extract kvm_pick_random_cpu() out of pin_task_to_random_cpu() so that tests
+can choose a random CPU without having to immediately pin a task to that
+CPU.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h | 11 ++++++++++-
+ tools/testing/selftests/kvm/lib/kvm_util.c     |  7 ++-----
+ 2 files changed, 12 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/9] KVM: selftests: Return the target CPU from pin_task_to_random_cpu()
+Author: Sean Christopherson <seanjc@google.com>
+
+When pinning a task to a random CPU, return which CPU the task was pinned
+to so that the caller can do things like avoid running other tasks on the
+target CPU.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h | 2 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c     | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/9] KVM: selftests: Add more syscall wrappers, fix hardware_disable_test
+Author: Sean Christopherson <seanjc@google.com>
+
+Buried in the middle of this is a fix for the hardware_disable_test where
+it can end up with a runtime of multiple minutes on preemptible kernels due
+to blindly pinning 68 spinning tasks to pCPUs 0-4, which is "mildly"
+problematic if the parent is also affined to those CPUs (or the scheduler
+keeps trying to run the parent on those CPUs for whatever reason).
+
+After wasting almost half a day bisecting the kernel to the auto-enablement
+of PREEMPT_LAZY, I got fed up with the test and went scorched earth on it,
+to try and clean up its many warts.
+
+The vast, vast majority of the changes are adding kvm_xxx() syscall wrappers
+so that tests don't need to manually assert that a syscall succeeds (the
+hardware disable test had some ugly equivalents).
+
+Note, this somewhat unfortunately applies on top of the bad-in-hindsight
+"irq_test" branch in kvm-x86, as I didn't want to re-invent the "pick a
+random CPU from a cpuset" functionality.  Luckily, AFAICT none of the nearly
+tree-wide changes conflict with anything else that's in-flight in other
+KVM arch trees, so I'm planning on smashing the "I'm Feeling Lucky" button
+on this and throwing it on top of the irq_test (though I'll rename the branch
+so it's not completely ridiculous).
+
+Tested on x86 and arm64, compile tested on other architectures.
+
+Sean Christopherson (9):
+  KVM: selftests: Return the target CPU from pin_task_to_random_cpu()
+  KVM: selftests: Extract picking of random CPU from cpu_set_t to
+    separate API
+  KVM: selftests: Affine child tasks to other pCPUs in hardware disable
+    test
+  KVM: selftests: Drop unreachable, dead code from hardware disable test
+  KVM: selftests: Add KVM syscall wrapper for pthread_create()
+  KVM: selftests: Add KVM syscall wrappers for pthread_{cancel,join}()
+  KVM: selftests: Add helper APIs to cancel+join pthreads
+  KVM: selftests: Add KVM syscall wrappers for
+    pthread_{g,s}etaffinity_np()
+  KVM: selftests: Clean up global constants in hardware disable test
+
+ tools/testing/selftests/kvm/arch_timer.c      |  18 ++--
+ tools/testing/selftests/kvm/arm64/vgic_irq.c  |  14 +--
+ .../selftests/kvm/arm64/vgic_lpi_stress.c     |   8 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |   4 +-
+ .../selftests/kvm/hardware_disable_test.c     | 101 ++++++++----------
+ .../selftests/kvm/include/kvm_syscalls.h      |  47 ++++++++
+ .../testing/selftests/kvm/include/kvm_util.h  |  11 +-
+ tools/testing/selftests/kvm/irq_test.c        |   4 +-
+ tools/testing/selftests/kvm/irqfd_test.c      |   4 +-
+ .../selftests/kvm/kvm_page_table_test.c       |   6 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  10 +-
+ tools/testing/selftests/kvm/lib/memstress.c   |   4 +-
+ .../selftests/kvm/lib/userfaultfd_util.c      |   7 +-
+ .../testing/selftests/kvm/memslot_perf_test.c |   4 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c |   4 +-
+ .../selftests/kvm/pre_fault_memory_test.c     |   4 +-
+ tools/testing/selftests/kvm/rseq_test.c       |   6 +-
+ tools/testing/selftests/kvm/s390/memop.c      |   4 +-
+ .../selftests/kvm/set_memory_region_test.c    |   6 +-
+ tools/testing/selftests/kvm/steal_time.c      |   6 +-
+ tools/testing/selftests/kvm/x86/hyperv_ipi.c  |  32 ++----
+ .../selftests/kvm/x86/hyperv_tlb_flush.c      |  30 +-----
+ .../kvm/x86/private_mem_conversions_test.c    |   4 +-
+ .../kvm/x86/private_mem_kvm_exits_test.c      |   7 +-
+ .../selftests/kvm/x86/recalc_apic_map_test.c  |   5 +-
+ .../selftests/kvm/x86/sev_migrate_tests.c     |   4 +-
+ .../selftests/kvm/x86/sync_regs_test.c        |   5 +-
+ .../selftests/kvm/x86/tsc_scaling_sync.c      |   4 +-
+ .../selftests/kvm/x86/xapic_ipi_test.c        |  31 +-----
+ .../selftests/kvm/x86/xen_shinfo_test.c       |  10 +-
+ 30 files changed, 179 insertions(+), 225 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] arm64: errata: Add NXP iMX8QM workaround for A53 cache
+Author: Peng Fan (OSS) <peng.fan@oss.nxp.com>
+
+
+According to NXP errata document IMX8_1N94W[1], the i.MX8QuadMax SoC
+suffers from a serious cache coherency issue (ERR050104). The upper
+bits, above bit 35, of the ARADDR and ACADDR buses within the Arm A53
+subsystem have been incorrectly connected. This causes some TLBI and IC
+maintenance operations exchanged between the A53 and A72 core clusters
+to be corrupted.
+
+The workaround requires:
+
+  - Downgrading targeted TLBI operations to broadcast-all variants.
+    Instead of patching the low-level __TLBI_1 macro (which interferes
+    with the REPEAT_TLBI workaround and causes excessive over-
+    invalidation), redirect high-level TLB flush functions
+    (flush_tlb_mm, __do_flush_tlb_range, flush_tlb_kernel_range,
+    __flush_tlb_kernel_pgtable) to use VMALLE1IS via static key checks.
+
+  - Upgrading IC IVAU to IC IALLUIS for both kernel (via ALTERNATIVE in
+    invalidate_icache_by_line) and EL0 userspace (via trap-and-upgrade
+    in user_cache_maint_handler with SCTLR_EL1.UCI=0).
+
+  - Disabling KVM since correct TLB maintenance cannot be guaranteed
+    for guests without the proper devicetree.
+
+  - No need to touch SMMU Broadcast TLB Maintenance (BTM) since i.MX8QM
+    does not support broadcast TLB.
+
+SoC detection uses devicetree compatible string "fsl,imx8qm" since the
+boot CPU MIDR_EL1 (0x410fd034) and AIDR_EL1 (0) are not unique to this
+SoC.
+
+[1] https://www.nxp.com/docs/en/errata/IMX8_1N94W.pdf
+
+[ Reworked per review feedback from Will Deacon and Mark Rutland:
+  - Move TLBI workaround from __TLBI_1 macro to high-level flush
+    functions to avoid REPEAT_TLBI interaction issues
+  - Add kernel IC IVAU upgrade via ALTERNATIVE in assembler.h
+  - Add cpucap_is_possible() entry for compile-time elimination]
+
+Co-developed-by: Ivan T. Ivanov <iivanov@suse.de>
+Signed-off-by: Ivan T. Ivanov <iivanov@suse.de>
+Link: https://lore.kernel.org/all/20230420112952.28340-1-iivanov@suse.de/
+Signed-off-by: Peng Fan <peng.fan@nxp.com>
+---
+This picks up the work originally done by Ivan T. Ivanov in 2023 [1],
+reworked to address review feedback from Will Deacon and Mark Rutland,
+and rebased onto linux-next (next-20260723).
+
+Changes from v2 [1]:
+  - Moved TLBI workaround from __TLBI_1 macro to high-level flush
+    functions (flush_tlb_mm, __do_flush_tlb_range, flush_tlb_kernel_range,
+    __flush_tlb_kernel_pgtable) to avoid REPEAT_TLBI interaction issues,
+    per Will Deacon suggestion to use static keys at the higher level.
+  - Added kernel IC IVAU -> IC IALLUIS upgrade via ALTERNATIVE in
+    assembler.h, per Mark Rutland review noting that only EL0 traps
+    were handled in v2.
+  - Added cpucap_is_possible() entry for compile-time elimination when
+    CONFIG_NXP_IMX8QM_ERRATUM_ERR050104 is not set.
+  - Dropped SMMU BTM changes since iMX8QM does not support broadcast TLB.
+
+[1] https://lore.kernel.org/all/20230420112952.28340-1-iivanov@suse.de/
+[2] https://www.nxp.com/docs/en/errata/IMX8_1N94W.pdf
+---
+Changes in v2:
+- Skip the workaround for local (TLBF_NOBROADCAST) TLB flushes; they
+  don't cross the core's external interface (Mark Rutland).
+- Preserve IC IVAU fault reporting: run "ic ivau" for the local fault
+  check, then "ic ialluis" only on success (Mark Rutland).
+- Link to v1: https://patch.msgid.link/20260729-imx8qm-cache-coherency-v1-1-c9864e280437@nxp.com
+---
+ Documentation/arch/arm64/silicon-errata.rst |  2 +
+ arch/arm64/Kconfig                          | 16 ++++++++
+ arch/arm64/include/asm/assembler.h          |  5 +++
+ arch/arm64/include/asm/cpucaps.h            |  2 +
+ arch/arm64/include/asm/tlbflush.h           | 62 ++++++++++++++++++-----------
+ arch/arm64/kernel/cpu_errata.c              | 20 ++++++++++
+ arch/arm64/kernel/traps.c                   |  2 +
+ arch/arm64/kvm/arm.c                        |  5 +++
+ arch/arm64/tools/cpucaps                    |  1 +
+ 9 files changed, 91 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 27/29] KVM: arm64: Expose FEAT_NV3 to guests
+Author: Marc Zyngier <maz@kernel.org>
+
+Further enable FEAT_NV3 by making it visible to NV guests.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 26/29] KVM: arm64: Add FEAT_NV3 detection
+Author: Marc Zyngier <maz@kernel.org>
+
+Now that everything is in place to engage the FEAT_NV3 fast-path,
+add the detection code to cpufeature.c.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kernel/cpufeature.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 23/29] KVM: arm64: Add NVHCR_EL2 context switching
+Author: Marc Zyngier <maz@kernel.org>
+
+Since NVHCR_EL2 represents the HCR_EL2 state of the EL1 guest, it
+must be dealt with in some particular way:
+
+- for a guest in hyp context (an L1 by definition), NVHCR_EL2 directly
+  reflects HCR_EL2 as read and written by the guest itself. It must
+  therefore be eagerly synced back with the emulation code which only
+  knows about HCR_EL2. This is unconditional if NV3 is available on
+  the host.
+
+- For an L2 guest, NVHCR_EL2 is controlled by the L1 guest, and we
+  just context switch it like any other EL1 register. Yes, EL1, as
+  that's where this thing runs from the PoV of L1. This is conditioned
+  on the guest using NV3.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h | 11 +++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c            | 10 ++++++++--
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 25/29] KVM: arm64: Engage NV3 TLBI trap elision
+Author: Marc Zyngier <maz@kernel.org>
+
+Similarly to the ERET elision mechanism, FEAT_NV3 can elide TLBIs
+that only affects the guest's S1 translation. Enable this, with the
+express condition that the guest isn't NV2 aware, as we otherwise
+need to trap these TLBIs to deal with VNCR mappings.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 29/29] arm64: Add override for ID_AA64MMFR4_EL1.NV_frac
+Author: Marc Zyngier <maz@kernel.org>
+
+In a very unsurprising turn of events, there is a large class of
+firmware that is totally unable to deal with FEAT_NV3, and doesn't
+set the required SCR2_EL3.NV3En bit, leading to an UNDEF exception
+or an unhandled trap to EL3, depending on the implementation.
+
+Allow the unfortunate user to override ID_AA64MMFR4_EL1.NV_frac
+and get a working system. Hopefully firmware will be fixed before
+actually HW ships, but I have been there before... :-/
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/cpufeature.h   |  1 +
+ arch/arm64/kernel/cpufeature.c        |  4 +++-
+ arch/arm64/kernel/image-vars.h        |  1 +
+ arch/arm64/kernel/pi/idreg-override.c | 10 ++++++++++
+ 4 files changed, 15 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 28/29] KVM: arm64: selftest: Add NVHCR_EL2 to get-reg-list
+Author: Marc Zyngier <maz@kernel.org>
+
+Since we now expose a new system register on NV3-capable HW when
+the guest is exposed to it, add it to the existing checker.  FWIW.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ tools/testing/selftests/kvm/arm64/get-reg-list.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/29] KVM: arm64: Split NV-specific exit fixups from the non-NV handling
+Author: Marc Zyngier <maz@kernel.org>
+
+In order to facilitate further changes, move the NV handling of
+early fixups in its own helper. This also makes the code slightly
+simpler to parse.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/vhe/switch.c | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 24/29] KVM: arm64: Engage NV3 ERET trap elision
+Author: Marc Zyngier <maz@kernel.org>
+
+When running on NV3 HW, always engage ERET trap elision when running
+the L1 context, as there is no benefit in not doing so.
+
+An L1 can itself engage trap elision by setting its own view of
+HCRX_EL2.NVTGE==1, which will subsequently be honored.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 10 ++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c      |  4 ++++
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 20/29] KVM: arm64: Add sanitisation for NVHCR_EL2
+Author: Marc Zyngier <maz@kernel.org>
+
+Just like any other VNCR-based register, NVHCR_EL2 requires some
+level of sanitisation. Being specified as a live copy of HCR_EL2,
+it adopts the exact same format, but depends on FEAT_NV3 instead.
+
+A subtle aspect is that we only want to apply the sanitisation if
+FEAT_NV3 is actually present, as the VNCR location is otherwise
+used to back accesses to HCR_EL2.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/config.c | 15 +++++++++++++++
+ arch/arm64/kvm/nested.c |  4 ++++
+ 2 files changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/29] KVM: arm64: Add NV3 control bits to HCRX_EL2 sanitisation
+Author: Marc Zyngier <maz@kernel.org>
+
+Expose the FEAT_NV3 control bits to the sanitisation code so that
+KVM stops moaning about the unattributed bits.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/config.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 21/29] KVM: arm64: Add NVHCR_EL2 handling to the sysreg array
+Author: Marc Zyngier <maz@kernel.org>
+
+Expose NVHCR_EL2 to userspace, and treat the direct access as UNDEF,
+as that would only outline a bug in our exception routing.
+
+The generic accessors are also updated to deal with the relatively
+uncommon location of that register.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/sys_regs.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 22/29] KVM: arm64: Add routing for NVHCR_EL2 trap
+Author: Marc Zyngier <maz@kernel.org>
+
+NVHCR_EL2 accesses from EL1 are taken to EL2 when HCRX_EL2.NVTGE==0
+and HCR_EL2.NV==1. Describe this in the exception routing tables.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/emulate-nested.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/29] arm64: Add ARM64_HAS_NV3 capability
+Author: Marc Zyngier <maz@kernel.org>
+
+As a bunch of KVM code is going to depend on FEAT_NV3 being detected
+on the host, add a new capability that will describe it.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/cpucaps | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 19/29] KVM: arm64: Make HCR_EL2 a non-VNCR register
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_NV3 makes a fundamental change to the architecture, by moving
+guest-initiated HCR_EL2 accesses to the NVHCR_EL2 register. As the
+names suggests, this is HCR_EL2 for a NV guest.
+
+But where do NVHCR_EL2 accesses from a guest go? The are redirected
+to the VNCR page, right where HCR_EL2 is stored in the NV2 case.
+Does it hurt? Good. There's more coming.
+
+The challenge here is to make KVM work seamlessly, without rewriting
+everything. Which implies that things such as __vcpu_sys_reg(HCR_EL2)
+must work, no matter the underlying NV implementation.
+
+A simple way to deal with it is to move HCR_EL2's canonical storage
+outside of VNCR for the vast majority of the KVM code, and only have
+a copy at entry/exit times. Given that we don't really support NV3
+yet, this is pretty simple.
+
+In the process, advertise NVHCR_EL2 as the register that now holds
+offset 0x78 in the VNCR page.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_host.h     | 3 ++-
+ arch/arm64/include/asm/vncr_mapping.h | 2 +-
+ arch/arm64/kvm/hyp/vhe/switch.c       | 9 +++++++++
+ 3 files changed, 12 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 18/29] KVM: arm64: Add kvm_has_nv{2,3}() predicates
+Author: Marc Zyngier <maz@kernel.org>
+
+Add a new set of predicates indicating whether VM is capable of
+NV2, NV3, and is in a nested NV3 context.
+
+This is going to become useful as we start dealing with a mix of
+behaviours (NV2, NV3, NV2 on NV3...).
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/29] arm64: sysreg: Add NVHCR_EL2 description as a mirror of HCR_EL2
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_NV3 introduces a new register that contains the HCR_EL2 value
+exposed to a NV guest. As such, it has the exact same layout as
+HCR_EL2.
+
+Describe NVHCR_EL2 as a mapping to HCR_EL2.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/sysreg | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/29] KVM: arm64: Relax CPTR_EL2 handling when FEAT_NV2p1 is present
+Author: Marc Zyngier <maz@kernel.org>
+
+With FEAT_NV2P1, it is no longer necessary to trap CPTR_EL2 accesses
+via CPACR_EL1, as CPACR_EL1.TCPAC is guaranteed to be stateful.
+
+Prevent such trapping and context switch CPACTR_EL1 in NV contexts
+when NV2P1 is present.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 5 +++--
+ arch/arm64/kvm/hyp/vhe/switch.c         | 3 +++
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c      | 8 +++++---
+ arch/arm64/kvm/sys_regs.c               | 5 ++++-
+ 4 files changed, 15 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/29] arm64: sysreg: Add HCRX_EL2 bits related to FEAT_NV3
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_NV3 introduces 4 new HCRX_EL2 control bits. Describe them
+in the sysreg file.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/sysreg | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/29] KVM: arm64: Classify CPTR_EL2 as a SR_LOC_SPECIAL register
+Author: Marc Zyngier <maz@kernel.org>
+
+It may not be obvious unless you look at it closely, but CPTR_EL2
+is treated very differently from other registers. It is one the
+registers that, despite looking very similar between EL1 and EL2
+when E2H==1, have RES0 bits that get in the way.
+
+Make it clear that CPTR_EL2 is odd by classifying it as SR_LOC_SPECIAL,
+just like CNTHCTL_EL2 (and for the same reasons). This makes it
+possible to use vcpu_read_sys_reg() with it, and will be necessary
+once we support FEAT_NV2P1.
+
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_emulate.h |  2 +-
+ arch/arm64/kvm/sys_regs.c            | 20 ++++++++++++++++++--
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/29] KVM: arm64: Relax CNTHCTL_EL2 handling when FEAT_NV2p1 is present
+Author: Marc Zyngier <maz@kernel.org>
+
+With NV2p1, it is no longer necessary to use the split approach
+where bits of CNTHCTL_EL2 cannot be accessed via CNTKCTL_EL1,
+and we can treat the CNTKCTL_EL1 accessor as if it was "normal".
+
+Key the special casing on FEAT_NV2P1 not being implemented.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/arch_timer.c        | 10 ++++++++--
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c | 13 ++++++++++---
+ arch/arm64/kvm/sys_regs.c          |  6 ++++--
+ 3 files changed, 22 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/29] KVM: arm64: Expose FEAT_NV2p1 to NV guests
+Author: Marc Zyngier <maz@kernel.org>
+
+Since NV2p1 is reducing the number of traps, it is valuable to expose
+it to NV guests. Do so.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/29] KVM: arm64: Plumb HCRX_EL2.SRMASKEn in HCRX_EL2 sanitisation
+Author: Marc Zyngier <maz@kernel.org>
+
+HCRX_EL2.SRMASKEn is a new bit enabling FEAT_SRMASK for a guest.
+We don't plan to support it any time soon, but it doesn't hurt to
+actively document it, specially as we are going to add more bits
+we actually care about.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/config.c | 1 +
+ arch/arm64/tools/sysreg | 4 +++-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/29] arm64: Add ARM64_HAS_NV2P1 capability
+Author: Marc Zyngier <maz@kernel.org>
+
+As we're about to deal with FEAT_NV2P1, add a new capability that
+will be used to key any support for it.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/cpucaps | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/29] arm64: Add FEAT_NV2p1 detection
+Author: Marc Zyngier <maz@kernel.org>
+
+Add the necessary NV2p1 probing to the cpufeature infrastructure.
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kernel/cpufeature.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/29] KVM: arm64: Don't evaluate HCR_EL2.NV nor HFGITR_EL2.ERET on ERET fast path
+Author: Marc Zyngier <maz@kernel.org>
+
+We currently avoid using the ERET fast path if the guest has HCR_EL2.NV
+set. This is an odd check, as NV doesn't mean much if HCR_EL2.TGE==1.
+
+Similarly, evaluating HFGITR_EL2.ERET makes little sense, as
+this only applies to the nested context, while the ERET fast-path
+is purely for the benefit of L1.
+
+Replace these bizarre checks with is_nested_ctxt() which makes a lot
+more sense: if we are running an L2, the ERET trap must go to L1.
+
+Fixes: dd0717a998f77 ("KVM: arm64: nv: Fast-track 'InHost' exception returns")
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/vhe/switch.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/29] KVM: arm64: Merge guest's HCRX_EL2 using NV_HCRX_GUEST_EXCLUDE
+Author: Marc Zyngier <maz@kernel.org>
+
+The way we merge the guest-provided HCRX_EL2 value with the host's
+is bonkers. We try to make it look like the FGT registers by using
+positive and negative polarities for traps, but most of these bits
+are not strictly about trapping, as they actively change the way
+some architectural state is managed.
+
+It would be far better to deal with these bits like we do for
+HCR_EL2, by enumerating the list of bits we don't allow the guest
+to override. This is simplified by the fact that HCRX_EL2 only
+affects EL1, and not EL2.
+
+Re-jig the HCRX_EL2 handling with a macro that list the bits excluded
+from the merge (TMEA, PTTWI, EnIDCP128).
+
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/29] KVM: arm64: Drop __HCRX_EL2_* masks
+Author: Marc Zyngier <maz@kernel.org>
+
+The __HCRX_EL2_* masks are a leftover from a time where we didn't
+have much sanitisation for the system registers. Since we are now
+in a better place, rely on the existing checks to detect unhandled
+bits in HCRX_EL2.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_arm.h | 15 ---------------
+ arch/arm64/kvm/config.c          |  5 +++--
+ arch/arm64/kvm/emulate-nested.c  |  5 -----
+ 3 files changed, 3 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/29] KVM: arm64: Add support for FEAT_NV2p1 and FEAT_NV3
+Author: Marc Zyngier <maz@kernel.org>
+
+This is the fourth (and hopefully last) version of a series adding
+support for two extensions targeting Nested Virt on arm64:
+
+- FEAT_NV2p1 is effectively a bug fix for two registers (CNTHCTL_EL2
+  and CPTR_EL2) that are missing stateful bits when accessed from EL1
+  in a NV configuration. When this is present, the hypervisor can
+  avoid a bunch of traps.
+
+- FEAT_NV3 is much more ambitious, and changes the way ERET behaves in
+  a NV environment. By moving EL1 accesses to HCR_EL2 from memory (via
+  VNCR) to a dedicated register (NVHCR_EL2), the HW can detect whether
+  the guest is performing an ERET for itself (NVHCR_EL2.TGE==1) or to
+  its own guest (NVHCR_EL2.TGE==0). In the former case, ERET is done
+  directly, and no trap occurs. Similar optimisations are available
+  for a class of TLBI instructions.
+
+The whole thing has been tested on an FVP model, and shown measurable
+improvements for an L1 guest (about 1.5% fewer instructions).
+
+Given that this isn't very convincing on its own, I have built an
+approximate emulation of FEAT_NV3 that L1 (and deeper levels) can use
+on actual production hardware. For these deeper levels, the numbers
+are in the double digit of percentage point reduction, see below for
+details.
+
+Does it make NV better? Yes!
+Does it make NV good? Get real!
+
+Anyway, patches on top of -rc4.
+
+* Side notes about performance evaluation with NV3 emulation:
+
+If you are interested in the NV3 emulation, I have a branch [0] that
+contains it all. Note that the improvement only kicks while running an
+L2 guest running at EL2 -- L1 will not see any improvement. But I get
+close to 40% improvements on L2, and 60% on L3 for the only workload
+that really matters (Debian Installer).
+
+If all your nested guests are running this hack, then you can pass
+"kvm-arm.mode=nested,nvtge" on the host command line, and all the
+nested guests will opt in the accelerated behaviour.
+
+If you like to live dangerously (or have a machine that does not have
+FEAT_HCX), you can instead pass 'kvm-arm.mode=nested,nvtge=force', and
+ERET will get the acceleration without even guest buy-in.
+
+* From v3 [3]:
+
+  - Fixed comment in the Mapping/Fields generator
+
+  - Dropped double semi-colon in HCRX configuration
+
+  - Simplified the kvm_has_nv3() predicate
+
+  - Added NVHCR_EL2 to the get-reg-list selftest
+
+  - Collected RBs from Yao Yuan, with thanks
+
+* From v2 [2]:
+
+  - Improved comments on the subtleties of trapping ERET in nested
+    contexts
+
+  - Rebased on top of v7.2-rc4
+
+  - Collected RBs from Yao Yuan, with thanks
+
+* From v1 [1]:
+
+  - Expanded generation of RESx and UNKN symbols to both Mapping and
+    Fields qualifiers
+
+  - Dropped HFGIRT_EL2.ERET checks on ERET fast-path
+
+  - Fixed the NVHCR_EL2 trap handling
+
+  - Added FORCE_RESx() to HCRX_EL2 constraints
+
+  - Fixed ID_AA64MMFR4_EL1 sanitisation
+
+  - Added NV3 acceleration for TLBIOS
+
+  - Collected RBs from Joey, with thanks
+
+[0] https://git.kernel.org/pub/scm/linux/kernel/git/maz/arm-platforms.git/log/?h=kvm-arm64/nv3
+[1] https://lore.kernel.org/r/20260702160248.1377250-1-maz@kernel.org
+[2] https://lore.kernel.org/r/20260714091641.1970822-1-maz@kernel.org
+[3] https://lore.kernel.org/r/20260722074234.3330999-1-maz@kernel.org
+
+Marc Zyngier (29):
+  arm64: sysreg: Emit RESx/UNKN values for Mapping/Fields definitions
+  arm64: Update ID_AA64MMFR4_EL1 description to 2026-03 JSON release
+  KVM: arm64: Merge guest's HCRX_EL2 using NV_HCRX_GUEST_EXCLUDE
+  KVM: arm64: Drop __HCRX_EL2_* masks
+  KVM: arm64: Plumb HCRX_EL2.SRMASKEn in HCRX_EL2 sanitisation
+  KVM: arm64: Classify CPTR_EL2 as a SR_LOC_SPECIAL register
+  KVM: arm64: Don't evaluate HCR_EL2.NV nor HFGITR_EL2.ERET on ERET fast
+    path
+  arm64: Add ARM64_HAS_NV2P1 capability
+  KVM: arm64: Relax CPTR_EL2 handling when FEAT_NV2p1 is present
+  KVM: arm64: Relax CNTHCTL_EL2 handling when FEAT_NV2p1 is present
+  KVM: arm64: Expose FEAT_NV2p1 to NV guests
+  arm64: Add FEAT_NV2p1 detection
+  arm64: sysreg: Add NVHCR_EL2 description as a mirror of HCR_EL2
+  arm64: sysreg: Add HCRX_EL2 bits related to FEAT_NV3
+  arm64: Add ARM64_HAS_NV3 capability
+  KVM: arm64: Split NV-specific exit fixups from the non-NV handling
+  KVM: arm64: Add NV3 control bits to HCRX_EL2 sanitisation
+  KVM: arm64: Add kvm_has_nv{2,3}() predicates
+  KVM: arm64: Make HCR_EL2 a non-VNCR register
+  KVM: arm64: Add sanitisation for NVHCR_EL2
+  KVM: arm64: Add NVHCR_EL2 handling to the sysreg array
+  KVM: arm64: Add routing for NVHCR_EL2 trap
+  KVM: arm64: Add NVHCR_EL2 context switching
+  KVM: arm64: Engage NV3 ERET trap elision
+  KVM: arm64: Engage NV3 TLBI trap elision
+  KVM: arm64: Add FEAT_NV3 detection
+  KVM: arm64: Expose FEAT_NV3 to guests
+  KVM: arm64: selftest: Add NVHCR_EL2 to get-reg-list
+  arm64: Add override for ID_AA64MMFR4_EL1.NV_frac
+
+ arch/arm64/include/asm/cpufeature.h           |  1 +
+ arch/arm64/include/asm/kvm_arm.h              | 15 -----
+ arch/arm64/include/asm/kvm_emulate.h          | 44 +++++++++++++-
+ arch/arm64/include/asm/kvm_host.h             |  3 +-
+ arch/arm64/include/asm/vncr_mapping.h         |  2 +-
+ arch/arm64/kernel/cpufeature.c                | 18 +++++-
+ arch/arm64/kernel/image-vars.h                |  1 +
+ arch/arm64/kernel/pi/idreg-override.c         | 10 ++++
+ arch/arm64/kvm/arch_timer.c                   | 10 +++-
+ arch/arm64/kvm/config.c                       | 27 ++++++++-
+ arch/arm64/kvm/emulate-nested.c               | 18 ++++--
+ arch/arm64/kvm/hyp/include/hyp/switch.h       | 27 +++++++--
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h    | 11 ++++
+ arch/arm64/kvm/hyp/vhe/switch.c               | 52 +++++++++++++----
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c            | 21 +++++--
+ arch/arm64/kvm/nested.c                       | 14 ++++-
+ arch/arm64/kvm/sys_regs.c                     | 57 +++++++++++++++++--
+ arch/arm64/tools/cpucaps                      |  2 +
+ arch/arm64/tools/gen-sysreg.awk               |  8 +--
+ arch/arm64/tools/sysreg                       | 44 ++++++++++++--
+ .../selftests/kvm/arm64/get-reg-list.c        |  2 +
+ 21 files changed, 322 insertions(+), 65 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/29] arm64: sysreg: Emit RESx/UNKN values for Mapping/Fields definitions
+Author: Marc Zyngier <maz@kernel.org>
+
+The sysreg file is using the Mapping or Fields qualifiers to indicate
+that a given encoding is only a mapping to a particular register (or
+an instance of a more generic register definition).
+
+As a result, we don't output any definition, and instead expect
+the canonical definitions to be used.
+
+This works rather well for individual fields, but creates problems
+for macros that refer to more generic classes of bits such as RESx.
+
+Relax the above rule by emitting the RESx and UNKN values for Mapping
+and Fields qualifiers as well.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/gen-sysreg.awk | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/29] arm64: Update ID_AA64MMFR4_EL1 description to 2026-03 JSON release
+Author: Marc Zyngier <maz@kernel.org>
+
+ID_AA64MMFR4_EL1 has gained a few fields and enum values in the past
+few months, so resync its definition with the 2026-03 JSON release.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/tools/sysreg | 32 ++++++++++++++++++++++++++++----
+ 1 file changed, 28 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
