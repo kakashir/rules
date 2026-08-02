@@ -1,0 +1,551 @@
+
+On /root/mail/repo:
+From a478cfab2 to 1c93bd47f
+KVM mailing list update from a478cfab2 to 1c93bd47f
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      7 kernel.org
+      1 gmail.com
+      1 enjuk.jp
+
+Top 15 contributors (Based on Email Body)
+
+      7  Marc Zyngier <maz@kernel.org>
+      1  Kohei Enju <kohei@enjuk.jp>
+      1  Hyunwoo Kim <imv4bel@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 6/6] KVM: arm64: Add VNCR TLB tracking again
+Author: Marc Zyngier <maz@kernel.org>
+
+Having established that our VNCR TLB tracking was flawed and dropped
+it from KVM, it is time to replace it with something that works.
+
+The goal of that tracking is to hit the TLBI slow path if there
+are any VNCR TLBs in the guest, irrespective of their mapping state.
+
+For this purpose, we introduce an VM wide counter (vncr_tlb_count)
+that tracks how many valid VNCR TLB are present. This means that
+creating such TLB must increment the counter, and invalidation
+decrement it, and both these operations must be done with the MMU
+lock held for write.
+
+On TLBI handling affecting EL2 S1, a non-zero counter forces the
+handling to take the slow path to consider the VNCR TLBs.
+
+Not exactly rocket science. Hopefully I got it right this time.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_host.h |  3 +++
+ arch/arm64/kvm/hyp/vhe/switch.c   |  5 +++--
+ arch/arm64/kvm/nested.c           | 25 +++++++++++++++++++------
+ 3 files changed, 25 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/6] KVM: arm64: Couple VNCR fixmap clearing and CPU number invalidation
+Author: Marc Zyngier <maz@kernel.org>
+
+A mapped VNCR translation must indicate which CPU it is resident.
+Unmapping such a translation must make this CPU number -1.
+
+Couple the unmap and the setting to -1 in a helper, so that we
+are always sure they are done together.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/6] KVM: arm64: Remove VM-wide VNCR mapping counter
+Author: Marc Zyngier <maz@kernel.org>
+
+The global VNCR mapping counter is used to decide whether an L1
+provided VNCR page is mapped in L0 on any CPU at the point of
+dealing with a TLB invalidation. It is incremented when a mapping
+is made in the fixmap, and decremented when unmapped.
+
+As it turns out, this tracking has several flaws:
+
+- we are trying to invalidate TLBs, and the mapping is only an
+  opportunistic consequence of the TLB. Checking this counter to
+  decide whether a TLB needs to be invalidated may result in missed
+  invalidations.
+
+- an L1 vcpu invalidating its own TLB (a very likely case) will not
+  succeed in invalidating the VNCR pseudo TLB because that page is
+  not mapped in L0 at this stage.
+
+Given that this tracking fails at delivering the minimum guarantees
+that are required and is only a performance optimisation, remove it
+completely.
+
+Fixes: 4ffa72ad8f37e ("KVM: arm64: nv: Add S1 TLB invalidation primitive for VNCR_EL2")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_host.h | 3 ---
+ arch/arm64/kvm/hyp/vhe/switch.c   | 3 +--
+ arch/arm64/kvm/nested.c           | 3 ---
+ 3 files changed, 1 insertion(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/6] KVM: arm64: Correctly handle end of VA space TLBI invalidation
+Author: Marc Zyngier <maz@kernel.org>
+
+Our TLB invalidation by VA code is based on comparing two ranges,
+one defined by the TLB, and one defined by the TLBI instruction.
+
+Each range is defined by a start and a size. However, the way the
+comparison is done doesn't account for address rollover, as it
+compares an address with (base + size). This works nicely until
+this expression represent the last page/block in the TTBR1 VA space,
+as the result is a big fat 0. And a failed TLB invalidation.
+
+Rewrite the comparison in a way that is immune to the address
+rollover (making the end address inclusive instead of exclusive),
+and move this into a common helper that is used by both VA and IPA
+invalidations, as suggested by Hyunwoo Kim (although the IPA version
+didn't suffer from this particular problem, obviously).
+
+Fixes: 4ffa72ad8f37e ("KVM: arm64: nv: Add S1 TLB invalidation primitive for VNCR_EL2")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/nested.c | 43 ++++++++++++++++++-----------------------
+ 1 file changed, 19 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/6] KVM: arm64: Handle negative S1 walk levels in VNCR TLB size evaluation
+Author: Marc Zyngier <maz@kernel.org>
+
+Computing the effects of a TLB invalidation involves looking at
+the size of the mapping cached by the TLB. For S1 mappings such as
+VNCR, this is deducted from the combination of the base granule size
+and the mapping level.
+
+However, this implies that the S1 MMU is *on*. When the MMU is off,
+we indicate this with the level being set to a "creative" value of
+-127 (S1_MMU_DISABLED).
+
+This ends-up being misinterpreted by pgshift_level_to_ttl() as it
+doesn't handle negative levels at all (the level is immediately cast
+to a u8 and only the bottom two bits considered), leading to an
+invalidation size of 0. Not helpful.
+
+Tidy-up pgshift_level_to_ttl() to handle these negative levels, and
+ttl_to_size() to always return SZ_1G when no valid TTL is present.
+This allows the removal of open-coded checks for similar situations.
+
+Note that the check for a negative value not explicitely checking for
+S1_MMU_DISABLED is deliberate, so that actual negative levels introduced
+with LVA2 and D128 can take the same path if we ever support them.
+
+Fixes: 7270cc9157f47 ("KVM: arm64: nv: Handle VNCR_EL2 invalidation from MMU notifiers")
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Link: https://lore.kernel.org/r/ameGoxbn2wzBq2kL@v4bel
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/nested.c | 26 +++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/6] KVM: arm64: Consider SCTLR_EL2.M when mapping the L1 VNCR page
+Author: Marc Zyngier <maz@kernel.org>
+
+We record a VNCR TLB even when SCTLR_EL2.M is 0 in order to make
+our life easier. But this is not something that the architecture
+anticipate.
+
+As a consequence, a hypervisor is free to set VNCR_EL2 to
+some PA when SCTLR_EL2.M==0, use it to run a guest which indirectly
+accesses the VNCR page, then eventually set SCTLR_EL2.M==1 with
+the same VA. Yes, this is odd, but apparently legal.
+
+A common trick in HW is to invalidate the TLBs on SCTLR_ELx.M being
+flipped. But doing this is a not a good idea for us (we'd need to
+trap SCTLR accesses), and wouldn't scale as we nest deeper.
+
+Instead, use the fact that the S1 MMU being off at the point of
+translation is cached in our TLB, and simply ignore it if it
+doesn't match the current MMU state.
+
+Fixes: 2a359e072596f ("KVM: arm64: nv: Handle mapping of VNCR_EL2 at EL2")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_nested.h | 7 +++++++
+ arch/arm64/kvm/at.c                 | 2 --
+ arch/arm64/kvm/nested.c             | 3 +++
+ 3 files changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/6] KVM: arm64: VNCR TLB invalidation fixes
+Author: Marc Zyngier <maz@kernel.org>
+
+Prompted by a patch [0] from Hyunwoo Kim which was addressing a pretty
+annoying corner case, I spent some time looking at what was wrong in
+our VNCR TLBI code. And there was a few things to say about it...
+
+- The TLB tracking to get into the slow path is wrong. It tracks what
+  is mapped, but not the established TLBs. Kind of annoying.
+
+- Handling IPA invalidation when the TLB was established with the S1
+  MMU disabled is failing for a number of reasons. This is the bug
+  that Hyunwoo Kim found, but I decided to address it at its root
+  rather than just fixing the symptoms.
+
+- Deciding to run with a VNCR TLB doesn't take the state of
+  SCTLR_EL2.M into account. Yes, this is a special sort of sport to
+  run a hypervisor with its MMU disabled...
+
+- TLB invalidation by VA targeting the last page/block of TTBR1_EL2 is
+  dropped on the floor, because I cannot count. This was amusing. Not.
+
+I have fixes for each of these issues, all stable candidates. On top
+of that, I have a couple of patches reintroducing the tracking that
+the first patch removes, this time in a way that is actually
+functional. Or at least I think it is...
+
+I'd like to thank Hyunwoo Kim for their initial patch and for
+providing a reproducer that helped me finding these issues by running
+it at multiple levels of nesting. It is most probably too late for
+7.2, so let's try to make this 7.3 material.
+
+[0] https://lore.kernel.org/r/ameGoxbn2wzBq2kL@v4bel
+
+Marc Zyngier (6):
+  KVM: arm64: Remove VM-wide VNCR mapping counter
+  KVM: arm64: Handle negative S1 walk levels in VNCR TLB size evaluation
+  KVM: arm64: Consider SCTLR_EL2.M when mapping the L1 VNCR page
+  KVM: arm64: Correctly handle end of VA space TLBI invalidation
+  KVM: arm64: Couple VNCR fixmap clearing and CPU number invalidation
+  KVM: arm64: Add VNCR TLB tracking again
+
+ arch/arm64/include/asm/kvm_host.h   |   4 +-
+ arch/arm64/include/asm/kvm_nested.h |   7 ++
+ arch/arm64/kvm/at.c                 |   2 -
+ arch/arm64/kvm/hyp/vhe/switch.c     |   4 +-
+ arch/arm64/kvm/nested.c             | 109 +++++++++++++++++-----------
+ 5 files changed, 78 insertions(+), 48 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nVMX: Don't load L1's host state when freeing a vCPU
+Author: Hyunwoo Kim <imv4bel@gmail.com>
+
+Don't load L1's host state when kicking a vCPU out of nested guest mode as
+part of freeing the vCPU, as loading host state processes vmcs12's VM-Exit
+MSR load list, i.e. reads an (index, value) pair out of guest memory and
+feeds it to kvm_emulate_msr_write() with host_initiated=false. Letting the
+guest emulate WRMSR against VM-scope state that KVM is actively tearing
+down goes sideways in at least two ways.
+
+Writing HV_X64_MSR_ICR sends an IPI, which for a non-shorthand,
+non-broadcast destination walks kvm->arch.apic_map to dereference the
+target's local APIC. kvm_free_lapic() neither rebuilds nor dirties the map,
+and the map is freed only after all vCPUs are destroyed, i.e. the map still
+points at the already-freed local APIC of a previously destroyed vCPU. This
+requires userspace to expose Hyper-V's CPUID to the guest. Writing
+MSR_KVM_SYSTEM_TIME_NEW activates the kvmclock gfn=>pfn cache, which leaves
+the cache's list entry, resident in the about-to-be-freed vCPU, linked into
+kvm->gpc_list; the next vCPU to manipulate the list writes through that
+entry.
+
+The vCPU will never run again, so nothing can observe the loaded host
+state. Simply restore KVM's MMU pointers so that they aren't left pointing
+at the nested MMU, and bail. nSVM does the same, i.e. doesn't emulate a
+VM-Exit when forcibly leaving nested mode, and performs only the equivalent
+MMU cleanup.
+
+Bail just before the branch that splits the success and VM-Fail paths, as
+leaving guest mode, canceling the VMX-preemption timer, and switching back
+to vmcs01 are all needed by the free path. Canceling the timer is in fact
+the only reason the free path goes through an emulated VM-Exit, see commit
+b4b65b5642d6 ("KVM: x86: cleanup freeing of nested state").
+
+Fixes: b4b65b5642d6 ("KVM: x86: cleanup freeing of nested state")
+Cc: stable@vger.kernel.org
+Signed-off-by: Hyunwoo Kim <imv4bel@gmail.com>
+---
+ arch/x86/kvm/vmx/nested.c | 12 ++++++++++++
+ arch/x86/kvm/vmx/vmx.h    |  3 +++
+ 2 files changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] docs: KVM: fix heading level for KVM_S390_VM_CPU_PROCESSOR
+Author: Kohei Enju <kohei@enjuk.jp>
+
+Change the section title underline from '=' to '-' so that the attribute
+is at the same heading level as the other attributes.
+
+Signed-off-by: Kohei Enju <kohei@enjuk.jp>
+---
+ Documentation/virt/kvm/devices/vm.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 33b24229f to ee0a07c33
+KVM mailing list update from 33b24229f to ee0a07c33
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      7 kernel.org
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      7  Marc Zyngier <maz@kernel.org>
+      1  Karl Mehltretter <kmehltretter@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: arm64: Preserve AArch32 CP64 registers on rejected reads
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH 6/6] KVM: arm64: Add VNCR TLB tracking again
+Author: Marc Zyngier <maz@kernel.org>
+
+Having established that our VNCR TLB tracking was flawed and dropped
+it from KVM, it is time to replace it with something that works.
+
+The goal of that tracking is to hit the TLBI slow path if there
+are any VNCR TLBs in the guest, irrespective of their mapping state.
+
+For this purpose, we introduce an VM wide counter (vncr_tlb_count)
+that tracks how many valid VNCR TLB are present. This means that
+creating such TLB must increment the counter, and invalidation
+decrement it, and both these operations must be done with the MMU
+lock held for write.
+
+On TLBI handling affecting EL2 S1, a non-zero counter forces the
+handling to take the slow path to consider the VNCR TLBs.
+
+Not exactly rocket science. Hopefully I got it right this time.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/kvm_host.h |  3 +++
+ arch/arm64/kvm/hyp/vhe/switch.c   |  5 +++--
+ arch/arm64/kvm/nested.c           | 25 +++++++++++++++++++------
+ 3 files changed, 25 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/6] KVM: arm64: Couple VNCR fixmap clearing and CPU number invalidation
+Author: Marc Zyngier <maz@kernel.org>
+
+A mapped VNCR translation must indicate which CPU it is resident.
+Unmapping such a translation must make this CPU number -1.
+
+Couple the unmap and the setting to -1 in a helper, so that we
+are always sure they are done together.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/nested.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/6] KVM: arm64: Remove VM-wide VNCR mapping counter
+Author: Marc Zyngier <maz@kernel.org>
+
+The global VNCR mapping counter is used to decide whether an L1
+provided VNCR page is mapped in L0 on any CPU at the point of
+dealing with a TLB invalidation. It is incremented when a mapping
+is made in the fixmap, and decremented when unmapped.
+
+As it turns out, this tracking has several flaws:
+
+- we are trying to invalidate TLBs, and the mapping is only an
+  opportunistic consequence of the TLB. Checking this counter to
+  decide whether a TLB needs to be invalidated may result in missed
+  invalidations.
+
+- an L1 vcpu invalidating its own TLB (a very likely case) will not
+  succeed in invalidating the VNCR pseudo TLB because that page is
+  not mapped in L0 at this stage.
+
+Given that this tracking fails at delivering the minimum guarantees
+that are required and is only a performance optimisation, remove it
+completely.
+
+Fixes: 4ffa72ad8f37e ("KVM: arm64: nv: Add S1 TLB invalidation primitive for VNCR_EL2")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_host.h | 3 ---
+ arch/arm64/kvm/hyp/vhe/switch.c   | 3 +--
+ arch/arm64/kvm/nested.c           | 3 ---
+ 3 files changed, 1 insertion(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/6] KVM: arm64: Correctly handle end of VA space TLBI invalidation
+Author: Marc Zyngier <maz@kernel.org>
+
+Our TLB invalidation by VA code is based on comparing two ranges,
+one defined by the TLB, and one defined by the TLBI instruction.
+
+Each range is defined by a start and a size. However, the way the
+comparison is done doesn't account for address rollover, as it
+compares an address with (base + size). This works nicely until
+this expression represent the last page/block in the TTBR1 VA space,
+as the result is a big fat 0. And a failed TLB invalidation.
+
+Rewrite the comparison in a way that is immune to the address
+rollover (making the end address inclusive instead of exclusive),
+and move this into a common helper that is used by both VA and IPA
+invalidations, as suggested by Hyunwoo Kim (although the IPA version
+didn't suffer from this particular problem, obviously).
+
+Fixes: 4ffa72ad8f37e ("KVM: arm64: nv: Add S1 TLB invalidation primitive for VNCR_EL2")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/nested.c | 43 ++++++++++++++++++-----------------------
+ 1 file changed, 19 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/6] KVM: arm64: Handle negative S1 walk levels in VNCR TLB size evaluation
+Author: Marc Zyngier <maz@kernel.org>
+
+Computing the effects of a TLB invalidation involves looking at
+the size of the mapping cached by the TLB. For S1 mappings such as
+VNCR, this is deducted from the combination of the base granule size
+and the mapping level.
+
+However, this implies that the S1 MMU is *on*. When the MMU is off,
+we indicate this with the level being set to a "creative" value of
+-127 (S1_MMU_DISABLED).
+
+This ends-up being misinterpreted by pgshift_level_to_ttl() as it
+doesn't handle negative levels at all (the level is immediately cast
+to a u8 and only the bottom two bits considered), leading to an
+invalidation size of 0. Not helpful.
+
+Tidy-up pgshift_level_to_ttl() to handle these negative levels, and
+ttl_to_size() to always return SZ_1G when no valid TTL is present.
+This allows the removal of open-coded checks for similar situations.
+
+Note that the check for a negative value not explicitely checking for
+S1_MMU_DISABLED is deliberate, so that actual negative levels introduced
+with LVA2 and D128 can take the same path if we ever support them.
+
+Fixes: 7270cc9157f47 ("KVM: arm64: nv: Handle VNCR_EL2 invalidation from MMU notifiers")
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Link: https://lore.kernel.org/r/ameGoxbn2wzBq2kL@v4bel
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/nested.c | 26 +++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/6] KVM: arm64: Consider SCTLR_EL2.M when mapping the L1 VNCR page
+Author: Marc Zyngier <maz@kernel.org>
+
+We record a VNCR TLB even when SCTLR_EL2.M is 0 in order to make
+our life easier. But this is not something that the architecture
+anticipate.
+
+As a consequence, a hypervisor is free to set VNCR_EL2 to
+some PA when SCTLR_EL2.M==0, use it to run a guest which indirectly
+accesses the VNCR page, then eventually set SCTLR_EL2.M==1 with
+the same VA. Yes, this is odd, but apparently legal.
+
+A common trick in HW is to invalidate the TLBs on SCTLR_ELx.M being
+flipped. But doing this is a not a good idea for us (we'd need to
+trap SCTLR accesses), and wouldn't scale as we nest deeper.
+
+Instead, use the fact that the S1 MMU being off at the point of
+translation is cached in our TLB, and simply ignore it if it
+doesn't match the current MMU state.
+
+Fixes: 2a359e072596f ("KVM: arm64: nv: Handle mapping of VNCR_EL2 at EL2")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_nested.h | 7 +++++++
+ arch/arm64/kvm/at.c                 | 2 --
+ arch/arm64/kvm/nested.c             | 3 +++
+ 3 files changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/6] KVM: arm64: VNCR TLB invalidation fixes
+Author: Marc Zyngier <maz@kernel.org>
+
+Prompted by a patch [0] from Hyunwoo Kim which was addressing a pretty
+annoying corner case, I spent some time looking at what was wrong in
+our VNCR TLBI code. And there was a few things to say about it...
+
+- The TLB tracking to get into the slow path is wrong. It tracks what
+  is mapped, but not the established TLBs. Kind of annoying.
+
+- Handling IPA invalidation when the TLB was established with the S1
+  MMU disabled is failing for a number of reasons. This is the bug
+  that Hyunwoo Kim found, but I decided to address it at its root
+  rather than just fixing the symptoms.
+
+- Deciding to run with a VNCR TLB doesn't take the state of
+  SCTLR_EL2.M into account. Yes, this is a special sort of sport to
+  run a hypervisor with its MMU disabled...
+
+- TLB invalidation by VA targeting the last page/block of TTBR1_EL2 is
+  dropped on the floor, because I cannot count. This was amusing. Not.
+
+I have fixes for each of these issues, all stable candidates. On top
+of that, I have a couple of patches reintroducing the tracking that
+the first patch removes, this time in a way that is actually
+functional. Or at least I think it is...
+
+I'd like to thank Hyunwoo Kim for their initial patch and for
+providing a reproducer that helped me finding these issues by running
+it at multiple levels of nesting. It is most probably too late for
+7.2, so let's try to make this 7.3 material.
+
+[0] https://lore.kernel.org/r/ameGoxbn2wzBq2kL@v4bel
+
+Marc Zyngier (6):
+  KVM: arm64: Remove VM-wide VNCR mapping counter
+  KVM: arm64: Handle negative S1 walk levels in VNCR TLB size evaluation
+  KVM: arm64: Consider SCTLR_EL2.M when mapping the L1 VNCR page
+  KVM: arm64: Correctly handle end of VA space TLBI invalidation
+  KVM: arm64: Couple VNCR fixmap clearing and CPU number invalidation
+  KVM: arm64: Add VNCR TLB tracking again
+
+ arch/arm64/include/asm/kvm_host.h   |   4 +-
+ arch/arm64/include/asm/kvm_nested.h |   7 ++
+ arch/arm64/kvm/at.c                 |   2 -
+ arch/arm64/kvm/hyp/vhe/switch.c     |   4 +-
+ arch/arm64/kvm/nested.c             | 109 +++++++++++++++++-----------
+ 5 files changed, 78 insertions(+), 48 deletions(-)
+
+----------------------------------------------------------------------
+
