@@ -1,0 +1,431 @@
+
+On /root/mail/repo:
+From 1c93bd47f to d4ab54be0
+KVM mailing list update from 1c93bd47f to d4ab54be0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 oracle.com
+      3 huawei.com
+      2 gmail.com
+      1 ultrarisc.com
+      1 tencent.com
+      1 linux.ibm.com
+
+Top 15 contributors (Based on Email Body)
+
+      3  Longfang Liu <liulongfang@huawei.com>
+      3  Dongli Zhang <dongli.zhang@oracle.com>
+      2  Kayra Cizmeci <kayracizmeci@gmail.com>
+      1  Xie Bo <xb@ultrarisc.com>
+      1  Vaibhav Jain <vaibhav@linux.ibm.com>
+      1  Jun Yang <junvyyang@tencent.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: PPC: Book3S HV nestedv2: Don't drop pending doorbell across L2 entry
+Author: Vaibhav Jain <vaibhav@linux.ibm.com>
+
+On nestedv2 the L1 converts a pending doorbell into guest DPDES state at
+the top of kvmhv_vcpu_entry_nestedv2() and immediately forgets about it:
+
+	if (vcpu->arch.doorbell_request) {
+		vcpu->arch.doorbell_request = 0;
+		kvmppc_set_dpdes(vcpu, 1);
+	}
+
+Clearing 'doorbell_request' at this point assumes that handing DPDES to the
+L0 is equivalent to the L2 having taken the doorbell. That is not true, and
+the doorbell can be lost in two ways:
+
+  - The block runs before the lazy_irq_pending() check, so the doorbell is
+    consumed even on the path that returns 0 without ever calling
+    H_GUEST_RUN_VCPU.
+
+  - DPDES stays pending in the L2 until it is actually delivered. The L2
+    may exit for an unrelated reason (hcall, page fault, HDEC) with the
+    doorbell still set, typically because it was running with MSR[EE]=0.
+    Nothing reloads DPDES afterwards, so the L1 never learns this.
+
+Once 'doorbell_request' has been cleared, the L1 has no record of the
+pending doorbell. kvmppc_doorbell_pending() returns false, so
+kvmppc_read_dpdes() reports the target thread as idle when a sibling vCPU
+emulates 'mfspr DPDES', and the vCPU can be treated as having no work
+pending and blocked. From the L2's point of view the doorbell is silently
+lost, which shows up as an SMT guest hanging on a doorbell-based IPI.
+
+Fix this by making 'doorbell_request' track the L2's DPDES rather than
+being consumed by entry:
+
+  - inject DPDES after the early-return paths and before
+    kvmhv_nestedv2_flush_vcpu() serializes it into the vcpu run input
+    buffer, and no longer clear 'doorbell_request' there,
+
+  - after H_GUEST_RUN_VCPU, reload DPDES from the L0. The run output only
+    carries the state the L0 chose to return and the 'valids' bitmap is
+    zeroed on exit, so an explicit kvmhv_nestedv2_cached_reload() is
+    needed to see the L2's current value,
+
+  - if DPDES is still set the doorbell was not delivered, so keep
+    'doorbell_request' pending so that it is re-injected on the next
+    entry; otherwise clear it.
+
+This keeps a pending doorbell visible to the L1 for as long as the L2 has
+not consumed it, so vCPU wakeup and DPDES emulation on sibling vCPUs stay
+consistent with the L2's actual state.
+
+Fixes: 54ec2bd9e017 ("KVM: PPC: Book3S HV nestedv2: Fix doorbell emulation")
+Signed-off-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+Assisted-by: Claude:Opus-5
+---
+ arch/powerpc/kvm/book3s_hv.c | 20 +++++++++++++++-----
+ 1 file changed, 15 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] hisi_acc_vfio_pci: fix VF BAR2 mmap on 64KB page size
+Author: Longfang Liu <liulongfang@huawei.com>
+
+    On HW_ACC_MIG_VF_CTRL hardware, VF BAR2 is split into functional
+and migration register regions. When kernel page size exceeds the
+functional region size (e.g. 64KB pages vs 32KB functional region),
+guest mmap operations get rounded up to page size, causing the VMA
+to exceed functional boundaries and fail validation.
+    The solution aligns mmap boundaries to page size while maintaining
+byte-granularity access control through hisi_acc_pci_rw_access_check()
+for read/write operations and accurate region size reporting via
+hisi_acc_vfio_ioctl_get_region(), ensuring migration registers remain
+protected from non-mmap access while resolving compatibility issues.
+
+Signed-off-by: Longfang Liu <liulongfang@huawei.com>
+---
+ drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] hisi_acc_vfio_pci: fix live migration enable conditions for PF passthrough
+Author: Longfang Liu <liulongfang@huawei.com>
+
+    In the previous implementation of live migration support for
+Hisilicon accelerator devices, there was insufficient consideration
+for the fact that PFs cannot support virtualization live migration.
+If a user unbinds the PF device driver from the host and directly
+passes it through to a VM, then attempts a live migration operation,
+it will trigger a calltrace exception.
+
+    To address this, we conducted a detailed analysis of potential
+failure points. We added checks for all operations that depend on
+PF driver commands and incorporated relevant conditional judgments
+to prevent system calltrace exceptions when users attempt live
+migration after passing PFs through to VMs.
+
+Fixes: b0eed085903e ("hisi_acc_vfio_pci: Add support for VFIO live migration")
+Signed-off-by: Longfang Liu <liulongfang@huawei.com>
+---
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 48 +++++++++++++++----
+ 1 file changed, 40 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] fix two issues related to the driver.
+Author: Longfang Liu <liulongfang@huawei.com>
+
+    This series fixes two issues in the HiSilicon ACC VFIO migration
+driver: a calltrace when a PF is passed through to a VM and migrated,
+guarded by NULL pf_qm checks and pdev->is_virtfn selection; and VF
+BAR2 mmap rejection on 64KB-page kernels, fixed by aligning the mmap
+boundary to PAGE_SIZE while keeping byte-granular read/write
+truncation. Build-tested and functionally verified.
+
+Longfang Liu (2):
+  hisi_acc_vfio_pci: fix live migration enable conditions for PF
+    passthrough
+  hisi_acc_vfio_pci: fix VF BAR2 mmap on 64KB page size
+
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 61 +++++++++++++++----
+ 1 file changed, 50 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost: reset the vring metadata cache on vring reconfiguration
+Author: Jun Yang <juny24602@gmail.com>
+
+
+vq->meta_iotlb[] caches the vhost_iotlb_map that backs each vring
+metadata region, and iotlb_access_ok() returns early on a cache hit,
+taking the hit as proof that the region has already been validated:
+
+	if (vhost_vq_meta_fetch(vq, addr, len, type))
+		return true;
+
+The cache is reset on VHOST_IOTLB_UPDATE and VHOST_IOTLB_INVALIDATE, on
+device IOTLB (re)initialisation and on vq reset, but not when
+VHOST_SET_VRING_ADDR replaces vq->desc, vq->avail and vq->used, nor when
+VHOST_SET_VRING_NUM changes the region sizes.
+
+With a device IOTLB attached both ioctls are accepted while the vq is
+live, and neither validates the addresses at ioctl time: vq_access_ok()
+and vq_log_used_access_ok() return true early because the addresses are
+GIOVAs, deferring validation to prefetch time.  Once the cache has been
+populated that deferred validation no longer runs -- vq_meta_prefetch()
+hits the stale entry and returns true -- and vhost_vq_meta_fetch() keeps
+translating through the old mapping as
+
+	map->addr + addr - map->start
+
+for an address the mapping no longer covers.  vhost_copy_to_user() and
+vhost_copy_from_user() consume the result with __copy_to_user() and
+__copy_from_user(), which do not check it either, so a subsequent used
+ring update or descriptor fetch accesses memory outside the region the
+IOTLB actually maps.
+
+Reset the metadata cache whenever the vring is reconfigured, so the new
+addresses are pushed back through iotlb_access_ok()'s slow path.
+
+Fixes: f88949138058 ("vhost: introduce O(1) vq metadata cache")
+Cc: stable@kernel.org
+Reported-by: TencentOS Corvus AI <corvus@tencent.com>
+Signed-off-by: Jun Yang <junvyyang@tencent.com>
+---
+ drivers/vhost/vhost.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v2] virtio: 9p: Order used ring updates before notifications
+Author: Xie Bo <xb@ultrarisc.com>
+
+virtio_p9_do_io() signals the guest immediately after adding each
+request to the used ring. Unlike the block and net backends, it bypasses
+virtio_queue__should_signal(), which provides the full memory barrier
+needed between publishing used->idx and injecting the interrupt.
+
+On weakly ordered architectures, the guest can therefore handle the
+interrupt before the updated used->idx becomes visible. If it observes
+the old index and goes back to sleep, the completed request can remain
+stuck indefinitely because no further interrupt is generated.
+
+This was observed on RISC-V with two 9p RPCs blocked while the host
+used->idx was two entries ahead of the guest's last_used_idx.
+
+Process all available requests first, then use
+virtio_queue__should_signal() before notifying the guest. Besides
+providing the required ordering, this also honors the driver's
+notification suppression request.
+
+Fixes: 1c7850f95903 ("kvm tools: Add virtio-9p")
+Signed-off-by: Xie Bo <xb@ultrarisc.com>
+---
+Changes in v2:
+- Drop the completed flag and rely directly on
+  virtio_queue__should_signal(), as suggested by Will Deacon.
+
+ virtio/9p.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/2] vhost-scsi: clamp max_io_vqs module parameter
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+max_io_vqs is currently validated only when a vhost-scsi device is opened.
+This allows sysfs to show values larger than the driver will actually use,
+e.g. writing 2048 succeeds even though vhost_scsi_open() later clamps it to
+VHOST_SCSI_MAX_IO_VQ. This makes the sysfs value differ from the value that
+will actually be used.
+
+hv# echo 2048 > /sys/module/vhost_scsi/parameters/max_io_vqs
+
+hv# cat /sys/module/vhost_scsi/parameters/max_io_vqs
+2048
+
+[  315.630495] Invalid max_io_vqs of 2048. Using 1024.
+
+Keep accepting out-of-range values for compatibility, but clamp them in the
+module parameter setter and store the effective value. This preserves the
+existing behavior that invalid values do not make module loading or sysfs
+writes fail. It also makes reads report the value that will actually be
+used.
+
+With the parameter value kept in range, remove the duplicate validation
+from vhost_scsi_open().
+
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+v1->v2:
+  - Access vhost_scsi_max_io_vqs with READ_ONCE().
+  - Clamp out-of-range max_io_vqs values instead of rejecting them.
+
+ drivers/vhost/scsi.c | 43 +++++++++++++++++++++++++++++++++----------
+ 1 file changed, 33 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/2] vhost-scsi: use kvzalloc for vq array allocation
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+vhost_scsi_open() allocates one "struct vhost_scsi_virtqueue" for each
+virtqueue. With large max_io_vqs values, this array can require a
+high-order contiguous allocation and trigger a page allocator warning.
+
+hv# cat /sys/module/vhost_scsi/parameters/max_io_vqs
+256
+
+[  766.075787] ------------[ cut here ]------------
+[  766.077030] WARNING: mm/page_alloc.c:5280 at __alloc_frozen_pages_noprof+0x32c/0x15c0, CPU#23: qemu-system-x86/5964
+... ...
+[  766.080351] RIP: 0010:__alloc_frozen_pages_noprof+0x32c/0x15c0
+... ...
+[  766.085813] Call Trace:
+[  766.085969]  <TASK>
+[  766.086098]  ? srso_alias_return_thunk+0x5/0xfbef5
+[  766.086365]  ? context_struct_compute_av+0x38a/0x4b0
+[  766.086652]  alloc_pages_mpol+0x9f/0x170
+[  766.086883]  ___kmalloc_large_node+0xb6/0xd0
+[  766.087124]  ? srso_alias_return_thunk+0x5/0xfbef5
+[  766.087389]  __kmalloc_large_node_noprof+0x18/0xa0
+[  766.087655]  __kmalloc_noprof+0x3a0/0x440
+[  766.087877]  ? vhost_scsi_open+0xcb/0x2d0 [vhost_scsi]
+[  766.088162]  vhost_scsi_open+0xcb/0x2d0 [vhost_scsi]
+[  766.088449]  misc_open+0x123/0x160
+[  766.088679]  chrdev_open+0xb1/0x230
+[  766.088885]  ? __pfx_chrdev_open+0x10/0x10
+[  766.089157]  do_dentry_open+0x11a/0x470
+[  766.089389]  vfs_open+0x29/0xf0
+[  766.089596]  path_openat+0x7c0/0x1100
+[  766.089821]  do_file_open+0xdd/0x190
+[  766.090032]  ? srso_alias_return_thunk+0x5/0xfbef5
+[  766.090332]  do_sys_openat2+0x7e/0x100
+[  766.090601]  __x64_sys_openat+0x51/0xa0
+[  766.090857]  do_syscall_64+0xfe/0x590
+[  766.091087]  entry_SYSCALL_64_after_hwframe+0x77/0x7f
+[  766.091411] RIP: 0033:0x7f9525a11fa6
+
+The array does not require physical contiguity, so allocate it with
+kvzalloc_objs() and free it with kvfree().
+
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+ drivers/vhost/scsi.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/2] vhost-scsi: fix max_io_vqs handling
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+Avoid high-order kmalloc() allocations for the vhost-scsi virtqueue array,
+and clamp out-of-range max_io_vqs updates so the stored value remains
+within the supported range.
+
+v1->v2:
+  - Access vhost_scsi_max_io_vqs with READ_ONCE().
+  - Clamp out-of-range max_io_vqs values instead of rejecting them.
+
+Dongli Zhang (2):
+  vhost-scsi: use kvzalloc for vq array allocation
+  vhost-scsi: vhost-scsi: clamp max_io_vqs module parameter
+
+ drivers/vhost/scsi.c | 49 ++++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 36 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/2] KVM: x86: Add limit check to IDT in __emulate_int_real()
+Author: Kayra Cizmeci <kayracizmeci@gmail.com>
+
+Currently there are no limit check at __emulate_int_real(),
+and normally greater numbers than the IDT limits needs to
+cause a #GP, but currently there is no limit check for doing that.
+
+So add a limit check for IDT to catch greater numbers than the IDT
+limit and if the number is greater than the IDT limit inject a #GP.
+
+Signed-off-by: Kayra Cizmeci <kayracizmeci@gmail.com>
+---
+v1: adds IDT limit check to __emulate_int_real(), link:
+https://lore.kernel.org/kvm/20260608123503.23298-1-kayracizmeci@gmail.com/
+v2: fixes the sign-extension of INT n, link:
+https://lore.kernel.org/kvm/20260608134642.25849-1-kayracizmeci@gmail.com/
+v3: rewrote commit messages, split 1 commit into 2 commits and rebased
+onto current mainline.
+
+ arch/x86/kvm/emulate.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/2] KVM: x86: Fix sign-extension of the INT n vector in the emulator
+Author: Kayra Cizmeci <kayracizmeci@gmail.com>
+
+Currently the INT n operand use SrcImmByte which translates vectors
+above 127 to negative numbers. And this negative numbers gets to
+(vector << 2) and from there vector are handed and without any
+warnings.
+
+Use SrcImmUByte so the vector never translates to negative.
+
+Signed-off-by: Kayra Cizmeci <kayracizmeci@gmail.com>
+---
+v1: adds IDT limit check to __emulate_int_real(), link:
+https://lore.kernel.org/kvm/20260608123503.23298-1-kayracizmeci@gmail.com/
+v2: fixes the sign-extension of INT n, link:
+https://lore.kernel.org/kvm/20260608134642.25849-1-kayracizmeci@gmail.com/
+v3: rewrote commit messages, split 1 commit into 2 commits and rebased
+onto current mainline.
+
+ arch/x86/kvm/emulate.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From ee0a07c33 to 86e9b49fa
+KVM mailing list update from ee0a07c33 to 86e9b49fa
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      1 linux.dev
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      1  Karl Mehltretter <kmehltretter@gmail.com>
+      1  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2] KVM: arm64: Preserve GPRs for AArch32 CP64 reads generating an UNDEF
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v1] KVM: arm64: vgic: Reset in_kernel on private IRQ allocation failure
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+kvm_vgic_create() sets vgic.in_kernel before allocating the per-vCPU
+private IRQs, but the allocation-failure path resets only vgic_model and
+leaves in_kernel set. As irqchip_in_kernel() is !!in_kernel, the VM is
+left with an in-kernel irqchip but no model, and the -EEXIST guard at the
+top of kvm_vgic_create() rejects every retry, so userspace cannot recover
+from a transient -ENOMEM.
+
+Reset in_kernel alongside vgic_model on the failure path.
+
+Fixes: 9435c1e1431003 ("KVM: arm64: gic: Set vgic_model before initing private IRQs")
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/vgic/vgic-init.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
