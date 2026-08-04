@@ -1,0 +1,1398 @@
+
+On /root/mail/repo:
+From d4ab54be0 to bfe65d0cf
+KVM mailing list update from d4ab54be0 to bfe65d0cf
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     34 arm.com
+     14 linux.ibm.com
+      6 tu-dortmund.de
+      6 linaro.org
+      3 gmail.com
+      1 tenstorrent.com
+      1 tencent.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     29  Steven Price <steven.price@arm.com>
+     14  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      6  Simon Schippers <simon.schippers@tu-dortmund.de>
+      6  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      3  Suzuki K Poulose <suzuki.poulose@arm.com>
+      2  Joey Gouly <joey.gouly@arm.com>
+      1  "Yuhang.Chen" <yhchen312@gmail.com>
+      1  Karl Mehltretter <kmehltretter@gmail.com>
+      1  Jun Yang <junvyyang@tencent.com>
+      1  Hisam Mehboob <hisamshar@gmail.com>
+      1  "Guo Ren (Alibaba DAMO Academy)" <guoren@kernel.org>
+      1  Andy Chiu <tchiu@tenstorrent.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+[PATCH net-next v14 0/5] tun/tap & vhost-net: apply qdisc backpressure on full ptr_ring to reduce TX drops
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+This patch series deals with tun/tap & vhost-net which drop incoming
+SKBs whenever their internal ptr_ring buffer is full. Instead, with this
+patch series, the associated netdev queue is stopped, but only when the
+new IFF_BACKPRESSURE flag is set and a qdisc is attached. Without the
+flag, or if no qdisc is present, the existing behavior is preserved. The
+XDP transmit path is not affected. This patch series touches tun/tap and
+vhost-net, as they share common logic and must be updated together.
+Modifying only one of them would break the other.
+
+By applying proper backpressure, this change allows the connected qdisc to
+operate correctly, as reported in [1], and significantly improves
+performance in real-world scenarios, as demonstrated in our paper [2]. For
+example, we observed a 36% TCP throughput improvement for an OpenVPN
+connection between Germany and the USA.
+
+The previous version of this work was applied and then reverted in 7.2,
+because the backpressure was unconditional: it caused a significant
+throughput drop in an IPv6 multicast testcase with multiple iperf3 TCP
+threads sending on Brett Sheffield's librecast testbed [3]. This version
+therefore makes the behavior opt-in via IFF_BACKPRESSURE from the very
+first patch, so that a tun/tap device which does not set the flag behaves
+exactly as before.
+
+The series is ordered so that no patch changes how packets are handled
+unless the flag is set:
+
+- Patch 1 adds the flag only. It has no effect yet: TUNSETIFF silently
+  masks it off, as it does for any flag outside TUN_FEATURES, until
+  patch 5 adds it there.
+- Patches 2 and 3 add the consumer side, which wakes a stopped netdev
+  queue. __tun_wake_queue() returns early unless IFF_BACKPRESSURE is set,
+  and no queue is stopped at this point anyway.
+- Patch 4 is a pure ptr_ring refactor required by patch 5.
+- Patch 5 adds the queue stopping, gated on IFF_BACKPRESSURE, together
+  with the wake needed when the flag is cleared again, and only there is
+  the flag added to TUN_FEATURES.
+
+That way no intermediate commit changes the behavior of an existing
+tun/tap user beyond the added checks, and bisecting inside the series can
+not hit the regression that led to the revert.
+
+Thanks!
+
+[1] https://unix.stackexchange.com/questions/762935/traffic-shaping-ineffective-on-tun-device
+[2] https://cni.etit.tu-dortmund.de/storages/cni-etit/r/Research/Publications/2025/Gebauer_2025_VTCFall/Gebauer_VTCFall2025_AuthorsVersion.pdf
+[3] https://lore.kernel.org/netdev/akVnoOYQOrt8k-Gu@karahi.librecast.net/
+
+---
+Changelog:
+v14:
+Addressing the regression found by Sashiko:
+- Move IFF_BACKPRESSURE from TUN_FEATURES in patch 1 to patch 5, so that
+  TUNSETIFF only honours the flag once the implementation is complete.
+- Patch 2: move the queue wake for the ntfile taking over the slot in
+  __tun_detach() after synchronize_net() and tun_queue_purge(). Waking
+  before the grace period could leave the subqueue stopped with no
+  consumer left to wake it.
+- Patch 2: only wake a subqueue if the tfile still owns its slot in
+  tun->tfiles[], as a detached tfile keeps its queue_index.
+- Patch 2: every place that wakes a queue now checks netif_running()
+  under a ring lock that tun_net_close() takes, so none of them can undo
+  its stop. tun_net_close() takes and releases both ring locks of every
+  tfile before it stops the queues, so no wake can still be running.
+- Patches 2 and 3: enforce the consumer_lock precondition with
+  lockdep_assert_held() and document it on the declaration.
+- Patch 4: document the return values of __ptr_ring_check_produce().
+- Patch 5: use a separate ntfile in the tun_set_iff() wake loop.
+
+v13: https://lore.kernel.org/netdev/20260730213639.726381-1-simon.schippers@tu-dortmund.de/
+--> Apart from the three items below, the resulting code is identical to
+    v12 plus the separate IFF_BACKPRESSURE patch [4]:
+- tuntap.rst does not name a kernel version anymore.
+- Add the IFF_BACKPRESSURE comment to tools/include/uapi/linux/if_tun.h
+  as well (Sashiko).
+- Add a comment explaining the __ptr_ring_empty() check in
+  __tun_detach() (MST).
+
+- Include the IFF_BACKPRESSURE opt-in into the series instead of adding it
+  as a follow-up fix, so that the series can not be bisected into the
+  regression that got v12 reverted.
+--> New patch 1 adds the flag on its own.
+- Patch 2 carries the IFF_BACKPRESSURE check in __tun_wake_queue() from
+  the start and introduces tun_force_wake_queue(), which is used by
+  tun_attach() and tun_queue_resize().
+- Patch 5 gates the queue stopping on IFF_BACKPRESSURE and calls
+  tun_force_wake_queue() for the attached tfiles in tun_set_iff(), so
+  clearing the flag can not leave a queue stopped.
+- Dropped the pktgen numbers from patches 2 and 3, as they only measured
+  the consumer side without any queue stopping.
+
+[4] https://lore.kernel.org/netdev/20260709095511.168235-1-simon.schippers@tu-dortmund.de/
+
+v12: https://lore.kernel.org/netdev/20260510151529.43895-1-simon.schippers@tu-dortmund.de/
+Patch 1:
+- Revert tun_queue_purge() to plain ptr_ring_consume() and instead
+  explicitly wake the queue in __tun_detach() for the ntfile taking
+  over the queue slot (if its ring is empty).
+- Inlined tun_reset_cons_cnt(), because only tun_attach() uses it.
+
+- Patches 2-4 and cover letter unchanged.
+- Compiled and short pktgen test.
+
+v11:
+- Renamed __ptr_ring_produce_peek() to __ptr_ring_check_produce()
+  (Sashiko)
+- Add return code -EINVAL to __ptr_ring_check_produce() which lets
+  tun_net_xmit() stop the queue only on -ENOSPC. (MST)
+- Resolve race on tfile->queue_index by locking tx_ring.consumer_lock
+  in __tun_detach(). (Sashiko)
+- Wake the queue in tun_queue_resize() to avoid possible stalls.
+- Other minor adjustments & reran the benchmarks.
+
+v10: https://lore.kernel.org/netdev/20260506141033.180450-1-simon.schippers@tu-dortmund.de/
+- Changed the term "Transmitted" to "Received" in the benchmarks,
+  as correctly pointed out by MST, and reran the benchmarks.
+
+Addressed the Sashiko AI review:
+- Avoid a data race on tfile->cons_cnt by always locking.
+- Correctly count the number of consumed packets for vhost-net.
+- Corrected a typo in the commit message of commit 3.
+- Added a missing barrier on the consumer side.
+--> The barriers now follow the "store buffering" principle.
+- No longer return NETDEV_TX_BUSY at all, because it is unsafe.
+--> Result: There are still a few drops with multiple senders, which
+            would be avoided by disabling LLTX.
+
+V9: https://lore.kernel.org/netdev/20260428123859.19578-1-simon.schippers@tu-dortmund.de/
+- Addressed minor nit by MST in patches 1 and 2.
+- Rebased patch 3 because of commit d748047
+  ("ptr_ring: disable KCSAN warnings").
+- Documented the pair of the smp_mb__after_atomic() in tun_net_xmit()
+  with tun_ring_consume().
+  --> It simply pairs with the test_and_clear_bit() inside of
+      netif_wake_subqueue().
+- Use 1 ptr_ring consumer spinlock instead of 2.
+- Ran pktgen benchmarks with pg_set SHARED for 50 iterations on
+  latest kernel
+  --> No significant performance difference noticed
+
+V8: https://lore.kernel.org/netdev/20260312130639.138988-1-simon.schippers@tu-dortmund.de/
+- Drop code changes in drivers/net/tap.c; The code there deals with
+  ipvtap/macvtap which are unrelated to the goal of this patch series
+  and I did not realize that before
+-> Greatly simplified logic, 4 instead of 9 commits
+-> No more duplicated logics and distinction in vhost required
+- Only wake after the queue stopped and half of the ring was consumed
+  as suggested by MST
+-> Performance improvements for TAP, but still slightly slower
+- Better benchmarking with pinned threads, XDP drop program for
+  tap+vhost-net and disabling CPU mitigations (and newer Ryzen 5 5600X
+  processor) as suggested by Jason Wang
+
+V7: https://lore.kernel.org/netdev/20260107210448.37851-1-simon.schippers@tu-dortmund.de/
+- Switch to an approach similar to veth (excluding the recently fixed
+variant), as suggested by MST, with minor adjustments discussed in V6
+- Rename the cover-letter title
+- Add multithreaded pktgen and iperf3 benchmarks, as suggested by Jason
+Wang
+- Rework __ptr_ring_consume_created_space() so it can also be used after
+batched consume
+
+...
+
+Simon Schippers (5):
+  tun/tap: add IFF_BACKPRESSURE flag
+  tun/tap: add ptr_ring consume helper with netdev queue wakeup
+  vhost-net: wake queue of tun/tap after ptr_ring consume
+  ptr_ring: move free-space check into separate helper
+  tun/tap & vhost-net: stop tail-drop when IFF_BACKPRESSURE is set
+
+ Documentation/networking/tuntap.rst |  32 +++++
+ drivers/net/tun.c                   | 182 ++++++++++++++++++++++++++--
+ drivers/vhost/net.c                 |  21 +++-
+ include/linux/if_tun.h              |   4 +
+ include/linux/ptr_ring.h            |  26 +++-
+ include/uapi/linux/if_tun.h         |   4 +
+ tools/include/uapi/linux/if_tun.h   |   4 +
+ 7 files changed, 255 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  tun/tap: add IFF_BACKPRESSURE flag
+[PATCH net-next v14 1/5] tun/tap: add IFF_BACKPRESSURE flag
+Author: Simon Schippers <simon.schippers@tu-dortmund.de>
+
+Add the IFF_BACKPRESSURE flag to the UAPI header and to its tools/ copy.
+The flag has no effect yet, it is the opt-in switch for the qdisc
+backpressure logic added by the following patches.
+
+It is added to TUN_FEATURES only in the last patch of the series, once the
+implementation is complete. Until then TUNSETIFF silently masks it off, as
+it does for any flag outside TUN_FEATURES.
+
+Keeping the flag and its users in separate patches would either leave a
+window where backpressure is unconditional, or make the opt-in a later
+add-on. Adding the flag first lets every following patch be a no-op
+unless it is set.
+
+Signed-off-by: Simon Schippers <simon.schippers@tu-dortmund.de>
+---
+ include/uapi/linux/if_tun.h       | 4 ++++
+ tools/include/uapi/linux/if_tun.h | 4 ++++
+ 2 files changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  riscv: KVM: Flush VS-stage stale entries
+[PATCH] riscv: KVM: Flush VS-stage stale entries
+Author: Guo Ren <guoren@kernel.org>
+
+
+When a vCPU migrates to a different host CPU, the new CPU may retain
+stale VS-stage TLB entries (GVA → GPA) left by a previous run of the
+same guest. Issue an HFENCE.VVMA (all ASIDs, all addresses) inside
+kvm_riscv_mmu_update_hgatp() whenever the vCPU is loaded on a CPU
+different from the one it last exited on.
+
+Signed-off-by: Guo Ren (Alibaba DAMO Academy) <guoren@kernel.org>
+---
+Does this patch solve your problem? I would prefer to issue a full
+HFENCE.VVMA whenever a new VMID is installed on a pCPU.
+---
+ arch/riscv/include/asm/kvm_mmu.h | 2 +-
+ arch/riscv/kvm/mmu.c             | 5 ++++-
+ arch/riscv/kvm/vcpu.c            | 4 ++--
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Support for Arm CCA in KVM
+[PATCH v16 00/45] arm64: Support for Arm CCA in KVM
+Author: Steven Price <steven.price@arm.com>
+
+This series adds support for running protected VMs using KVM under the
+Arm Confidential Compute Architecture (CCA), including the firmware
+support needed to communicate with the Realm Management Monitor (RMM).
+
+For v15 the series was split into a 6-patch generic firmware/RMM series
+and a 37-patch KVM series. The two parts are combined again for v16, as
+requested to allow the complete stack to be tested by Sashiko as a
+single series.
+
+The first six patches add the generic firmware layer for talking to the
+RMM, as specified by version 2.0-bet2 of the RMM specification[0]. They
+provide the RMI definitions and wrappers, discover and configure the
+RMM, implement Stateful RMI Operations (SROs), and ensure that the RMM
+has GPT entries for host memory. The remaining patches add the KVM
+support needed to create, populate and run Realm VMs.
+
+Note that RMM v2.0 Beta 3 specification should be published soon. The
+changes introduced in that are minor and I expect this series to be
+largely compatible with the new spec.
+
+The RMM v2.0 specification introduces SROs, which allow the RMM to
+complete an operation over several SMC calls while requesting or
+returning memory to the host. This allows interrupts to be handled in
+the middle of an operation and lets the RMM dynamically allocate memory
+for internal tracking purposes. For example, RMI_REC_CREATE no longer
+needs auxiliary granules to be provided up front, and can instead
+request memory during the operation.
+
+The main changes since v15 are:
+
+ * Recombine the firmware/RMM and KVM portions into one series. The
+   Realm-specific RMI wrappers remain separate from the generic
+   firmware wrappers, in a new KVM patch.
+
+ * Rewrite Realm entry and exit handling to fit into the generic KVM
+   run loop. Work which cannot be performed in the entry path is now
+   completed through KVM requests, and MMIO, PSCI, RIPAS changes and
+   host calls are adapted to the new flow.
+
+ * Rewrite Realm timer support to use KVM's IRQ-ops infrastructure and
+   software resampling.
+
+ * Improve SRO cancellation and error handling. Ensure a cancelled
+   operation isn't treated as successful, wrapper return values can carry
+   negative Linux errors as well as RMI return values, and those errors
+   are propagated through the KVM users.
+
+ * Check that the RMM supports the host page size before configuring it,
+   and exclude firmware-reserved NOMAP memory when creating GPT entries.
+
+ * Expand the KVM_ARM_RMI_POPULATE documentation to make clear that Arm
+   CCA cannot preserve memory contents during an in-place
+   shared-to-private conversion.
+
+ * Allocate Realm parameters only while creating the Realm descriptor.
+
+ * Document the encoding of the arm64 VM types and require
+   ICH_HCR_EL2.TDIR before advertising or creating Realm VMs.
+
+This series is based on the guest_memfd in-place conversion v9 tree[1],
+which is itself based on kvm-x86/next. It is also available as a git
+repository:
+
+https://gitlab.arm.com/linux-arm/linux-cca cca-host/v16
+
+Work in progress changes for kvmtool are available from the git
+repository below:
+
+https://gitlab.arm.com/linux-arm/kvmtool-cca cca/v13
+
+The TF-RMM branch used for testing this series is available here:
+
+https://git.trustedfirmware.org/TF-RMM/tf-rmm.git topics/rmm-v2.0-poc_3
+
+There is a kvm-unit-test branch updated to support the attestation used
+in RMM v2.0 available here:
+
+https://gitlab.arm.com/linux-arm/kvm-unit-tests-cca cca/v4
+
+[0] https://developer.arm.com/documentation/den0137/2-0bet2/
+One bet2 change, which moves metadata out of the individual address
+range descriptors, has intentionally not been implemented because that
+part of the specification is expected to be reverted.
+
+[1] https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-v9
+
+Jean-Philippe Brucker (6):
+  KVM: arm64: CCA: Propagate breakpoint and watchpoint counts to
+    userspace
+  KVM: arm64: CCA: Set breakpoint parameters through SET_ONE_REG
+  KVM: arm64: CCA: Propagate max SVE vector length from the RMM
+  KVM: arm64: CCA: Configure max SVE vector length for a Realm
+  KVM: arm64: CCA: Provide register list for unfinalized RECs
+  KVM: arm64: CCA: Provide an accurate register list
+
+Joey Gouly (2):
+  KVM: arm64: CCA: Allow userspace to inject aborts
+  KVM: arm64: CCA: Support RSI_HOST_CALL
+
+Steven Price (34):
+  firmware: arm_rmm: Add SMC definitions for calling the RMM
+  firmware: arm_rmm: Add wrappers for direct RMI calls
+  firmware: arm_rmm: Check for RMI support at init
+  firmware: arm_rmm: Configure the RMM with the host's page size
+  firmware: arm_rmm: Add support for SRO
+  firmware: arm_rmm: Ensure the RMM has GPT entries for memory
+  arm64: mm: Handle Granule Protection Faults (GPFs)
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Add wrappers for realm related RMIs
+  KVM: arm64: CCA: Check for RMI support at KVM init
+  KVM: arm64: CCA: Check for LPA2 support
+  KVM: arm64: CCA: Define the user ABI
+  KVM: arm64: CCA: Add basic infrastructure for creating a realm
+  KVM: arm64: CCA: Allow passing the machine type in KVM creation
+  KVM: arm64: CCA: Tear down RTTs
+  KVM: arm64: CCA: Allocate and free RECs to match vCPUs
+  KVM: arm64: CCA: Support the VGIC in realms
+  KVM: arm64: CCA: Support timers in realm RECs
+  KVM: arm64: CCA: Handle realm enter/exit
+  KVM: arm64: CCA: Handle RMI_EXIT_RIPAS_CHANGE
+  KVM: arm64: CCA: Handle realm MMIO emulation
+  KVM: arm64: Expose support for private memory
+  KVM: arm64: CCA: Create the realm descriptor
+  KVM: arm64: CCA: Activate realms on first vCPU run
+  KVM: arm64: CCA: Allow populating initial contents
+  KVM: arm64: CCA: Set RIPAS of initial memslots
+  KVM: arm64: CCA: Support runtime faulting of memory
+  KVM: arm64: CCA: Handle realm vCPU load
+  KVM: arm64: CCA: Validate register access for Realm VMs
+  KVM: arm64: CCA: Handle Realm PSCI requests
+  KVM: arm64: WARN on injected undef exceptions
+  KVM: arm64: CCA: Prevent Device mappings for realms
+  KVM: arm64: CCA: Require ICH_HCR_EL2.TDIR for realms
+  KVM: arm64: CCA: Enable realms to be created
+
+Suzuki K Poulose (3):
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+  KVM: arm64: CCA: Allow checking SVE on VM instance
+
+ Documentation/virt/kvm/api.rst       |   70 +-
+ arch/arm64/Kconfig                   |    1 +
+ arch/arm64/include/asm/kvm_asm.h     |    2 +
+ arch/arm64/include/asm/kvm_emulate.h |   37 +
+ arch/arm64/include/asm/kvm_host.h    |   12 +-
+ arch/arm64/include/asm/kvm_pgtable.h |    6 +-
+ arch/arm64/include/asm/kvm_pkvm.h    |    2 +-
+ arch/arm64/include/asm/kvm_rmi.h     |  139 +++
+ arch/arm64/include/asm/rmi_cmds.h    |  465 ++++++++
+ arch/arm64/include/asm/virt.h        |    1 +
+ arch/arm64/kernel/cpufeature.c       |    1 +
+ arch/arm64/kvm/Kconfig               |    2 +
+ arch/arm64/kvm/Makefile              |    2 +-
+ arch/arm64/kvm/arch_timer.c          |   34 +-
+ arch/arm64/kvm/arm.c                 |  139 ++-
+ arch/arm64/kvm/guest.c               |   93 +-
+ arch/arm64/kvm/handle_exit.c         |   14 +
+ arch/arm64/kvm/hyp/pgtable.c         |    1 +
+ arch/arm64/kvm/hypercalls.c          |    4 +-
+ arch/arm64/kvm/inject_fault.c        |    5 +-
+ arch/arm64/kvm/mmio.c                |   16 +-
+ arch/arm64/kvm/mmu.c                 |  144 ++-
+ arch/arm64/kvm/reset.c               |   13 +-
+ arch/arm64/kvm/rmi-exit.c            |  178 +++
+ arch/arm64/kvm/rmi.c                 | 1561 ++++++++++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c            |   47 +-
+ arch/arm64/kvm/vgic/vgic-init.c      |    2 +-
+ arch/arm64/mm/fault.c                |   28 +-
+ drivers/firmware/Kconfig             |    1 +
+ drivers/firmware/Makefile            |    1 +
+ drivers/firmware/arm_rmm/Kconfig     |   26 +
+ drivers/firmware/arm_rmm/Makefile    |    2 +
+ drivers/firmware/arm_rmm/rmi.c       |  776 +++++++++++++
+ include/kvm/arm_psci.h               |    2 +
+ include/linux/arm-rmi-cmds.h         |  201 ++++
+ include/linux/arm-smccc-rmi.h        |  493 ++++++++
+ include/uapi/linux/kvm.h             |   20 +-
+ 37 files changed, 4446 insertions(+), 95 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Fix unlikely NULL gmap dereference
+[PATCH v8 01/13] KVM: s390: Fix unlikely NULL gmap dereference
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When creating a new vCPU, kvm_vm_ioctl_create_vcpu() will call
+kvm_arch_vcpu_postcreate() after the file descriptor for the new vCPU
+has been created. The new file descriptor has not been returned yet,
+but a malicious userspace program could try to guess it.
+
+If a malicious userspace program manages to start the newly created vCPU
+before kvm_arch_vcpu_postcreate() is called, __vcpu_run() will try to
+dereference vcpu->arch.gmap and trigger a NULL pointer dereference.
+
+Fix this by adding a new field to struct kvm_vcpu_arch to keep track of
+the initialization status of the vCPU. Refuse to run a vCPU that is not
+fully initialized.
+
+Fixes: dafd032a15f8 ("KVM: s390: move vcpu specific initalization to a later point")
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Reviewed-by: Steffen Eiden <seiden@linux.ibm.com>
+Reviewed-by: Janosch Frank <frankja@linux.ibm.com>
+Reviewed-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+---
+ arch/s390/include/asm/kvm_host.h |  1 +
+ arch/s390/kvm/kvm-s390.c         | 11 +++++++++++
+ 2 files changed, 12 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Misc fixes
+[PATCH v8 00/13] KVM: s390: Misc fixes
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Fix a bunch of small issues that came up during the previous round of fixes.
+
+They are mostly extremely unlikely races, but they should be fixed
+nonetheless.
+
+v7->v8
+* Fix some patch descriptions.
+* Remove KVM_BUG_ON() from code that should not be reached but could
+  still be reached. Just return an appropriate error code.
+* Drop the last patch. Will need a more complex fix, will be done in a
+  different series.
+
+v6->v7
+* Do not free SCA in kvm_arch_init_vm() if it was not allocated
+* Remove a KVM_BUG_ON() that could still be triggered from userspace
+  with UCONTROL.
+* Remove KVM_BUG_ON() if a memslot change could not be performed.
+* Fence KVM_S390_INTERRUPT also for vCPUs for UCONTROL VMs.
+
+v5->v6
+* Move the memory accesses in sca_ext_call_pending() and
+  sca_inject_ext_call() so that they only happen after the newly
+  introduced checks. Otherwise an out of bounds access was still possible.
+* Completely fence the KVM_S390_INTERRUPT ioctl for UCONTROL VMs.
+* Move page table updates from kvm_arch_commit_memory_region() to
+  kvm_arch_prepare_memory_region(), so that failures are not ignored.
+
+v4->v5
+* Improve / fix some comments
+* Undo handle_mvpg_pei() changes
+* cmma_d_count_pte() now clears the cmma_d bit, to avoid double counting
+* Improve some patch descriptions
+* Trigger KVM_BUG_ON() in sca_ext_call_pending() and
+  sca_inject_ext_call() if called on UCONTROL vCPUs
+* Reshuffle the order of the patches to hopefully get fewer false
+  positives from sashiko
+* Check and free cbrlo only if it's not zero
+
+v3->v4
+* Improve patch descriptions, add comments
+* Use smp_store_release and smp_load_acquire in the first patch
+* Multiple fixes in patch 4: potential NULL pointer dereference,
+  incorrect behaviour in low memory condition
+* Rework patch 8 to use scope-based cleanup instead of gotos.
+* Three new patches:
+  - KVM: s390: Fix kvm_arch_commit_memory_region() when low on memory
+  - KVM: s390: Fix kvm_s390_vcpu_unsetup_cmma()
+  - KVM: s390: Fix sca_clear_ext_call() for UCONTROL
+
+v2->v3
+* Use READ_ONCE to pair with WRITE_ONCE in the first patch
+* Fix leaking PGM_ADDRESSING also in kvm_s390_keyop() and related functions
+* Fix and improve commit messages
+* Use slots_arch_lock instead of slots_lock for ESSA operations
+* Use normal spin_{,un}lock() functions instead of scoped_guard to avoid
+  mixing the two styles
+* Use the newly introduced vcpu->arch.initialized to determine whether the
+  SCA entry needs to be cleared
+* Improve handling of -EINTR; handle_mvpg_pei() needed some refactoring to
+  deal with it properly
+* Three new patches:
+  - Free the mmu cache when kvm_arch_vcpu_create() fails
+  - Fix ordering when adding to SCA
+  - Fix cleanup in kvm_s390_pv_create_cpu()
+
+v1->v2
+* Drop some patches that have been picked upstream in the meantime.
+* Drop patch 3, as it was trying to fix a bug that does not exist
+* Avoid the NULL gmap dereference by using a flag
+* Fix the return value of kvm_s390_[gp]et_skeys too
+* Use kvm->slots_arch_lock instead of kvm->slots_lock for CMMA and ESSA
+  handling, to avoid potential deadlocks with the RCU.
+* Three new patches to fix other issues that came out while fixing the
+  other issues
+
+Claudio Imbrenda (13):
+  KVM: s390: Fix unlikely NULL gmap dereference
+  KVM: s390: Do not free SCA if it was not allocated
+  KVM: s390: Fix kvm_s390_vcpu_unsetup_cmma()
+  KVM: s390: Fix overclearing ESCA in case of error
+  KVM: s390: ucontrol: Fix sca_clear_ext_call()
+  KVM: s390: Fix leaking of PGM_ADDRESSING to userspace
+  KVM: s390: Fix race in __do_essa()
+  KVM: s390: cmma: Fix dirty tracking when removing memslot
+  KVM: s390: ucontrol: Add missing locking around gmap_remove_child()
+  KVM: s390: Free the mmu cache when kvm_arch_vcpu_create() fails
+  KVM: s390: Return -EINTR if a signal is pending while faulting-in
+  KVM: s390: Fix ordering when adding to SCA
+  KVM: s390: Fix cleanup in kvm_s390_pv_create_cpu()
+
+ arch/s390/include/asm/kvm_host.h |   1 +
+ arch/s390/kvm/dat.c              |  23 ++++--
+ arch/s390/kvm/dat.h              |   2 +-
+ arch/s390/kvm/faultin.c          |   6 +-
+ arch/s390/kvm/interrupt.c        |  19 +++--
+ arch/s390/kvm/kvm-s390.c         | 125 ++++++++++++++++++++-----------
+ arch/s390/kvm/priv.c             |  10 ++-
+ arch/s390/kvm/pv.c               |  43 +++++------
+ 8 files changed, 144 insertions(+), 85 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 86e9b49fa to 242f6ccf0
+KVM mailing list update from 86e9b49fa to 242f6ccf0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     34 arm.com
+     22 google.com
+     18 kernel.org
+     12 linux.dev
+      6 linaro.org
+      3 gmail.com
+      1 nxp.com
+
+Top 15 contributors (Based on Email Body)
+
+     29  Steven Price <steven.price@arm.com>
+     21  Vincent Donnefort <vdonnefort@google.com>
+     18  Mark Brown <broonie@kernel.org>
+     12  Fuad Tabba <fuad.tabba@linux.dev>
+      6  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      3  Suzuki K Poulose <suzuki.poulose@arm.com>
+      2  Karl Mehltretter <kmehltretter@gmail.com>
+      2  Joey Gouly <joey.gouly@arm.com>
+      1  Peng Fan <peng.fan@nxp.com>
+      1  Keir Fraser <keirf@google.com>
+      1  Hisam Mehboob <hisamshar@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  arm64/gcs: Ensure FGTs for EL1 GCS instructions
+[PATCH v18 01/14] arm64/gcs: Ensure FGTs for EL1 GCS instructions
+Author: Mark Brown <broonie@kernel.org>
+
+The initial EL2 setup for GCS did not include disabling of EL1 usage of
+GCS instructions, also disable these traps.
+
+Fixes: ff5181d8a2a8 ("arm64/gcs: Provide basic EL2 setup to allow GCS usage at EL0 and EL1")
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/el2_setup.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Provide guest support for GCS
+[PATCH v18 00/14] KVM: arm64: Provide guest support for GCS
+Author: Mark Brown <broonie@kernel.org>
+
+The arm64 Guarded Control Stack (GCS) feature provides support for
+hardware protected stacks of return addresses, intended to provide
+hardening against return oriented programming (ROP) attacks and to make
+it easier to gather call stacks for applications such as profiling.
+
+When GCS is active a secondary stack called the Guarded Control Stack is
+maintained, protected with a memory attribute which means that it can
+only be written with specific GCS operations.  The current GCS pointer
+can not be directly written to by userspace.  When a BL is executed the
+value stored in LR is also pushed onto the GCS, and when a RET is
+executed the top of the GCS is popped and compared to LR with a fault
+being raised if the values do not match.  GCS operations may only be
+performed on GCS pages, a data abort is generated if they are not.
+
+The combination of hardware enforcement and lack of extra instructions
+in the function entry and exit paths should result in something which
+has less overhead and is more difficult to attack than a purely software
+implementation like clang's shadow stacks.
+
+This series implements support for managing GCS for KVM guests.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v18:
+- Reinject all GCS exceptions from nested guests.
+- Include GCSCRE0_EL1 and GCSPR_EL0 in the live CPU register accessors.
+- Sort el2_regs in get-reg-list.
+- Link to v17: https://patch.msgid.link/20260731-arm64-gcs-v17-0-5e39ca01b14e@kernel.org
+
+Changes in v17:
+- Rebase onto v7.2-rc4.
+- Fix mapping of HFGITR_EL2.nGCSEPP.
+- Implement a test for NV emulation around EXLOCK.
+- Fix NV exception emulation issues.
+- Add GCS[PC]R_EL1 to locate_direct_register().
+- Add barriers.
+- Add ID_AA64PFR1_EL1.GCS to set_id_regs.
+- Comment updates.
+- Link to v16: https://lore.kernel.org/r/20250912-arm64-gcs-v16-0-6435e5ec37db@kernel.org
+
+Changes in v16:
+- Rebase onto v6.17-rc3.
+- Also expose the feature to nested guests.
+- Implement emulation of EXLOCK when returning from nested guests.
+- Rename enter_exception_gcs() to compute_exlock().
+- Move all ID_AA64PFR1_EL1 handling to the final kernel patch.
+- Drop unneeded forwarding of GCS exceptions.
+- Commit and cover message updates.
+- Link to v15: https://lore.kernel.org/r/20250820-arm64-gcs-v15-0-5e334da18b84@kernel.org
+
+Changes in v15:
+- Rebase onto v6.17-rc1.
+- Link to v14: https://lore.kernel.org/r/20241005-arm64-gcs-v14-0-59060cd6092b@kernel.org
+
+Changes in v14:
+- Rebase onto arm64/for-next/gcs which includes all the non-KVM support.
+- Manage the fine grained traps for GCS instructions.
+- Manage PSTATE.EXLOCK when delivering exceptions to KVM guests.
+- Link to v13: https://lore.kernel.org/r/20241001-arm64-gcs-v13-0-222b78d87eee@kernel.org
+
+Changes in v13:
+- Rebase onto v6.12-rc1.
+- Allocate VM_HIGH_ARCH_6 since protection keys used all the existing
+  bits.
+- Implement mm_release() and free transparently allocated GCSs there.
+- Use bit 32 of AT_HWCAP for GCS due to AT_HWCAP2 being filled.
+- Since we now only set GCSCRE0_EL1 on change ensure that it is
+  initialised with GCSPR_EL0 accessible to EL0.
+- Fix OOM handling on thread copy.
+- Link to v12: https://lore.kernel.org/r/20240829-arm64-gcs-v12-0-42fec947436a@kernel.org
+
+Changes in v12:
+- Clarify and simplify the signal handling code so we work with the
+  register state.
+- When checking for write aborts to shadow stack pages ensure the fault
+  is a data abort.
+- Depend on !UPROBES.
+- Comment cleanups.
+- Link to v11: https://lore.kernel.org/r/20240822-arm64-gcs-v11-0-41b81947ecb5@kernel.org
+
+Changes in v11:
+- Remove the dependency on the addition of clone3() support for shadow
+  stacks, rebasing onto v6.11-rc3.
+- Make ID_AA64PFR1_EL1.GCS writeable in KVM.
+- Hide GCS registers when GCS is not enabled for KVM guests.
+- Require HCRX_EL2.GCSEn if booting at EL1.
+- Require that GCSCR_EL1 and GCSCRE0_EL1 be initialised regardless of
+  if we boot at EL2 or EL1.
+- Remove some stray use of bit 63 in signal cap tokens.
+- Warn if we see a GCS with VM_SHARED.
+- Remove rdundant check for VM_WRITE in fault handling.
+- Cleanups and clarifications in the ABI document.
+- Clean up and improve documentation of some sync placement.
+- Only set the EL0 GCS mode if it's actually changed.
+- Various minor fixes and tweaks.
+- Link to v10: https://lore.kernel.org/r/20240801-arm64-gcs-v10-0-699e2bd2190b@kernel.org
+
+Changes in v10:
+- Fix issues with THP.
+- Tighten up requirements for initialising GCSCR*.
+- Only generate GCS signal frames for threads using GCS.
+- Only context switch EL1 GCS registers if S1PIE is enabled.
+- Move context switch of GCSCRE0_EL1 to EL0 context switch.
+- Make GCS registers unconditionally visible to userspace.
+- Use FHU infrastructure.
+- Don't change writability of ID_AA64PFR1_EL1 for KVM.
+- Remove unused arguments from alloc_gcs().
+- Typo fixes.
+- Link to v9: https://lore.kernel.org/r/20240625-arm64-gcs-v9-0-0f634469b8f0@kernel.org
+
+Changes in v9:
+- Rebase onto v6.10-rc3.
+- Restructure and clarify memory management fault handling.
+- Fix up basic-gcs for the latest clone3() changes.
+- Convert to newly merged KVM ID register based feature configuration.
+- Fixes for NV traps.
+- Link to v8: https://lore.kernel.org/r/20240203-arm64-gcs-v8-0-c9fec77673ef@kernel.org
+
+Changes in v8:
+- Invalidate signal cap token on stack when consuming.
+- Typo and other trivial fixes.
+- Don't try to use process_vm_write() on GCS, it intentionally does not
+  work.
+- Fix leak of thread GCSs.
+- Rebase onto latest clone3() series.
+- Link to v7: https://lore.kernel.org/r/20231122-arm64-gcs-v7-0-201c483bd775@kernel.org
+
+Changes in v7:
+- Rebase onto v6.7-rc2 via the clone3() patch series.
+- Change the token used to cap the stack during signal handling to be
+  compatible with GCSPOPM.
+- Fix flags for new page types.
+- Fold in support for clone3().
+- Replace copy_to_user_gcs() with put_user_gcs().
+- Link to v6: https://lore.kernel.org/r/20231009-arm64-gcs-v6-0-78e55deaa4dd@kernel.org
+
+Changes in v6:
+- Rebase onto v6.6-rc3.
+- Add some more gcsb_dsync() barriers following spec clarifications.
+- Due to ongoing discussion around clone()/clone3() I've not updated
+  anything there, the behaviour is the same as on previous versions.
+- Link to v5: https://lore.kernel.org/r/20230822-arm64-gcs-v5-0-9ef181dd6324@kernel.org
+
+Changes in v5:
+- Don't map any permissions for user GCSs, we always use EL0 accessors
+  or use a separate mapping of the page.
+- Reduce the standard size of the GCS to RLIMIT_STACK/2.
+- Enforce a PAGE_SIZE alignment requirement on map_shadow_stack().
+- Clarifications and fixes to documentation.
+- More tests.
+- Link to v4: https://lore.kernel.org/r/20230807-arm64-gcs-v4-0-68cfa37f9069@kernel.org
+
+Changes in v4:
+- Implement flags for map_shadow_stack() allowing the cap and end of
+  stack marker to be enabled independently or not at all.
+- Relax size and alignment requirements for map_shadow_stack().
+- Add more blurb explaining the advantages of hardware enforcement.
+- Link to v3: https://lore.kernel.org/r/20230731-arm64-gcs-v3-0-cddf9f980d98@kernel.org
+
+Changes in v3:
+- Rebase onto v6.5-rc4.
+- Add a GCS barrier on context switch.
+- Add a GCS stress test.
+- Link to v2: https://lore.kernel.org/r/20230724-arm64-gcs-v2-0-dc2c1d44c2eb@kernel.org
+
+Changes in v2:
+- Rebase onto v6.5-rc3.
+- Rework prctl() interface to allow each bit to be locked independently.
+- map_shadow_stack() now places the cap token based on the size
+  requested by the caller not the actual space allocated.
+- Mode changes other than enable via ptrace are now supported.
+- Expand test coverage.
+- Various smaller fixes and adjustments.
+- Link to v1: https://lore.kernel.org/r/20230716-arm64-gcs-v1-0-bf567f93bba6@kernel.org
+
+---
+Mark Brown (14):
+      arm64/gcs: Ensure FGTs for EL1 GCS instructions are disabled
+      KVM: arm64: Fix FGT mapping for HFGITR_EL2.nGCSEPP
+      KVM: arm64: Manage GCS access and registers for guests
+      KVM: arm64: Ensure GCS memory effects are visible
+      KVM: arm64: Set PSTATE.EXLOCK when entering an exception
+      KVM: arm64: Validate GCS exception lock when emulating ERET
+      KVM: arm64: Forward GCS exceptions to nested guests
+      KVM: arm64: Enforce EXLOCK for SPSR and ELR
+      KVM: arm64: Allow GCS to be enabled for guests
+      KVM: selftests: arm64: Add GCS registers to get-reg-list
+      KVM: selftests: arm64: Add GCS to set_id_regs
+      KVM: selftests: arm64: Only restore SPSR_EL1 and ELR_EL1 if they change
+      tools: Synchronise the kernel esr.h
+      KVM: selftests: arm64: Add GCS EXLOCK exception emulation test
+
+ arch/arm64/include/asm/el2_setup.h                 |   5 +
+ arch/arm64/include/asm/kvm_emulate.h               |  11 +
+ arch/arm64/include/asm/kvm_host.h                  |  14 +
+ arch/arm64/include/asm/kvm_nested.h                |  39 +++
+ arch/arm64/include/asm/vncr_mapping.h              |   2 +
+ arch/arm64/include/uapi/asm/ptrace.h               |   1 +
+ arch/arm64/kvm/emulate-nested.c                    |   7 +-
+ arch/arm64/kvm/handle_exit.c                       |  18 +-
+ arch/arm64/kvm/hyp/exception.c                     |  37 +++
+ arch/arm64/kvm/hyp/include/hyp/sysreg-sr.h         |  31 ++
+ arch/arm64/kvm/hyp/nvhe/switch.c                   |  13 +
+ arch/arm64/kvm/hyp/vhe/switch.c                    |   4 +
+ arch/arm64/kvm/hyp/vhe/sysreg-sr.c                 |  24 ++
+ arch/arm64/kvm/nested.c                            |   3 +-
+ arch/arm64/kvm/sys_regs.c                          |  89 +++++-
+ tools/arch/arm64/include/asm/esr.h                 | 113 ++++++-
+ tools/testing/selftests/kvm/Makefile.kvm           |   1 +
+ tools/testing/selftests/kvm/arm64/gcs_exceptions.c | 346 +++++++++++++++++++++
+ tools/testing/selftests/kvm/arm64/get-reg-list.c   |  12 +
+ tools/testing/selftests/kvm/arm64/set_id_regs.c    |   1 +
+ tools/testing/selftests/kvm/lib/arm64/handlers.S   |  10 +
+ 21 files changed, 757 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Finalize guest-wide sysregs prior to
+[PATCH v2 1/2] KVM: arm64: Finalize guest-wide sysregs prior to
+Author: Mark Brown <broonie@kernel.org>
+
+In commit d82d09d5ba4b ("KVM: arm64: Don't skip per-vcpu NV
+initialisation") the NV register sanitisation was moved earlier in
+kvm_finalize_sys_regs() so that it runs for each vCPU rather than only
+once per guest. This means that for the first vCPU it runs prior to vGIC
+finalization, but the vGIC finalization updates the ID registers which
+the NV initialization uses so we may end up with a mismatch. For
+example, HFGRTR_EL2.ICC_IGRPENn_EL1 depends on GICv3 being enabled in
+ID_AA64PFR0_EL1.GIC so may be mistakenly marked or not marked as RES0.
+
+Split the initialization which runs once per guest into a separate
+function and run that before the per-vCPU initialisation for NV,
+renaming the per-vCPU function to make it clear that it does per-vCPU
+setup.
+
+Fixes: d82d09d5ba4b ("KVM: arm64: Don't skip per-vcpu NV initialisation")
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/kvm/arm.c      |  2 +-
+ arch/arm64/kvm/sys_regs.c | 40 ++++++++++++++++++++++++++--------------
+ arch/arm64/kvm/sys_regs.h |  2 +-
+ 3 files changed, 28 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: ID register finalisation fixes
+[PATCH v2 0/2] KVM: arm64: ID register finalisation fixes
+Author: Mark Brown <broonie@kernel.org>
+
+While looking at some feature enablement I noticed that there are some
+scenarios where we can end up with an inconsistently configured vCPU due
+to finalizing configuration based on ID registers before we have blocked
+writes to the ID registers. This series aims to clean up these issues.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v2:
+- Also replace the kvm_vm_has_ran_once() usage in kvm_set_vm_id_rg() and
+  kvm_vm_finalize_sys_regs() with kvm_id_regs_final().
+- Link to v1: https://patch.msgid.link/20260731-kvm-arm64-idreg-final-v1-0-3de2a5616dc6@kernel.org
+
+---
+Mark Brown (2):
+      KVM: arm64: Finalize guest-wide sysregs prior to per-vCPU sysregs
+      KVM: arm64: Block ID register changes after we rely on the values
+
+ arch/arm64/include/asm/kvm_host.h |  8 ++++++
+ arch/arm64/kvm/arm.c              |  2 +-
+ arch/arm64/kvm/sys_regs.c         | 57 ++++++++++++++++++++++++---------------
+ arch/arm64/kvm/sys_regs.h         |  2 +-
+ arch/arm64/kvm/vgic/vgic-init.c   |  6 ++---
+ 5 files changed, 48 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Allocate the shadow S2 MMUs individually
+[PATCH 1/2] KVM: arm64: nv: Allocate the shadow S2 MMUs individually
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+A vCPU in L2 caches its shadow S2 MMU in vcpu->arch.hw_mmu.
+kvm_vcpu_init_nested() can grow kvm->arch.nested_mmus while initialising
+another vCPU: it copies the MMUs, publishes the new allocation, and frees
+the old one.  It updates pgt->mmu back-pointers, but not hw_mmu, leaving
+the first vCPU with a pointer to freed memory.  hw_mmu cannot be fixed up
+the same way: a running vCPU reads it without holding mmu_lock.  Copying
+also duplicates the MMU's refcount, leaving the live copy permanently
+elevated.
+
+KASAN reports this as a slab-use-after-free in kvm_handle_guest_abort().
+
+Make nested_mmus a pointer table and allocate each MMU separately.
+Growing the table now moves only pointer entries, preserving cached
+hw_mmu pointers, pgt->mmu back-pointers, and each MMU's refcount.  Fully
+initialise new MMUs before publishing the table and its size under
+mmu_lock.
+
+The old failure path passed uninitialised entries to
+kvm_free_stage2_pgd(), which needs mmu->arch.  Use an allocation helper
+that returns only fully initialised MMUs, so error cleanup frees only
+completed objects; kvm_init_stage2_mmu() unwinds a failed initialisation.
+
+Fixes: 4f128f8e1aaa ("KVM: arm64: nv: Support multiple nested Stage-2 mmu structures")
+Cc: stable@vger.kernel.org
+Assisted-by: Claude:claude-fable-5
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+
+Tested on an arm64 KASAN kernel under QEMU TCG with EL2 emulation
+(-machine virt,virtualization=on -cpu max, kvm-arm.mode=nested): the
+selftest in patch 2 reports the slab-use-after-free without this patch
+and passes with it.
+
+ arch/arm64/include/asm/kvm_host.h |  6 +-
+ arch/arm64/kvm/nested.c           | 92 +++++++++++++++++++++----------
+ 2 files changed, 67 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Support for Arm CCA in KVM
+[PATCH v16 00/45] arm64: Support for Arm CCA in KVM
+Author: Steven Price <steven.price@arm.com>
+
+This series adds support for running protected VMs using KVM under the
+Arm Confidential Compute Architecture (CCA), including the firmware
+support needed to communicate with the Realm Management Monitor (RMM).
+
+For v15 the series was split into a 6-patch generic firmware/RMM series
+and a 37-patch KVM series. The two parts are combined again for v16, as
+requested to allow the complete stack to be tested by Sashiko as a
+single series.
+
+The first six patches add the generic firmware layer for talking to the
+RMM, as specified by version 2.0-bet2 of the RMM specification[0]. They
+provide the RMI definitions and wrappers, discover and configure the
+RMM, implement Stateful RMI Operations (SROs), and ensure that the RMM
+has GPT entries for host memory. The remaining patches add the KVM
+support needed to create, populate and run Realm VMs.
+
+Note that RMM v2.0 Beta 3 specification should be published soon. The
+changes introduced in that are minor and I expect this series to be
+largely compatible with the new spec.
+
+The RMM v2.0 specification introduces SROs, which allow the RMM to
+complete an operation over several SMC calls while requesting or
+returning memory to the host. This allows interrupts to be handled in
+the middle of an operation and lets the RMM dynamically allocate memory
+for internal tracking purposes. For example, RMI_REC_CREATE no longer
+needs auxiliary granules to be provided up front, and can instead
+request memory during the operation.
+
+The main changes since v15 are:
+
+ * Recombine the firmware/RMM and KVM portions into one series. The
+   Realm-specific RMI wrappers remain separate from the generic
+   firmware wrappers, in a new KVM patch.
+
+ * Rewrite Realm entry and exit handling to fit into the generic KVM
+   run loop. Work which cannot be performed in the entry path is now
+   completed through KVM requests, and MMIO, PSCI, RIPAS changes and
+   host calls are adapted to the new flow.
+
+ * Rewrite Realm timer support to use KVM's IRQ-ops infrastructure and
+   software resampling.
+
+ * Improve SRO cancellation and error handling. Ensure a cancelled
+   operation isn't treated as successful, wrapper return values can carry
+   negative Linux errors as well as RMI return values, and those errors
+   are propagated through the KVM users.
+
+ * Check that the RMM supports the host page size before configuring it,
+   and exclude firmware-reserved NOMAP memory when creating GPT entries.
+
+ * Expand the KVM_ARM_RMI_POPULATE documentation to make clear that Arm
+   CCA cannot preserve memory contents during an in-place
+   shared-to-private conversion.
+
+ * Allocate Realm parameters only while creating the Realm descriptor.
+
+ * Document the encoding of the arm64 VM types and require
+   ICH_HCR_EL2.TDIR before advertising or creating Realm VMs.
+
+This series is based on the guest_memfd in-place conversion v9 tree[1],
+which is itself based on kvm-x86/next. It is also available as a git
+repository:
+
+https://gitlab.arm.com/linux-arm/linux-cca cca-host/v16
+
+Work in progress changes for kvmtool are available from the git
+repository below:
+
+https://gitlab.arm.com/linux-arm/kvmtool-cca cca/v13
+
+The TF-RMM branch used for testing this series is available here:
+
+https://git.trustedfirmware.org/TF-RMM/tf-rmm.git topics/rmm-v2.0-poc_3
+
+There is a kvm-unit-test branch updated to support the attestation used
+in RMM v2.0 available here:
+
+https://gitlab.arm.com/linux-arm/kvm-unit-tests-cca cca/v4
+
+[0] https://developer.arm.com/documentation/den0137/2-0bet2/
+One bet2 change, which moves metadata out of the individual address
+range descriptors, has intentionally not been implemented because that
+part of the specification is expected to be reverted.
+
+[1] https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-v9
+
+Jean-Philippe Brucker (6):
+  KVM: arm64: CCA: Propagate breakpoint and watchpoint counts to
+    userspace
+  KVM: arm64: CCA: Set breakpoint parameters through SET_ONE_REG
+  KVM: arm64: CCA: Propagate max SVE vector length from the RMM
+  KVM: arm64: CCA: Configure max SVE vector length for a Realm
+  KVM: arm64: CCA: Provide register list for unfinalized RECs
+  KVM: arm64: CCA: Provide an accurate register list
+
+Joey Gouly (2):
+  KVM: arm64: CCA: Allow userspace to inject aborts
+  KVM: arm64: CCA: Support RSI_HOST_CALL
+
+Steven Price (34):
+  firmware: arm_rmm: Add SMC definitions for calling the RMM
+  firmware: arm_rmm: Add wrappers for direct RMI calls
+  firmware: arm_rmm: Check for RMI support at init
+  firmware: arm_rmm: Configure the RMM with the host's page size
+  firmware: arm_rmm: Add support for SRO
+  firmware: arm_rmm: Ensure the RMM has GPT entries for memory
+  arm64: mm: Handle Granule Protection Faults (GPFs)
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Add wrappers for realm related RMIs
+  KVM: arm64: CCA: Check for RMI support at KVM init
+  KVM: arm64: CCA: Check for LPA2 support
+  KVM: arm64: CCA: Define the user ABI
+  KVM: arm64: CCA: Add basic infrastructure for creating a realm
+  KVM: arm64: CCA: Allow passing the machine type in KVM creation
+  KVM: arm64: CCA: Tear down RTTs
+  KVM: arm64: CCA: Allocate and free RECs to match vCPUs
+  KVM: arm64: CCA: Support the VGIC in realms
+  KVM: arm64: CCA: Support timers in realm RECs
+  KVM: arm64: CCA: Handle realm enter/exit
+  KVM: arm64: CCA: Handle RMI_EXIT_RIPAS_CHANGE
+  KVM: arm64: CCA: Handle realm MMIO emulation
+  KVM: arm64: Expose support for private memory
+  KVM: arm64: CCA: Create the realm descriptor
+  KVM: arm64: CCA: Activate realms on first vCPU run
+  KVM: arm64: CCA: Allow populating initial contents
+  KVM: arm64: CCA: Set RIPAS of initial memslots
+  KVM: arm64: CCA: Support runtime faulting of memory
+  KVM: arm64: CCA: Handle realm vCPU load
+  KVM: arm64: CCA: Validate register access for Realm VMs
+  KVM: arm64: CCA: Handle Realm PSCI requests
+  KVM: arm64: WARN on injected undef exceptions
+  KVM: arm64: CCA: Prevent Device mappings for realms
+  KVM: arm64: CCA: Require ICH_HCR_EL2.TDIR for realms
+  KVM: arm64: CCA: Enable realms to be created
+
+Suzuki K Poulose (3):
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+  KVM: arm64: CCA: Allow checking SVE on VM instance
+
+ Documentation/virt/kvm/api.rst       |   70 +-
+ arch/arm64/Kconfig                   |    1 +
+ arch/arm64/include/asm/kvm_asm.h     |    2 +
+ arch/arm64/include/asm/kvm_emulate.h |   37 +
+ arch/arm64/include/asm/kvm_host.h    |   12 +-
+ arch/arm64/include/asm/kvm_pgtable.h |    6 +-
+ arch/arm64/include/asm/kvm_pkvm.h    |    2 +-
+ arch/arm64/include/asm/kvm_rmi.h     |  139 +++
+ arch/arm64/include/asm/rmi_cmds.h    |  465 ++++++++
+ arch/arm64/include/asm/virt.h        |    1 +
+ arch/arm64/kernel/cpufeature.c       |    1 +
+ arch/arm64/kvm/Kconfig               |    2 +
+ arch/arm64/kvm/Makefile              |    2 +-
+ arch/arm64/kvm/arch_timer.c          |   34 +-
+ arch/arm64/kvm/arm.c                 |  139 ++-
+ arch/arm64/kvm/guest.c               |   93 +-
+ arch/arm64/kvm/handle_exit.c         |   14 +
+ arch/arm64/kvm/hyp/pgtable.c         |    1 +
+ arch/arm64/kvm/hypercalls.c          |    4 +-
+ arch/arm64/kvm/inject_fault.c        |    5 +-
+ arch/arm64/kvm/mmio.c                |   16 +-
+ arch/arm64/kvm/mmu.c                 |  144 ++-
+ arch/arm64/kvm/reset.c               |   13 +-
+ arch/arm64/kvm/rmi-exit.c            |  178 +++
+ arch/arm64/kvm/rmi.c                 | 1561 ++++++++++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c            |   47 +-
+ arch/arm64/kvm/vgic/vgic-init.c      |    2 +-
+ arch/arm64/mm/fault.c                |   28 +-
+ drivers/firmware/Kconfig             |    1 +
+ drivers/firmware/Makefile            |    1 +
+ drivers/firmware/arm_rmm/Kconfig     |   26 +
+ drivers/firmware/arm_rmm/Makefile    |    2 +
+ drivers/firmware/arm_rmm/rmi.c       |  776 +++++++++++++
+ include/kvm/arm_psci.h               |    2 +
+ include/linux/arm-rmi-cmds.h         |  201 ++++
+ include/linux/arm-smccc-rmi.h        |  493 ++++++++
+ include/uapi/linux/kvm.h             |   20 +-
+ 37 files changed, 4446 insertions(+), 95 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Restore type-checking across the host/hyp hypercall boundary
+[PATCH v2 00/11] KVM: arm64: Restore type-checking across the host/hyp hypercall boundary
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - Dropped the explicit argument-count parameter from the hypercall
+    declarations and the handler definitions. The macro ladder derives it
+    from COUNT_ARGS() instead. (Marc, Will)
+  - Renamed the __hostva address space to __kern. (Vincent)
+  - Rebased onto 7.2-rc6.
+
+The SMCCC conversion of the host/hyp interface reduced every hypercall
+to a function number and a pile of registers: kvm_call_hyp_nvhe() never
+shows the compiler a callable, so the caller's arguments and the
+handler's DECLARE_REG() casts can disagree in type, count or order
+without a diagnostic. Reviewing a fix for exactly that class of bug,
+Marc wrote [2]:
+
+  "we lost all form of type-checking when everything was hastily
+   converted to SMCCC to avoid function pointers. Somehow, I feel that
+   the cure was worse than the disease.
+
+   I wish we'd reintroduce some form of compile-time checks, maybe by
+   having generated stubs?"
+
+and sketched the shape he preferred [3]: a generated nvhe_hvc_##f()
+stub that does the type-checking, driven by "some form of declarative
+IDL", with "both the caller and callee stubs ... totally generated".
+
+This series implements that, in plain preprocessor macros rather
+than an external generator, in the mold of the syscall wrappers.
+Each hypercall's signature is declared once, in kvm_hcall.h:
+kvm_call_hyp_nvhe() resolves to a typed nvhe_hvc_##f() stub
+generated from the declaration, and the hyp-main.c handlers
+unmarshal their arguments through glue that is type-checked
+against the same declaration. A mistyped or stale call, or a
+handler that drifts from its caller, now fails to compile. On top
+of that shared declaration, host-VA parameters gain a __kern
+sparse address space, so dereferencing one at EL2 without
+kern_hyp_va_host() translation is flagged by sparse. The address
+space is KVM-private and lives with the interface it annotates
+rather than in compiler_types.h, like x86's __seg_gs in asm/percpu.h.
+The deeper instances of that bug class, host VAs reached through
+struct fields after the boundary, are follow-up work.
+
+The declarations do not also generate the function-number enum or the
+dispatch table. The enum carries the availability-band markers that
+decide when each hypercall becomes reachable, and its base entry is
+consumed from assembly, so generating it would hide the banding. The
+remaining duplication cannot drift silently: a name mismatch between
+declaration, caller and handler fails to compile, and a missing
+dispatch-table entry is rejected at run time as
+SMCCC_RET_NOT_SUPPORTED.
+
+Along the way it turned out "make C=2" has never checked the nVHE
+objects at all: the custom %.nvhe.o rule reuses rule_cc_o_c, which
+only hooks the checker for C=1, and that only on a rebuild. Patches
+2-5 fix the hook and the handful of pre-existing sparse warnings it
+flushes out, so the checker lands clean. The libfdt objects under
+arch/arm64/kernel/pi/ have the same gap through the same rule, so
+patch 6 gives them the same one-line fix; it touches arm64 core
+rather than KVM, so it can go through either tree. Patch 1 is
+adjacent: trace_remote_event.h is not self-contained (it uses bool
+without including linux/types.h), which the nVHE include order had
+been silently working around; it can go through the tracing tree
+instead if preferred.
+
+The first six patches do not depend on the type-checking work (the
+tracing-header fix, the sparse cleanups, and the two C=2 hook fixes),
+so they could be taken on their own, ahead of the rest of the series
+if that is easier.
+
+The series is structured as follows:
+
+  01:     Make trace_remote_event.h self-contained.
+  02-04:  Fix the pre-existing sparse warnings in the nVHE code.
+  05:     Run the source checker on nVHE objects under C=2.
+  06:     Same for the libfdt objects under arch/arm64/kernel/pi/.
+  07:     Pass the host-VA hypercall arguments as pointers at EL2.
+  08:     Move the dispatch macros to a new kvm_hcall.h.
+  09:     Declare the hypercall signatures, type-check the callers.
+  10:     Generate the handler unmarshalling, type-check the handlers.
+  11:     Tag host-VA parameters __kern for sparse.
+
+The generated code is unchanged, checked by comparing the disassembly
+of every KVM object, function by function, against the base: the
+callers are identical apart from hypercall returns now being tested at
+their declared width and the stage-2 TLB-flush level argument now
+being sign-extended as it is loaded (an s8 passed as an int), and the
+handlers are instruction-for-instruction identical apart from
+flush_hyp_vcpu()/sync_hyp_vcpu() being inlined into their only
+caller. The extra argument that prompted the thread, a
+mistyped or reordered argument, and a handler that disagrees with its
+declaration all now fail to compile. checkpatch complains about the
+__KVM_HCALL_MAP() machinery, the (type, name) pair syntax and the
+generated signature typedefs, as it does about __MAP() in the syscall
+wrappers; the idiom cannot be parenthesized, and the typedef is what
+checks the handler against the declaration. Enforcing the
+__kern tag needs sparse v0.6.5-rc1 or later for __typeof_unqual__,
+as all sparse checking on current kernels does; no stable sparse
+release has it yet, so build from sparse.git (checker-valid.sh skips
+the check, with a warning, on anything older).
+
+Based on Linux 7.2-rc6 (075b74841bd00).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260720161343.1367007-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/86zf7po2n3.wl-maz@kernel.org/
+[3] https://lore.kernel.org/all/86wm2tnsd8.wl-maz@kernel.org/
+
+Fuad Tabba (11):
+  tracing: Include linux/types.h in trace_remote_event.h
+  KVM: arm64: nVHE: Share the stacktrace per-CPU declarations with EL2
+  KVM: arm64: nVHE: Declare the hyp event IDs before defining them
+  KVM: arm64: nVHE: Use NULL to reset the trace buffer backing pointer
+  KVM: arm64: nVHE: Run the source checker under C=2
+  arm64: pi: Run the source checker on the libfdt objects under C=2
+  KVM: arm64: nVHE: Pass host VA arguments as pointers
+  KVM: arm64: Move the host hypercall interface to its own header
+  KVM: arm64: Type-check hypercall arguments at the caller
+  KVM: arm64: nVHE: Check hypercall handlers against the declared ABI
+  KVM: arm64: Tag host-VA hypercall parameters __kern
+
+ arch/arm64/include/asm/kvm_hcall.h       | 258 +++++++++++++
+ arch/arm64/include/asm/kvm_host.h        |  48 +--
+ arch/arm64/include/asm/kvm_mmu.h         |  10 +
+ arch/arm64/include/asm/stacktrace/nvhe.h |  10 +-
+ arch/arm64/kernel/pi/Makefile            |   1 +
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h   |   7 +-
+ arch/arm64/kvm/hyp/include/nvhe/trace.h  |   5 +-
+ arch/arm64/kvm/hyp/nvhe/Makefile         |   1 +
+ arch/arm64/kvm/hyp/nvhe/events.c         |   2 +
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c       | 444 +++++++++++------------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c           |  12 +-
+ arch/arm64/kvm/hyp/nvhe/stacktrace.c     |   3 +-
+ arch/arm64/kvm/hyp/nvhe/trace.c          |   6 +-
+ arch/arm64/kvm/hyp_trace.c               |   2 +-
+ arch/arm64/kvm/stacktrace.c              |   3 -
+ include/linux/trace_remote_event.h       |   2 +
+ 16 files changed, 512 insertions(+), 302 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  tracing: Include linux/types.h in trace_remote_event.h
+[PATCH v2 01/11] tracing: Include linux/types.h in trace_remote_event.h
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+trace_remote_event.h uses bool without including linux/types.h, so a
+translation unit that includes it ahead of anything else that pulls
+types.h in fails to build, as with nvhe/trace.h at EL2.
+
+Fixes: 072529158e60 ("tracing: Add events to trace remotes")
+Acked-by: Steven Rostedt <rostedt@goodmis.org>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ include/linux/trace_remote_event.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Prefault host stage-2 entries on block split
+[PATCH 01/20] KVM: arm64: Prefault host stage-2 entries on block split
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+New:  Huge mapping support for protected VMs
+[PATCH 00/20] Huge mapping support for protected VMs
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+Currently, pKVM handles stage-2 mappings and ownership tracking strictly
+at the PAGE_SIZE level. This series extends pKVM to support PMD_SIZE
+block mappings, thereby enabling Transparent Huge Pages (THP) for
+protected guests. hugetlbfs is currently unsupported as it does not
+appear as swapbacked.
+
+Summary of changes:
+
+1. Enable host stage-2 block-level annotations:
+
+The host stage-2 being annotated with the GFN of the guest on the
+host->guest donation transitions, we allow block-level annotations to
+ensure the host stage-2 mapping size matches the guest stage-2.
+
+2. Expand ownership transition HVCs:
+
+Enable the ownership test to work with PMD_SIZE so we can test
+transitions supporting more than PAGE_SIZE.
+
+3. Implements the `PKVM_HYP_REQ_SPLIT` hypervisor request:
+
+Allows the hypervisor to ask the host to split a mapping. This ensures
+the guest s2, pkvm_mapping tree and host s2 are always using the same
+mapping size.
+
+4. Wires up THP support for pKVM guests.
+
+Keir Fraser (1):
+  KVM: arm64: Prefault host stage-2 entries on block split
+
+Vincent Donnefort (19):
+  KVM: arm64: Propagate host stage-2 annotated entries on block split
+  KVM: arm64: Allow block-level stage-2 annotation
+  KVM: arm64: Use block-level annotations when setting up the host
+    stage-2
+  KVM: arm64: Make pKVM ownership selftest an HVC
+  KVM: arm64: Add a range to __pkvm_host_share/unshare_hyp()
+  KVM: arm64: Add a range to __pkvm_host_donate_guest()
+  KVM: arm64: Add a range to __pkvm_host_reclaim_page_guest()
+  KVM: arm64: Add a range to __pkvm_guest_share_host()
+  KVM: arm64: Add a range to __pkvm_guest_unshare_host()
+  KVM: arm64: Add a range to pKVM ownership selftest
+  KVM: arm64: Handle huge mappings in
+    __pkvm_host_force_reclaim_page_guest()
+  KVM: arm64: Handle huge mappings in __pkvm_vcpu_in_poison_fault()
+  KVM: arm64: pkvm: Warn on guest stage-2 block collapse
+  KVM: arm64: Add pkvm_hyp_req infrastructure
+  KVM: arm64: Add __pkvm_host_split_guest HVC
+  KVM: arm64: Extend pKVM page ownership selftests to cover guest block
+    split
+  KVM: arm64: Add PKVM_HYP_REQ_SPLIT
+  KVM: arm64: Raise PKVM_HYP_REQ_SPLIT on guest to host sharing
+  KVM: arm64: Stage-2 huge mappings for protected VMs
+
+ arch/arm64/include/asm/kvm_asm.h              |  12 +-
+ arch/arm64/include/asm/kvm_host.h             |  19 +
+ arch/arm64/include/asm/kvm_pgtable.h          |   3 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |  21 +-
+ arch/arm64/kvm/arm.c                          |   2 +
+ arch/arm64/kvm/handle_exit.c                  |   3 +
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |  25 +-
+ arch/arm64/kvm/hyp/include/nvhe/memory.h      |   5 +
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h        |   6 +-
+ arch/arm64/kvm/hyp/nvhe/ffa.c                 |  12 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |  47 +-
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 545 ++++++++++++------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |  59 +-
+ arch/arm64/kvm/hyp/nvhe/setup.c               | 152 +++--
+ arch/arm64/kvm/hyp/pgtable.c                  | 113 +++-
+ arch/arm64/kvm/mmu.c                          |  72 ++-
+ arch/arm64/kvm/pkvm.c                         | 247 +++++++-
+ arch/arm64/kvm/trace_pkvm.h                   |  44 ++
+ 18 files changed, 1036 insertions(+), 351 deletions(-)
+
+----------------------------------------------------------------------
+
