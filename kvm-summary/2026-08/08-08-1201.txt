@@ -1,0 +1,2519 @@
+
+On /root/mail/repo:
+From 32846f744 to c4412fbf0
+KVM mailing list update from 32846f744 to c4412fbf0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     61 google.com
+     50 arm.com
+     30 linux.ibm.com
+     12 gmail.com
+      2 kernel.org
+      1 kylinos.cn
+      1 amd.com
+
+Top 15 contributors (Based on Email Body)
+
+     50  Sascha Bischoff <Sascha.Bischoff@arm.com>
+     21  Ackerley Tng <ackerleytng@google.com>
+     19  Sean Christopherson <seanjc@google.com>
+     18  Anthony Krowiak <akrowiak@linux.ibm.com>
+     17  Samiullah Khawaja <skhawaja@google.com>
+      7  Christoph Schlameuss <schlameuss@linux.ibm.com>
+      5  Amit Machhiwal <amachhiw@linux.ibm.com>
+      3  Yu Zhang <yuz08559@gmail.com>
+      3  "Yuhang.chen" <yhchen312@gmail.com>
+      2  YiFei Zhu <zhuyifei@google.com>
+      2  sai madhu <suryasaimadhu369@gmail.com>
+      2  Pranjal Shrivastava <praan@google.com>
+      1  zengchi <zengchi@kylinos.cn>
+      1  Michael Roth <michael.roth@amd.com>
+      1  Jinu Kim <kimjw04271234@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  iommu: Add live update state preservation
+[PATCH v4 00/18] iommu: Add live update state preservation
+Author: Samiullah Khawaja <skhawaja@google.com>
+
+Hi,
+
+This patch series introduces a mechanism for IOMMU state preservation
+across live update, including the Intel VT-d driver support
+implementation.
+
+Please take a look at the following LWN article to learn about KHO and
+Live Update Orchestrator:
+
+https://lwn.net/Articles/1033364/
+
+This work depends on,
+
+- VFIO CDEV preservation series (v4):
+  https://lore.kernel.org/kvm/20260511234802.2280368-1-vipinsh@google.com/
+- PCI device preservation series (v8):
+  https://lore.kernel.org/all/20260522202410.3104264-1-dmatlack@google.com/
+- LUO file dependency preservation series (v2):
+  https://lore.kernel.org/all/20260723202912.1467112-1-skhawaja@google.com/
+
+The kernel tree with all dependencies is uploaded to the following
+Github location:
+
+https://github.com/samikhawaja/linux/tree/iommu/phase1-v4
+
+The series is targeting IOMMU tree.
+
+Overall Goals:
+
+The goal of this effort is to preserve the IOMMU domains, managed by
+iommufd, attached to devices preserved through VFIO cdev. This allows
+DMA mappings and IOMMU context of a device assigned to a VM to be
+maintained across a kexec live update.
+
+This is achieved by preserving IOMMU page tables using Generic Page
+Table support, IOMMU root table and the relevant context entries across
+live update.
+
+The functionality in the previously sent RFC is split into two phases
+and this series implements the Phase 1. Phase 1 implements the following
+functionality:
+
+  - Foundational work in IOMMU core and VT-d driver to preserve and
+    restore IOMMU translation units, IOMMU domains and devices across
+    liveupdate kexec.
+  - The preservation is triggered by preserving vfio cdev FD and bound
+    iommufd FD into a live update session.
+  - An HWPT (and backing IOMMU domain) is only preserved if it contains
+    only file type DMA mappings. Also the memfd being used for such
+    mapping should be SEAL SEAL'd during mapping.
+  - During live update boot, the state of preserved Intel VT-d, IOMMU
+    domain and devices is restored.
+  - The restored IOMMU domains are reattached to the preserved devices
+    during early boot.
+  - The DMA ownership of restored devices is also claimed during
+    live update boot. This means that any attempt to bind a non-vfio
+    drivers with them or binding a new iommufd with them will fail.
+
+Architectural Overview:
+
+The target architecture for IOMMU state preservation across a live
+update involves coordination between the Live Update Orchestrator,
+iommufd, and the IOMMU drivers.
+
+The core design uses the Live Update Orchestrator's file descriptor
+preservation mechanism to preserve iommufd file descriptors. The user
+marks the iommufd HWPTs for preservation using a new ioctl added in this
+series. Once done, the preservation of iommufd inside an LUO session is
+triggered using LUO ioctls. During preservation, the LUO preserve
+callback for an iommufd walks through the HWPTs it manages to identify
+the ones that need to be preserved. Once identified, a new IOMMU core
+API is used to preserve the iommu domain. The IOMMU core uses Generic
+Page Table to preserve the page tables of these domains. The domains are
+then marked as preserved.
+
+When the user triggers the preservation of a VFIO cdev that is attached
+to an iommufd that is preserved, the device attachment state of that
+VFIO cdev is also preserved using an API exported by iommufd. IOMMUFD
+fetches all the information that needs to be preserved and calls the
+IOMMU core API to preserve the device state. The IOMMU core also
+preserves state of IOMMU that is associated with this device.
+
+The IOMMU core has LUO FLB registered with the iommufd LUO file handler
+so the preserved iommu domain and iommu hardware unit state is available
+during boot for early restore in the next kernel.
+
+During boot the driver fetches the preserved state from the IOMMU core
+and restores the state of preserved IOMMUs. Later when IOMMU core goes
+through the devices and probes them, the iommu domains of preserved
+devices are restored and the preserved devices are attached to them.
+During attachment, the DMA ownership of these devices is also claimed.
+
+Tested:
+
+The new iommufd_liveupdate_kexec_test selftest was used to verify the
+preservation logic. It was tested using QEMU with virtual IOMMU (VT-d)
+support with virtio pcie device bound to the vfio-pci driver.
+
+Also Tested on an Intel machine with DSA device bound to vfio-pci
+driver.
+
+Following steps were followed for verification,
+
+- Bind the test device with vfio-pci driver
+- Run test on the machine by running
+
+  ./iommufd_liveupdate_kexec_test <vfio-cdev-path>
+
+- Trigger Kexec.
+- After reboot, try binding the device to a non-vfio pci driver,
+
+  echo <device bdf> > /sys/class/bus/drivers/pci-pf-stub/bind
+
+- This should fail with "Device or resource busy".
+- Bind the device with vfio-pci driver and run the test again.
+
+  ./iommufd_liveupdate_kexec_test <vfio-cdev-path> --stage 2
+
+- Test verifies that the device cannot be bound with a new iommufd and
+  the session cannot be finished.
+
+Future and in progress work:
+
+- Phase 2 with IOMMUFD restore to reclaim the preserved vfio cdev and
+  restore the preserved HWPTs.
+- Full support for PASID preservation.
+- Nested IOMMU preservation.
+- Extend support to other IOMMU architectures (e.g., AMD-Vi).
+- DMA Alloc preservation support buddy allocator only.
+  https://lore.kernel.org/all/20260708234854.4044652-1-skhawaja@google.com/
+- Arm sMMUv3 preservation support
+  https://github.com/pran005/linux/tree/wip-arm-smmu-lu
+
+Roadmap:
+
+  The doc below gives a break down of the overall work into Patch series
+  needed to complete Liveupdate feature from IOMMU perspective:
+  https://docs.google.com/document/d/1enDn-uPE9U77U-xHEnzn6HHGKiePSAtMIP8EDU3NO0M
+
+High-Level Sequence Flow:
+
+The following diagrams illustrate the high-level interactions during the
+preservation phase. Note that function names in the diagram are kept
+abbreviated to save horizontal space.
+
+Preserve:
+
+Before live update the PREPARE event of Liveupdate Orchestrator invokes
+callbacks of the registered file and subsystem handlers.
+
+ Userspace (VMM) | LUO Core |    iommufd    |  IOMMU Core   | IOMMU Driver
+-----------------|----------|---------------|---------------|-------------
+                 |          |               |               |
+MARK_HWPT        |          |               |               |
+--------------------------->                |               |
+                 |          | Mark HWPT for |               |
+                 |          | preservation  |               |
+                 |          |               |               |
+PRESERVE         |          |               |               |
+ iommufd_fd      |          |               |               |
+----------------->          |               |               |
+                 | preserve |               |               |
+                 |---------->               |               |
+                 |          | For each HWPT |               |
+                 |          |-------------->                |
+                 |          |               | domain_presrv |
+                 |          |               |-------------->
+                 |          |               |               | gpt(preserve)
+                 |          |               |<--------------|
+                 |          |<--------------|               |
+                 |<---------|               |               |
+                 |          |               |               |
+...              |          |               |               |
+                 |          |               |               |
+PRESERVE,        |          |               |               |
+ vfio_cdev_fd    |          |               |               |
+----------------->          |               |               |
+                 | preserve |               |               |
+                 |---------->               |               |
+                 |          |               |               |
+                 |          | iommu_preserv |               |
+                 |          | _device()     |               |
+                 |          |-------------->                |
+                 |          |               | preserve      |
+                 |          |               | (iommu_hw)    |
+                 |          |               |-------------->
+                 |          |               |               | preserve(root)
+                 |          |               |<--------------|
+                 |          |               |               |
+                 |          |               | preserve      |
+                 |          |               | _device(dev)  |
+                 |          |               |-------------->
+                 |          |               |               | preserve(pasid)
+                 |          |               |<--------------|
+                 |          |<--------------|               |
+                 |<---------|               |               |
+
+Restore:
+
+After a live update, the preserved state is restored during boot.
+
+ Userspace (VMM) | LUO Core |    iommufd    |  IOMMU Core   | IOMMU Driver
+-----------------|----------|---------------|---------------|-------------
+                 |          |               |               |
+                 |          |               |               | Restore
+                 |          |               |               | Root, DIDs
+                 |          |               |               |
+                 |          |               |               | Register
+                 |          |               | probe devices |
+                 |          |               |               |
+                 |          |               | restore       |
+                 |          |               | domain        |
+                 |          |               |-------------->
+                 |          |               |               | restore
+                 |          |               | reattach      |
+                 |          |               | domain        |
+                 |          |               |-------------->
+                 |          |               |               |
+
+
+Looking forward to your feedback on this.
+
+Changelog:
+
+v4:
+  - Add kdocs.
+  - Add 64BIT Kconfig dependency.
+  - Add FLB version into the serialized state.
+  - Replace bitfield in KHO state with u8 and padding.
+  - Add fallback stub for intel_iommu_unpreserve_device.
+  - Reject real DMA subdevices with -EOPNOTSUPP.
+  - Add VTD_PRESERVED_BITMAP_LONGS macro for context tables.
+  - Disable PRE in preserved context entries during shutdown.
+  - Unify DMAR free and disable into release_dmar_iommu.
+  - Move Intel IOMMU domain reattach logic into separate function and
+    file.
+  - Rename intel_pasid_try_restore_table to intel_pasid_restore_table.
+  - Use __aligned_u64 for hwpt_token in UAPI struct.
+  - Reject PRI usage in HWPT preservation.
+  - Remove liveupdate_preserve bitfield from hwpt_paging.
+  - Convert liveupdate_preserved bitfield to bool.
+  - Replace group-level boolean with per-device flag and group refcount.
+  - Check device_array in pasid attachment before preserving.
+  - Collect reviews and acks.
+
+v3:
+  - Add Reviewed-by tags.
+  - Export memfd_get_seals for iommufd module usage.
+  - Move iommu_flb_obj to liveupdate.c.
+  - Replace bitfields with u32 flags.
+  - Move callbacks from iommu_domain_ops to pt_iommu_ops.
+  - Fix DYNAMIC_TOP support by saving range.max_vasz_lg2.
+  - Replace BUG_ON with iommu_restore_pages helper.
+  - Update to use IOMMU_SER_FLAG_INCOMING and IOMMU_SER_FLAG_DELETED.
+  - Split out shutdown context-entry clearing logic into separate patch.
+  - Add context_tables_bitmap to track and preserve only active tables.
+  - Skip iommu_set_root_entry if restored.
+  - Fix array iteration bug by splitting macros.
+  - Move restore logic into caller instead of iommu_alloc_root_entry.
+  - Add robust IS_ERR checks for iommu_ser.
+  - Add safety checks for array traversal and domain physical address.
+  - Remove pasid_cleanup_preserved_table.
+  - Update handle_pd to dynamically iterate over valid PDE entries.
+  - Link liveupdate.o into iommufd.o to resolve modpost errors.
+  - Refactor liveupdate_immutable into nr_preserved_domains counter.
+  - Save actual number of preserved HWPTs to TOCTOU.
+
+v2:
+  - Move IOMMU_LIVEUPDATE under IOMMU_SUPPORT dependencies.
+  - Update copyright year to 2026.
+  - Add Kernel-doc for FLB struct.
+  - Add an ASCII diagram for FLB memory layout.
+  - Change compatibility to iommu-liveupdate-v1.
+  - Rename structs to more reasonable names.
+  - Add comment explaining the rationale for BUG_ON during restoration.
+  - Rename 'did' to 'attachment_id'.
+  - Use phys_to_virt() and virt_to_phys() consistently.
+  - Create separate functions for FLB unpreserve and folio_put.
+  - Return the virtual address from the restore_array function.
+  - Free serialized state on finish without checking for NULL.
+  - Rename 'iommu-lu.h' to 'iommu-liveupdate.h'.
+  - Suffix max with _per_page (iommu_max_objs_per_page).
+  - Move unused helpers to the patches that actually need them.
+  - Rename reserve_obj_ser to alloc_object_ser.
+  - Only allow vfio drivers to use preserve_device APIs.
+  - Move ops declarations under CONFIG_IOMMU_LIVEUPDATE guards.
+  - Add lockdep_assert_held() validations in locked functions.
+  - Rename device_ser_match to match_device_ser.
+  - Create iommu_folio_update_stats(folio, nr_pages) helper.
+  - Explicitly set incoherent flag to false for restored pages.
+  - Do not use unpreserve_pages() function for error handling.
+  - Preserve vasz and sign_extend of a domain.
+  - Make the restored domain free-only.
+  - Ignore error of pt_descend() during restore as it should never fail (dead code).
+  - On domain restore, clear all features except the preserved.
+  - Add a KUnit test to verify that a restored domain can be freed with zeroed features.
+  - Bypass paging_domain_compatible() checks for restored domains.
+  - Use an explicit if-check for preserved state to clear the context entries.
+  - Rename clean_context to clear_unpreserved_context_entries.
+  - Use "DMAR:" in pr_fmt instead of "iommu:".
+  - Pass ROOT_ENTRY_NR directly into unpreserve functions.
+  - Remove IOMMU lock during preserve as not needed.
+  - Iterate all devices when clearing context entries instead of just PCIe devices.
+  - Do not populate empty unpreserve_device callbacks if not needed.
+  - Rename unpreserve_iommu_context to unpreserve_iommu_context_table.
+  - Check the associated IOMMU in _restore_used_domain_id.
+  - Add a comment that MMIO base is used as token for identifying IOMMU.
+  - Add a comment in _restore_used_domain_ids that IDA allocation can safely fail.
+  - Mark IOMMU state restored after restoring to prevent double restoration and UAF.
+  - Fix domain leak in iommu_restore_domain error path.
+  - Check DID start range before allocation.
+  - Add lockdep_assert_held in group domain restoration path.
+  - Add WARN_ON to catch unexpected group ownership during device probe.
+  - Add comment explaining group ownership setup and reclaim during device probe.
+  - Cleanup the full PASID directory instead of only 4K.
+  - Rename ioctl to IOMMU_HWPT_LIVEUPDATE_MARK_PRESERVE.
+  - Use XArray to save the HWPT liveupdate marks.
+  - Add the ioctl struct to ucmd_buffer.
+  - Make the ioctl 64-bit aligned (struct padding).
+  - Add UAPI documentation stating that HWPTs cannot be unmarked.
+  - Add UAPI documentation stating that only file-based mappings are allowed.
+  - Rename structs to use "liveupdate" instead of "lu".
+  - Rework HWPT preservation to prevent TOCTOU and mutex lock inside XA spin lock.
+  - Check preserved pages at the IOPT level, not the HWPT level.
+  - Return -EOPNOTSUPP if there are PASID attachments.
+  - Do not allow detach (or attach) once the device is preserved.
+  - Add MODULE_IMPORT_NS("IOMMUFD") in vfio_pci_liveupdate.c.
+  - Make token u64.
+  - Modify selftest to use live update kexec_test pattern.
+  - Use helper macros in test instead of repeating ksft_assert
+  - Rename setup_cdev to open_cdev.
+  - Define constants (tokens) as u64 to avoid ABI warnings.
+
+v3: https://lore.kernel.org/all/20260614233728.2212104-1-skhawaja@google.com/
+
+v2: https://lore.kernel.org/all/20260427175633.1978233-1-skhawaja@google.com/
+
+v1: https://lore.kernel.org/all/20260203220948.2176157-1-skhawaja@google.com/
+
+rfcv2: https://lore.kernel.org/all/20251202230303.1017519-1-skhawaja@google.com/
+
+rfcv1: https://lore.kernel.org/all/20250928190624.3735830-1-skhawaja@google.com/
+
+Samiullah Khawaja (16):
+  memfd: export memfd_get_seals()
+  iommu: Implement IOMMU Live update FLB callbacks
+  iommu/pages: Add APIs to preserve/unpreserve/restore iommu pages
+  iommupt: Implement preserve/unpreserve/restore callbacks
+  iommu: Implement IOMMU domain preservation
+  iommu: Implement device and IOMMU HW preservation
+  iommu/vt-d: Implement device and iommu preserve/unpreserve ops
+  iommu/vt-d: Clear unpreserved context entries during shutdown
+  iommu: Add APIs to get iommu and device preserved state
+  iommu/vt-d: Restore IOMMU state and reclaimed domain ids
+  iommu: Restore and reattach preserved domains to devices
+  iommu/vt-d: Handle reattach of the restored domain
+  iommu/vt-d: Preserve PASID table of preserved device
+  iommufd: Add APIs to preserve/unpreserve a vfio cdev
+  vfio/pci: Preserve the iommufd state of the vfio cdev
+  iommufd/selftest: Add test to verify iommufd preservation
+
+YiFei Zhu (2):
+  iommufd: Implement ioctl to mark HWPT for preservation
+  iommufd: Persist iommu hardware pagetables for live update
+
+ MAINTAINERS                                   |  19 +
+ drivers/iommu/Kconfig                         |  12 +
+ drivers/iommu/Makefile                        |   1 +
+ drivers/iommu/generic_pt/iommu_pt.h           | 152 ++++
+ drivers/iommu/generic_pt/kunit_iommu_pt.h     |  30 +
+ drivers/iommu/intel/Makefile                  |   1 +
+ drivers/iommu/intel/iommu.c                   | 144 +--
+ drivers/iommu/intel/iommu.h                   |  57 ++
+ drivers/iommu/intel/liveupdate.c              | 679 ++++++++++++++
+ drivers/iommu/intel/pasid.c                   |  10 +-
+ drivers/iommu/intel/pasid.h                   |   8 +
+ drivers/iommu/iommu-pages.c                   | 108 ++-
+ drivers/iommu/iommu-pages.h                   |  30 +
+ drivers/iommu/iommu.c                         | 107 +++
+ drivers/iommu/iommufd/Makefile                |   2 +
+ drivers/iommu/iommufd/device.c                | 144 +++
+ drivers/iommu/iommufd/io_pagetable.c          |  11 +
+ drivers/iommu/iommufd/io_pagetable.h          |   1 +
+ drivers/iommu/iommufd/iommufd_private.h       |  49 +
+ drivers/iommu/iommufd/liveupdate.c            | 375 ++++++++
+ drivers/iommu/iommufd/main.c                  |  19 +-
+ drivers/iommu/iommufd/pages.c                 |  11 +
+ drivers/iommu/liveupdate.c                    | 840 ++++++++++++++++++
+ drivers/vfio/device_cdev.c                    |  10 +
+ drivers/vfio/pci/vfio_pci_liveupdate.c        |  28 +-
+ include/linux/generic_pt/iommu.h              |  30 +
+ include/linux/iommu-liveupdate.h              | 209 +++++
+ include/linux/iommu.h                         |  47 +
+ include/linux/iommufd.h                       |  31 +
+ include/linux/kho/abi/iommu.h                 | 248 ++++++
+ include/linux/kho/abi/iommufd.h               |  51 ++
+ include/uapi/linux/iommufd.h                  |  26 +
+ mm/memfd.c                                    |   8 +
+ tools/testing/selftests/iommu/Makefile        |  12 +
+ .../iommu/iommufd_liveupdate_kexec_test.c     | 241 +++++
+ 35 files changed, 3692 insertions(+), 59 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  memfd: export memfd_get_seals()
+[PATCH v4 01/18] memfd: export memfd_get_seals()
+Author: Samiullah Khawaja <skhawaja@google.com>
+
+memfd_get_seals() is used by iommufd during preservation to make sure
+that he preserved memfd was sealed when it was mapped into iommufd.
+Since iommufd can be built as a module, export memfd_get_seals() to
+avoid linker error.
+
+Cc: Hugh Dickins <hughd@google.com>
+Cc: Baolin Wang <baolin.wang@linux.alibaba.com>
+Cc: Andrew Morton <akpm@linux-foundation.org>
+Cc: linux-mm@kvack.org
+
+Acked-by: Pratyush Yadav (Google) <pratyush@kernel.org>
+Reviewed-by: Ankit Soni <Ankit.Soni@amd.com>
+Signed-off-by: Samiullah Khawaja <skhawaja@google.com>
+---
+ mm/memfd.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  s390/vfio-ap: Fix control domain removal in vfio_ap_mdev_cfg_remove
+[PATCH] s390/vfio-ap: Fix control domain removal in vfio_ap_mdev_cfg_remove
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The vfio_ap_config_remove function uses the bitmap_andnot function to clear
+bits from the matrix_mdev->matrix.adm (specifies the control domains
+assigned to the mdev). This prevents the explicitly unplugged control
+domains from being removed the KVM guest. The bitmap_and function is used
+instead.
+
+Fixes: eeb386aeb5b7c ("s390/vfio-ap: handle config changed and scan complete notification")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/vfio-ap: Provide function to get the number of queues assigned to mdev
+[PATCH v7 01/15] s390/vfio-ap: Provide function to get the number of queues assigned to mdev
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+Provides a function that returns the number of queues that are or will be
+passed through to a guest when the mdev is attached to a guest.
+
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c     | 8 ++++++++
+ drivers/s390/crypto/vfio_ap_private.h | 2 ++
+ 2 files changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+New:   s390/vfio-ap: Add live guest migration support
+[PATCH v7 00/15]  s390/vfio-ap: Add live guest migration support
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+This patch series implements live guest migration support for KVM guests
+with s390 AP (Adjunct Processor) devices passed through via the VFIO
+mediated device framework.
+
+Background
+~~~~~~~~~~
+
+The vfio-ap device driver differs from typical VFIO device drivers in that
+it does not virtualize a physical device. Instead, it manages AP
+configuration metadata identifying the AP adapters, domains, and control
+domains to which a guest will be granted access. These AP resources are
+configured by assigning them to a vfio-ap mediated device via its sysfs
+assignment interfaces. When the fd for the VFIO device is opened by
+userspace, the vfio_ap device driver sets the guest's AP configuration
+from the metadata stored with the mediated device. As such, the AP devices
+are not accessed directly through the vfio_ap driver, so the driver has no
+internal AP device state to migrate. What it does migrate is the AP
+configuration metadata of the source guest.
+
+Implementation Approach
+~~~~~~~~~~~~~~~~~~~~~~~
+
+This series implements the VFIO migration protocol using the STOP_COPY
+migration flow. The key aspects are:
+
+1. On transition of the migration state from STOP to STOP_COPY
+   - The vfio_ap device driver creates a filestream for userspace to use to
+     read the guest's AP configuration from the mdev
+
+2. During the STOP_COPY phase
+   - Userspace uses the filestream created in #1 to read the source guest's
+     AP configuration
+   - The vfio_ap device driver copies the source guest's AP configuration
+     information to userspace
+
+3. On transition of the migration state from STOP to RESUMING
+   - The vfio_ap device driver creates a filestream for userspace to use to
+     write the source guest's AP configuration information so it can be
+     restored to the mdev on the destination host.
+
+4. During the RESUMING phase
+   - Userspace uses the filestream created in #3 to send the source guest's
+     AP configuration information to the vfio_ap device driver on the
+     destination host.
+   - The vfio_ap device driver first verifies the source guest's AP
+     configuration is compatible with the destination host's.
+   - The driver restores AP configuration to the mdev on the destination
+     host which automatically hot plugs the AP resources identified
+     therein.
+
+5. Documentation
+   - Add live guest migration chapter to vfio-ap.rst
+
+Compatibility Validation
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+The series includes comprehensive validation to ensure source and
+destination AP configurations are compatible. For each queue, the following
+characteristics must match:
+
+- AP type (target must be same or newer than source)
+- Installed facilities (APSC, APQKM, AP4KC, SLCF)
+- Operating mode (CCA, Accelerator, XCP)
+- APXA facility setting
+- Classification (native vs stateless functions)
+- Queue usability (binding/associated state)
+
+When incompatibilities are detected, migration fails with detailed error
+messages identifying the specific queue and characteristic that caused
+the failure.
+
+Configuration Management
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+This implementation does not prevent configuration changes during
+migration. Configuration stability is an orchestration-layer
+responsibility, consistent with other VFIO device types. The driver's
+role is to validate configurations and provide clear diagnostics when
+incompatibilities are detected, enabling orchestration tools to implement
+appropriate policies.
+
+QEMU patches exploiting this series:
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+https://lore.kernel.org/qemu-devel/20260409141352.997844-1-akrowiak@linux.ibm.com/
+
+Change log v6 => v7:
+~~~~~~~~~~~~~~~~~~~
+Patch 2: Data structures for facilitating vfio device migration
+* Added 'magic' and 'version'fields to struct vfio_ap_config to
+  handle ABI stability across host migrations.
+  
+Patch 6: Transition device migration state from STOP to STOP_COPY
+* Refactored stop_copy file release functions
+
+Patch 7: File ops called to save the vfio device migration state
+* Drop mdevs_lock prior to calling the vfio_ap_store_queue_info
+  function and re-acquire it afterward. The vfio_ap_store_queue_info
+  executes the PQAP(TAPQ) instruction which could consume a 
+  lot of time if there are an inordinate number of queues for which
+  info needs to be retrieved. 
+
+Patch 8: Transition device migration state from STOP to RESUMING
+* Refactored resuming file release functions
+
+Patch 9: Add method to set a new guest AP configuration
+* Removed !q->matrix_mdev check in collect_queues_by_apid function
+  as it is not necessary because all callers pass a matrix_mdev
+  obtained from container context and will never be NULL.
+
+Patch 10: File ops called to resume the vfio device migration
+* Replaced pr_err calls with pr_err_ratelimited calls in 
+  report_qinfo_incompatibilities() function along with all of the functions
+  it calls to prevent the CPU stalls or a denial of service attacks.
+* Added a scratch buffer that must be filled with vfio_ap_config header
+  information (the new 'magic' and 'version' fields (see Patch 2 above)
+  as well as the 'num_queues' field before allocating a vfio_ap_config
+  object.
+* Added write_in_progress flag to the vfio_ap_migration_data structure to
+  reject concurrent write operations. This flag is checked when the
+  vfio_ap_resuming_write() function is called and if already set, the
+  function will return -EBUSY; otherwise, it will be set.
+
+Patch 13:Callback to get the size of data to be migrated during guest
+         migration
+* modified vfio_ap_get_data_size function to call the vfio_ap_config_size
+  function to set *stop_copy_length
+* Use struct_size_t function to calculate config size
+
+Patch 14: Add 'migratable' feature to sysfs 'features' attribute
+* Do not display 'migratable' feature when the system is an SE guest;
+  live guest migration is not supported for such guests.
+
+
+Anthony Krowiak (15):
+  s390/vfio-ap: Provide function to get the number of queues assigned to
+    mdev
+  s390/vfio-ap: Data structures for facilitating vfio device migration
+  s390/vfio-ap: Functions to initialize/release vfio device migration
+    data
+  s390/vfio-ap: Reset migration state in VFIO_DEVICE_RESET ioctl handler
+  s390/vfio-ap: Callback to get/set vfio device mig state during guest
+    migration
+  s390/vfio-ap: Transition guest migration state from STOP to STOP_COPY
+  s390/vfio-ap: File ops called to save the vfio device migration state
+  s390/vfio-ap: Transition device migration state from STOP to RESUMING
+  s390/vfio-ap: Add method to set a new guest AP configuration
+  s390/vfio-ap: File ops called to resume the vfio device migration
+  s390/vfio-ap: Transition device migration state to STOP
+  s390/vfio-ap: Transition device migration state from STOP to RUNNING
+    and vice versa
+  s390/vfio-ap: Callback to get the size of data to be migrated during
+    guest migration
+  s390/vfio-ap: Add 'migratable' feature to sysfs 'features' attribute
+  s390/vfio-ap: Add live guest migration chapter to vfio-ap.rst
+
+ Documentation/arch/s390/vfio-ap.rst     |  616 ++++++--
+ drivers/s390/crypto/Makefile            |    2 +-
+ drivers/s390/crypto/vfio_ap_drv.c       |   14 +-
+ drivers/s390/crypto/vfio_ap_migration.c | 1762 +++++++++++++++++++++++
+ drivers/s390/crypto/vfio_ap_ops.c       |  297 ++--
+ drivers/s390/crypto/vfio_ap_private.h   |   73 +
+ 6 files changed, 2557 insertions(+), 207 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  guest_memfd: In-place conversion support
+[PATCH v10 00/41] guest_memfd: In-place conversion support
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+This is v10 of guest_memfd in-place conversion support, which addresses
+comments on v9. Please find the motivation for this series from v8 and
+before.
+
+v9 is based on kvm-x86/next, with a cherry-picked version of David's GUP
+fix [1], and a cherry-picked version of David's refactoring patch
+[2].
+
+Here's everything stitched together for your convenience:
+
+https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-v10
+
+I tested v10 with CoCo selftests on top of the branch above:
+
+https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-coco-selftests-v10
+
+Tested with both CONFIG_KVM_VM_MEMORY_ATTRIBUTES enabled and disabled:
+
++ tools/testing/selftests/kvm/guest_memfd_test.c
++ tools/testing/selftests/kvm/pre_fault_memory_test.c
++ tools/testing/selftests/kvm/x86/guest_memfd_conversions_test.c
++ tools/testing/selftests/kvm/x86/private_mem_conversions_test.c
++ tools/testing/selftests/kvm/x86/private_mem_kvm_exits_test.c
++ The TDX and SNP conversions selftests in https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-coco-selftests-v10
+
+[1] https://lore.kernel.org/all/20260731-check_and_migrate_movable_folios-v1-1-e0002d7b791e@kernel.org/
+("mm/gup: fix always draining LRU caches in collect_longterm_unpinnable_folios()")
+[2] https://lore.kernel.org/all/20260806-lru_cache_drain_for_folio-v1-1-c6287d295e99@kernel.org/
+("mm/gup: factor out LRU cache draining for folio into lru_cache_drain_for_folio()")
+
+Older series:
+
+v9: https://lore.kernel.org/r/20260728-gmem-inplace-conversion-v9-0-35f9aec2aed2@google.com
+v8: https://lore.kernel.org/r/20260618-gmem-inplace-conversion-v8-0-9d2959357853@google.com
+v7: https://lore.kernel.org/r/20260522-gmem-inplace-conversion-v7-0-2f0fae496530@google.com
+v6: https://lore.kernel.org/r/20260507-gmem-inplace-conversion-v6-0-91ab5a8b19a4@google.com
+RFC v5: https://lore.kernel.org/r/20260428-gmem-inplace-conversion-v5-0-d8608ccfca22@google.com
+RFC v4: https://lore.kernel.org/all/20260326-gmem-inplace-conversion-v4-0-e202fe950ffd@google.com/T/
+RFC v3: https://lore.kernel.org/r/20260313-gmem-inplace-conversion-v3-0-5fc12a70ec89@google.com/T/
+RFC v2: https://lore.kernel.org/all/cover.1770071243.git.ackerleytng@google.com/T/
+RFC v1: https://lore.kernel.org/all/cover.1760731772.git.ackerleytng@google.com/T/
+
+Previous versions of this feature, part of other series, are available at:
+
++ https://lore.kernel.org/all/bd163de3118b626d1005aa88e71ef2fb72f0be0f.1726009989.git.ackerleytng@google.com/
++ https://lore.kernel.org/all/20250117163001.2326672-6-tabba@google.com/
++ https://lore.kernel.org/all/b784326e9ccae6a08388f1bf39db70a2204bdc51.1747264138.git.ackerleytng@google.com/
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (21):
+      KVM: guest_memfd: Filter both shared and private when invalidating
+      KVM: guest_memfd: Add base support for KVM_SET_MEMORY_ATTRIBUTES2
+      KVM: guest_memfd: Ensure pages are not in use before conversion
+      KVM: guest_memfd: Call arch make_shared callback for to-shared conversion
+      KVM: guest_memfd: Return early if range already has requested attributes
+      KVM: guest_memfd: Handle lru_add fbatch refcounts during conversion safety check
+      KVM: guest_memfd: Zero page while getting pfn
+      KVM: TDX: Make source page optional for KVM_TDX_INIT_MEM_REGION
+      KVM: Let userspace disable per-VM mem attributes, enable per-gmem attributes
+      KVM: selftests: Test basic single-page conversion flow
+      KVM: selftests: Test conversion flow when INIT_SHARED
+      KVM: selftests: Test conversion precision in guest_memfd
+      KVM: selftests: Test conversion before allocation
+      KVM: selftests: Convert with allocated folios in different layouts
+      KVM: selftests: Test that truncation does not change shared/private status
+      KVM: selftests: Add helpers to pin pages with CONFIG_GUP_TEST
+      KVM: selftests: Test conversion with elevated page refcount
+      KVM: selftests: Reset shared memory after hole-punching
+      KVM: selftests: Provide function to look up guest_memfd details from gpa
+      KVM: selftests: Make TEST_EXPECT_SIGBUS thread-safe
+      KVM: selftests: Update private_mem_conversions_test to mmap() guest_memfd
+
+David Hildenbrand (Arm) (1):
+      mm/gup: factor out LRU cache draining for folio into lru_cache_drain_for_folio()
+
+Michael Roth (1):
+      KVM: SEV: Make 'uaddr' parameter optional for KVM_SEV_SNP_LAUNCH_UPDATE
+
+Sean Christopherson (18):
+      KVM: guest_memfd: Use kvm_mem_is_private() when populating guest_memfd memory
+      KVM: guest_memfd: Introduce per-gmem attributes, use to guard user mappings
+      KVM: Rename KVM_GENERIC_MEMORY_ATTRIBUTES to KVM_VM_MEMORY_ATTRIBUTES
+      KVM: Enumerate support for PRIVATE memory iff kvm_arch_has_private_mem is defined
+      KVM: Rename memory attribute APIs to prepare for in-place gmem conversion
+      KVM: Provide generic interface for checking memory private/shared status
+      KVM: guest_memfd: Stub in ability to enable in-place shared<=>private conversion
+      KVM: Consolidate private memory and guest_memfd ifdeffery in kvm_host.h
+      KVM: Move KVM_VM_MEMORY_ATTRIBUTES config definition to x86
+      KVM: guest_memfd: Enable INIT_SHARED on guest_memfd for x86 Coco VMs
+      KVM: selftests: Create gmem fd before "regular" fd when adding memslot
+      KVM: selftests: Rename guest_memfd{,_offset} to gmem_{fd,offset}
+      KVM: selftests: Add support for mmap() on guest_memfd in core library
+      KVM: selftests: Add selftests global for guest memory attributes capability
+      KVM: selftests: Add helpers for calling ioctls on guest_memfd
+      KVM: selftests: Test that shared/private status is consistent across processes
+      KVM: selftests: Provide common function to set memory attributes
+      KVM: selftests: Update private memory exits test to work with per-gmem attributes
+
+ Documentation/virt/kvm/api.rst                     |  78 +++-
+ .../virt/kvm/x86/amd-memory-encryption.rst         |  14 +-
+ Documentation/virt/kvm/x86/intel-tdx.rst           |   4 +
+ arch/x86/include/asm/kvm-x86-ops.h                 |   2 +-
+ arch/x86/include/asm/kvm_host.h                    |   6 +-
+ arch/x86/kvm/Kconfig                               |  15 +-
+ arch/x86/kvm/mmu/mmu.c                             |  16 +-
+ arch/x86/kvm/svm/sev.c                             |  11 +-
+ arch/x86/kvm/vmx/tdx.c                             |   8 +-
+ arch/x86/kvm/x86.c                                 |  20 +-
+ include/linux/kvm_host.h                           |  76 +--
+ include/linux/swap.h                               |  11 +-
+ include/trace/events/kvm.h                         |   6 +-
+ include/uapi/linux/kvm.h                           |  16 +
+ mm/gup.c                                           |  15 +-
+ mm/swap.c                                          |  48 ++
+ tools/testing/selftests/kvm/Makefile.kvm           |   1 +
+ tools/testing/selftests/kvm/include/kvm_util.h     | 139 +++++-
+ tools/testing/selftests/kvm/include/test_util.h    |  34 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c         | 164 ++++---
+ tools/testing/selftests/kvm/lib/test_util.c        |   7 -
+ .../kvm/x86/guest_memfd_conversions_test.c         | 512 +++++++++++++++++++++
+ .../kvm/x86/private_mem_conversions_test.c         |  53 ++-
+ .../selftests/kvm/x86/private_mem_kvm_exits_test.c |  36 +-
+ virt/kvm/Kconfig                                   |   3 -
+ virt/kvm/guest_memfd.c                             | 450 ++++++++++++++++--
+ virt/kvm/kvm_main.c                                |  92 ++--
+ 27 files changed, 1574 insertions(+), 263 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Use kvm_mem_is_private() when
+[PATCH v10 01/41] KVM: guest_memfd: Use kvm_mem_is_private() when
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Using kvm_mem_is_private() when populating guest_memfd instead of using an
+open coded equivalent.  In addition to simplifying the populate code *now*,
+this avoids the need to provide a range-based gmem lookup API in the future
+as well.
+
+No functional change intended.
+
+Suggested-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Revoke BARs and DMABUFs during
+[RFC PATCH v1 1/1] vfio/pci: Revoke BARs and DMABUFs during
+Author: Pranjal Shrivastava <praan@google.com>
+
+Currently, vfio-pci does not implement the .reset_prepare and .reset_done
+ops in its struct pci_error_handlers. During a sysfs-triggered PCI reset
+(echo 1 > /sys/bus/pci/.../reset), the PCI core resets the device using
+Function Level Reset (FLR) or Secondary Bus Reset (SBR), which isn't
+propagated to the vfio-pci driver. Due to this, the exported DMABUFs and
+BARs aren't zapped or revoked and the importer continues to use them.
+
+Implement reset_prepare and reset_done hooks for the vfio-pci driver
+that zap the BARs and revoke the exported DMABUFs while holding the
+memory_lock.
+
+Signed-off-by: Pranjal Shrivastava <praan@google.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 88 ++++++++++++++++++++------------
+ 1 file changed, 56 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [RFC PATCH v1 1/1] vfio/pci: Revoke BARs and DMABUFs during
+ Skip: [RFC PATCH v1 0/1] vfio/pci: Revoke BARs and DMABUFs during
+New:  KVM: PPC: Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+[PATCH v8 1/4] KVM: PPC: Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+Introduce a new capability and ioctl to expose CPU compatibility modes
+supported by the host processor for nested guests.
+
+On IBM POWER systems, newer processor generations (N) can operate in
+compatibility modes corresponding to earlier generations, like (N-1) and
+(N-2). This is particularly relevant for nested virtualization, where
+nested KVM guests may need to run with a specific processor compatibility
+level.
+
+Introduce KVM_CAP_PPC_COMPAT_CAPS capability and the corresponding
+KVM_PPC_GET_COMPAT_CAPS vm ioctl. The ioctl returns a bitmap describing
+the compatibility modes supported by the host in respective bit numbers,
+allowing userspace (e.g., QEMU) to select an appropriate compatibility
+level when configuring nested KVM guests.
+
+The ioctl handling is added in kvm_arch_vm_ioctl() and retrieves host
+CPU compatibility capabilities via a PowerPC-specific backend
+implementation when available.
+
+The struct kvm_ppc_compat_caps places the 'size' field first so it can
+be read alone via get_user() before copy_struct_from_user() is called,
+avoiding pointer arithmetic to locate the size field.
+
+The ioctl is defined using _IO so the ioctl number remains stable even if
+the struct grows in future versions. It uses copy_struct_from_user() and
+copy_struct_to_user() to provide forward- and backward-compatible
+extensibility: older userspace passing a smaller struct to a newer kernel
+gets zero-padded trailing fields. Newer userspace passing a larger struct to
+an older kernel (usize > ksize) succeeds if trailing bytes are zero (the
+kernel reports back min(usize, ksize) as the filled size); if trailing bytes
+are non-zero, the kernel writes back ksize into host_caps.size and returns
+-E2BIG so userspace can retry with the correct size.
+
+KVM_PPC_COMPAT_CAPS_SIZE_VER0 is defined as a frozen integer constant
+(24) marking the size of the initial struct version, used as the
+minimum floor for size field validation, similar to other versioned
+struct interfaces in the kernel.
+
+The 'flags' field is reserved for future use. The kernel rejects any
+call where flags is non-zero with -EINVAL, preventing garbage values
+from being baked into ABI permanently.
+
+The ioctl returns appropriate error codes: E2BIG if usize exceeds
+PAGE_SIZE, or if new userspace provides a larger struct with non-zero
+trailing bytes (with ksize written back into host_caps.size for the
+retry); EINVAL for an invalid size or non-zero reserved fields; EFAULT
+for failed copy operations; and ENOTTY if the backend doesn't implement
+get_compat_caps.
+
+Suggested-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+Tested-by: Gautam Menghani <gautam@linux.ibm.com>
+Reviewed-by: Gautam Menghani <gautam@linux.ibm.com>
+Tested-by: Anushree Mathur <anushree.mathur@linux.ibm.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+Changes in this version:
+  - Add PAGE_SIZE guard after get_user() to bound the check_zeroed_user()
+    scan in the usize > ksize path [Ritesh]
+  - Drop manual usize > sizeof(host_caps) pre-check; delegate entirely to
+    copy_struct_from_user() which succeeds on zero trailing bytes and
+    returns -E2BIG only on non-zero trailing bytes; handle -E2BIG with
+    ksize writeback and -EFAULT escalation if put_user() fails [Ritesh]
+  - Fix host_caps.size on success path: use min_t(u64, usize,
+    sizeof(host_caps)) so new userspace with zero trailing bytes gets back
+    the number of bytes the kernel actually populated, not usize [Ritesh]
+
+ arch/powerpc/include/asm/kvm_ppc.h  |  1 +
+ arch/powerpc/include/uapi/asm/kvm.h |  8 +++
+ arch/powerpc/kvm/powerpc.c          | 78 +++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h            |  3 ++
+ 4 files changed, 90 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: PPC: Expose CPU compatibility modes for nested guests
+[PATCH v8 0/4] KVM: PPC: Expose CPU compatibility modes for nested guests
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+On POWER systems, newer processor generations can operate in compatibility
+modes corresponding to earlier generations (e.g., a Power11 system running
+in Power10 compatibility mode). In such cases, the effective CPU level
+exposed to guests differs from the physical processor generation.
+
+This creates a problem for nested virtualization. When booting a nested KVM
+guest (L2) inside a host KVM guest (L1) running in a compatibility mode,
+userspace (e.g., QEMU) may derive the CPU model from the raw hardware PVR
+and attempt to configure the nested guest accordingly. However, the L1
+partition is constrained by the compatibility level negotiated with the
+hypervisor (L0), and requests exceeding that level are rejected, leading to
+guest boot failures such as:
+
+  KVM-NESTEDv2: couldn't set guest wide elements
+
+This series provides a mechanism for userspace to query the effective CPU
+compatibility modes supported by the host, so it can select an appropriate
+CPU model for nested guests.
+
+To achieve this, the series introduces a new KVM capability and ioctl
+(KVM_CAP_PPC_COMPAT_CAPS / KVM_PPC_GET_COMPAT_CAPS) that expose the
+compatibility modes supported by the host.
+
+Why a new UAPI?
+===============
+While cpu-version is available in /proc/device-tree/cpus/<cpu#>/cpu-version
+on both L1 booted on PowerNV and PowerVM LPARs, the UAPI approach is
+preferable for several reasons:
+
+1. pHYP (L0) capabilities: On PowerVM, we need to rely on capabilities
+   negotiated with pHYP in KVM, not just device tree properties. The
+   cpu-version property depicts the current compat mode but doesn't point
+   to what all compat modes are supported for the nested guest.
+
+2. procfs dependency: Not all systems run with procfs enabled (CONFIG_PROC_FS
+   is optional). Minimal configurations like buildroot might disable it, but
+   KVM ioctl works regardless since it accesses kernel data structures
+   directly.
+
+3. Kernel validation: The kernel validates and normalizes the compatibility
+   information, ensuring userspace gets validated, consistent data.
+
+4. Abstraction & stability: /proc/device-tree is an implementation detail.
+   The UAPI provides a stable interface that won't break if the underlying
+   mechanism changes.
+
+5. Semantic clarity: KVM_PPC_GET_COMPAT_CAPS clearly expresses what
+   compatibility modes can be used for KVM guests, vs. parsing device tree
+   which requires understanding the semantic meaning of cpu-version.
+
+The implementation supports both:
+
+  - KVM on PowerVM (nested API v2), where compatibility information is
+    served from the cached nested_capabilities value, originally obtained
+    via the H_GUEST_GET_CAPABILITIES hypercall at module init.
+  - KVM on PowerNV (nested API v1), where compatibility is derived from the
+    device tree ("cpu-version") representing the effective processor
+    compatibility level.
+
+This allows userspace (e.g., QEMU) to select a CPU model consistent with
+the host compatibility mode, avoiding mismatches and enabling successful
+nested guest boot.
+
+Note: This series is built on top of patch [1] which must be applied first.
+Patch [1] ensures arch_compat is validated against the host compatibility
+mode before this series adds the capability query mechanism.
+Commit e4de1b9cb3b5 ("powerpc/dt_cpu_ftrs: Set CPU_FTR_P11_PVR for Power11
+and later processors") which was also a prerequisite has been merged upstream.
+
+Changes in v8:
+ - Add PAGE_SIZE guard after get_user() to bound the check_zeroed_user()
+   scan in the usize > ksize path [Ritesh]
+ - Drop the manual usize > sizeof(host_caps) pre-check; delegate the
+   usize > ksize path entirely to copy_struct_from_user(), which succeeds
+   when trailing bytes are zero (valid forward-compat) and returns -E2BIG
+   only when they are non-zero. Handle -E2BIG by writing back ksize with
+   proper -EFAULT escalation if put_user() fails. [Ritesh]
+ - Fix host_caps.size writeback on success path: use
+   min_t(u64, usize, sizeof(host_caps)) instead of sizeof(host_caps) to
+   avoid reporting a larger size than the kernel actually populated when
+   new userspace passes a larger struct with zero trailing bytes. [Ritesh]
+ - Update documentation to reflect the corrected three-case versioning
+   contract and the revised E2BIG semantics. [Ritesh]
+
+Patch summary:
+  [1/4] Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+  [2/4] Implement capability retrieval for KVM on PowerVM (API v2)
+  [3/4] Add KVM on PowerNV support (API v1)
+  [4/4] Document the new ioctl
+
+Testing (with QEMU v5 patches and on top of patch [1]):
+
+KVM APIv1 Testing
+=================
+  On P10 PowerNV machine (L0)
+  ---------------------------
+    - P10 L1 KVM guest -> works
+      - P10 nested L2 KVM guest -> works
+      - P9 compat nested L2 KVM guest -> works
+    - P9 compat L1 KVM guest -> works
+      - P9 nested L2 KVM guest -> works
+
+  On Powernv11 TCG Guest (L0)
+  ---------------------------
+    - P11 PowerNV TCG L0 guest -> works
+    - P11 L1 KVM guest -> works
+      - P11 L2 KVM guest -> works
+    - P10 compat L1 KVM guest -> works
+      - P10 L2 KVM guest -> works
+    - P9  compat L1 KVM guest -> works
+      - P9 L2 KVM guest -> works
+
+KVM APIv2 Testing
+=================
+  On P11 PowerVM LPAR (L1)
+  ------------------------
+    - P11 L2 KVM guest -> works
+    - P10 compat L2 KVM guest -> works
+    - P9 compat L2 KVM guest fails to boot as expected
+    - Without QEMU patches but Linux patches
+      - P11 L2 KVM guest -> works
+      - P10 compat L2 KVM guest -> works
+      - P9 compat L2 KVM guest fails to boot as expected
+    - Without Linux patches but QEMU patches
+      - P11 L2 KVM guest -> works
+      - P10 compat L2 KVM guest -> works
+
+  On P11 LPAR in P10 compat (L1)
+  ------------------------------
+    - P10 (host compat) L2 KVM guest -> works
+    - Without QEMU patch but Linux patches
+      - P10 guest fails to boot as expected (error: kvm run failed Invalid argument)
+    - Without Linux patch but QEMU patches
+      - P10 guest fails to boot as expected (KVM: unknown exit, hardware reason ffffffffffffffea)
+
+  On P10 PowerVM LPAR (L1)
+  ------------------------
+    - P10 L2 KVM guest -> works
+    - P9 compat L2 KVM guest fails to boot as expected
+
+TCG pSeries Guest
+=================
+    - P11 (default) pSeries guest boots fine
+
+ABI Extensibility Testing (struct size 32, extra member)
+=========================================================
+    - Newer struct on QEMU, older kernel -> works (kernel returns -E2BIG,
+      QEMU retries with correct size)
+    - New struct on Linux kernel, older QEMU -> works (kernel zero-pads
+      trailing fields, QEMU gets correct data)
+
+With this series, nested guests boot successfully in configurations where
+they previously failed due to compatibility mismatches.
+
+Related QEMU series:
+====================
+QEMU v5 series:
+https://lore.kernel.org/all/20260804182914.83091-1-amachhiw@linux.ibm.com/
+
+Previous QEMU versions:
+v4: https://lore.kernel.org/all/20260701052341.62289-1-amachhiw@linux.ibm.com/
+v3: https://lore.kernel.org/all/20260616113915.25589-1-amachhiw@linux.ibm.com/
+v2: https://lore.kernel.org/all/20260502140021.69712-1-amachhiw@linux.ibm.com/
+v1: https://lore.kernel.org/all/20260430061333.37905-1-amachhiw@linux.ibm.com/
+
+Previous versions:
+==================
+v7: https://lore.kernel.org/linuxppc-dev/20260806170645.11892-1-amachhiw@linux.ibm.com/
+v6: https://lore.kernel.org/linuxppc-dev/20260804180705.59160-1-amachhiw@linux.ibm.com/
+v5: https://lore.kernel.org/linuxppc-dev/20260701051409.51820-1-amachhiw@linux.ibm.com/
+v4: https://lore.kernel.org/linuxppc-dev/20260616123314.82721-1-amachhiw@linux.ibm.com/
+v3: https://lore.kernel.org/linuxppc-dev/20260522152744.55251-1-amachhiw@linux.ibm.com/
+v2: https://lore.kernel.org/linuxppc-dev/20260513100755.83195-1-amachhiw@linux.ibm.com/
+v1: https://lore.kernel.org/linuxppc-dev/20260430054906.94431-1-amachhiw@linux.ibm.com/
+
+References:
+===========
+[1] https://lore.kernel.org/all/20260714175432.86388-1-amachhiw@linux.ibm.com/
+
+Amit Machhiwal (4):
+  KVM: PPC: Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+  KVM: PPC: Book3S HV: Implement compat CPU capability retrieval for KVM
+    on PowerVM
+  KVM: PPC: Book3S HV: Add support for compat CPU capabilities for KVM
+    on PowerNV
+  KVM: PPC: Document KVM_PPC_GET_COMPAT_CAPS ioctl
+
+ Documentation/virt/kvm/api.rst      | 89 +++++++++++++++++++++++++++++
+ arch/powerpc/include/asm/kvm_ppc.h  |  1 +
+ arch/powerpc/include/uapi/asm/kvm.h | 18 ++++++
+ arch/powerpc/kvm/book3s_hv.c        | 56 ++++++++++++++++++
+ arch/powerpc/kvm/powerpc.c          | 78 +++++++++++++++++++++++++
+ include/uapi/linux/kvm.h            |  3 +
+ 6 files changed, 245 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  s390/vfio-ap: Fix dereference matrix_mdev->kvm without checking for NULL
+[PATCH] s390/vfio-ap: Fix dereference matrix_mdev->kvm without checking for NULL
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The ap_driver structure has two fields which are function pointers to
+callbacks:
+
+* .on_config_changed: called at the start of the AP bus scan function to
+                      notify the device driver that the host AP
+                      configuration has changed and the associated AP
+                      devices will be added or removed accordingly. This
+                      gives the implementor a chance to evaluate the
+                      configuration changes and respond to them before
+                      the associated devices are added or removed.
+
+* .on_scan_complete:  Called at the end of the AP bus scan function to
+                      notify the device driver that the host AP
+                      configuration has changed and the AP devices have
+                      been added or removed accordingly. This gives the
+                      implementor the opportunity to respond to the
+                      changes after the associated devices are added or
+                      removed.
+
+These two callbacks are implemented in the vfio_ap device driver via the
+vfio_ap_on_cfg_changed and vfio_ap_on_scan_complete functions respectively.
+
+Within the call stack of these two callback functions the
+matrix_mdev->kvm->lock mutex is taken without checking whether
+matrix_mdev->kvm is NULL or not. If matrix_mdev->kvm has never been set,
+trying to take the lock will trigger a NULL pointer dereference. This patch
+adds checks for matrix_mdev->kvm == NULL before taking the
+matrix_mdev->kvm->lock mutex.
+
+It is important to make note of the following:
+1. The matrix_dev->guests_lock is acquired at the start of both callback
+   functions. This ensures that matrix_mdev will not be removed via the
+   vfio_ap_mdev_remove function because it too takes matrix_dev_guests_lock
+   before removing the object; so, matrix_mdev will be available for the
+   duration of the callback functions.
+
+2. The matrix_dev->mdevs_lock mutex must be taken in order to access
+   fields within the matrix_mdev structure
+
+3. matrix_mdev->kvm->lock mutex must be taken before the
+   matrix_dev->mdevs_lock to prevent a lockdep splat.
+
+4: The kvm->lock must be held while plugging the guest's AP configuration
+   into its SIE state description via the vfio_ap_mdev_update_guest_apcb
+   function.
+
+5. The vfio_ap_mdev_update_guest_apcb checks matrix_mdev->kvm to verify it
+   is not NULL before doing the hot plug of the guest's AP configuration.
+
+Fixes: eeb386aeb5b7c ("s390/vfio-ap: handle config changed and scan complete notification")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 33 ++++++++++++++++++++++---------
+ 1 file changed, 24 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: WARN and clear role.invalid when creating a child shadow page
+[PATCH] KVM: x86/mmu: WARN and clear role.invalid when creating a child shadow page
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+
+Explicitly clear role.invalid when deriving a child shadow page's role from
+its parent to harden against bugs elsewhere in KVM, as violating KVM's
+invariant that invalid pages are NOT on the list of active MMU pages leads
+to use-after-free due to __kvm_mmu_prepare_zap_page() using list_add()
+instead of list_move() when processing an invalid shadow page, i.e. makes a
+bad situation far worse.
+
+Yell loudly if the parent is invalid, as it means KVM has missed a validity
+check, i.e. KVM is attempting to map memory using an invalid/obsolete root,
+but continue on as the child is otherwise still a valid shadow page.
+
+  ==================================================================
+  BUG: KASAN: slab-use-after-free in __kvm_mmu_get_shadow_page+0x1817/0x1860 [kvm]
+  Write of size 8 at addr ff11000153dd1368 by task repro/853
+
+  CPU: 1 UID: 1000 PID: 853 Comm: repro Not tainted 7.2.0-rc2-3aec122bdcaf-next-vm #5 PREEMPT
+  Hardware name: QEMU Standard PC (Q35 + ICH9, 2009), BIOS 0.0.0 02/06/2015
+  Call Trace:
+   <TASK>
+   dump_stack_lvl+0x4b/0x70
+   print_report+0x153/0x49c
+   kasan_report+0xbc/0xf0
+   __kvm_mmu_get_shadow_page+0x1817/0x1860 [kvm]
+   mmu_alloc_root+0x141/0x320 [kvm]
+   kvm_mmu_load+0x612/0x20f0 [kvm]
+   kvm_arch_vcpu_ioctl_run+0x3dd5/0x6150 [kvm]
+   kvm_vcpu_ioctl+0x5e4/0x10d0 [kvm]
+   __x64_sys_ioctl+0x131/0x1b0
+   do_syscall_64+0x67/0x5f0
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+   </TASK>
+
+  Allocated by task 853:
+   kasan_save_stack+0x20/0x40
+   kasan_save_track+0x14/0x30
+   __kasan_slab_alloc+0x5f/0x70
+   kmem_cache_alloc_noprof+0xfe/0x2e0
+   __kvm_mmu_topup_memory_cache+0x135/0x530 [kvm]
+   paging64_page_fault+0x318/0x1e30 [kvm]
+   kvm_mmu_do_page_fault+0x21d/0x630 [kvm]
+   kvm_mmu_page_fault+0x18c/0x17b0 [kvm]
+   kvm_arch_vcpu_ioctl_run+0x1f35/0x6150 [kvm]
+   kvm_vcpu_ioctl+0x5e4/0x10d0 [kvm]
+   __x64_sys_ioctl+0x131/0x1b0
+   do_syscall_64+0x67/0x5f0
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+
+  Freed by task 853:
+   kasan_save_stack+0x20/0x40
+   kasan_save_track+0x14/0x30
+   kasan_save_free_info+0x3b/0x60
+   __kasan_slab_free+0x43/0x70
+   kmem_cache_free+0xe2/0x400
+   kvm_mmu_commit_zap_page.part.0+0x1e2/0x310 [kvm]
+   kvm_mmu_free_roots+0x283/0x560 [kvm]
+   kvm_arch_vcpu_ioctl_run+0x33c8/0x6150 [kvm]
+   kvm_vcpu_ioctl+0x5e4/0x10d0 [kvm]
+   __x64_sys_ioctl+0x131/0x1b0
+   do_syscall_64+0x67/0x5f0
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Fixes: a770f6f28b1a ("KVM: MMU: Inherit a shadow page's guest level count from vcpu setup")
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/xen: Use read_trylock() for GPC locks in hardirq paths
+[PATCH] KVM: x86/xen: Use read_trylock() for GPC locks in hardirq paths
+Author: sai madhu <suryasaimadhu369@gmail.com>
+
+kvm_xen_set_evtchn_fast() is called from hardirq context (xen timer
+callback, kvm_arch_set_irq_inatomic()). On PREEMPT_RT (and under
+lockdep), read_lock_irqsave(&gpc->lock) is invalid there because
+rwlock_t may sleep.
+
+Switch to read_trylock() and return -EWOULDBLOCK when the lock is
+contended or the cache is invalid. xen_timer_callback() already
+defers to the slow path (timer_pending + KVM_REQ_UNBLOCK +
+kvm_xen_inject_timer_irqs()).
+
+Also fix __kvm_xen_has_interrupt() the same way for atomic callers.
+
+Based on David Woodhouse's upstream series (May 2026, patch 3/7).
+Fixes syzbot: https://syzkaller.appspot.com/bug?extid=919877893c9d28162dc2
+
+Tested-by: sai madhu <suryasaimadhu369@gmail.com>
+Signed-off-by: sai madhu <suryasaimadhu369@gmail.com>
+---
+ arch/x86/kvm/xen.c | 32 +++++++++++++++++++++++---------
+ 1 file changed, 23 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH] KVM: x86/xen: Use read_trylock() for GPC locks in hardirq paths
+ Skip: [PATCH] KVM: x86/xen: Use read_trylock() for GPC locks in hardirq paths
+New:  KVM: selftests: SEV: Sanity check the launch measurement
+[PATCH] KVM: selftests: SEV: Sanity check the launch measurement
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+test_sev() launches the guest but discards the measurement returned by
+KVM_SEV_LAUNCH_MEASURE, with a TODO to validate it.  A full
+attestation-style validation isn't possible from the selftest because
+userspace does not possess the transport keys the PSP uses to derive the
+measurement, so the expected value cannot be recomputed here.
+
+Capture the measurement for SEV and SEV-ES guests and sanity check it:
+assert that the firmware reports the blob length defined by the SEV API
+specification, and that both the measurement and the nonce are non-zero.
+Describe the blob layout with a struct so the buffer and field sizes are
+derived from a single definition instead of open-coded magic numbers.
+SNP does not return a measurement through this path, so it is skipped.
+
+  # ./sev_smoke_test; echo "exit=$?"
+  Random seed: 0x6b8b4567
+  exit=0
+
+  # ./sev_init2_tests; echo "exit=$?"
+  Random seed: 0x6b8b4567
+  exit=0
+
+  # ./sev_migrate_tests; echo "exit=$?"
+  Random seed: 0x6b8b4567
+  exit=0
+
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ tools/testing/selftests/kvm/include/x86/sev.h | 12 +++++++
+ tools/testing/selftests/kvm/lib/x86/sev.c     | 11 +++++--
+ .../selftests/kvm/x86/sev_smoke_test.c        | 33 +++++++++++++++++--
+ 3 files changed, 52 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Use active memslots for the per-vCPU MMIO cache
+[PATCH] KVM: x86: Use active memslots for the per-vCPU MMIO cache
+Author: Jinu Kim <kimjw04271234@gmail.com>
+
+KVM tags the per-vCPU MMIO cache with a memslot generation so that a
+memslot update invalidates cached MMIO information.  Both the fill and
+validation paths use kvm_memslots(), which unconditionally selects address
+space 0, even when the vCPU is running in SMM and using address space 1.
+
+Commit 56f17dd3fbc4 ("kvm: x86: fix stale mmio cache bug") added the
+memslot generation to the cache key so that a memslot update could not
+leave a stale entry valid.  When commit 699023e23965 ("KVM: x86: add SMM
+to the MMU role, support SMRAM address space") added the SMM address space,
+these helpers were not converted to use the active memslots.
+
+Consequently, an update to the SMM memslots can leave an entry from the old
+SMM address space apparently valid after the vCPU returns to the normal
+address space.  A guest can then cause an access to valid RAM at the same
+GFN to be returned to userspace as KVM_EXIT_MMIO.
+
+Completing that exit through the VMM's RAM address space writes the backing
+page without going through KVM's write-tracking path.  If the page backs a
+nested EPT table, KVM can continue using shadow translations derived from
+the old contents.  The WARN_ON_ONCE() in kvm_mmu_write_protect_fault()
+catches this invalid cache and memslot combination.
+
+Use the vCPU's active memslots when caching and validating the entry.
+Memslot generations are unique across address spaces, so the generation
+also distinguishes the normal and SMM views.  This matches the MMIO SPTE
+cache, which already uses kvm_vcpu_memslots().
+
+On an unpatched current-mainline kernel, a regression test that fills the
+cache in SMM and updates only the SMM memslots fails the intended RAM write
+and triggers the kvm_mmu_write_protect_fault() warning.  With this change,
+the same test completes the RAM write without a warning.  The x86/smm_test,
+set_memory_region_test, and memslot_modification_stress_test selftests also
+pass.
+
+Fixes: 699023e23965 ("KVM: x86: add SMM to the MMU role, support SMRAM address space")
+Cc: stable@vger.kernel.org
+Signed-off-by: Jinu Kim <kimjw04271234@gmail.com>
+---
+ arch/x86/kvm/x86.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  irqchip/gic-v5: Allow KVM setup without a
+[PATCH v5 01/49] irqchip/gic-v5: Allow KVM setup without a
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+GICv5 does not require a virtual CPU interface maintenance interrupt
+for native GCIE operation. The interrupt is only needed when
+FEAT_GCIE_LEGACY is present, as the legacy GICv3 interface still
+relies on maintenance IRQ delivery.
+
+Stop rejecting KVM setup solely because the maintenance interrupt is
+absent. Parse the interrupt if present, but if none is described and
+the system does not advertise FEAT_GCIE_LEGACY, tell KVM that no
+maintenance interrupt is required.
+
+This lets native GICv5 KVM support be registered on systems that do
+not provide a maintenance interrupt, while requiring a maintenance
+interrupt for GICv3-capable systems.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ drivers/irqchip/irq-gic-v5.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add GICv5 IRS support
+[PATCH v5 00/49] KVM: arm64: Add GICv5 IRS support
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Hi all,
+
+This series builds on the initial vGICv5 support [1] and adds support
+for the GICv5 IRS, as described by the GICv5 (EAC0) specification [2].
+With this, a GICv5 guest is no longer restricted to PPIs, and can make
+use of SPIs and LPIs as well.
+
+With SPIs and LPIs available, this series makes it possible to boot a
+full Linux guest on the Arm FVP model [3], using the setup described in
+Lorenzo's GICv5 Linux software enablement guide [4]. In addition, GICv5
+IPIs are typically implemented as LPIs, so LPI support is what makes
+guests with more than one vCPU possible.
+
+The corresponding kvmtool changes are available separately [5]. With
+these changes, `--irqchip=3Dgicv5` works now. The `--irqchip=3Dgicv5-its`
+configuration does not work with this series, as ITS/MSI support is not
+included here.
+
+The IRS is created as part of the vgic-v5 device, and is not a separate
+KVM device. This is because implementing the CPU interface alone would
+limit a guest to a single vCPU and PPIs only. Hence, the IRS is bundled
+into the VGIC, much like the distributor for GICv3.
+
+The series adds the host-side plumbing needed for KVM to interact with
+the physical IRS, including VM and VPE table management, VPE residency,
+and VPE doorbells. It also adds an emulated IRS MMIO interface for the
+guest, together with the UAPI needed for userspace to configure the IRS
+address and to save/restore the IRS and IST state.
+
+The main pieces are:
+
+* Host IRS capability discovery and configuration frame plumbing.
+
+* Allocation and management of the GICv5 VM table, VPE table, VMTEs,
+  VPEs, and host-backed guest IST storage.
+
+* VPE residency and doorbell handling, allowing the IRS to select SPIs
+  and LPIs for resident VPEs and wake non-resident VPEs when required.
+
+* Emulation of the GICv5 IRS MMIO CONFIG_FRAME for guests.
+  Virtualisation, MPAM, MEC, and SWERR are not supported and are
+  RAZ/WI.
+
+* SPI injection support using GIC VDPEND. Once injected, the GICv5
+  hardware manages the SPI lifecycle.
+
+* Save/restore support for GICv5 EL1 system registers, IRS MMIO state,
+  and guest ISTs. SPI and LPI IST state is transferred through
+  userspace-owned buffers using KVM_DEV_ARM_VGIC_GRP_IST.
+
+* Documentation for the new VGICv5 IRS userspace interfaces and the
+  required save/restore ordering.
+
+* Selftests for the UAPI components, the PPI, SPI, and LPI support, and
+  save/restore.
+
+This series keeps SPI, LPI, and save/restore support together
+intentionally. SPI and LPI support are needed to run realistic guests,
+while the save/restore interface is included at the same time so that the
+new userspace ABI is complete from the point it is exposed: userspace
+should not be able to create VGICv5 state that it cannot also migrate.
+
+The IST migration selftest restores state into a separate VM, re-saves
+the SPI and LPI IST images before the destination runs, and compares
+them byte-for-byte with the source images. It also validates restored IRS
+MMIO state through SPI/LPI delivery, priority, enable, and affinity
+behavior.
+
+LPIs are explicitly driven by the guest through the IRS/IST state. This
+series does not add direct LPI injection support, MSI support, or GICv5
+ITS emulation.
+
+These changes are based on v7.2-rc6. I've pushed the full set of changes
+to a branch at [6].
+
+Changes since v4 [7]:
+
+* Rebased onto v7.2-rc6 and addressed review feedback from Marc and
+  Fuad, together with the Sashiko AI reports for v4. Thanks all!
+
+* Aligned ACPI maintenance-interrupt discovery with GICv3. Broken MADT
+  descriptions now produce FW_BUG warnings rather than preventing KVM
+  initialisation, and the interrupt is always registered as
+  level-sensitive.
+
+* Reworked host IRS capability discovery to cache raw IRS_IDR2,
+  IRS_IDR3, and IRS_IDR4 values and derive their fields through
+  accessors. This avoids tying future EL2 code to the decoded layout
+  of kvm_vgic_global_state.
+
+* Hardened hardware-shared table handling for non-coherent IRS
+  implementations. IRS operations and CPU table accesses now share a
+  lock, VPET, VMD and VPED allocations are rounded up to whole cache
+  lines, descriptors are initialised before publication, and VMT
+  configuration waits for the IRS to become idle.
+
+* Fixed sparse vCPU ID handling. The VPET and architectural VPE ID now
+  use the userspace-provided vcpu_id, while doorbells and VPED storage
+  use the dense internal vcpu_idx. IDs outside the available VPE ID
+  space are rejected.
+
+* Limited virtual GICv5 implementations to 1024 SPIs so that the
+  physically contiguous per-SPI state allocation remains within
+  KMALLOC_MAX_SIZE. The common IRQ routing table accommodates 1024
+  pins, while route validation retains the existing 988-pin limit for
+  GICv2 and GICv3.
+
+* Tightened LPI IST lifetime and migration rules. Guest Valid-to-Valid
+  IRS_IST_BASER writes can no longer change the address, and once a
+  host LPI IST exists, userspace may replay but not alter
+  IRS_IST_BASER or IRS_IST_CFGR. LPI IST saves also require the VMTE ID
+  width to match IRS_IST_CFGR. The IST migration descriptor has moved
+  into the arm64-specific UAPI header.
+
+* Hardened IRS and doorbell operation. GICv5 probing now fails without
+  a host LPI domain, commands require a valid doorbell IRQ, running
+  vCPUs are reloaded only on IRSEN transitions, and WFI doorbells are
+  requested only while the virtual IRS is enabled.
+
+* The resident, non-resident, and VDPEND nVHE handlers are explicit
+  no-ops under pKVM. This matches the fix by Fuad for the
+  already-upstreamed GICv5 hypercalls [8].
+
+* Expanded the selftests to cover the 1024-SPI boundary, live IST
+  register restrictions, sparse vCPU IDs, and rejection of vCPU IDs
+  outside the GICv5 VPE ID space.
+
+Thanks for taking the time to look at these changes!
+
+Thanks,
+Sascha
+
+[1] https://lore.kernel.org/all/20260319154937.3619520-1-sascha.bischoff@ar=
+m.com/
+[2] https://developer.arm.com/documentation/aes0070/latest
+[3] https://developer.arm.com/documentation/108086/latest
+[4] https://linaro.atlassian.net/wiki/x/CQAF-wY
+[5] https://lore.kernel.org/all/20260116182606.61856-1-sascha.bischoff@arm.=
+com/
+[6] https://gitlab.arm.com/linux-arm/linux-sb/-/tree/gicv5_kvm_irs_support_=
+v5
+[7] https://lore.kernel.org/all/20260724104819.1296803-1-sascha.bischoff@ar=
+m.com/
+[8] https://lore.kernel.org/all/20260806100256.371164-1-fuad.tabba@linux.de=
+v/
+
+Sascha Bischoff (49):
+  irqchip/gic-v5: Allow KVM setup without a maintenance IRQ
+  irqchip/gic-v5: Provide OF IRS config frame attrs to KVM
+  irqchip/gic-v5: Set up gic_kvm_info on ACPI hosts
+  KVM: arm64: gic-v5: Define remaining IRS MMIO registers
+  arm64/sysreg: Add GICv5 GIC VDPEND encoding
+  arm64/sysreg: Update ICC_CR0_EL1 with LINK and LINK_IDLE fields
+  KVM: arm64: gic-v5: Cache host IRS ID registers
+  KVM: arm64: gic-v5: Add VPE doorbell domain
+  KVM: arm64: gic-v5: Create and manage VM and VPE tables
+  KVM: arm64: gic-v5: Introduce guest IST alloc and management
+  KVM: arm64: gic-v5: Implement VMT/vIST IRS MMIO Ops
+  KVM: arm64: gic-v5: Keep GICv5 vCPU limit model-specific
+  KVM: arm64: gic-v5: Implement VPE IRS MMIO Ops
+  KVM: arm64: gic-v5: Set up VMTEs and VPE doorbells
+  KVM: arm64: gic-v5: Add resident/non-resident hyp calls
+  KVM: arm64: gic-v5: Request doorbells when VPEs enter WFI
+  KVM: arm64: gic-v5: Introduce struct vgic_v5_irs and IRS base address
+  KVM: arm64: gic-v5: Add IRS IODEV support to MMIO handlers
+  KVM: arm64: gic-v5: Add KVM_VGIC_V5_ADDR_TYPE_IRS to UAPI
+  KVM: arm64: gic-v5: Add GICv5 IRS IODEV and MMIO emulation
+  KVM: arm64: gic-v5: Initialise per-VM IRS state
+  KVM: arm64: gic-v5: Register the IRS IODEV
+  KVM: arm64: gic-v5: Set IRICHPPIDIS based on IRS enable state
+  KVM: arm64: selftests: Update vGICv5 selftest to set IRS address
+  KVM: arm64: gic-v5: Add GIC VDPEND hyp call
+  KVM: arm64: gic: Introduce set_pending_state() to irq_ops
+  KVM: arm64: gic-v5: Support SPI injection
+  Documentation: KVM: Extend VGICv5 device attribute docs
+  KVM: arm64: gic-v5: Add GICv5 SPI injection to irqfd
+  KVM: arm64: gic-v5: Mask per-vCPU PPI state in
+    vgic_v5_finalize_ppi_state()
+  KVM: arm64: gic-v5: Add GICv5 EL1 sysreg userspace accessors
+  KVM: arm64: gic-v5: Handle userspace accesses to IRS MMIO region
+  KVM: arm64: gic-v5: Add CoreSight MMIO regs to IRS
+  KVM: arm64: gic-v5: Add VGICv5 IST save/restore UAPI
+  KVM: arm64: gic-v5: Implement save/restore mechanisms for ISTs
+  Documentation: KVM: Document KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS for
+    VGICv5
+  Documentation: KVM: Add KVM_DEV_ARM_VGIC_GRP_IRS_REGS to VGICv5 docs
+  Documentation: KVM: Add docs for KVM_DEV_ARM_VGIC_GRP_IST
+  Documentation: KVM: Add the VGICv5 IRS save/restore sequences
+  KVM: selftests: Add VGICv5 IRS address attribute tests
+  KVM: selftests: Add VGICv5 NR_IRQS attribute tests
+  KVM: selftests: Add VGICv5 IRS_REGS attribute tests
+  KVM: selftests: Add VGICv5 IST attribute tests
+  KVM: selftests: Add VGICv5 USERSPACE_PPIS tests
+  KVM: selftests: Add VGICv5 CPU sysreg attribute tests
+  KVM: selftests: Add VGICv5 SPI injection tests
+  KVM: selftests: Add VGICv5 LPI delivery tests
+  KVM: selftests: Add VGICv5 IST save/restore coverage
+  KVM: selftests: Add VGICv5 sparse vCPU IDs test
+
+ Documentation/virt/kvm/api.rst                |    3 +-
+ .../virt/kvm/devices/arm-vgic-v5.rst          |  271 ++-
+ arch/arm64/include/asm/kvm_asm.h              |    3 +
+ arch/arm64/include/asm/kvm_host.h             |    1 +
+ arch/arm64/include/asm/kvm_hyp.h              |    3 +
+ arch/arm64/include/asm/sysreg.h               |   13 +-
+ arch/arm64/include/uapi/asm/kvm.h             |   15 +
+ arch/arm64/kvm/Makefile                       |    3 +-
+ arch/arm64/kvm/arm.c                          |   10 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |   35 +
+ arch/arm64/kvm/hyp/vgic-v5-sr.c               |   45 +
+ arch/arm64/kvm/sys_regs.c                     |    6 +-
+ arch/arm64/kvm/vgic-sys-reg-v5.c              |  519 +++++
+ arch/arm64/kvm/vgic/vgic-init.c               |  150 +-
+ arch/arm64/kvm/vgic/vgic-irqfd.c              |   18 +-
+ arch/arm64/kvm/vgic/vgic-irs-v5.c             | 1184 ++++++++++
+ arch/arm64/kvm/vgic/vgic-kvm-device.c         |  270 ++-
+ arch/arm64/kvm/vgic/vgic-mmio.c               |    6 +
+ arch/arm64/kvm/vgic/vgic-mmio.h               |    2 +
+ arch/arm64/kvm/vgic/vgic-v5-tables.c          | 1860 ++++++++++++++++
+ arch/arm64/kvm/vgic/vgic-v5-tables.h          |  140 ++
+ arch/arm64/kvm/vgic/vgic-v5.c                 | 1139 +++++++++-
+ arch/arm64/kvm/vgic/vgic.c                    |   37 +-
+ arch/arm64/kvm/vgic/vgic.h                    |   21 +
+ arch/arm64/tools/sysreg                       |    4 +-
+ drivers/irqchip/irq-gic-v5-irs.c              |   19 +-
+ drivers/irqchip/irq-gic-v5.c                  |  112 +-
+ include/kvm/arm_vgic.h                        |  210 +-
+ include/linux/irqchip/arm-gic-v5.h            |  256 ++-
+ include/linux/irqchip/arm-vgic-info.h         |    5 +
+ tools/arch/arm64/include/uapi/asm/kvm.h       |   15 +
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   | 1931 ++++++++++++++++-
+ .../selftests/kvm/include/arm64/gic_v5.h      |  105 +
+ 33 files changed, 8208 insertions(+), 203 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost-vdpa: don't install the eventfd_ctx_fdget() error in config_ctx
+[PATCH 1/2] vhost-vdpa: don't install the eventfd_ctx_fdget() error in config_ctx
+Author: Yu Zhang <yuz08559@gmail.com>
+
+vhost_vdpa_set_config_call() swaps the eventfd_ctx_fdget() return value
+into v->config_ctx before checking it, so on failure the field briefly
+holds an ERR_PTR:
+
+	ctx = fd == VHOST_FILE_UNBIND ? NULL : eventfd_ctx_fdget(fd);
+	swap(ctx, v->config_ctx);
+
+	if (!IS_ERR_OR_NULL(ctx))
+		eventfd_ctx_put(ctx);
+
+	if (IS_ERR(v->config_ctx)) {
+		long ret = PTR_ERR(v->config_ctx);
+
+		v->config_ctx = NULL;
+		return ret;
+	}
+
+Commit 0bde59c1723a ("vhost-vdpa: set v->config_ctx to NULL if
+eventfd_ctx_fdget() fails") added that clearing, and spelled out the
+invariant the rest of the file relies on: "we consider 'v->config_ctx'
+valid if it is not NULL".  The window between the swap and the clearing
+still breaks it.  vhost_vdpa_config_cb() only tests for NULL, so a config
+interrupt delivered inside the window hands the ERR_PTR to
+eventfd_signal().
+
+Check the fd before installing it instead.  That closes the window and
+matches how vhost_vring_ioctl() handles the same failure for the vq call
+fd.
+
+It also stops a rejected fd from tearing down a config interrupt that was
+working: until now the swap replaced the live context and put it, so
+after an EBADF the device silently stopped delivering config interrupts
+until userspace installed a new fd.
+
+Fixes: 776f395004d8 ("vhost_vdpa: Support config interrupt in vdpa")
+Signed-off-by: Yu Zhang <yuz08559@gmail.com>
+---
+ drivers/vhost/vdpa.c | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost-vdpa: fix a use-after-free on the config eventfd
+[PATCH 0/2] vhost-vdpa: fix a use-after-free on the config eventfd
+Author: Yu Zhang <yuz08559@gmail.com>
+
+vhost_vdpa_config_cb() reads v->config_ctx with no reference and no lock
+while VHOST_VDPA_SET_CONFIG_CALL frees the old context, so a config
+interrupt delivered at the wrong moment signals freed memory.
+
+Patch 1 stops the fdget error value from ever being installed in
+config_ctx.  It is a fix in its own right -- the callback tests only for
+NULL and would signal the ERR_PTR -- and it is also what lets patch 2's
+lock establish "non-NULL implies valid".
+
+Patch 2 adds the lock that closes the use-after-free.
+
+This is not the reopen refcount underflow fixed by f6bbf0010ba0
+("vhost-vdpa: fix use-after-free of v->config_ctx"), and it is a
+different bug from the vq call fd one I sent on Aug 6
+(https://lore.kernel.org/all/20260806150323.2154-1-yuz08559@gmail.com/),
+which is about the parent caching an eventfd_ctx it does not own.  The
+three touch different functions.
+
+Tested on v7.2-rc6 with KASAN under qemu, VDUSE as the parent: one thread
+swaps the config call fd on the vhost-vdpa fd while another injects
+VDUSE_DEV_INJECT_CONFIG_IRQ on the VDUSE fd.  9 of 10 30-second runs hit
+the UAF; 0 of 5 with the series applied, with the workload counters
+unchanged either way (~30k swaps and ~2.6M injects per run), so the race
+is still being exercised rather than merely not reached.  Also clean over
+5 runs with PROVE_LOCKING, and vdpa_sim shows no change on the shared
+VHOST_VDPA_SET_CONFIG_CALL path (20000 install/unbind cycles plus the
+bad-fd path, identical before and after).
+
+For patch 1 specifically: with a working config fd installed, 250 injects
+deliver 250 signals; after a VHOST_VDPA_SET_CONFIG_CALL with a bad fd,
+delivery stops on an unpatched kernel and continues with the patch.
+
+Yu Zhang (2):
+  vhost-vdpa: don't install the eventfd_ctx_fdget() error in config_ctx
+  vhost-vdpa: protect config_ctx from being freed under the config
+    callback
+
+ drivers/vhost/vdpa.c | 44 +++++++++++++++++++++++++++++---------------
+ 1 file changed, 29 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Remove double 64bscao feature check
+[PATCH 1/6] KVM: s390: Remove double 64bscao feature check
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+sclp.has_64bscao is already verified in the guard clause a few lines
+above this. So we cannot reach this code if it is not true.
+
+Reviewed-by: Hendrik Brueckner <brueckner@linux.ibm.com>
+Reviewed-by: Eric Farman <farman@linux.ibm.com>
+Reviewed-by: Janosch Frank <frankja@linux.ibm.com>
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+ arch/s390/kvm/kvm-s390.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: vsie: Small VSIE cleanup and improvements
+[PATCH 0/6] KVM: s390: vsie: Small VSIE cleanup and improvements
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+Some patches previously sent in series
+"KVM: s390: vsie: Add VSIE SIGP Interpretation (vsie_sigpi) v1"
+
+Link: https://lore.kernel.org/r/20260709-vsie-sigpi-v1-0-ea9f12066408@linux.ibm.com
+
+now in its own series as proposed by Janosch in
+
+Link: https://lore.kernel.org/all/77387525-cf7b-4617-a492-d81b6c1cef17@linux.ibm.com/
+
+As well as some small additions like some of the offsets in struct
+vsie_page do have in page offset or alignment requirements. Adding
+assertions can actually prevent bad code changes as well as provide
+clarity for the requirements.
+
+And introduction of simple SCB_ALIGNMENT_SHIFT constant.
+
+---
+Christoph Schlameuss (6):
+      KVM: s390: Remove double 64bscao feature check
+      KVM: s390: vsie: Remove duplicate assertion
+      KVM: s390: vsie: Convert shift to phys_to_pfn()
+      KVM: s390: vsie: Assert mcck_info offset in vsie_page
+      KVM: s390: vsie: Assert crycb alignment in vsie_page
+      KVM: s390: vsie: Create constant SCB_ALIGNMENT_SHIFT
+
+ arch/s390/include/asm/kvm_host_types.h |  2 ++
+ arch/s390/kvm/kvm-s390.c               |  3 +--
+ arch/s390/kvm/vsie.c                   | 19 +++++++++----------
+ 3 files changed, 12 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: PPC: BookE: Use vcpu_err() instead of printk() in kvmppc_dump_vcpu()
+[PATCH] KVM: PPC: BookE: Use vcpu_err() instead of printk() in kvmppc_dump_vcpu()
+Author: Gaurav Yadav <yadavgaurav386@gmail.com>
+
+Replace generic printk() calls in kvmppc_dump_vcpu() with vcpu_err()
+and remove the corresponding TODO comment.
+
+Using vcpu_err() provides vCPU-aware logging context, making it easier
+to associate register dumps with specific vCPU instances in logs.
+
+Signed-off-by: Gaurav Yadav <yadavgaurav386@gmail.com>
+---
+ arch/powerpc/kvm/booke.c | 25 ++++++++++++-------------
+ 1 file changed, 12 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Remove the kvm debugfs directory if kvm_init() fails
+[PATCH] KVM: Remove the kvm debugfs directory if kvm_init() fails
+Author: Zeng Chi <zeng_chi911@163.com>
+
+
+kvm_init_debug() creates the "kvm" debugfs directory along with all of
+the VM/vCPU stat files, but none of kvm_init()'s error paths removes it.
+If kvm_vfio_ops_init(), kvm_gmem_init(), kvm_init_virtualization() or
+misc_register() fails, the directory is leaked, and none of kvm_init()'s
+callers invokes kvm_exit() on failure, i.e. nothing papers over the
+leak.
+
+The stale /sys/kernel/debug/kvm directory isn't just cosmetic: a
+subsequent attempt to load KVM makes debugfs_create_dir() fail with
+-EEXIST, after which kvm_debugfs_dir holds an ERR_PTR and all stat
+files are silently never created again.  Worse, the leaked stat files
+reference file_operations and stat data that live in the KVM module; if
+the module is unloaded after the failed initialization, reading the
+stale files is a use-after-free.
+
+Remove the debugfs directory in the error path, mirroring kvm_exit().
+
+Fixes: 2b0128127373 ("KVM: Register /dev/kvm as the _very_ last thing during initialization")
+Cc: stable@vger.kernel.org
+Signed-off-by: zengchi <zengchi@kylinos.cn>
+---
+ virt/kvm/kvm_main.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Compare the entire XSAVE buffer in the SEV smoke test
+[PATCH] KVM: selftests: Compare the entire XSAVE buffer in the SEV smoke test
+Author: Gokul K <gokul02k@gmail.com>
+
+compare_xsave() stops at index 4094, so the last byte of the XSAVE state
+is never compared.  Both buffers handed to it are 4096 bytes: the host
+copy is a struct kvm_xsave, whose region[] member is 1024 u32s, and the
+guest copy is the PAGE_SIZE shared page that guest_code_xsave() runs
+XSAVE into.  A VMSA synchronization bug that corrupted only that final
+byte would go unreported and the test would still pass.
+
+Bound the loop with sizeof(struct kvm_xsave) rather than an open-coded
+length, and make the index unsigned so it does not mix signedness with
+sizeof.
+
+Fixes: 8c53183dbaa2 ("selftests: kvm: add test for transferring FPU state into VMSA")
+Signed-off-by: Gokul K <gokul02k@gmail.com>
+---
+ tools/testing/selftests/kvm/x86/sev_smoke_test.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Add PMU event filter support
+[PATCH v2 1/2] RISC-V: KVM: Add PMU event filter support
+Author: Yuhang.chen <yhchen312@gmail.com>
+
+Allow userspace to restrict which SBI PMU events a guest is permitted
+to program via the new VM ioctl KVM_SET_PMU_EVENT_FILTER.  It takes a
+struct kvm_pmu_event_filter whose events[] array holds SBI PMU event
+indices encoded as (type << 16) | code.  The action field selects ALLOW
+(only listed events may be programmed) or DENY (listed events are
+rejected); nevents == 0 clears any active filter.
+
+The filter is enforced in kvm_riscv_vcpu_pmu_ctr_cfg_match(), where a
+disallowed event fails configuration with SBI_ERR_NOT_SUPPORTED.  It
+governs new counter configuration only and is not retroactive.  The
+filter lives in struct kvm_arch, read via SRCU on the vCPU run path and
+replaced under kvm->lock with synchronize_srcu_expedited().  Event
+indices are masked to their valid bits before comparison, so reserved
+high bits cannot bypass a DENY filter.
+
+Advertise the feature with KVM_CAP_PMU_EVENT_FILTER.
+
+Assisted-by: YuanSheng:deepseek-v4-pro
+Co-developed-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Quan Zhou <zhouquan@iscas.ac.cn>
+Signed-off-by: Yuhang.chen <yhchen312@gmail.com>
+---
+ arch/riscv/include/asm/kvm_host.h |  3 ++
+ arch/riscv/include/uapi/asm/kvm.h | 20 +++++++++
+ arch/riscv/kvm/vcpu_pmu.c         | 31 ++++++++++++++
+ arch/riscv/kvm/vm.c               | 69 ++++++++++++++++++++++++++++++-
+ 4 files changed, 122 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v2 1/2] RISC-V: KVM: Add PMU event filter support
+ Skip: [PATCH v2 0/2] RISC-V: KVM: Add PMU event filter support
+On /root/mail/repo_armkvm:
+From 52f006770 to 1c8a9de12
+KVM mailing list update from 52f006770 to 1c8a9de12
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     50 arm.com
+     14 google.com
+      5 linux.dev
+      2 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     50  Sascha Bischoff <Sascha.Bischoff@arm.com>
+     13  Sebastian Ene <sebastianene@google.com>
+      5  Fuad Tabba <fuad.tabba@linux.dev>
+      2  Karl Mehltretter <kmehltretter@gmail.com>
+      1  Mostafa Saleh <smostafa@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: Donate MMIO to the hypervisor
+[PATCH v2 01/13] KVM: arm64: Donate MMIO to the hypervisor
+Author: Sebastian Ene <sebastianene@google.com>
+
+
+Extend the pKVM API to allow the donation of MMIO from the host
+address space to the hypervisor linear map.
+Initialize the host s2 page table with an invalid leaf with the owner ID
+of the hypervisor to prevent the host from mapping the page on faults.
+Prevent kvm_pgtable_stage2_unmap() from removing owner ID from
+stage-2 PTEs, as this can be triggered from recycle logic under memory
+pressure.
+
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |   7 +
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 137 +++++++++++++++++-
+ arch/arm64/kvm/hyp/pgtable.c                  |  11 +-
+ 3 files changed, 148 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: ITS hardening for pKVM
+[PATCH v2 00/13] KVM: ITS hardening for pKVM
+Author: Sebastian Ene <sebastianene@google.com>
+
+This series introduces the necessary machinery to perform trap & emulate
+on device access in pKVM. Furthermore, it hardens the GIC/ITS controller to
+prevent an attacker from tampering with the hypervisor protected memory
+through this device. 
+
+In pKVM, the host kernel is initially trusted to manage the boot process but
+its permissions are revoked once KVM initializes. The GIC/ITS device is
+configured before the kernel deprivileges itself. Once the hypervisor
+becomes available, sanitize the accesses to the ITS controller by
+trapping and emulating certain registers and by shadowing some memory
+structures used by the ITS.
+
+This is required because the ITS is in complete host control and can issue
+transactions on the memory bus without having any protection in front of it
+(IOMMU or SMMU). With pKVM this makes it an interesting target for crossing the
+hypervisor privilege boundary because with pKVM the security model is
+that the host is untrusted. 
+
+Patches overview
+================
+
+The first patch is an adaptation of Mostafa's patch for donating MMIO to
+the hypervisor which can be found here [1]
+
+[1] https://lore.kernel.org/all/20260715115906.2664882-3-smostafa@google.com/
+
+The only difference is that this maps MMIO in the linear space of the
+hypervisor, but after discussing with him on the list [2]
+(https://lore.kernel.org/all/anMwxy9gEEt_Wu6M@google.com/) he seems to be
+more inclined to having the IO in the private VA mapping space. For
+simplicity, I used the linear map but I am happy to change it this is
+required as it doesn't change the code too much.
+
+The next 2 patches add some basic infrastructure to be able to keep
+track of the unmapped MMIO regions from the host and invoke a handler
+when a stage-2 data abort happens in that region.
+
+The 4th patch looks up the ITS node from the device tree and adds it to
+an array of unmapped devices. It install a handler that forwards all the
+MMIO request to mediate the host access inside the emulation layer and
+to prevent breaking ITS functionality. 
+
+The 5th patch changes the GIC/ITS driver to exposes two new methods
+which will be called from the KVM layer to setup the shadow state and
+to take the appropriate locks.
+
+Patch 6 adds the entry point into the emulation setup and sets up the
+shadow command queue. It adds some helper macros to define the offset
+register and the associate action that we want to execute in the
+emulation. It also unmaps the state passed from the host kernel
+to prevent it from playing nasty games later on. The patch
+traps accesses to CWRITER register and copies the commands from the
+host command queue to the shadow command queue. 
+
+Patch 7 prevents the host from directly accessing the first layer of the
+indirect tables held in GITS_BASER<n>. It also prevents the host from
+directly accesssing the last layer of the Device Table (since the entries
+in this table hold the address of the ITT table) and of the vPE Table
+(since the vPE table entries hold the address of the virtual LPI pending
+table.
+
+Patches [8-10] sanitize the commands sent to the ITS and their
+arguments.
+
+The next patches restrict the access of the host to certain registers
+and prevent undefined behaviour. Prevent the host from re-programming
+the tables held in the GITS_BASER register.
+
+The last patch introduces an hvc to setup the ITS emulation and calls
+into the ITS driver to setup the shadow state. 
+
+Design
+======
+
+
+1. Command queue shadowing
+
+The ITS hardware supports a command queue which is programmed by the driver
+in the GITS_CBASER register. When ITS emulation is enabled, the ITS
+driver allocated a copy of the original command queue and uses the copy
+and the emulation layer restricts the access to the original queue for
+the host. When the driver sends a command to the mirrored queue, the
+emulation traps on the write to GITS_CWRITER register and validates the
+command before writing it over to the original queue. 
+
+
+2. Indirect tables first level shadowing
+
+The ITS hardware supports indirection to minimize the space required to
+accommodate large tables (eg. deviceId space used to index the Device Table
+is quite sparse). This is a 2-level indirection, with entries from the
+first table pointing to a second table.
+
+An attacker in control of the host can insert an address that points to
+the hypervisor protected memory in the first level table and then use
+subsequent ITS commands to write to this memory (MAPD).
+
+To shadow this tables, we rely on the driver to allocate space for it
+and we copy the original content from the table into the copy. When
+pKVM becomes available we switch the pointers that hold the orginal
+tables to point to the copy.
+To keep the tables from the hypervisor in sync with what the host
+has, we update the tables when commands are sent to the ITS.
+
+
+3. Hiding the last layer of the Device Table and vPE Table from the host
+
+An attacker in control of the host kernel can alter the content of these
+tables directly (the Arm IHI 0069H.b spec says that is undefined behavior
+if entries are created by software). Normally these entries are created in
+response of commands sent to the ITS.
+
+A Device Table entry that has the following structure:
+
+type DeviceTableEntry is (
+	boolean Valid,
+	Address ITT_base,
+	bits(5) ITT_size
+) 
+
+This can be maliciously created by an attacker and the ITT_base can be
+pointed to hypervisor protected memory. The MAPTI command can then be
+used to write over the ITT_base with an ITE entry.
+
+Similarly a vCPU Table entry has the following structure:
+
+type VCPUTableEntry is (
+	boolean Valid,
+	bits(32) RDbase,
+	Address VPT_base,
+	bits(5) VPT_size
+)
+
+VPT_base can be pointed to hypervisor protected memory and then a
+command can be used to raise interrupts and set the corresponding
+bit. This would give a 1-bit write primitive so is not "as generous"
+as the others.
+
+Testing
+=======
+
+Verified that it boots in Qemu using the following arguments:
+"-machine virt,virtualization=true,gic-version=4,its=true,iommu=smmuv3,acpi=off"
+
+and enabled Qemu tracing using the following argument: '--trace "gicv3_its_*"'
+Qemu reports a bunch of events due to virtio-block using the ITS to
+raise MSIs and I can see the accesses made by the device to the
+GITS_TRANSLATER register.
+
+Wrote a PoC [3] which uses a DEVMEM like interface to poke the ITS
+directly from userspace to achieve controlled write to hyp protected
+memory and verified that this is not possible anymore when the
+sanitization is in place.
+
+[3] [https://github.com/sebastianene07/gic-its-poc/blob/main/its.c]
+
+
+What is not covered
+===================
+
+Only a subset of the commands is sanitized & covered: vLPI commands are
+not covered at all and the Redistributor hardeninig is not covered. 
+
+
+Changelog
+=========
+
+v1 -> v2:
+ - fixed a bunch of functional errors in the parsing of the MAPD command
+ - renamed the functions exported from the GIC driver, made the
+   allocation GFP_ATOMIC, make it accepts a flags arg
+ - renamed the entry point in the emulation and make it so that it
+   accepts the size of pages that we use for the private state
+ - added support for rollback on certain commands that timeout on
+   hardware
+ - clarified commit messages 
+
+Previous posting:
+################
+
+v1: https://lore.kernel.org/all/20260310124933.830025-1-sebastianene@google.com/
+
+
+ Mostafa Saleh (1):
+  KVM: arm64: Donate MMIO to the hypervisor
+
+Sebastian Ene (12):
+  KVM: arm64: Track host-unmapped MMIO regions in a static array
+  KVM: arm64: Support host MMIO trap handlers for unmapped devices
+  KVM: Parse the device tree and register the ITS region with pKVM
+  irqchip/gic-v3-its: Add support for the ITS emulation setup
+  KVM: arm64: Shadow the ITS command queue and setup emulation
+  KVM: arm64: Restrict host access to the private ITS tables
+  KVM: arm64: Trap & emulate the ITS MAPD command
+  KVM: arm64: Trap & emulate the ITS MAPC command
+  KVM: arm64: Restrict host updates to GITS_CTLR
+  KVM: arm64: Prevent the host from specifying a different command queue
+  KVM: arm64: Prevent the host from programming new GITS_BASER tables
+  KVM: arm64: Implement HVC interface for ITS emulation setup
+
+ arch/arm64/include/asm/kvm_arm.h              |   2 +
+ arch/arm64/include/asm/kvm_asm.h              |   1 +
+ arch/arm64/include/asm/kvm_pkvm.h             |  18 +
+ arch/arm64/kvm/hyp/include/nvhe/its_emulate.h |  14 +
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |   7 +
+ arch/arm64/kvm/hyp/nvhe/Makefile              |   3 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |  16 +
+ arch/arm64/kvm/hyp/nvhe/its_emulate.c         | 827 ++++++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 189 +++-
+ arch/arm64/kvm/hyp/nvhe/setup.c               |  27 +
+ arch/arm64/kvm/hyp/pgtable.c                  |  11 +-
+ arch/arm64/kvm/pkvm.c                         |  76 +-
+ drivers/irqchip/irq-gic-v3-its.c              | 169 +++-
+ include/linux/irqchip/arm-gic-v3.h            |  51 ++
+ 14 files changed, 1379 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  irqchip/gic-v5: Allow KVM setup without a
+[PATCH v5 01/49] irqchip/gic-v5: Allow KVM setup without a
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+GICv5 does not require a virtual CPU interface maintenance interrupt
+for native GCIE operation. The interrupt is only needed when
+FEAT_GCIE_LEGACY is present, as the legacy GICv3 interface still
+relies on maintenance IRQ delivery.
+
+Stop rejecting KVM setup solely because the maintenance interrupt is
+absent. Parse the interrupt if present, but if none is described and
+the system does not advertise FEAT_GCIE_LEGACY, tell KVM that no
+maintenance interrupt is required.
+
+This lets native GICv5 KVM support be registered on systems that do
+not provide a maintenance interrupt, while requiring a maintenance
+interrupt for GICv3-capable systems.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ drivers/irqchip/irq-gic-v5.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Add GICv5 IRS support
+[PATCH v5 00/49] KVM: arm64: Add GICv5 IRS support
+Author: Sascha Bischoff <Sascha.Bischoff@arm.com>
+
+Hi all,
+
+This series builds on the initial vGICv5 support [1] and adds support
+for the GICv5 IRS, as described by the GICv5 (EAC0) specification [2].
+With this, a GICv5 guest is no longer restricted to PPIs, and can make
+use of SPIs and LPIs as well.
+
+With SPIs and LPIs available, this series makes it possible to boot a
+full Linux guest on the Arm FVP model [3], using the setup described in
+Lorenzo's GICv5 Linux software enablement guide [4]. In addition, GICv5
+IPIs are typically implemented as LPIs, so LPI support is what makes
+guests with more than one vCPU possible.
+
+The corresponding kvmtool changes are available separately [5]. With
+these changes, `--irqchip=3Dgicv5` works now. The `--irqchip=3Dgicv5-its`
+configuration does not work with this series, as ITS/MSI support is not
+included here.
+
+The IRS is created as part of the vgic-v5 device, and is not a separate
+KVM device. This is because implementing the CPU interface alone would
+limit a guest to a single vCPU and PPIs only. Hence, the IRS is bundled
+into the VGIC, much like the distributor for GICv3.
+
+The series adds the host-side plumbing needed for KVM to interact with
+the physical IRS, including VM and VPE table management, VPE residency,
+and VPE doorbells. It also adds an emulated IRS MMIO interface for the
+guest, together with the UAPI needed for userspace to configure the IRS
+address and to save/restore the IRS and IST state.
+
+The main pieces are:
+
+* Host IRS capability discovery and configuration frame plumbing.
+
+* Allocation and management of the GICv5 VM table, VPE table, VMTEs,
+  VPEs, and host-backed guest IST storage.
+
+* VPE residency and doorbell handling, allowing the IRS to select SPIs
+  and LPIs for resident VPEs and wake non-resident VPEs when required.
+
+* Emulation of the GICv5 IRS MMIO CONFIG_FRAME for guests.
+  Virtualisation, MPAM, MEC, and SWERR are not supported and are
+  RAZ/WI.
+
+* SPI injection support using GIC VDPEND. Once injected, the GICv5
+  hardware manages the SPI lifecycle.
+
+* Save/restore support for GICv5 EL1 system registers, IRS MMIO state,
+  and guest ISTs. SPI and LPI IST state is transferred through
+  userspace-owned buffers using KVM_DEV_ARM_VGIC_GRP_IST.
+
+* Documentation for the new VGICv5 IRS userspace interfaces and the
+  required save/restore ordering.
+
+* Selftests for the UAPI components, the PPI, SPI, and LPI support, and
+  save/restore.
+
+This series keeps SPI, LPI, and save/restore support together
+intentionally. SPI and LPI support are needed to run realistic guests,
+while the save/restore interface is included at the same time so that the
+new userspace ABI is complete from the point it is exposed: userspace
+should not be able to create VGICv5 state that it cannot also migrate.
+
+The IST migration selftest restores state into a separate VM, re-saves
+the SPI and LPI IST images before the destination runs, and compares
+them byte-for-byte with the source images. It also validates restored IRS
+MMIO state through SPI/LPI delivery, priority, enable, and affinity
+behavior.
+
+LPIs are explicitly driven by the guest through the IRS/IST state. This
+series does not add direct LPI injection support, MSI support, or GICv5
+ITS emulation.
+
+These changes are based on v7.2-rc6. I've pushed the full set of changes
+to a branch at [6].
+
+Changes since v4 [7]:
+
+* Rebased onto v7.2-rc6 and addressed review feedback from Marc and
+  Fuad, together with the Sashiko AI reports for v4. Thanks all!
+
+* Aligned ACPI maintenance-interrupt discovery with GICv3. Broken MADT
+  descriptions now produce FW_BUG warnings rather than preventing KVM
+  initialisation, and the interrupt is always registered as
+  level-sensitive.
+
+* Reworked host IRS capability discovery to cache raw IRS_IDR2,
+  IRS_IDR3, and IRS_IDR4 values and derive their fields through
+  accessors. This avoids tying future EL2 code to the decoded layout
+  of kvm_vgic_global_state.
+
+* Hardened hardware-shared table handling for non-coherent IRS
+  implementations. IRS operations and CPU table accesses now share a
+  lock, VPET, VMD and VPED allocations are rounded up to whole cache
+  lines, descriptors are initialised before publication, and VMT
+  configuration waits for the IRS to become idle.
+
+* Fixed sparse vCPU ID handling. The VPET and architectural VPE ID now
+  use the userspace-provided vcpu_id, while doorbells and VPED storage
+  use the dense internal vcpu_idx. IDs outside the available VPE ID
+  space are rejected.
+
+* Limited virtual GICv5 implementations to 1024 SPIs so that the
+  physically contiguous per-SPI state allocation remains within
+  KMALLOC_MAX_SIZE. The common IRQ routing table accommodates 1024
+  pins, while route validation retains the existing 988-pin limit for
+  GICv2 and GICv3.
+
+* Tightened LPI IST lifetime and migration rules. Guest Valid-to-Valid
+  IRS_IST_BASER writes can no longer change the address, and once a
+  host LPI IST exists, userspace may replay but not alter
+  IRS_IST_BASER or IRS_IST_CFGR. LPI IST saves also require the VMTE ID
+  width to match IRS_IST_CFGR. The IST migration descriptor has moved
+  into the arm64-specific UAPI header.
+
+* Hardened IRS and doorbell operation. GICv5 probing now fails without
+  a host LPI domain, commands require a valid doorbell IRQ, running
+  vCPUs are reloaded only on IRSEN transitions, and WFI doorbells are
+  requested only while the virtual IRS is enabled.
+
+* The resident, non-resident, and VDPEND nVHE handlers are explicit
+  no-ops under pKVM. This matches the fix by Fuad for the
+  already-upstreamed GICv5 hypercalls [8].
+
+* Expanded the selftests to cover the 1024-SPI boundary, live IST
+  register restrictions, sparse vCPU IDs, and rejection of vCPU IDs
+  outside the GICv5 VPE ID space.
+
+Thanks for taking the time to look at these changes!
+
+Thanks,
+Sascha
+
+[1] https://lore.kernel.org/all/20260319154937.3619520-1-sascha.bischoff@ar=
+m.com/
+[2] https://developer.arm.com/documentation/aes0070/latest
+[3] https://developer.arm.com/documentation/108086/latest
+[4] https://linaro.atlassian.net/wiki/x/CQAF-wY
+[5] https://lore.kernel.org/all/20260116182606.61856-1-sascha.bischoff@arm.=
+com/
+[6] https://gitlab.arm.com/linux-arm/linux-sb/-/tree/gicv5_kvm_irs_support_=
+v5
+[7] https://lore.kernel.org/all/20260724104819.1296803-1-sascha.bischoff@ar=
+m.com/
+[8] https://lore.kernel.org/all/20260806100256.371164-1-fuad.tabba@linux.de=
+v/
+
+Sascha Bischoff (49):
+  irqchip/gic-v5: Allow KVM setup without a maintenance IRQ
+  irqchip/gic-v5: Provide OF IRS config frame attrs to KVM
+  irqchip/gic-v5: Set up gic_kvm_info on ACPI hosts
+  KVM: arm64: gic-v5: Define remaining IRS MMIO registers
+  arm64/sysreg: Add GICv5 GIC VDPEND encoding
+  arm64/sysreg: Update ICC_CR0_EL1 with LINK and LINK_IDLE fields
+  KVM: arm64: gic-v5: Cache host IRS ID registers
+  KVM: arm64: gic-v5: Add VPE doorbell domain
+  KVM: arm64: gic-v5: Create and manage VM and VPE tables
+  KVM: arm64: gic-v5: Introduce guest IST alloc and management
+  KVM: arm64: gic-v5: Implement VMT/vIST IRS MMIO Ops
+  KVM: arm64: gic-v5: Keep GICv5 vCPU limit model-specific
+  KVM: arm64: gic-v5: Implement VPE IRS MMIO Ops
+  KVM: arm64: gic-v5: Set up VMTEs and VPE doorbells
+  KVM: arm64: gic-v5: Add resident/non-resident hyp calls
+  KVM: arm64: gic-v5: Request doorbells when VPEs enter WFI
+  KVM: arm64: gic-v5: Introduce struct vgic_v5_irs and IRS base address
+  KVM: arm64: gic-v5: Add IRS IODEV support to MMIO handlers
+  KVM: arm64: gic-v5: Add KVM_VGIC_V5_ADDR_TYPE_IRS to UAPI
+  KVM: arm64: gic-v5: Add GICv5 IRS IODEV and MMIO emulation
+  KVM: arm64: gic-v5: Initialise per-VM IRS state
+  KVM: arm64: gic-v5: Register the IRS IODEV
+  KVM: arm64: gic-v5: Set IRICHPPIDIS based on IRS enable state
+  KVM: arm64: selftests: Update vGICv5 selftest to set IRS address
+  KVM: arm64: gic-v5: Add GIC VDPEND hyp call
+  KVM: arm64: gic: Introduce set_pending_state() to irq_ops
+  KVM: arm64: gic-v5: Support SPI injection
+  Documentation: KVM: Extend VGICv5 device attribute docs
+  KVM: arm64: gic-v5: Add GICv5 SPI injection to irqfd
+  KVM: arm64: gic-v5: Mask per-vCPU PPI state in
+    vgic_v5_finalize_ppi_state()
+  KVM: arm64: gic-v5: Add GICv5 EL1 sysreg userspace accessors
+  KVM: arm64: gic-v5: Handle userspace accesses to IRS MMIO region
+  KVM: arm64: gic-v5: Add CoreSight MMIO regs to IRS
+  KVM: arm64: gic-v5: Add VGICv5 IST save/restore UAPI
+  KVM: arm64: gic-v5: Implement save/restore mechanisms for ISTs
+  Documentation: KVM: Document KVM_DEV_ARM_VGIC_GRP_CPU_SYSREGS for
+    VGICv5
+  Documentation: KVM: Add KVM_DEV_ARM_VGIC_GRP_IRS_REGS to VGICv5 docs
+  Documentation: KVM: Add docs for KVM_DEV_ARM_VGIC_GRP_IST
+  Documentation: KVM: Add the VGICv5 IRS save/restore sequences
+  KVM: selftests: Add VGICv5 IRS address attribute tests
+  KVM: selftests: Add VGICv5 NR_IRQS attribute tests
+  KVM: selftests: Add VGICv5 IRS_REGS attribute tests
+  KVM: selftests: Add VGICv5 IST attribute tests
+  KVM: selftests: Add VGICv5 USERSPACE_PPIS tests
+  KVM: selftests: Add VGICv5 CPU sysreg attribute tests
+  KVM: selftests: Add VGICv5 SPI injection tests
+  KVM: selftests: Add VGICv5 LPI delivery tests
+  KVM: selftests: Add VGICv5 IST save/restore coverage
+  KVM: selftests: Add VGICv5 sparse vCPU IDs test
+
+ Documentation/virt/kvm/api.rst                |    3 +-
+ .../virt/kvm/devices/arm-vgic-v5.rst          |  271 ++-
+ arch/arm64/include/asm/kvm_asm.h              |    3 +
+ arch/arm64/include/asm/kvm_host.h             |    1 +
+ arch/arm64/include/asm/kvm_hyp.h              |    3 +
+ arch/arm64/include/asm/sysreg.h               |   13 +-
+ arch/arm64/include/uapi/asm/kvm.h             |   15 +
+ arch/arm64/kvm/Makefile                       |    3 +-
+ arch/arm64/kvm/arm.c                          |   10 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |   35 +
+ arch/arm64/kvm/hyp/vgic-v5-sr.c               |   45 +
+ arch/arm64/kvm/sys_regs.c                     |    6 +-
+ arch/arm64/kvm/vgic-sys-reg-v5.c              |  519 +++++
+ arch/arm64/kvm/vgic/vgic-init.c               |  150 +-
+ arch/arm64/kvm/vgic/vgic-irqfd.c              |   18 +-
+ arch/arm64/kvm/vgic/vgic-irs-v5.c             | 1184 ++++++++++
+ arch/arm64/kvm/vgic/vgic-kvm-device.c         |  270 ++-
+ arch/arm64/kvm/vgic/vgic-mmio.c               |    6 +
+ arch/arm64/kvm/vgic/vgic-mmio.h               |    2 +
+ arch/arm64/kvm/vgic/vgic-v5-tables.c          | 1860 ++++++++++++++++
+ arch/arm64/kvm/vgic/vgic-v5-tables.h          |  140 ++
+ arch/arm64/kvm/vgic/vgic-v5.c                 | 1139 +++++++++-
+ arch/arm64/kvm/vgic/vgic.c                    |   37 +-
+ arch/arm64/kvm/vgic/vgic.h                    |   21 +
+ arch/arm64/tools/sysreg                       |    4 +-
+ drivers/irqchip/irq-gic-v5-irs.c              |   19 +-
+ drivers/irqchip/irq-gic-v5.c                  |  112 +-
+ include/kvm/arm_vgic.h                        |  210 +-
+ include/linux/irqchip/arm-gic-v5.h            |  256 ++-
+ include/linux/irqchip/arm-vgic-info.h         |    5 +
+ tools/arch/arm64/include/uapi/asm/kvm.h       |   15 +
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   | 1931 ++++++++++++++++-
+ .../selftests/kvm/include/arm64/gic_v5.h      |  105 +
+ 33 files changed, 8208 insertions(+), 203 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-its: Don't dereference a NULL collection on ITT save
+[PATCH v2 1/4] KVM: arm64: vgic-its: Don't dereference a NULL collection on ITT save
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+MAPC with V=0 drops ite->collection but leaves the ITE on the device's
+ITT list, and vgic_its_save_ite() dereferences it unconditionally. A
+guest that issues MAPD, MAPTI and then MAPC(V=0) therefore oopses the
+host when the VMM issues KVM_DEV_ARM_ITS_SAVE_TABLES to migrate it.
+That sequence is UNPREDICTABLE per the architecture, but KVM already
+handles the resulting state in the translate, MOVI and DISCARD paths.
+
+Save a zeroed entry, which vgic_its_restore_ite() reads back as
+invalid. Skipping the ITE instead would leave the ITT slot holding
+whatever is in guest memory, and restore rejects an entry naming a
+collection the restored collection table does not have.
+
+Fixes: eff484e0298da ("KVM: arm64: vgic-its: ITT save and restore")
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/vgic/vgic-its.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: Fixes for ITS table save and init retry
+[PATCH v2 0/4] KVM: arm64: vgic: Fixes for ITS table save and init retry
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Respinning today since I am travelling until the 17th and will be slow to
+reply.
+
+Changes since v1 [1]:
+  - Patch 3: check the collection ID with vgic_its_check_id() instead of
+    bounding the walk by the table size, so a collection the table cannot
+    address is not saved either. Retitled to match. (sashiko)
+  - New patch 4: skip the ITEs that are saved as invalid when computing an
+    ITE's next-event offset. (Oliver)
+
+Three unrelated vgic fixes, and one follow-up to the first of them.
+
+The first is the one that matters the most. A guest that issues MAPD,
+MAPTI and then MAPC(V=0) leaves an ITE mapped with no collection, and
+the next KVM_DEV_ARM_ITS_SAVE_TABLES from the VMM oopses the host. That
+is three ITS commands and an ordinary migration save, with no race and
+no allocation failure.
+
+The other two are weaker and come after it. The init fix stops the SPI
+array leaking when userspace retries KVM_DEV_ARM_VGIC_CTRL_INIT after a
+failure. The collection table fix stops the save writing past the end of
+the table, and stops it saving a collection the destination will reject.
+
+Patch 4 is not a fix. It makes the restore scan skip the invalid entries
+patch 1 writes instead of stepping through them one at a time.
+
+Patch 1 is unchanged. Oliver also suggested deleting the ITEs when their
+collection goes away, but I do not think it removes the need for the
+check here: vgic_its_free_collection_list() reaches the same state with
+the ITTs intact, and that path is not UNPREDICTABLE.
+
+Patches 1 and 3 are reproduced, each with a selftest that fails on an
+unfixed kernel and passes on a fixed one. Those are not part of this
+series, happy to post them separately if they are worth having.
+
+Based on Linux 7.2-rc6 (075b74841bd00).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260805093828.3626610-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (4):
+  KVM: arm64: vgic-its: Don't dereference a NULL collection on ITT save
+  KVM: arm64: vgic: Don't leak the SPI array when init is retried
+  KVM: arm64: vgic-its: Don't save collections the table cannot hold
+  KVM: arm64: vgic-its: Point saved ITEs at the next valid entry
+
+ arch/arm64/kvm/vgic/vgic-init.c |  3 +++
+ arch/arm64/kvm/vgic/vgic-its.c  | 26 +++++++++++++++++++-------
+ 2 files changed, 22 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
