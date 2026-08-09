@@ -1,0 +1,1031 @@
+
+On /root/mail/repo:
+From c4412fbf0 to 928efb013
+KVM mailing list update from c4412fbf0 to 928efb013
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     11 linux.ibm.com
+      6 gmail.com
+      1 systemssoftware.dev
+
+Top 15 contributors (Based on Email Body)
+
+      6  Anthony Krowiak <akrowiak@linux.ibm.com>
+      5  Amit Machhiwal <amachhiw@linux.ibm.com>
+      4  Gokul K <gokul02k@gmail.com>
+      2  Jia Jia <physicalmtea@gmail.com>
+      1  Sainath Grandhi <sainathg@systemssoftware.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 5/5] s390/vfio-ap: Fix control domain removal in vfio_ap_mdev_cfg_remove
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The vfio_ap_config_remove function uses the bitmap_andnot function to clear
+bits from the matrix_mdev->matrix.adm bitmap (specifies the control domains
+assigned to the mdev). This prevents the explicitly unplugged control
+domains from being removed the KVM guest. The bitmap_and function is used
+instead.
+
+Fixes: eeb386aeb5b7c ("s390/vfio-ap: handle config changed and scan complete notification")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/5] s390/vfio-ap: Fix required lock not held during update of ap_matrix_mdev object
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+In the vfio_ap_mdev_cfg_add function, the apm_add, aqm_add and adm_add
+fields of an ap_matrix_mdev object fields are modified while not holding
+the matrix_dev->mdevs_lock. This lock must be held while making these
+to guard against a race condition with another caller that may be
+concurrently modifying these fields or any of the fields in the
+matrix_mdev->matrix.
+
+Fixes: eeb386aeb5b7c ("s390/vfio-ap: handle config changed and scan complete notification")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 2/5] s390/vfio-ap: Fix dereference matrix_mdev->kvm without checking for NULL
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The ap_driver structure has two fields which are function pointers to
+callbacks:
+
+* .on_config_changed: called at the start of the AP bus scan function to
+                      notify the device driver that the host AP
+                      configuration has changed and the associated AP
+                      devices will be added or removed accordingly. This
+                      gives the implementor a chance to evaluate the
+                      configuration changes and respond to them before
+                      the associated devices are added or removed.
+
+* .on_scan_complete:  Called at the end of the AP bus scan function to
+                      notify the device driver that the host AP
+                      configuration has changed and the AP devices have
+                      been added or removed accordingly. This gives the
+                      implementor the opportunity to respond to the
+                      changes after the associated devices are added or
+                      removed.
+
+These two callbacks are implemented in the vfio_ap device driver via the
+vfio_ap_on_cfg_changed and vfio_ap_on_scan_complete functions respectively.
+
+Within the call stack of these two callback functions the
+matrix_mdev->kvm->lock mutex is taken without checking whether
+matrix_mdev->kvm is NULL or not. If matrix_mdev->kvm has never been set,
+trying to take the lock will trigger a NULL pointer dereference. This patch
+adds checks for matrix_mdev->kvm == NULL before taking the
+matrix_mdev->kvm->lock mutex.
+
+Note that the matrix_mdev->kvm->lock mutex taken in the
+vfio_ap_mdev_hot_plug_config function is moved to the calling function
+along with the matrix_dev->mdevs_lock which is needed there to access
+the fields of the matrix_mdev. It makes little sense to make the change
+the check for matrix_mdev->kvm there before taking the kvm->lock
+mutex only to have to move it out via another patch, so it is done in
+this patch.
+
+It is important to make note of the following:
+1. The matrix_dev->guests_lock is acquired at the start of both callback
+   functions. This ensures that matrix_mdev will not be removed via the
+   vfio_ap_mdev_remove function because it too takes matrix_dev_guests_lock
+   before removing the object; so, matrix_mdev will be available for the
+   duration of the callback functions.
+
+2. The matrix_dev->mdevs_lock mutex must be taken in order to access
+   fields within the matrix_mdev structure
+
+3. matrix_mdev->kvm->lock mutex must be taken before the
+   matrix_dev->mdevs_lock to prevent a lockdep splat.
+
+4: The kvm->lock must be held while plugging the guest's AP configuration
+   into its SIE state description via the vfio_ap_mdev_update_guest_apcb
+   function.
+
+5. The vfio_ap_mdev_update_guest_apcb checks matrix_mdev->kvm to verify it
+   is not NULL before doing the hot plug of the guest's AP configuration.
+
+Fixes: eeb386aeb5b7c ("s390/vfio-ap: handle config changed and scan complete notification")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 33 ++++++++++++++++++++++---------
+ 1 file changed, 24 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/5] s390/vfio-ap: Fix use of wrong lock in mdev probe function
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The vfio_ap_mdev_probe function uses the matrix_dev->mdevs_lock
+mutex to guard the add of a newly created ap_matrix_mdev object to the
+matrix_dev->mdev_list. This mutex does not protect against traversal
+of the list; its purpose is to guard against concurrent access to fields
+contained in an ap_matrix_mdev object. This could lead to kernel memory
+corruption or use-after-free if another mdev is created concurrently.
+
+The adding of an ap_matrix_mdev object to matrix_dev->mdev_list
+is now guarded by the matrix_dev->guests_lock which is the correct
+way to protect against concurrent mdev_list access.
+
+See the vfio-ap-locking.rst in the linux kernel tree.
+
+Fixes: 2c1ee8983aa3 ("s390/vfio-ap: prepare for dynamic update of guest's APCB on queue probe/remove")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/5] s390/vfio-ap: Fix stale do_remove flag across iterations in vfio_ap_mdev_cfg_remove
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The do_remove flag in vfio_ap_mdev_cfg_remove() is initialised to zero
+before the loop that iterates over the list of matrix mdevs, but is
+never reset at the start of each iteration. Since do_remove is
+OR-accumulated across iterations, a positive result from one mdev
+carries over to subsequent mdevs.
+
+The fix is to set the do_remove flag with the first call to bitmap_and;
+for example: do_remove = bitmap_an rather than do_remove |= bitmap_and.
+
+Fixes: eeb386aeb5b7 ("s390/vfio-ap: handle config changed and scan complete notification")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/5] s390/vfio-ap: Fix bugs in vfio_ap device driver callback functions
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+Patches 2/5 and 5/5 in this series were previously posted as individual
+fixes upstream. During review of those patches, the reviewer identified
+several pre-existing problems in the same code paths that are addressed
+by the remaining three patches. All five patches are fixes for
+pre-existing bugs and are tagged for stable.
+
+Patches 1/5, 3/5 and 4/5 fix bugs in the call trees of the two
+callback functions implemented by the vfio_ap device
+driver -- vfio_ap_on_cfg_changed and vfio_ap_on_scan_complete:
+
+* Patch 1/5 fixes a stale do_remove flag in vfio_ap_mdev_cfg_remove
+  that causes spurious hot-unplug operations on mdevs that have no
+  assigned adapters, domains or control domains in common with those
+  removed from the host AP configuration.
+
+* Patch 3/5 fixes the use of the wrong lock to protect the addition of
+  a newly created ap_matrix_mdev object to the mdev_list in the
+  vfio_ap_mdev_probe function.
+
+* Patch 4/5 fixes the missing mdevs_lock while updating the apm_add,
+  aqm_add and adm_add fields of an ap_matrix_mdev object in
+  vfio_ap_mdev_cfg_add.
+
+Anthony Krowiak (5):
+  s390/vfio-ap: Fix stale do_remove flag across iterations in
+    vfio_ap_mdev_cfg_remove
+  s390/vfio-ap: Fix dereference matrix_mdev->kvm without checking for
+    NULL
+  s390/vfio-ap: Fix use of wrong lock in mdev probe function
+  s390/vfio-ap: Fix required lock not held during update of
+    ap_matrix_mdev object
+  s390/vfio-ap: Fix control domain removal in vfio_ap_mdev_cfg_remove
+
+ drivers/s390/crypto/vfio_ap_ops.c | 59 +++++++++++++++++++++----------
+ 1 file changed, 41 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 4/4] KVM: PPC: Document KVM_PPC_GET_COMPAT_CAPS ioctl
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+Add documentation for the KVM_PPC_GET_COMPAT_CAPS ioctl to the KVM API
+documentation.
+
+The ioctl exposes host processor compatibility modes supported for
+nested KVM guests on PowerPC systems. The documentation covers error
+code descriptions including E2BIG for forward compatibility,
+KVM_PPC_COMPAT_CAPS_SIZE_VER0 as the minimum size floor, the rationale
+for rejecting non-zero reserved fields to prevent ABI ambiguity, bit
+numbering clarification for IBM MSB-0 convention, and KVM-specific
+capability bit constants.
+
+Tested-by: Gautam Menghani <gautam@linux.ibm.com>
+Reviewed-by: Gautam Menghani <gautam@linux.ibm.com>
+Tested-by: Anushree Mathur <anushree.mathur@linux.ibm.com>
+Reviewed-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+Changes in this version:
+  - Simplify versioning paragraph: drop the three-case explanation of
+    copy_struct_{from,to}_user() behaviour; keep a single sentence
+    referencing the functions [Ritesh]
+
+ Documentation/virt/kvm/api.rst | 77 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 77 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 3/4] KVM: PPC: Book3S HV: Add support for compat CPU capabilities for KVM on PowerNV
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+Currently, when booting a compatibility-mode KVM guest (L1) on a PowerNV
+hypervisor (L0), the guest runs with the expected processor
+compatibility level. However, when booting a nested KVM guest (L2)
+inside the L1, QEMU derives the CPU model from the raw host PVR and
+attempts to run the nested guest at that level, instead of honoring the
+compatibility mode of the L1.
+
+Extend host CPU compatibility capability reporting to support nested
+virtualization on PowerNV systems (PAPR nested API v1).
+
+For nested API v2 (PowerVM), compatibility capabilities are served from
+the cached nested_capabilities value (populated at module init via
+kvmhv_nested_init() using the H_GUEST_GET_CAPABILITIES hcall). This
+information is not available on PowerNV systems.
+
+For nested API v1, derive the compatibility capabilities from the L1
+guest by reading the "cpu-version" property from the device tree, which
+reflects the effective (logical) processor compatibility level. Map this
+value to the corresponding compatibility capability bitmap using
+KVM-specific constants.
+
+The mapping is cumulative: a system running at a given compatibility
+level is assumed to also support older generations down the supported
+chain. Note that unlike KVM on PowerVM (nested API v2), KVM on PowerNV
+currently does not strictly enforce older generation compatibility modes
+for nested guests - the reported capabilities reflect what the host CPU
+can present, not what the hypervisor independently validates.
+
+Introduce a helper kvmppc_map_compat_capabilities() to translate CPU
+version values into KVM_PPC_COMPAT_CAP bits using a fallthrough switch,
+and integrate it into kvmppc_get_compat_caps(). The implementation
+applies masking to ensure only supported processor modes are exposed.
+
+This allows userspace to query host CPU compatibility modes on both
+KVM on PowerVM and on PowerNV platforms via the KVM_PPC_GET_COMPAT_CAPS
+ioctl.
+
+Suggested-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+Tested-by: Gautam Menghani <gautam@linux.ibm.com>
+Reviewed-by: Gautam Menghani <gautam@linux.ibm.com>
+Tested-by: Anushree Mathur <anushree.mathur@linux.ibm.com>
+Reviewed-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+ arch/powerpc/kvm/book3s_hv.c | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/4] KVM: PPC: Book3S HV: Implement compat CPU capability retrieval for KVM on PowerVM
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+On POWER systems, the host CPU may run in a compatibility mode (e.g., a
+Power11 processor operating in Power10 compatibility mode). In such
+cases, the effective CPU level exposed to guests differs from the
+physical processor generation.
+
+When running nested KVM guests, QEMU derives the host CPU type using
+mfpvr(), which reflects the physical processor version. This can result
+in a mismatch between the CPU model selected by QEMU and the
+compatibility mode enforced by the host, leading to guest boot failures.
+
+For example, booting a nested guest on a Power11 LPAR configured in
+Power10 compatibility mode fails with:
+
+  KVM-NESTEDv2: couldn't set guest wide elements
+  [..KVM reg dump..]
+
+This occurs because QEMU selects a CPU model corresponding to the
+physical processor (via mfpvr()), while the host operates in a lower
+compatibility mode. As a result, KVM rejects the requested compatibility
+level during guest initialization.
+
+On pseries nestedv2 systems, add support for retrieving host CPU
+compatibility capabilities for nested guests on PowerVM. The capability
+bitmap reflects the processor modes negotiated between the Power
+hypervisor (L0) and the host partition (L1) via the
+H_GUEST_GET_CAPABILITIES hcall, but is retrieved from the cached
+nested_capabilities value populated during module initialization,
+avoiding repeated hypervisor calls. A WARN_ON_ONCE() flags the
+unexpected case where nested_capabilities is zero on a nestedv2 system.
+The implementation defines KVM-specific capability constants
+(KVM_PPC_COMPAT_CAP_POWER9/10/11), masks unsupported bits, and exposes
+the result through the KVM_PPC_GET_COMPAT_CAPS ioctl.
+
+Hook the implementation into the Book3S HV kvmppc_ops so that it can be
+invoked by the generic KVM ioctl handling code.
+
+Suggested-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+Tested-by: Gautam Menghani <gautam@linux.ibm.com>
+Reviewed-by: Gautam Menghani <gautam@linux.ibm.com>
+Tested-by: Anushree Mathur <anushree.mathur@linux.ibm.com>
+Reviewed-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+ arch/powerpc/include/uapi/asm/kvm.h | 10 ++++++++++
+ arch/powerpc/kvm/book3s_hv.c        | 20 ++++++++++++++++++++
+ 2 files changed, 30 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 1/4] KVM: PPC: Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+Introduce a new capability and ioctl to expose CPU compatibility modes
+supported by the host processor for nested guests.
+
+On IBM POWER systems, newer processor generations (N) can operate in
+compatibility modes corresponding to earlier generations, like (N-1) and
+(N-2). This is particularly relevant for nested virtualization, where
+nested KVM guests may need to run with a specific processor compatibility
+level.
+
+Introduce KVM_CAP_PPC_COMPAT_CAPS capability and the corresponding
+KVM_PPC_GET_COMPAT_CAPS vm ioctl. The ioctl returns a bitmap describing
+the compatibility modes supported by the host in respective bit numbers,
+allowing userspace (e.g., QEMU) to select an appropriate compatibility
+level when configuring nested KVM guests.
+
+The ioctl handling is added in kvm_arch_vm_ioctl() and retrieves host
+CPU compatibility capabilities via a PowerPC-specific backend
+implementation when available.
+
+The struct kvm_ppc_compat_caps places the 'size' field first so it can
+be read alone via get_user() before copy_struct_from_user() is called,
+avoiding pointer arithmetic to locate the size field.
+
+The ioctl is defined using _IO so the ioctl number remains stable even if
+the struct grows in future versions. It uses copy_struct_from_user() and
+copy_struct_to_user() to provide forward- and backward-compatible
+extensibility: older userspace passing a smaller struct to a newer kernel
+gets zero-padded trailing fields. Newer userspace passing a larger struct to
+an older kernel (usize > ksize) succeeds if trailing bytes are zero (the
+kernel reports back min(usize, ksize) as the filled size); if trailing bytes
+are non-zero, the kernel writes back ksize into host_caps.size and returns
+-E2BIG so userspace can retry with the correct size.
+
+KVM_PPC_COMPAT_CAPS_SIZE_VER0 is defined as a frozen integer constant
+(24) marking the size of the initial struct version, used as the
+minimum floor for size field validation, similar to other versioned
+struct interfaces in the kernel.
+
+The 'flags' field is reserved for future use. The kernel rejects any
+call where flags is non-zero with -EINVAL, preventing garbage values
+from being baked into ABI permanently.
+
+The ioctl returns appropriate error codes: E2BIG if usize exceeds
+PAGE_SIZE, or if new userspace provides a larger struct with non-zero
+trailing bytes (with ksize written back into host_caps.size for the
+retry); EINVAL for an invalid size or non-zero reserved fields; EFAULT
+for failed copy operations; and ENOTTY if the backend doesn't implement
+get_compat_caps.
+
+Suggested-by: Vaibhav Jain <vaibhav@linux.ibm.com>
+Tested-by: Gautam Menghani <gautam@linux.ibm.com>
+Reviewed-by: Gautam Menghani <gautam@linux.ibm.com>
+Tested-by: Anushree Mathur <anushree.mathur@linux.ibm.com>
+Reviewed-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+ arch/powerpc/include/asm/kvm_ppc.h  |  1 +
+ arch/powerpc/include/uapi/asm/kvm.h |  8 +++
+ arch/powerpc/kvm/powerpc.c          | 78 +++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h            |  3 ++
+ 4 files changed, 90 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 0/4] KVM: PPC: Expose CPU compatibility modes for nested guests
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+On POWER systems, newer processor generations can operate in compatibility
+modes corresponding to earlier generations (e.g., a Power11 system running
+in Power10 compatibility mode). In such cases, the effective CPU level
+exposed to guests differs from the physical processor generation.
+
+This creates a problem for nested virtualization. When booting a nested KVM
+guest (L2) inside a host KVM guest (L1) running in a compatibility mode,
+userspace (e.g., QEMU) may derive the CPU model from the raw hardware PVR
+and attempt to configure the nested guest accordingly. However, the L1
+partition is constrained by the compatibility level negotiated with the
+hypervisor (L0), and requests exceeding that level are rejected, leading to
+guest boot failures such as:
+
+  KVM-NESTEDv2: couldn't set guest wide elements
+
+This series provides a mechanism for userspace to query the effective CPU
+compatibility modes supported by the host, so it can select an appropriate
+CPU model for nested guests.
+
+To achieve this, the series introduces a new KVM capability and ioctl
+(KVM_CAP_PPC_COMPAT_CAPS / KVM_PPC_GET_COMPAT_CAPS) that expose the
+compatibility modes supported by the host.
+
+Why a new UAPI?
+===============
+While cpu-version is available in /proc/device-tree/cpus/<cpu#>/cpu-version
+on both L1 booted on PowerNV and PowerVM LPARs, the UAPI approach is
+preferable for several reasons:
+
+1. pHYP (L0) capabilities: On PowerVM, we need to rely on capabilities
+   negotiated with pHYP in KVM, not just device tree properties. The
+   cpu-version property depicts the current compat mode but doesn't point
+   to what all compat modes are supported for the nested guest.
+
+2. procfs dependency: Not all systems run with procfs enabled (CONFIG_PROC_FS
+   is optional). Minimal configurations like buildroot might disable it, but
+   KVM ioctl works regardless since it accesses kernel data structures
+   directly.
+
+3. Kernel validation: The kernel validates and normalizes the compatibility
+   information, ensuring userspace gets validated, consistent data.
+
+4. Abstraction & stability: /proc/device-tree is an implementation detail.
+   The UAPI provides a stable interface that won't break if the underlying
+   mechanism changes.
+
+5. Semantic clarity: KVM_PPC_GET_COMPAT_CAPS clearly expresses what
+   compatibility modes can be used for KVM guests, vs. parsing device tree
+   which requires understanding the semantic meaning of cpu-version.
+
+The implementation supports both:
+
+  - KVM on PowerVM (nested API v2), where compatibility information is
+    served from the cached nested_capabilities value, originally obtained
+    via the H_GUEST_GET_CAPABILITIES hypercall at module init.
+  - KVM on PowerNV (nested API v1), where compatibility is derived from the
+    device tree ("cpu-version") representing the effective processor
+    compatibility level.
+
+This allows userspace (e.g., QEMU) to select a CPU model consistent with
+the host compatibility mode, avoiding mismatches and enabling successful
+nested guest boot.
+
+Note: This series is built on top of patch [1] which must be applied first.
+Patch [1] ensures arch_compat is validated against the host compatibility
+mode before this series adds the capability query mechanism.
+Commit e4de1b9cb3b5 ("powerpc/dt_cpu_ftrs: Set CPU_FTR_P11_PVR for Power11
+and later processors") which was also a prerequisite has been merged upstream.
+
+Changes in v9:
+ - Simplify versioning paragraph in api.rst: drop the three-case
+   explanation of copy_struct_{from,to}_user() behaviour; keep a single
+   sentence referencing the functions [Ritesh]
+
+Patch summary:
+  [1/4] Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+  [2/4] Implement capability retrieval for KVM on PowerVM (API v2)
+  [3/4] Add KVM on PowerNV support (API v1)
+  [4/4] Document the new ioctl
+
+Testing (with QEMU v5 patches and on top of patch [1]):
+
+KVM APIv1 Testing
+=================
+  On P10 PowerNV machine (L0)
+  ---------------------------
+    - P10 L1 KVM guest -> works
+      - P10 nested L2 KVM guest -> works
+      - P9 compat nested L2 KVM guest -> works
+    - P9 compat L1 KVM guest -> works
+      - P9 nested L2 KVM guest -> works
+
+  On Powernv11 TCG Guest (L0)
+  ---------------------------
+    - P11 PowerNV TCG L0 guest -> works
+    - P11 L1 KVM guest -> works
+      - P11 L2 KVM guest -> works
+    - P10 compat L1 KVM guest -> works
+      - P10 L2 KVM guest -> works
+    - P9  compat L1 KVM guest -> works
+      - P9 L2 KVM guest -> works
+
+KVM APIv2 Testing
+=================
+  On P11 PowerVM LPAR (L1)
+  ------------------------
+    - P11 L2 KVM guest -> works
+    - P10 compat L2 KVM guest -> works
+    - P9 compat L2 KVM guest fails to boot as expected
+    - Without QEMU patches but Linux patches
+      - P11 L2 KVM guest -> works
+      - P10 compat L2 KVM guest -> works
+      - P9 compat L2 KVM guest fails to boot as expected
+    - Without Linux patches but QEMU patches
+      - P11 L2 KVM guest -> works
+      - P10 compat L2 KVM guest -> works
+
+  On P11 LPAR in P10 compat (L1)
+  ------------------------------
+    - P10 (host compat) L2 KVM guest -> works
+    - Without QEMU patch but Linux patches
+      - P10 guest fails to boot as expected (error: kvm run failed Invalid argument)
+    - Without Linux patch but QEMU patches
+      - P10 guest fails to boot as expected (KVM: unknown exit, hardware reason ffffffffffffffea)
+
+  On P10 PowerVM LPAR (L1)
+  ------------------------
+    - P10 L2 KVM guest -> works
+    - P9 compat L2 KVM guest fails to boot as expected
+
+TCG pSeries Guest
+=================
+    - P11 (default) pSeries guest boots fine
+
+ABI Extensibility Testing (struct size 32, extra member)
+=========================================================
+    - Newer struct on QEMU, older kernel -> works (kernel returns -E2BIG,
+      QEMU retries with correct size)
+    - New struct on Linux kernel, older QEMU -> works (kernel zero-pads
+      trailing fields, QEMU gets correct data)
+
+With this series, nested guests boot successfully in configurations where
+they previously failed due to compatibility mismatches.
+
+Related QEMU series:
+====================
+QEMU v5 series:
+https://lore.kernel.org/all/20260804182914.83091-1-amachhiw@linux.ibm.com/
+
+Previous QEMU versions:
+v4: https://lore.kernel.org/all/20260701052341.62289-1-amachhiw@linux.ibm.com/
+v3: https://lore.kernel.org/all/20260616113915.25589-1-amachhiw@linux.ibm.com/
+v2: https://lore.kernel.org/all/20260502140021.69712-1-amachhiw@linux.ibm.com/
+v1: https://lore.kernel.org/all/20260430061333.37905-1-amachhiw@linux.ibm.com/
+
+Previous versions:
+==================
+v8: https://lore.kernel.org/linuxppc-dev/20260807172433.82045-1-amachhiw@linux.ibm.com/
+v7: https://lore.kernel.org/linuxppc-dev/20260806170645.11892-1-amachhiw@linux.ibm.com/
+v6: https://lore.kernel.org/linuxppc-dev/20260804180705.59160-1-amachhiw@linux.ibm.com/
+v5: https://lore.kernel.org/linuxppc-dev/20260701051409.51820-1-amachhiw@linux.ibm.com/
+v4: https://lore.kernel.org/linuxppc-dev/20260616123314.82721-1-amachhiw@linux.ibm.com/
+v3: https://lore.kernel.org/linuxppc-dev/20260522152744.55251-1-amachhiw@linux.ibm.com/
+v2: https://lore.kernel.org/linuxppc-dev/20260513100755.83195-1-amachhiw@linux.ibm.com/
+v1: https://lore.kernel.org/linuxppc-dev/20260430054906.94431-1-amachhiw@linux.ibm.com/
+
+References:
+===========
+[1] https://lore.kernel.org/all/20260714175432.86388-1-amachhiw@linux.ibm.com/
+
+Amit Machhiwal (4):
+  KVM: PPC: Introduce KVM_CAP_PPC_COMPAT_CAPS and wire up ioctl
+  KVM: PPC: Book3S HV: Implement compat CPU capability retrieval for KVM
+    on PowerVM
+  KVM: PPC: Book3S HV: Add support for compat CPU capabilities for KVM
+    on PowerNV
+  KVM: PPC: Document KVM_PPC_GET_COMPAT_CAPS ioctl
+
+ Documentation/virt/kvm/api.rst      | 77 ++++++++++++++++++++++++++++
+ arch/powerpc/include/asm/kvm_ppc.h  |  1 +
+ arch/powerpc/include/uapi/asm/kvm.h | 18 +++++++
+ arch/powerpc/kvm/book3s_hv.c        | 56 +++++++++++++++++++++
+ arch/powerpc/kvm/powerpc.c          | 78 +++++++++++++++++++++++++++++
+ include/uapi/linux/kvm.h            |  3 ++
+ 6 files changed, 233 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2] vhost/vdpa: reject VRING_NUM larger than device max
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_vring_set_num() only requires a non-zero power-of-two that fits
+in 16 bits. vhost-vdpa then hands that value to the backend through
+set_vq_num() without comparing it to get_vq_num_max().
+
+A local process with access to /dev/vhost-vdpa-* can therefore set a
+queue size larger than the device advertises. On the vdpa_sim backend,
+the worker then walks descriptors beyond the mapped descriptor ring.
+KASAN reports a 16-byte out-of-bounds read, corresponding to one
+vring_desc, in the vringh IOTLB path:
+
+  BUG: KASAN: out-of-bounds in _copy_from_iter
+  Read of size 16
+  copy_from_iotlb
+  copydesc_iotlb
+  vringh_getdesc_iotlb
+  vdpasim_net_work
+
+Check the requested size against get_vq_num_max() in
+vhost_vdpa_vring_ioctl() before calling vhost_vring_ioctl(), and return
+-EINVAL when the request is too large.
+
+Fixes: 4c8cf31885f6 ("vhost: introduce vDPA-based backend")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+v2:
+- Add the missing Signed-off-by tag.
+
+ drivers/vhost/vdpa.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost/vdpa: reject VRING_NUM larger than device max
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_vring_set_num() only requires a non-zero power-of-two that fits
+in 16 bits. vhost-vdpa then hands that value to the backend through
+set_vq_num() without comparing it to get_vq_num_max().
+
+A local process with access to /dev/vhost-vdpa-* can therefore set a
+queue size larger than the device advertises. On the vdpa_sim backend,
+the worker then walks descriptors beyond the mapped descriptor ring.
+KASAN reports a 16-byte out-of-bounds read, corresponding to one
+vring_desc, in the vringh IOTLB path:
+
+  BUG: KASAN: out-of-bounds in _copy_from_iter
+  Read of size 16
+  copy_from_iotlb
+  copydesc_iotlb
+  vringh_getdesc_iotlb
+  vdpasim_net_work
+
+Check the requested size against get_vq_num_max() in
+vhost_vdpa_vring_ioctl() before calling vhost_vring_ioctl(), and return
+-EINVAL when the request is too large.
+
+Fixes: 4c8cf31885f6 ("vhost: introduce vDPA-based backend")
+---
+ drivers/vhost/vdpa.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] KVM: selftests: Free the VM when NX hugepage disabling is denied
+Author: Gokul K <gokul02k@gmail.com>
+
+run_test() returns as soon as it has confirmed that disabling NX huge
+pages fails with -EPERM, without freeing the VM created a few lines
+earlier.
+
+This is not an obscure path.  nx_huge_pages_test.sh runs the test a
+second time without CAP_SYS_BOOT for any non-root user, and main() calls
+run_test() with disable_nx_huge_pages=true on its second invocation, so
+an ordinary run of the wrapper script always takes it.
+
+Free the VM before returning.
+
+Fixes: b774da3f2e57 ("KVM: selftests: Test disabling NX hugepages on a VM")
+Signed-off-by: Gokul K <gokul02k@gmail.com>
+---
+ tools/testing/selftests/kvm/x86/nx_huge_pages_test.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: selftests: Free the VM when the SEV smoke test's guest completes
+Author: Gokul K <gokul02k@gmail.com>
+
+test_sev() returns directly out of the UCALL_DONE case rather than
+leaving the loop, so the plain-SEV path skips the kvm_vm_free() at the
+end of the function.  The SEV-ES path is unaffected; it breaks out of
+the loop and frees the VM correctly.
+
+main() invokes test_sev() once per supported SEV VM type, so a full run
+leaks a VM and its file descriptors.  Nothing fails today because the
+process exits shortly afterwards, which is presumably why this was not
+noticed, but the leak also means the plain-SEV path never exercises VM
+teardown.
+
+Use a goto so UCALL_DONE joins the existing exit path.  A plain break
+would only leave the switch statement and spin the loop again.
+
+Fixes: be250ff437fa ("KVM: selftests: Add a basic SEV smoke test")
+Signed-off-by: Gokul K <gokul02k@gmail.com>
+---
+ tools/testing/selftests/kvm/x86/sev_smoke_test.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: selftests: Fix two VMs leaked on early returns
+Author: Gokul K <gokul02k@gmail.com>
+
+Two x86 selftests create a VM and then take an early return that skips the
+kvm_vm_free() at the end of the function.
+
+Patch 1 is the plain-SEV path of sev_smoke_test(), which returns straight
+out of the UCALL_DONE case instead of leaving the loop.  The SEV-ES path
+next to it breaks out and frees correctly.
+
+Patch 2 is nx_huge_pages_test, which returns as soon as it has confirmed
+that disabling NX huge pages is denied without CAP_SYS_BOOT.  This one is
+not an unusual error path: nx_huge_pages_test.sh runs the test without
+CAP_SYS_BOOT for any non-root user, so a normal run always takes it.
+
+Neither leak causes a failure today, since the process exits shortly
+afterwards.  They do mean those paths never exercise VM teardown.
+
+The two patches are independent and either can be applied on its own.
+
+Found by auditing every function under tools/testing/selftests/kvm/ that
+creates a VM and later calls kvm_vm_free(), looking for returns in
+between.  Seven other hits were false positives, mostly returns after
+REPORT_GUEST_ASSERT() or TEST_FAIL(), which abort the process and make
+the return unreachable.  Two more that do look real, in get-reg-list.c
+and arm64/external_aborts.c, are left out here because they belong to
+different maintainers.
+
+Compile-tested only.  This host has neither SEV (kvm_amd sev=N) nor
+hugetlb configured, so both tests SKIP rather than run.
+
+Note patch 1 touches sev_smoke_test.c, which an unrelated patch I sent
+earlier also touches [1].  They modify different functions, do not
+conflict, and neither depends on the other.
+
+[1] https://lore.kernel.org/all/20260807071026.195503-1-gokul02k@gmail.com/
+
+Gokul K (2):
+  KVM: selftests: Free the VM when the SEV smoke test's guest completes
+  KVM: selftests: Free the VM when NX hugepage disabling is denied
+
+ tools/testing/selftests/kvm/x86/nx_huge_pages_test.c | 1 +
+ tools/testing/selftests/kvm/x86/sev_smoke_test.c     | 3 ++-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: Fix the bounds of the SEV debug dst buffer check
+Author: Gokul K <gokul02k@gmail.com>
+
+validate_dst() is passed a starting offset and a byte count, but bounds
+its loop with "i < nr_bytes", comparing the offset against the count
+rather than against offset + nr_bytes.  Only calls that pass offset 0
+check the region they were asked to check.  Every other call checks too
+few bytes, and any call whose offset is >= the count returns without
+checking anything at all.
+
+Of the 1990 validate_dst() calls a full run makes per VM type, 740 (37%)
+check zero bytes, only the 29 zero-offset calls are correct, and 62% of
+the intended bytes are checked overall.  The unaligned offsets the sweep
+deliberately picks to exercise partial chunks are precisely the ones
+that end up checking nothing.
+
+The bug is latent today: validate_buffers() runs first and compares all
+of src[] against dst[], so a genuine {en,de}crypt corruption is still
+caught.  That is presumably why this went unnoticed.
+
+Bound the loop with offset + nr_bytes, and rename the parameter to
+offset so it cannot be mistaken for a length again.  The caller already
+guarantees offset + nr_bytes <= BUFFER_SIZE, so the corrected loop stays
+in bounds.
+
+Fixes: 6edd35e77a42 ("KVM: selftests: Add a test to verify SEV {en,de}crypt debug ioctls")
+Signed-off-by: Gokul K <gokul02k@gmail.com>
+---
+Compile-tested only: this host has no SEV (kvm_amd sev=N, no /dev/sev), so
+the test SKIPs here rather than running.
+
+The figures above come from replaying the exact offset/size sweep of
+__test_sev_dbg() and test_sev_dbg() outside the kernel against both the
+current and the corrected loop.  Injecting a single-byte corruption at every
+position the check is supposed to cover, the current loop detects 62% of them
+and the corrected loop detects all of them.
+
+ tools/testing/selftests/kvm/x86/sev_dbg_test.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH] riscv: Add Zicboz CBO.ZERO tests
+Author: Sainath Grandhi <sainathg@systemssoftware.dev>
+
+Add a test for CBO.ZERO when Zicboz is advertised. Read the cache-block
+size from riscv,cboz-block-size and allocate three aligned blocks.
+Execute CBO.ZERO at multiple offsets in the middle block and verify that
+the containing block is zeroed while the adjacent blocks remain
+unchanged.
+
+Skip the test when Zicboz is unavailable.
+
+Signed-off-by: Sainath Grandhi <sainathg@systemssoftware.dev>
+---
+ riscv/Makefile      |   1 +
+ riscv/isa-zicboz.c  | 168 ++++++++++++++++++++++++++++++++++++++++++++
+ riscv/unittests.cfg |   4 ++
+ 3 files changed, 173 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 1c8a9de12 to eeb8e8a7c
+KVM mailing list update from 1c8a9de12 to eeb8e8a7c
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 google.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+      3  Mostafa Saleh <smostafa@google.com>
+      1  Marc Zyngier <maz@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2 2/3] KVM: arm64: Fix timer offsets for non-protected VMs
+Author: Mostafa Saleh <smostafa@google.com>
+
+With pKVM, protected VMs always have offset of zero.
+However, timer offsets for non-protected guests fail to take effect
+for two reasons:
+1) In __timer_enable_traps(), enabling of traps check for
+   is_protected_kvm_enabled() rather than vcpu_is_protected(vcpu)
+
+2) The vcpu timer offsets were never initialised and kept as NULL.
+
+This is problematic for cases when the timer is trapped in the
+hypervisor as the with the case of broken CNTVOFF_EL2, which leads
+to the hypervisor and host using different offsets and causing VM
+hangs.
+
+This can be confirmed by running the arch_timer selftest which fails:
+./arch_timer -o 100000000
+Random seed: 0x6b8b4567
+Guest assert failed,  vcpu 0; stage; 3; iter: 0
+==== Test Assertion Failure ====
+  arm64/arch_timer.c:137: config_iter + 1 == irq_iter
+  pid=310 tid=312 errno=4 - Interrupted system call
+Guest assert failed,  vcpu 3; stage; 3; iter: 0
+Guest assert failed,  vcpu 1; stage; 3; iter: 0
+==== Test Assertion Failure ====
+  arm64/arch_timer.c:137: config_iter + 1 == irq_iter
+  pid=310 tid=313 errno=4 - Interrupted system call
+Guest assert failed,  vcpu 2; stage; 3; iter: 0
+==== Test Assertion Failure ====
+  arm64/arch_timer.c:137: config_iter + 1 == irq_iter
+  pid=310 tid=314 errno=4 - Interrupted system call
+[...]
+
+After the fix:
+
+./arch_timer -o 100000000
+Random seed: 0x6b8b4567
+PASS(vCPU-1).
+PASS(vCPU-3).
+PASS(vCPU-0).
+PASS(vCPU-2)
+
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Fixes: cb0c272acebd ("KVM: arm64: Initialize the hypervisor's VM state at EL2")
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/pkvm.c     | 14 ++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c |  6 +++---
+ 2 files changed, 17 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] KVM: arm64: Fix hvhe and broken CNTVOFF_EL2
+Author: Mostafa Saleh <smostafa@google.com>
+
+When running on a setup affected with broken CNTVOFF_EL2
+(has_broken_cntvoff())
+
+Booting with VHE or protected mode(nvhe) (id_aa64mmfr1.vh=0
+and arm64_sw.hvhe=0) works fine.
+
+However launching a protected VM with protected hvhe mode panics the
+guest kernel:
+
+[    0.000000] Internal error: Oops - Undefined instruction: 0000000000000000 [#1]  SMP
+[    0.000000] Modules linked in:
+[    0.000000] CPU: 0 UID: 0 PID: 0 Comm: swapper/0 Not tainted 7.2.0-rc3-g05f75bd71e0e-dirty #29 PREEMPT
+[    0.000000] Hardware name: linux,dummy-virt (DT)
+[    0.000000] pstate: 000003c5 (nzcv DAIF -PAN -UAO -TCO -DIT -SSBS BTYPE=--)
+[    0.000000] pc : arch_timer_shutdown_virt+0x4/0x1c
+[    0.000000] lr : arch_timer_starting_cpu+0x1c4/0x2d4
+[    0.000000] sp : ffffa6bd9a193c00
+[    0.000000] x29: ffffa6bd9a193c20 x28: ffffa6bd9a1bcf88 x27: 0000000000000000
+[    0.000000] x26: ffff00001be70dd8 x25: ffffa6bd99d85000 x24: ffffa6bd99d85ee4
+[    0.000000] x23: ffffa6bd99d85000 x22: ffffa6bd9a1499c0 x21: ffffa6bd9a1ab900
+[    0.000000] x20: 00ffffffffffffff x19: ffff00001be8b600 x18: 000000000000028c
+[    0.000000] x17: 00000000510f0010 x16: 00000000510f0010 x15: 00000000500f0000
+[    0.000000] x14: 0000000000000000 x13: 0000000000000000 x12: 0000000000000018
+[    0.000000] x11: ffffa6bd9a8ac000 x10: 0000000000f0000f x9 : ffffffffffffffff
+[    0.000000] x8 : ffffa6bd98822e18 x7 : 0070752d65746174 x6 : 00111ff76e007261
+[    0.000000] x5 : ffffa6bd9ad68078 x4 : 0000000000000000 x3 : ffffa6bd98822a0c
+[    0.000000] x2 : 0000000000000073 x1 : 0000000000000001 x0 : ffff00001be8b600
+[    0.000000] Call trace:
+[    0.000000]  arch_timer_shutdown_virt+0x4/0x1c (P)
+[    0.000000]  cpuhp_invoke_callback+0x11c/0x280
+[    0.000000]  cpuhp_issue_call+0x1e8/0x224
+[    0.000000]  __cpuhp_setup_state_cpuslocked+0x1d8/0x2b8
+[    0.000000]  __cpuhp_setup_state+0x50/0x74
+[    0.000000]  arch_timer_register+0xc0/0x148
+[    0.000000]  arch_timer_of_init+0x148/0x170
+[    0.000000]  timer_probe+0x74/0x124
+[    0.000000]  time_init+0x18/0x58
+[    0.000000]  start_kernel+0x1c0/0x3ac
+[    0.000000]  __primary_switched+0x88/0x90
+[    0.000000] Code: c80b7d2a 35ffffab 17ffffeb d503245f (d53be328)
+
+The workaround avoids setting non-zero CNTVOFF_EL2 and trapping the
+virtual counter to emulate the offset.
+In the VHE path (timer_set_traps()), traps are only enabled when the
+guest actually has a non-zero virtual timer offset.
+However, __timer_enable_traps() in hyp/nvhe/timer-sr.c unconditionally
+set CNTHCTL_EL1TVT and CNTHCTL_EL1TVCT whenever has_broken_cntvoff()
+was true.
+
+Which causes 2 issues:
+1) Protected VMs: kvm_handle_pvm_sysreg() does not find "cntv_ctl_el0"
+in pvm_sys_reg_descs and injects undefined instruction exceptions.
+
+2) non-protected guests are trapped all the time even with offset of
+zero.
+
+Fix this by adding a check in __timer_enable_traps() similar to the one in
+timer_set_traps()
+
+Fixes: 0bc9a9e85fcf ("KVM: arm64: Work around x1e's CNTVOFF_EL2 bogosity")
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Yuan Yao <yaoyuan@linux.alibaba.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Tested-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] KVM: arm64: Make timer_get_offset() work in all contexts
+Author: Mostafa Saleh <smostafa@google.com>
+
+
+We currently have two implementations of get_timer offset(), one
+in arm_arch_timer.h, and another one in switch.h.
+
+These two only differ by a pair of kern_hyp_va(), which seems a
+pretty weak reason to open-code it.
+
+Turn this function into a macro to avoid the include dependency hell
+on kern_hyp_va(), and make it work correctly in all contexts.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+---
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 15 +----------
+ include/kvm/arm_arch_timer.h            | 34 +++++++++++++++----------
+ 2 files changed, 22 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] KVM: arm64: Fixes for timers and pKVM
+Author: Mostafa Saleh <smostafa@google.com>
+
+What started as a  small patch ended up as a 3 patch series thanks
+to Sashiko.
+
+First patch from Marc to consolidate the offset calculation,
+follow up patches fix issues with non-protected VM and timer
+offset and protected VM running with broken CNTVOFF_EL2.
+
+The patches have all the information so I will keep this short.
+
+v1: https://lore.kernel.org/all/20260806150105.4010701-1-smostafa@google.com/
+Main changes:
+- Add comment based on Fuad review
+- Add prefix patches that also fix the non-protected hang properly.
+
+Marc Zyngier (1):
+  KVM: arm64: Make timer_get_offset() work in all contexts
+
+Mostafa Saleh (2):
+  KVM: arm64: Fix timer offsets for non-protected VMs
+  KVM: arm64: Fix hvhe and broken CNTVOFF_EL2
+
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 15 +----------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c          | 14 ++++++++++
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c      | 10 ++++----
+ include/kvm/arm_arch_timer.h            | 34 +++++++++++++++----------
+ 4 files changed, 41 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
