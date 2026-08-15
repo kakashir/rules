@@ -1,0 +1,753 @@
+
+On /root/mail/repo:
+From 78286209f to a049185bd
+KVM mailing list update from 78286209f to a049185bd
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     15 linux.ibm.com
+      8 gmail.com
+      6 linux.dev
+      5 redhat.com
+      5 google.com
+      3 kylinos.cn
+
+Top 15 contributors (Based on Email Body)
+
+     14  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      8  Jia Jia <physicalmtea@gmail.com>
+      6  Jinyu Tang <jinyu.tang@linux.dev>
+      5  Vitaly Kuznetsov <vkuznets@redhat.com>
+      5  Sean Christopherson <seanjc@google.com>
+      2  Hao Zhang <zhanghao1@kylinos.cn>
+      1  Tao Cui <cuitao@kylinos.cn>
+      1  Christian Borntraeger <borntraeger@linux.ibm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: VMX: Explicitly track TDX VMs' root level instead of
+[PATCH] KVM: VMX: Explicitly track TDX VMs' root level instead of
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly track the root level for TDX VMs instead of trying to infer the
+depth of the paging tree based on an individual vCPU's CPUID information.
+Applying KVM's existing logic to select the root level to TDX is flawed as
+nothing *requires* userspace to fill in the correct guest.MAXPHYADDR for a
+vCPU's CPUID.  Guessing at the correct root level is also ridiculous given
+that userspace has already told KVM the root level during TD initialization.
+
+Relying on userspace to set the expected/correct CPUID lets a misbehaving
+userspace trip the KVM_BUG_ON() in tdx_load_mmu_pgd() by configuring guest
+CPUID to use an "incorrect" guest.MAXPHYADDR.
+
+Keep gfn_direct_bits even though it can be trivially derived from
+mirror_root_level as saving a whole eight bytes per VM is meaningless, and
+the value is queried fairly often and in hot paths.
+
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Binbin Wu <binbin.wu@linux.intel.com>
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Fixes: 20d913729c11 ("KVM: x86/mmu: Taking guest pa into consideration when calculate tdp level")
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+
+Compile-tested only, and found by inspection, i.e. I haven't proven that this
+works, or that there's actually a bug.  But I'm pretty sure there's a bug.
+
+Came across this when looking at our out-of-tree intrahost migration code, and
+wanted to assert that could be at most one mirror root per TDX VM.
+
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/cpuid.c            | 14 --------------
+ arch/x86/kvm/cpuid.h            |  1 -
+ arch/x86/kvm/mmu.h              |  9 +++++++++
+ arch/x86/kvm/mmu/mmu.c          | 16 ++++++++--------
+ arch/x86/kvm/vmx/tdx.c          | 12 +++---------
+ 6 files changed, 21 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Even more misc fixes
+[PATCH v2 0/6] KVM: s390: Even more misc fixes
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+A few fixes that had been dropped from previous series due to still
+having issues, plus a few new fixes.
+
+v1->v2:
+* Fix racy usage of sg->parent in patch 2
+* Fix wrong number of arguments for dat_delete_slot() in patch 3
+* Restrict srcu usage to the bare minimum necessary to avoid potentially
+  triggering page faults in the guest while holding the srcu
+* Fix races also in other skey functions
+
+
+Claudio Imbrenda (6):
+  KVM: s390: Fix dirty marking in adapter_indicators_set*()
+  KVM: s390: Fix _gaccess_shadow_fault()
+  KVM: s390: Refactor dat_set_slot()
+  KVM: s390: Move all code into kvm_arch_prepare_memory_region()
+  KVM: s390: Add missing srcu in kvm_s390_set_irq_state()
+  KVM: s390: Fix potential races in dat skey functions
+
+ arch/s390/kvm/dat.c       |  65 +++++++++++---------
+ arch/s390/kvm/dat.h       |  10 ++--
+ arch/s390/kvm/gaccess.c   |  13 ++++
+ arch/s390/kvm/interrupt.c |  44 +++++++-------
+ arch/s390/kvm/kvm-s390.c  | 122 +++++++++++++++++---------------------
+ 5 files changed, 132 insertions(+), 122 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Fix dirty marking in adapter_indicators_set*()
+[PATCH v2 1/6] KVM: s390: Fix dirty marking in adapter_indicators_set*()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When the indicator and/or summary bits are set in the guest, the
+accessed page was only marked dirty in KVM if the access was performed
+using the slow path; accesses through the new kvm_arch_set_irq_inatomic
+fast inject path would not mark the page as dirty.
+
+Fix by adding/moving the missing calls to mark_page_dirty(). Note that
+for the inatomic path set_page_dirty{,_lock}() is not needed as the
+page stays pinned; the unpin path correctly marks it as dirty.
+
+Opportunistically reorder the local variables to be in reverse
+Christmas tree order and refactor to use guard().
+
+Fixes: 1e95e3bc6b05 ("KVM: s390: Enable adapter_indicators_set to use mapped pages")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/interrupt.c | 40 ++++++++++++++++++++-------------------
+ 1 file changed, 21 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+[PATCH 1/4] KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+VMPTRLD with active eVMCS is already forbidden, however, returning 1
+without skipping the instruction or queuing an exception will likely
+result in L1 getting stuck. Genuine Hyper-V seems to inject #UD under
+similar circumstances, mimic the behavior in KVM.
+
+Reported-by: f734222792@gmail.com
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=221841
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Adjust VMPTRLD/VMPTRST behavior with active eVMCS
+[PATCH 0/4] KVM: nVMX: Adjust VMPTRLD/VMPTRST behavior with active eVMCS
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+It was reported (https://bugzilla.kernel.org/show_bug.cgi?id=221841) that
+KVM's emulation of VMPTRLD/VMPTRST instructions when Enlightened VMCS is
+active is sub-optimal: returning '1' does not make the L1 guest skip the
+instruction so a hang is likely to happen. While TLFS does not really
+specify the expected behavior, genuine Hyper-V seems to return #UD for
+VMPTRLD and eVMCS pointer for VMPTRST. Alter the behavior in KVM and check
+it in selftests.
+
+Note: this is not a security issue. Misbehaving L1 can only do self-harm
+by doing VMPTRLD/VMPTRST when it also uses eVMCS.
+
+Vitaly Kuznetsov (4):
+  KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+  KVM: nVMX: Make VMPTRST return eVMCS GPA when it is used
+  KVM: selftests: Adapt to the updated VMPTRST behavior when eVMCS is
+    used
+  KVM: selftests: Check VMPTRLD with active eVMCS
+
+ arch/x86/kvm/vmx/nested.c                     | 22 +++++++++++++------
+ tools/testing/selftests/kvm/include/x86/vmx.h |  6 -----
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  | 18 ++++++++++-----
+ 3 files changed, 28 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Move the shared "IRQs off" exit handler(s) to
+[PATCH 1/3] KVM: VMX: Move the shared "IRQs off" exit handler(s) to
+Author: Sean Christopherson <seanjc@google.com>
+
+Move vmx_handle_exit_irqoff() and its helpers to common.h / main.c to
+capture that it's a common handler and to allow guarding against incorrectly
+using to_vmx(), and to allow for
+
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Binbin Wu <binbin.wu@linux.intel.com>
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h  |  6 ++++
+ arch/x86/kvm/vmx/main.c    | 69 +++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/vmx/vmx.c     | 74 --------------------------------------
+ arch/x86/kvm/vmx/x86_ops.h |  1 -
+ 4 files changed, 75 insertions(+), 75 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Harden against interpreting TDX vCPU as vcpu_vmx
+[PATCH 0/3] KVM: VMX: Harden against interpreting TDX vCPU as vcpu_vmx
+Author: Sean Christopherson <seanjc@google.com>
+
+Move vmx_handle_exit_irqoff() and all its helpers to main.c, and then poison
+to_vmx() for the common .c files to harden KVM against misinterpreting a TDX
+vCPU as a VMX vCPU, i.e. consuming to_vmx() on a TDX vCPU.  Spotted when
+working through the bus lock series.
+
+TDX changes are compile-tested only (one of these days I'll track down a host
+that's fully TDX-capable).
+
+Sean Christopherson (3):
+  KVM: VMX: Move the shared "IRQs off" exit handler(s) to common code
+  KVM: VMX: Disallowing using to_vmx() in common VT code
+  KVM: VMX: Rename posted interrupt prefixes from "vmx" to "vt"
+
+ arch/x86/kvm/vmx/common.h      |  6 +++
+ arch/x86/kvm/vmx/main.c        | 75 +++++++++++++++++++++++++++++++-
+ arch/x86/kvm/vmx/posted_intr.c | 18 ++++----
+ arch/x86/kvm/vmx/posted_intr.h |  8 ++--
+ arch/x86/kvm/vmx/tdx.c         |  4 +-
+ arch/x86/kvm/vmx/vmx.c         | 78 +---------------------------------
+ arch/x86/kvm/vmx/x86_ops.h     |  1 -
+ 7 files changed, 97 insertions(+), 93 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390x/css: Fix css stsch detection to go beyond 8192 devices
+[PATCH 1/1] s390x/css: Fix css stsch detection to go beyond 8192 devices
+Author: Christian Borntraeger <borntraeger@linux.ibm.com>
+
+find_last_bit expects a size in bits and not in words. the calculation
+limits the number of guest devices to 8192.  This probably does not
+matter in reality, its wrong anyway.
+
+Fixes: df1fe5bb49241 ("s390: Virtual channel subsystem support")
+Signed-off-by: Christian Borntraeger <borntraeger@linux.ibm.com>
+---
+ hw/s390x/css.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost: add helpers for device IOTLB lifecycle
+[PATCH v5 1/3] vhost: add helpers for device IOTLB lifecycle
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_init_device_iotlb() currently replaces an existing device IOTLB
+with a new empty table. A later VHOST_SET_FEATURES update, such as a
+logging change while ACCESS_PLATFORM remains enabled, can therefore
+discard valid translations.
+
+Make device IOTLB initialization idempotent and add a common teardown
+helper for the inverse transition. The helper detaches the table from
+all virtqueues, resets their metadata caches, clears queued IOTLB miss
+messages, and frees the old table after the virtqueue handoff. It is a
+no-op when no device IOTLB is installed, so callers do not need to inspect
+that internal state.
+
+Callers must hold the device mutex. The helper does not update
+acknowledged features; backend-specific code continues to do that.
+
+Fixes: 6b1e6cc7855b ("vhost: new device IOTLB API")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/vhost.c | 30 ++++++++++++++++++++++++++++++
+ drivers/vhost/vhost.h |  1 +
+ 2 files changed, 31 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vhost: fix device IOTLB feature lifecycle
+[PATCH v5 0/3] vhost: fix device IOTLB feature lifecycle
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Both vhost-vsock and vhost-net can leave the device IOTLB attached when
+userspace clears VIRTIO_F_ACCESS_PLATFORM. They also replace an existing
+IOTLB with a new empty table when a later feature update keeps
+ACCESS_PLATFORM enabled, for example when updating logging.
+
+The stale IOTLB can keep old translations active after a memory table
+change, while replacing an existing table discards valid translations and
+causes avoidable IOTLB misses.
+
+Patch 1 makes device IOTLB initialization idempotent and adds a common
+teardown helper. The helper detaches the table from every virtqueue,
+resets metadata caches, clears queued IOTLB miss messages, and frees the
+old table after the virtqueue handoff. It is a no-op when no device IOTLB
+is installed.
+
+Patches 2 and 3 use the common helper when vhost-vsock and vhost-net clear
+ACCESS_PLATFORM. The backend-specific code continues to update
+acked_features in its own virtqueue loop.
+
+Changes since v4:
+- move the existing-IOTLB check into vhost_init_device_iotlb()
+- remove the vhost-vsock-specific keep-IOTLB patch
+- add the corresponding ACCESS_PLATFORM teardown to vhost-net
+- make vhost_clear_device_iotlb() handle an absent device IOTLB
+
+Jia Jia (3):
+  vhost: add helpers for device IOTLB lifecycle
+  vhost/vsock: discard IOTLB when ACCESS_PLATFORM is cleared
+  vhost/net: discard IOTLB when ACCESS_PLATFORM is cleared
+
+ drivers/vhost/net.c   |  4 ++++
+ drivers/vhost/vhost.c | 28 ++++++++++++++++++++++++++++
+ drivers/vhost/vhost.h |  1 +
+ drivers/vhost/vsock.c |  4 ++++
+ 4 files changed, 36 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Fix dirty marking in adapter_indicators_set*()
+[PATCH v1 1/6] KVM: s390: Fix dirty marking in adapter_indicators_set*()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When the indicator and/or summary bits are set in the guest, the
+accessed page was only marked dirty in KVM if the access was performed
+using the slow path; accesses through the new kvm_arch_set_irq_inatomic
+fast inject path would not mark the page as dirty.
+
+Fix by adding/moving the missing calls to mark_page_dirty(). Note that
+for the inatomic path set_page_dirty{,_lock}() is not needed as the
+page stays pinned; the unpin path correctly marks it as dirty.
+
+Opportunistically reorder the local variables to be in reverse
+Christmas tree order and refactor to use guard().
+
+Fixes: 1e95e3bc6b05 ("KVM: s390: Enable adapter_indicators_set to use mapped pages")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/interrupt.c | 40 ++++++++++++++++++++-------------------
+ 1 file changed, 21 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v2 0/6] KVM: s390: Even more misc fixes
+ Skip: [PATCH v1 0/6] KVM: s390: Even more misc fixes
+New:  KVM: riscv: Avoid redundant interrupt check for pending timers
+[PATCH] KVM: riscv: Avoid redundant interrupt check for pending timers
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+kvm_vcpu_check_block() calls kvm_arch_vcpu_runnable() before
+checking whether a timer is pending. On RISC-V, kvm_arch_vcpu_runnable()
+already checks all pending guest interrupts through
+kvm_riscv_vcpu_has_interrupts(vcpu, -1UL), including IRQ_VS_TIMER.
+
+Drop the repeated IRQ_VS_TIMER pending-interrupt check from
+kvm_riscv_vcpu_timer_pending() and keep the helper focused on the timer
+deadline state. If the timer becomes pending after the runnable check,
+the timer path still injects IRQ_VS_TIMER and kicks the vCPU through the
+normal wakeup path.
+
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/vcpu_timer.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+[PATCH v3 1/3] KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+The generic KVM_PRE_FAULT_MEMORY ioctl lets userspace populate KVM page
+tables before running a vCPU over a GPA range. x86 already supports the
+ioctl, but RISC-V does not expose the capability and has no arch hook.
+
+Add the RISC-V arch hook and reuse the existing G-stage fault mapping
+path with a read access. Report progress using the G-stage mapping
+returned by the map path, so the ioctl can advance by the actual leaf
+size that covers the requested GPA. Retry until a mapping is installed
+or a signal, VM-dead request, or real error is observed.
+
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+v2 -> v3:
+- Retry internally when the map path returns success without a visible
+  G-stage mapping, instead of exposing -EAGAIN.  (Sashiko)
+
+ arch/riscv/kvm/Kconfig  |  1 +
+ arch/riscv/kvm/gstage.c |  3 +++
+ arch/riscv/kvm/mmu.c    | 42 +++++++++++++++++++++++++++++++++++++++++
+ arch/riscv/kvm/vm.c     |  1 +
+ 4 files changed, 47 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Add KVM_PRE_FAULT_MEMORY support
+[PATCH v3 0/3] KVM: riscv: Add KVM_PRE_FAULT_MEMORY support
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+This series adds RISC-V support for the generic KVM_PRE_FAULT_MEMORY
+vcpu ioctl and enables the existing generic KVM selftest for RISC-V.
+
+KVM_PRE_FAULT_MEMORY lets userspace ask KVM to populate stage-2 mappings
+for a GPA range before running a vCPU that is expected to access that
+range.  x86 already supports the ioctl; RISC-V currently falls back to
+normal first-touch G-stage faults.
+
+Patch 1 implements the RISC-V arch hook using the existing G-stage map
+path.  Patch 2 fixes the RISC-V selftest page-table walker for Sv57,
+which can be selected as the default guest mode.  Patch 3 enables
+pre_fault_memory_test for RISC-V.
+
+Changes in v3:
+- Retry internally when the map path returns success without a visible
+  G-stage mapping, instead of exposing -EAGAIN.  (Sashiko)
+
+Changes in v2:
+- Drop the per-test guest_modes_append_default() call from
+  pre_fault_memory_test.c.  RISC-V already initializes supported and
+  default guest modes from kvm_selftest_arch_init(), which is called by
+  the common kvm_selftest_init() constructor, as suggested by Sean.
+
+Jinyu Tang (3):
+  KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+  KVM: selftests: Add RISC-V Sv57 page table indexing
+  KVM: selftests: Enable pre_fault_memory_test for RISC-V
+
+ arch/riscv/kvm/Kconfig                        |  1 +
+ arch/riscv/kvm/gstage.c                       |  3 ++
+ arch/riscv/kvm/mmu.c                          | 42 +++++++++++++++++++
+ arch/riscv/kvm/vm.c                           |  1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../selftests/kvm/include/riscv/processor.h   |  6 +++
+ .../selftests/kvm/lib/riscv/processor.c       |  2 +
+ 7 files changed, 56 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Avoid overwriting existing G-stage tables with huge leaves
+[PATCH] KVM: riscv: Avoid overwriting existing G-stage tables with huge leaves
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V KVM can overwrite an existing G-stage table entry when installing
+a huge leaf mapping. If the target huge range already has a lower-level
+page table, kvm_riscv_gstage_set_pte() can replace the non-leaf entry
+with a leaf PTE. This disconnects the lower-level page table and can
+change guest-visible mappings or leak the page-table page.
+
+Reject replacing a valid non-leaf PTE with a leaf PTE. If huge-page
+installation hits such a conflict, fall back to a 4K mapping for the
+faulting GPA and leave the existing page-table structure intact.
+
+Suggested-by: Sashiko <sashiko-bot@kernel.org>
+Fixes: 9d05c1fee837 ("RISC-V: KVM: Implement stage2 page table programming")
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/gstage.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Skip empty TDP leaf page tables
+[RFC PATCH 1/1] KVM: x86: Skip empty TDP leaf page tables
+Author: Hao Zhang <hao_zhang_kdev@163.com>
+
+
+When KVM zaps only leaf SPTEs, the TDP page table hierarchy is
+intentionally retained so that subsequent faults can reuse it.  However,
+a later zap of the same range still descends through retained 4K leaf
+page tables whose leaf SPTEs are all non-present.
+
+Track whether a retained 4K leaf page table contains any present leaf
+SPTEs.  If a zap fully covers the corresponding 2MiB range and the page
+table is known to be empty, skip descending into it.
+
+Keep the page table hierarchy linked so that it can still be reused by
+future page faults.  Installing a new leaf SPTE clears the empty hint.
+The hint checks are skipped for ranges smaller than a complete 2MiB leaf
+page table.
+
+The iterator restarts its walk from the root after yielding.  Allow the
+restarted walk to mark an empty leaf page table again instead of
+permanently excluding the page table that contained the yield.
+
+Tested on a 4-vCPU, 1GB guest with five repetitions on the same host.
+The main improvement is seen for repeated same-range invalidation; rolling
+sweep workloads are mostly neutral.
+
+Signed-off-by: Hao Zhang <zhanghao1@kylinos.cn>
+---
+ arch/x86/kvm/mmu/mmu_internal.h |  2 ++
+ arch/x86/kvm/mmu/tdp_iter.c     | 10 +++++-
+ arch/x86/kvm/mmu/tdp_iter.h     |  6 ++++
+ arch/x86/kvm/mmu/tdp_mmu.c      | 74 ++++++++++++++++++++++++++++++++++++-----
+ 4 files changed, 82 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [RFC PATCH 1/1] KVM: x86: Skip empty TDP leaf page tables
+ Skip: [RFC PATCH 0/1] KVM: x86: Skip empty TDP leaf page tables
+New:  vhost: add helper to clear device IOTLB
+[PATCH v4 1/3] vhost: add helper to clear device IOTLB
+Author: Jia Jia <physicalmtea@gmail.com>
+
+The device IOTLB is shared by vhost backends, but clearing it requires
+dropping each virtqueue's IOTLB pointer and metadata cache before the
+old table is freed. Add a common helper for this teardown sequence so
+backend-specific feature code only needs to decide when the table must
+be cleared.
+
+The caller must hold the device mutex. The helper does not update
+acked_features; backends continue to update that state in their own
+virtqueue loops.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/vhost.c | 24 ++++++++++++++++++++++++
+ drivers/vhost/vhost.h |  1 +
+ 2 files changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  vhost/vsock: fix device IOTLB feature lifecycle
+[PATCH v4 0/3] vhost/vsock: fix device IOTLB feature lifecycle
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost-vsock leaves the device IOTLB attached when userspace clears
+VIRTIO_F_ACCESS_PLATFORM. It also replaces an existing IOTLB with an
+empty one whenever a later feature update keeps ACCESS_PLATFORM enabled.
+
+Patch 1 adds a common vhost helper that detaches the device IOTLB from
+all virtqueues, clears their metadata caches, drops queued IOTLB miss
+messages, and frees the old table after all virtqueues have released
+their pointers.
+
+Patch 2 uses the helper when vhost-vsock clears ACCESS_PLATFORM. The
+acked_features update remains in the vhost-vsock-specific loop.
+
+Patch 3 avoids replacing an existing IOTLB when ACCESS_PLATFORM remains
+enabled across a feature update.
+
+Changes since v3:
+- move the IOTLB teardown helper from vhost-vsock into common vhost code
+- keep acked_features updates in the backend-specific loop
+- add the common helper as a separate first patch
+
+Jia Jia (3):
+  vhost: add helper to clear device IOTLB
+  vhost/vsock: discard IOTLB when ACCESS_PLATFORM is cleared
+  vhost/vsock: keep IOTLB across feature updates
+
+ drivers/vhost/vhost.c | 24 ++++++++++++++++++++++++
+ drivers/vhost/vhost.h |  1 +
+ drivers/vhost/vsock.c |  7 ++++++-
+ 3 files changed, 31 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From f7c0f90d9 to 7a677841a
+KVM mailing list update from f7c0f90d9 to 7a677841a
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 kernel.org
+      3 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      3  Wei-Lin Chang <weilin.chang@arm.com>
+      3  Marc Zyngier <maz@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  arm64: ptdump: Make note_page_flush() range aware
+[PATCH v3 1/2] arm64: ptdump: Make note_page_flush() range aware
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+note_page_flush() calls note_page() with addr == 0 and level == -1 to
+dump the last row of a ptdump. addr == 0 (1 << 64 wrapped around)
+renders a huge region with enormous size for address spaces with
+IA bits < 64. For example the stage-2 page tables and the EFI runtime
+page table.
+
+More importantly, the last region of the address space and everything
+after the address space up to 1 << 64 are merged into one row of
+output. If the last region within the address space is valid, it will
+appear to remain valid up to 1 << 64 with the same attributes.
+
+Currently only the EFI runtime ptdump is affected by this, but KVM will
+soon fix its stage-2 ptdump by using note_page_flush(). Here is an
+example of an EFI runtime ptdump (last row):
+
+0x0000008000000000-0x0000000000000000   17179868672G PGD
+
+With this patch:
+
+0x0000008000000000-0x0001000000000000      261632G PGD
+
+To fix this, cache the end address of a ptdump in ptdump_pg_state so
+note_page_flush() can call the final note_page() with the correct end
+address.
+
+Fixes: 9d80448ac92b ("efi/arm64: Add debugfs node to dump UEFI runtime page tables")
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+---
+ arch/arm64/include/asm/ptdump.h |  2 ++
+ arch/arm64/mm/ptdump.c          | 14 +++++++++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: ptdump flush fixes
+[PATCH v3 0/2] arm64: ptdump flush fixes
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Hi,
+
+This series fixes two problems around ptdumps:
+
+1. note_page_flush(), which flushes out the last row of ptdumps, does
+   not account for address spaces that have IA < 64. Other than making
+   the last region extremely huge, the attributes of the last region
+   within the address spaces appear to extend all the way to 1 << 64.
+
+2. KVM/arm64's stage-2 ptdump missed calling note_page_flush().
+
+To address Will's comment [1], I have created an end_address field for
+struct ptdump_pg_state, and initialized it with the end address of the
+ptdumps. It follows the same convention as the last range->end:
+exclusive end, except for the case where the address space ends at
+1 << 64. In that case it is set as ULONG_MAX.
+
+Caching the end address avoids duplicating the range iteration in
+note_page_flush(), at the cost of duplicating state in ptdump_pg_state.
+
+Series is based on v7.2-rc5.
+
+* Changes from v2:
+
+  - Instead of scanning ptdump_state.range[] to find the end address,
+    cache the end address in a new field end_address when we initialize
+    struct ptdump_pg_state.
+
+  - Adjust KVM's struct ptdump_pg_state initialization so it uses
+    end_address instead of ptdump_state.range[].
+
+  - Collected Reviewed-by and Tested-by from Dev, thanks!
+
+  - v2: https://lore.kernel.org/r/20260724185431.2990395-1-weilin.chang@arm.com/
+
+* Changes from v1:
+
+  - Instead of manually calling note_page() for flushing, fix
+    note_page_flush() so that it ends the ptdump at the end of the
+    address space.
+
+  - Changed the start address of the second marker to ULONG_MAX for KVM
+    ptdump, so we don't output extra marker names, and advance past the
+    end of the marker array.
+
+  - v1: https://lore.kernel.org/r/20260717231233.2299068-1-weilin.chang@arm.com/
+
+Thanks!
+
+[1]: https://lore.kernel.org/r/anXFo-igVdqrCogQ@willie-the-truck/
+
+Wei-Lin Chang (2):
+  arm64: ptdump: Make note_page_flush() range aware
+  KVM: arm64: ptdump: Flush the last region
+
+ arch/arm64/include/asm/ptdump.h |  2 ++
+ arch/arm64/kvm/ptdump.c         | 11 +++++++----
+ arch/arm64/mm/ptdump.c          | 14 +++++++++++++-
+ 3 files changed, 22 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Shadow S2 life-cycle fixes
+[PATCH v2 0/2] KVM: arm64: nv: Shadow S2 life-cycle fixes
+Author: Marc Zyngier <maz@kernel.org>
+
+This is yet another stab at trying to fix a bunch of annoying issues
+(i.e. very stupid bugs) that plague the life cycle of shadow S2 MMU
+structures and page tables.
+
+The first patch is identical to [1], only with added lockdep_assert(),
+as suggested by Joey. The second patch finishes the job (at least one
+hopes) by freeing the S2 MMUs when it is actually safe to do so.
+
+Both are targeting 7.3, and are stable candidates.
+
+[1] https://lore.kernel.org/r/20260811122057.754772-1-maz@kernel.org
+
+Marc Zyngier (2):
+  KVM: arm64: nv: Fix life cycle of the nested_mmus array
+  KVM: arm64: nv: Delay freeing of shadow S2 structures until VM
+    destruction
+
+ arch/arm64/include/asm/kvm_host.h   |   2 +-
+ arch/arm64/include/asm/kvm_nested.h |   3 +-
+ arch/arm64/kvm/arm.c                |   8 +-
+ arch/arm64/kvm/nested.c             | 115 +++++++++++++++-------------
+ 4 files changed, 69 insertions(+), 59 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Fix life cycle of the nested_mmus array
+[PATCH v2 1/2] KVM: arm64: nv: Fix life cycle of the nested_mmus array
+Author: Marc Zyngier <maz@kernel.org>
+
+The nested_mmus array holds the shadow page tables that are used when
+a guest is running a nested context. These structures are allocated on
+VCPU_INIT for whole guest, which implies that they may have to be
+relocated as the array grows.
+
+Should a VCPU_INIT occur whilst a vcpu is actively running an L2 and
+that the allocation requires relocation, that vcpu will still be
+running with a pointer to the previous structure, which will have been
+freed.
+
+Fix this by turning the array of structures to an array of pointers,
+which is now allocated at VM creation, sized to the absolute maximum
+that KVM can handle.
+
+In turn, each VCPU_INIT contributes S2_MMU_PER_VCPU to the pool. No
+reallocation is ever performed, and the life cycle of each object is
+much clearer:
+
+- the nested_mmus array is allocated in kvm_init_nested(), and freed
+  in kvm_arch_destroy_vm()
+
+- s2_mmu structures are allocated in kvm_vcpu_init_nested(), and freed
+  on kvm_arch_flush_shadow_all()
+
+Finally, the freeing of vcpu->arch.vncr_array is made consistent
+rather than being done on some failure paths, but not others.
+
+Fixes: 4f128f8e1aaa ("KVM: arm64: nv: Support multiple nested Stage-2 mmu structures")
+Reported-by: Shen Yongchao <grayhat@foxmail.com>
+Reported-by: Karl Mehltretter <kmehltretter@gmail.com>
+Suggested-by: Karl Mehltretter <kmehltretter@gmail.com>
+Link: https://lore.kernel.org/r/20260803224405.41468-1-kmehltretter@gmail.com
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_host.h   |  2 +-
+ arch/arm64/include/asm/kvm_nested.h |  2 +-
+ arch/arm64/kvm/arm.c                |  8 ++-
+ arch/arm64/kvm/nested.c             | 93 +++++++++++++----------------
+ 4 files changed, 51 insertions(+), 54 deletions(-)
+
+----------------------------------------------------------------------
+
