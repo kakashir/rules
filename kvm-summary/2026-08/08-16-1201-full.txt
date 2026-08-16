@@ -1,0 +1,459 @@
+
+On /root/mail/repo:
+From a049185bd to 9268150ba
+KVM mailing list update from a049185bd to 9268150ba
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     12 linux.dev
+      1 gmail.com
+      1 amazon.co.uk
+
+Top 15 contributors (Based on Email Body)
+
+     12  Jinyu Tang <jinyu.tang@linux.dev>
+      1  Mushahid Hussain <hmushi@amazon.co.uk>
+      1  Karl Mehltretter <kmehltretter@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: Use kvcalloc() to allocate lpage_info arrays and dirty bitmaps
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+Use kvcalloc() instead of __vcalloc() for the lpage_info arrays and
+memslot dirty bitmaps, and switch their frees from vfree() back to
+kvfree(). kvcalloc() serves sub-page requests from the slab and
+falls back to vmalloc for anything larger; kvfree() handles either
+allocator. The vfree() pairing came from commit a952d608f0be ("KVM:
+Use vfree for memory allocated by vcalloc()/__vcalloc()").
+
+Commit 37b2a6510a48 ("KVM: use __vcalloc for very large allocations")
+moved these sites onto __vcalloc() to escape kvmalloc()'s INT_MAX
+size cap, since memslot metadata sizes scale with the memslot size
+and can exceed 2 GiB. Neither site can reach the cap: lpage_info
+holds one 4 byte entry per hugepage granule (per 2 MiB at level 2,
+per 1 GiB at level 3), so reaching INT_MAX would take a 1 PiB
+memslot, while userspace slots are capped at 8 TiB by
+KVM_MEM_MAX_NR_PAGES and x86's internal slots at 4 GiB by
+__x86_set_memory_region()'s u32 size. The dirty bitmap is two
+bitmaps at one bit per page, npages/4 bytes, at most 512 MiB, and
+internal slots never have one because kvm_set_internal_memslot()
+rejects any flags.
+
+__vcalloc() makes every allocation at least a page, so a single page
+memslot consumes 8 KiB of vmalloc for 8 bytes of lpage_info and
+another 4 KiB for a 16 byte dirty bitmap when dirty logging is
+enabled. This overhead scales with the number of slots and VMs on a
+host, adding up to memory pressure when guest address spaces are
+fragmented into small slots.
+
+The rmap and gfn_write_track arrays keep __vcalloc() and vfree():
+the 4K rmap and gfn_write_track are per-page arrays, 8 and 2 bytes
+per 4 KiB page, which legitimately cross INT_MAX below the 8 TiB
+slot ceiling; the smaller higher-level rmaps share the 4K rmap's
+allocation loop; and none of them allocate under the TDP MMU, where
+the waste above was observed.
+
+Fixes: 37b2a6510a48 ("KVM: use __vcalloc for very large allocations")
+Assisted-by: Kiro:claude-fable-5
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c  | 6 +++---
+ virt/kvm/kvm_main.c | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 RESEND 5/5] KVM: selftests: Enable pre_fault_memory_test for RISC-V
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V now supports KVM_PRE_FAULT_MEMORY, so include the generic
+pre_fault_memory_test in the RISC-V KVM selftest build.
+
+The test uses PAGE_SIZE from the architecture processor header. Define
+the normal 4K RISC-V selftest page size so the generic test can build
+for RISC-V.
+
+Reviewed-by: Nutty Liu <nutty.liu@hotmail.com>
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ tools/testing/selftests/kvm/Makefile.kvm              | 1 +
+ tools/testing/selftests/kvm/include/riscv/processor.h | 3 +++
+ 2 files changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 RESEND 4/5] KVM: selftests: Add RISC-V Sv57 page table indexing
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V selftests can create guests with five page-table levels, for
+example when the selected guest mode is Sv57. The RISC-V page-table
+walker only had index arrays for levels 0 through 3, so
+virt_arch_pg_map() indexed past the end of the arrays when level 4 was
+used.
+
+Add the missing L4 index mask and shift so selftests can build guest
+page tables for Sv57 VMs.
+
+Reviewed-by: Nutty Liu <nutty.liu@hotmail.com>
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ tools/testing/selftests/kvm/include/riscv/processor.h | 3 +++
+ tools/testing/selftests/kvm/lib/riscv/processor.c     | 2 ++
+ 2 files changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 RESEND 3/5] KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+The generic KVM_PRE_FAULT_MEMORY ioctl lets userspace populate KVM page
+tables before running a vCPU over a GPA range. x86 already supports the
+ioctl, but RISC-V does not expose the capability and has no arch hook.
+
+Add the RISC-V arch hook and reuse the existing G-stage fault mapping
+path with a read access. Report progress using the G-stage mapping
+returned by the map path, so the ioctl can advance by the actual leaf
+size that covers the requested GPA. Retry until a mapping is installed
+or a signal, VM-dead request, or real error is observed.
+
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/Kconfig  |  1 +
+ arch/riscv/kvm/gstage.c |  3 +++
+ arch/riscv/kvm/mmu.c    | 45 ++++++++++++++++++++++++++++++++++++++++-
+ arch/riscv/kvm/vm.c     |  1 +
+ 4 files changed, 49 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 RESEND 2/5] KVM: riscv: Avoid THP adjustment for existing 4K G-stage leaves
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+When dirty logging is disabled after a G-stage PMD mapping has been
+split, the fault path may see a 4K G-stage leaf while the backing host
+page is still THP-backed. The existing kvm_riscv_gstage_map_page()
+comment says that this path should update the small leaf and leave huge
+mapping recovery to a later ioctl path.
+
+However, transparent_hugepage_adjust() runs before that G-stage lookup
+and rewrites the fault GPA to the PMD base. If the original fault is not
+at the PMD base, the lookup can find and update the wrong 4K leaf.
+
+Check the original fault GPA in transparent_hugepage_adjust(). If it
+already has a 4K G-stage leaf, skip THP adjustment and keep handling the
+fault at PAGE_SIZE granularity.
+
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/mmu.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 RESEND 1/5] KVM: riscv: Avoid overwriting G-stage tables with huge leaves
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V KVM can overwrite an existing G-stage table entry when
+installing a huge leaf mapping. If the target huge range already has a
+lower-level page table, kvm_riscv_gstage_set_pte() can replace the
+non-leaf entry with a leaf PTE and disconnect the lower-level page
+table.
+
+Reject replacing a valid table entry with a leaf PTE. If huge-page
+installation hits such a conflict, fall back to a 4K mapping for the
+original faulting GPA in the MMU fault path, where the original GPA and
+HFN are still available.
+
+Suggested-by: Sashiko <sashiko-bot@kernel.org>
+Fixes: 9d05c1fee837 ("RISC-V: KVM: Implement stage2 page table programming")
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/gstage.c |  6 ++++++
+ arch/riscv/kvm/mmu.c    | 24 +++++++++++++++++++++++-
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 RESEND 0/5] KVM: riscv: Add KVM_PRE_FAULT_MEMORY support
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+Add RISC-V support for the generic KVM_PRE_FAULT_MEMORY ioctl.
+
+Patch 1 and patch 2 fix existing G-stage huge-page corner cases. They
+are included first because the prefault hook relies on the map path
+reporting the mapping that actually covers the requested GPA.
+
+Patch 3 adds the RISC-V arch hook for KVM_PRE_FAULT_MEMORY. Patch 4 adds
+Sv57 indexing support to the RISC-V KVM selftest helpers, and patch 5
+enables the generic pre_fault_memory_test for RISC-V.
+
+Patch 1 folds the previously posted standalone G-stage table overwrite
+fix into this series:
+
+  https://lore.kernel.org/kvm-riscv/20260814105752.565325-1-jinyu.tang@linux.dev/T/#u
+
+Changes in v4 resend:
+- Resend the full series because the previous v4 send was interrupted
+  and the kvm-riscv list archive did not show a complete thread. No
+  code changes.
+
+Changes in v4:
+- Fold the standalone G-stage non-leaf overwrite fix into this series.
+- Avoid THP adjustment when the original faulting GPA already has an
+  existing 4K G-stage leaf.
+- Return an error for HWPOISON instead of reporting success without a
+  visible G-stage mapping. (Sashiko)
+
+Changes in v3:
+- Retry internally when the map path returns success without a visible
+  G-stage mapping, instead of exposing -EAGAIN. (Sashiko)
+
+Changes in v2:
+- Drop the per-test guest_modes_append_default() call from
+  pre_fault_memory_test.c. (Sean)
+
+Jinyu Tang (5):
+  KVM: riscv: Avoid overwriting G-stage tables with huge leaves
+  KVM: riscv: Avoid THP adjustment for existing 4K G-stage leaves
+  KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+  KVM: selftests: Add RISC-V Sv57 page table indexing
+  KVM: selftests: Enable pre_fault_memory_test for RISC-V
+
+ arch/riscv/kvm/Kconfig                        |  1 +
+ arch/riscv/kvm/gstage.c                       |  9 ++
+ arch/riscv/kvm/mmu.c                          | 83 ++++++++++++++++++-
+ arch/riscv/kvm/vm.c                           |  1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../selftests/kvm/include/riscv/processor.h   |  6 ++
+ .../selftests/kvm/lib/riscv/processor.c       |  2 +
+ 7 files changed, 100 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 5/5] KVM: selftests: Enable pre_fault_memory_test for RISC-V
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V now supports KVM_PRE_FAULT_MEMORY, so include the generic
+pre_fault_memory_test in the RISC-V KVM selftest build.
+
+The test uses PAGE_SIZE from the architecture processor header. Define
+the normal 4K RISC-V selftest page size so the generic test can build
+for RISC-V.
+
+Reviewed-by: Nutty Liu <nutty.liu@hotmail.com>
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ tools/testing/selftests/kvm/Makefile.kvm              | 1 +
+ tools/testing/selftests/kvm/include/riscv/processor.h | 3 +++
+ 2 files changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 4/5] KVM: selftests: Add RISC-V Sv57 page table indexing
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V selftests can create guests with five page-table levels, for
+example when the selected guest mode is Sv57. The RISC-V page-table
+walker only had index arrays for levels 0 through 3, so
+virt_arch_pg_map() indexed past the end of the arrays when level 4 was
+used.
+
+Add the missing L4 index mask and shift so selftests can build guest
+page tables for Sv57 VMs.
+
+Reviewed-by: Nutty Liu <nutty.liu@hotmail.com>
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ tools/testing/selftests/kvm/include/riscv/processor.h | 3 +++
+ tools/testing/selftests/kvm/lib/riscv/processor.c     | 2 ++
+ 2 files changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 3/5] KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+The generic KVM_PRE_FAULT_MEMORY ioctl lets userspace populate KVM page
+tables before running a vCPU over a GPA range. x86 already supports the
+ioctl, but RISC-V does not expose the capability and has no arch hook.
+
+Add the RISC-V arch hook and reuse the existing G-stage fault mapping
+path with a read access. Report progress using the G-stage mapping
+returned by the map path, so the ioctl can advance by the actual leaf
+size that covers the requested GPA. Retry until a mapping is installed
+or a signal, VM-dead request, or real error is observed.
+
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/Kconfig  |  1 +
+ arch/riscv/kvm/gstage.c |  3 +++
+ arch/riscv/kvm/mmu.c    | 45 ++++++++++++++++++++++++++++++++++++++++-
+ arch/riscv/kvm/vm.c     |  1 +
+ 4 files changed, 49 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 2/5] KVM: riscv: Avoid THP adjustment for existing 4K G-stage leaves
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+When dirty logging is disabled after a G-stage PMD mapping has been
+split, the fault path may see a 4K G-stage leaf while the backing host
+page is still THP-backed. The existing kvm_riscv_gstage_map_page()
+comment says that this path should update the small leaf and leave huge
+mapping recovery to a later ioctl path.
+
+However, transparent_hugepage_adjust() runs before that G-stage lookup
+and rewrites the fault GPA to the PMD base. If the original fault is not
+at the PMD base, the lookup can find and update the wrong 4K leaf.
+
+Check the original fault GPA in transparent_hugepage_adjust(). If it
+already has a 4K G-stage leaf, skip THP adjustment and keep handling the
+fault at PAGE_SIZE granularity.
+
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/mmu.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 1/5] KVM: riscv: Avoid overwriting G-stage tables with huge leaves
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+RISC-V KVM can overwrite an existing G-stage table entry when
+installing a huge leaf mapping. If the target huge range already has a
+lower-level page table, kvm_riscv_gstage_set_pte() can replace the
+non-leaf entry with a leaf PTE and disconnect the lower-level page
+table.
+
+Reject replacing a valid table entry with a leaf PTE. If huge-page
+installation hits such a conflict, fall back to a 4K mapping for the
+original faulting GPA in the MMU fault path, where the original GPA and
+HFN are still available.
+
+Suggested-by: Sashiko <sashiko-bot@kernel.org>
+Fixes: 9d05c1fee837 ("RISC-V: KVM: Implement stage2 page table programming")
+Signed-off-by: Jinyu Tang <jinyu.tang@linux.dev>
+---
+ arch/riscv/kvm/gstage.c |  6 ++++++
+ arch/riscv/kvm/mmu.c    | 24 +++++++++++++++++++++++-
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 0/5] KVM: riscv: Add KVM_PRE_FAULT_MEMORY support
+Author: Jinyu Tang <jinyu.tang@linux.dev>
+
+Add RISC-V support for the generic KVM_PRE_FAULT_MEMORY ioctl.
+
+Patch 1 and patch 2 fix existing G-stage huge-page corner cases. They
+are included first because the prefault hook relies on the map path
+reporting the mapping that actually covers the requested GPA.
+
+Patch 3 adds the RISC-V arch hook for KVM_PRE_FAULT_MEMORY. Patch 4 adds
+Sv57 indexing support to the RISC-V KVM selftest helpers, and patch 5
+enables the generic pre_fault_memory_test for RISC-V.
+
+Patch 1 folds the previously posted standalone G-stage table overwrite
+fix into this series:
+
+  https://lore.kernel.org/kvm-riscv/20260814105752.565325-1-jinyu.tang@linux.dev/T/#u
+
+Changes in v4:
+- Fold the standalone G-stage non-leaf overwrite fix into this series.
+- Avoid THP adjustment when the original faulting GPA already has an
+  existing 4K G-stage leaf.
+- Return an error for HWPOISON instead of reporting success without a
+  visible G-stage mapping. (Sashiko)
+
+Changes in v3:
+- Retry internally when the map path returns success without a visible
+  G-stage mapping, instead of exposing -EAGAIN. (Sashiko)
+
+Changes in v2:
+- Drop the per-test guest_modes_append_default() call from
+  pre_fault_memory_test.c. (Sean)
+
+Jinyu Tang (5):
+  KVM: riscv: Avoid overwriting G-stage tables with huge leaves
+  KVM: riscv: Avoid THP adjustment for existing 4K G-stage leaves
+  KVM: riscv: Implement KVM_PRE_FAULT_MEMORY
+  KVM: selftests: Add RISC-V Sv57 page table indexing
+  KVM: selftests: Enable pre_fault_memory_test for RISC-V
+
+ arch/riscv/kvm/Kconfig                        |  1 +
+ arch/riscv/kvm/gstage.c                       |  9 ++
+ arch/riscv/kvm/mmu.c                          | 83 ++++++++++++++++++-
+ arch/riscv/kvm/vm.c                           |  1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../selftests/kvm/include/riscv/processor.h   |  6 ++
+ .../selftests/kvm/lib/riscv/processor.c       |  2 +
+ 7 files changed, 100 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: Fix the GICv5 KVM_IRQ_LINE PPI range
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+KVM rejects GICv5 PPI irq_id values above 63, while the documented
+range extends to 127. KVM also rejects PPIs not present in the
+KVM_DEV_ARM_VGIC_USERSPACE_PPIS mask. That mask is populated by
+KVM_DEV_ARM_VGIC_CTRL_INIT; reading it beforehand currently succeeds
+but returns all zeroes.
+
+Correct the range, document the mask restriction, and require the mask
+to be queried after VGIC initialization.
+
+Fixes: b88d05a893cb ("KVM: arm64: gic-v5: Support GICv5 interrupts with KVM_IRQ_LINE")
+Assisted-by: Claude:claude-fable-5
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/api.rst                  | 4 +++-
+ Documentation/virt/kvm/devices/arm-vgic-v5.rst | 3 +++
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 7a677841a to 2541a9aee
+KVM mailing list update from 7a677841a to 2541a9aee
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      1  Karl Mehltretter <kmehltretter@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] Documentation: KVM: Fix the GICv5 KVM_IRQ_LINE PPI range
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+KVM rejects GICv5 PPI irq_id values above 63, while the documented
+range extends to 127. KVM also rejects PPIs not present in the
+KVM_DEV_ARM_VGIC_USERSPACE_PPIS mask. That mask is populated by
+KVM_DEV_ARM_VGIC_CTRL_INIT; reading it beforehand currently succeeds
+but returns all zeroes.
+
+Correct the range, document the mask restriction, and require the mask
+to be queried after VGIC initialization.
+
+Fixes: b88d05a893cb ("KVM: arm64: gic-v5: Support GICv5 interrupts with KVM_IRQ_LINE")
+Assisted-by: Claude:claude-fable-5
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/api.rst                  | 4 +++-
+ Documentation/virt/kvm/devices/arm-vgic-v5.rst | 3 +++
+ 2 files changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
