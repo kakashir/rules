@@ -1,0 +1,2154 @@
+
+On /root/mail/repo:
+From e60e16bc8 to 8062318b0
+KVM mailing list update from e60e16bc8 to 8062318b0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     18 google.com
+     11 redhat.com
+      9 gmail.com
+      3 linux.ibm.com
+      1 oracle.com
+
+Top 15 contributors (Based on Email Body)
+
+      7  Jacky Li <jackyli@google.com>
+      7  Ackerley Tng <ackerleytng@google.com>
+      5  Vitaly Kuznetsov <vkuznets@redhat.com>
+      5  =?utf-8?q?Marc-Andr=C3=A9_Lureau?= <marcandre.lureau@redhat.com>
+      4  Like Xu <like.xu.linux@gmail.com>
+      4  Jia Jia <physicalmtea@gmail.com>
+      3  Sean Christopherson <seanjc@google.com>
+      3  Anthony Krowiak <akrowiak@linux.ibm.com>
+      1  Ryosuke Yasuoka <ryasuoka@redhat.com>
+      1  Keqiang Duan <duankeqiangcym@gmail.com>
+      1  Jing Zhang <jingzhangos@google.com>
+      1  Dongli Zhang <dongli.zhang@oracle.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: VMX: Clear GUEST_ACTIVITY_STATE when userspace makes a vCPU RUNNABLE
+Author: Keqiang Duan <duankeqiangcym@gmail.com>
+
+Force a vCPU out of its hardware-tracked halted state when userspace
+explicitly declares the vCPU RUNNABLE via KVM_SET_MP_STATE, i.e. clear
+VMCS.GUEST_ACTIVITY_STATE if it says the vCPU is halted.  Add an optional
+kvm_x86_ops hook to do the clearing, as SVM has no equivalent VMCB field.
+
+When HLT-exiting is disabled for a VM (KVM_CAP_X86_DISABLE_EXITS with
+KVM_X86_DISABLE_EXITS_HLT, e.g. QEMU's "-overcommit cpu-pm=on"), a guest
+HLT halts the physical CPU instead of exiting to KVM, and hardware saves
+GUEST_ACTIVITY_STATE=HLT into the VMCS on the next VM-Exit.  That field is
+sticky: it survives VM-Exit/VM-Enter and is only cleared by vmx_clear_hlt()
+on event injection, or by vmx_vcpu_reset() on INIT / vCPU creation.
+
+Nothing clears it on a userspace-driven state change.  KVM_SET_REGS only
+writes the software register cache and KVM_SET_MP_STATE only writes
+vcpu->arch.mp_state; kvm_vcpu_running() likewise consults software state
+only.  A VMM that emulates a machine reset therefore ends up with a vCPU
+that KVM happily VM-Enters while hardware refuses to fetch instructions.
+
+Reproduce with a Linux guest by triggering a panic/kdump on a non-boot
+vCPU: nmi_shootdown_cpus() parks the other vCPUs -- including vCPU0 -- in
+crash_nmi_callback(), which does local_irq_disable() followed by a bare
+HLT.  The capture kernel then resets the machine via port 0xCF9.  QEMU
+rewrites RIP to 0xfff0 and sets mp_state to RUNNABLE, but vCPU0's
+GUEST_ACTIVITY_STATE is still HLT, so the BSP never executes the reset
+vector, never sends SIPIs, and the entire VM hangs at "reboot: machine
+restart" forever.  Only destroying and recreating the VM recovers it.
+
+Clearing the state is always safe: waking from HLT is architecturally
+permitted to be spurious, and every HLT in the kernel is inside a loop.
+Hook KVM_SET_MP_STATE rather than the VM-Enter path so that the clearing
+is driven by an explicit userspace declaration, and so that no work is
+added to vmx_vcpu_run().
+
+Note, vmx_clear_hlt() loses its "static" qualifier as the kvm_x86_ops table
+now lives in vmx/main.c.  TDX cannot disable HLT-exiting and KVM cannot
+access a TD's VMCS, so vt_clear_hlt() short-circuits for TD vCPUs,
+following the existing vt_*() wrapper pattern.
+
+Fixes: caa057a2cad6 ("KVM: X86: Provide a capability to disable HLT intercepts")
+Cc: stable@vger.kernel.org
+Signed-off-by: Keqiang Duan <duankeqiangcym@gmail.com>
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  7 +++++++
+ arch/x86/kvm/vmx/main.c            | 13 +++++++++++++
+ arch/x86/kvm/vmx/vmx.c             |  2 +-
+ arch/x86/kvm/vmx/x86_ops.h         |  1 +
+ arch/x86/kvm/x86.c                 | 13 +++++++++++++
+ 6 files changed, 36 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/1] KVM: x86: lapic: update apic_base and APIC ID together
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+The commit b2849bec936b ("KVM: VMX: Update SVI during runtime APICv
+activation") resolved the loss of EOI issue when apicv is activated after
+being inhibited at runtime. However, it does not resolve the cause of the
+runtime apicv inhibition.
+
+The inhibition occurs because apic_base and the APIC ID are not updated
+together.
+
+Although commit 052c3b99cbc8 ("KVM: x86: Reinitialize xAPIC ID when
+userspace forces x2APIC => xAPIC") reinitializes the xAPIC ID to the
+vCPU ID when userspace forces the APIC to transition directly from x2APIC
+to xAPIC mode, the updates are not performed in a single transaction.
+
+If another thread calls kvm_recalculate_apic_map() during the window
+between updating apic_base and the APIC ID, kvm_recalculate_phys_map() may
+set xapic_id_mismatch and temporarily inhibit APICv.
+
+       Thread A                        Thread B
+
+__kvm_apic_set_base()
+
+-> vcpu->arch.apic_base = value;
+   (disable x2apic)
+                              kvm_recalculate_apic_map()
+                              -> kvm_recalculate_phys_map()
+                                 *xapic_id_mismatch = true;
+
+-> kvm_apic_set_xapic_id(apic, vcpu->vcpu_id);
+
+
+It is easier to reproduce without the commit 052c3b99cbc8 ("KVM: x86:
+Reinitialize xAPIC ID when userspace forces x2APIC => xAPIC").
+
+In the QEMU scenario, when a vCPU is removed, QEMU parks the KVM vCPU fd
+and reuses it later. When the same vCPU fd is reused for another hot-add
+operation, its x2APIC is still enabled. Once QEMU tries to disable x2APIC,
+we may encounter the race windows described above.
+
+Add conditional lock protection within __kvm_apic_set_base() so that
+vcpu->arch.apic_base and the APIC ID are updated atomically. The same lock
+is also used in kvm_recalculate_apic_map().
+
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+ arch/x86/kvm/lapic.c | 23 +++++++++++++++++++----
+ 1 file changed, 19 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: vgic-its: Fix O(C*I) loop in vgic_its_free_collection_list
+Author: Jing Zhang <jingzhangos@google.com>
+
+When destroying the vgic-its collection list,
+vgic_its_free_collection_list() iterates over every collection and for
+each, calls vgic_its_free_collection(). This function walks every
+Interrupt Translation Entry (ITE) across all devices via
+for_each_lpi_its() to nullify the collection pointer.
+
+A guest can allocate up to 65536 collections and hundreds of thousands
+of ITEs. By clearing GITS_CTLR.Enable and writing Valid=0 to
+GITS_BASER1, the guest can trigger this teardown path from a single MMIO
+exit. The resulting O(Collections * ITEs) nested loop executes billions
+of iterations without a single cond_resched(). This pins a physical CPU
+and stalls RCU grace periods for seconds or minutes on PREEMPT_NONE
+kernels.
+
+Fix this by replacing the O(Collections * ITEs) teardown with an
+O(Collections + ITEs) pass. Since the entire collection list is being
+freed, we can safely bulk-clear the collection pointers from all ITEs in
+a single pass, and then free all the collections in a second pass.
+
+Signed-off-by: Jing Zhang <jingzhangos@google.com>
+---
+ arch/arm64/kvm/vgic/vgic-its.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 6/6] kvm: Implement SIGSEGV sentinel for Pkey recovery
+Author: Jacky Li <jackyli@google.com>
+
+Implement a fallback `SIGSEGV` signal handler
+(`qemu_pkey_sigsegv_handler`) to recover from legitimate host accesses
+to Pkey-protected guest memory when locked.
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+ util/pkey.c | 157 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 155 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 5/6] x86: Add xstate parsing and PKRU offset detection
+Author: Jacky Li <jackyli@google.com>
+
+Add data structures and CPUID detection routines to locate the PKRU
+register inside the Linux x86_64 signal frame extended state (`xstate`).
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+ util/pkey.c | 53 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 53 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 4/6] kvm: Lock guest RAMBlocks via PKRU during host
+Author: Jacky Li <jackyli@google.com>
+
+Protect guest RAMBlocks from host-side speculative execution attacks by
+locking and unlocking the guest memory protection key before and after
+`KVM_RUN`.
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+ accel/kvm/kvm-all.c       |  7 ++++++-
+ include/exec/cpu-common.h |  2 ++
+ system/physmem.c          |  6 +++++-
+ util/pkey.c               | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 58 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 3/6] physmem: Tag guest RAMBlocks with Protection Key
+Author: Jacky Li <jackyli@google.com>
+
+Apply the allocated guest memory protection key to all guest RAMBlocks
+using `pkey_mprotect()` to enforce hardware-assisted access control.
+
+This ensures that guest physical RAM mappings are tagged with our
+dedicated Pkey in the host page tables, allowing the PKRU register to
+dynamically permit or block access to guest memory.
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+ include/exec/cpu-common.h |  1 +
+ include/qemu/mmap-alloc.h |  5 +++++
+ system/physmem.c          | 16 ++++++++++++++--
+ util/mmap-alloc.c         |  3 +--
+ util/pkey.c               | 16 ++++++++++++++++
+ 5 files changed, 37 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 2/6] kvm: Add guest memory Pkey initialization
+Author: Jacky Li <jackyli@google.com>
+
+Add initialization logic during early QEMU startup to allocate a
+dedicated userspace protection key (Pkey) for protecting guest physical
+memory when enabled via QEMU_ENABLE_PKEY_GUEST_MEMORY.
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+ include/exec/cpu-common.h |  1 +
+ system/vl.c               |  1 +
+ util/meson.build          |  2 +-
+ util/pkey.c               | 23 +++++++++++++++++++++++
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 1/6] x86: Introduce basic PKRU hardware wrappers
+Author: Jacky Li <jackyli@google.com>
+
+Introduce basic hardware instruction wrappers and helper functions for
+interacting with x86 Protection Keys for Userspace (PKRU / MPK) in QEMU.
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+ MAINTAINERS |  1 +
+ util/pkey.c | 96 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 97 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 0/6] Protect VMM from speculative attacks using x86 PKRU
+Author: Jacky Li <jackyli@google.com>
+
+Hi,
+
+This RFC patch series introduces a hardware-assisted memory protection
+mechanism in QEMU using x86 Protection Keys for Userspace (PKRU / MPK)
+to complete the Address Space Isolation ecosystem by protecting the VMM
+from guest-to-host speculative execution attacks.
+
+In a guest-to-host speculative side-channel attack against QEMU, a
+malicious guest mistrains the VMM branch predictor to execute a
+speculative gadget in host mode. This gadget speculatively reads a
+host secret and uses that secret as an index to touch guest RAMBlocks,
+leaving an observable microarchitectural footprint in the CPU cache.
+Existing mitigations like issuing IBPB on every VM-exit incur high
+overhead, while guest_memfd cannot protect memory that must stay mapped.
+
+To break this covert channel, we protect guest RAMBlocks using a
+dedicated pkey (pkey_mprotect).
+
+- During normal QEMU host userspace execution (I/O handling, timers,
+  event loops), we lock this pkey by setting PKEY_DISABLE_ACCESS in
+  the PKRU register via WRPKRU. Because CPU pipelines natively enforce
+  PKRU restrictions during out-of-order execution, any speculative
+  gadget in host mode attempting to touch guest RAMBlocks is blocked by
+  the MMU at the hardware level, leaving zero footprint in the cache.
+
+- Before entering KVM (KVM_RUN), we temporarily unlock the pkey, and
+  immediately re-lock it upon returning to QEMU userspace.
+
+- To gracefully handle legitimate host accesses to guest RAMBlocks
+  when locked, a SEGV_PKUERR signal handler unlocks the pkey in the
+  interrupted thread's xstate and issues an IBPB (PR_SPEC_INDIRECT_BRANCH)
+  to prevent speculative leakage before resuming execution.
+
+Comments and feedback on this approach are very welcome!
+
+To: qemu-devel@nongnu.org
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Zhao Liu <zhao1.liu@intel.com>
+Cc: Richard Henderson <richard.henderson@linaro.org>
+Cc: Philippe Mathieu-Daud=C3=A9 <philmd@mailo.com>
+Cc: Peter Xu <peterx@redhat.com>
+Cc: kvm@vger.kernel.org
+Cc: James Houghton <jthoughton@google.com>
+Cc: Mingwei Zhang <mizhang@google.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Brendan Jackman <jackmanb@google.com>
+Cc: Reiji Watanabe <reijiw@google.com>
+Cc: Jacky Li <jackyli@google.com>
+
+Signed-off-by: Jacky Li <jackyli@google.com>
+---
+Jacky Li (6):
+      [RFC PATCH 1/6] x86: Introduce basic PKRU hardware wrappers
+      [RFC PATCH 2/6] kvm: Add guest memory Pkey initialization
+      [RFC PATCH 3/6] physmem: Tag guest RAMBlocks with Protection Key
+      [RFC PATCH 4/6] kvm: Lock guest RAMBlocks via PKRU during host usersp=
+ace execution
+      [RFC PATCH 5/6] x86: Add xstate parsing and PKRU offset detection
+      [RFC PATCH 6/6] kvm: Implement SIGSEGV sentinel for Pkey recovery
+
+ MAINTAINERS               |   1 +
+ accel/kvm/kvm-all.c       |   7 +-
+ include/exec/cpu-common.h |   4 +
+ include/qemu/mmap-alloc.h |   5 +
+ system/physmem.c          |  22 ++-
+ system/vl.c               |   1 +
+ util/meson.build          |   2 +-
+ util/mmap-alloc.c         |   3 +-
+ util/pkey.c               | 386 ++++++++++++++++++++++++++++++++++++++++++=
+++++
+ 9 files changed, 424 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 1/1] s390/vfio-ap: fix KVM GISC and page leak when queue removed from host config
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+Three related problems exist in the handling of KVM interrupt and page
+resources when a queue is removed from the host's AP configuration
+while assigned to a mediated device (mdev).
+
+Problem 1:
+~~~~~~~~~
+AP_RESPONSE_Q_NOT_AVAIL not handled in vfio_ap_mdev_reset_queue()
+
+When the AP bus removes a queue device whose adapter or domain has
+been removed from the host's AP configuration,
+vfio_ap_mdev_remove_queue() is called. If the queue is still in the
+host's AP configuration at that point, it calls
+vfio_ap_mdev_reset_queue(), which issues a PQAP(ZAPQ). Since the
+adapter is already gone from the host configuration, ap_zapq() returns
+AP_RESPONSE_Q_NOT_AVAIL (0x01). This response code is not handled in
+vfio_ap_mdev_reset_queue()'s switch statement and falls through to
+the default case, which issues a WARN but does not call
+vfio_ap_free_aqic_resources(). As a result, if IRQ handling was
+enabled for the queue by the guest, the KVM GISC registration and
+the pinned guest page holding the notification indicator byte (NIB)
+are both leaked.
+
+This is fixed by adding AP_RESPONSE_Q_NOT_AVAIL to the same case as
+AP_RESPONSE_DECONFIGURED and AP_RESPONSE_CHECKSTOPPED in
+vfio_ap_mdev_reset_queue(). Like those response codes, Q_NOT_AVAIL
+indicates the queue is not operational and no further reset attempts
+are possible; the correct action is to free the IRQ resources
+immediately.
+
+Problem 2:
+~~~~~~~~~
+ AP_RESPONSE_Q_NOT_AVAIL not handled in apq_status_check()
+
+In vfio_ap_mdev_reset_queue(), there are four cases that indicate a queue
+reset has not yet completed, in which case apq_reset_check() is queued to
+a work queue to verify completion of the reset operation. This function
+uses the PQAP(TAPQ) function to get the queue's status and calls
+apq_status_check() to verify whether the reset has completed, failed or
+needs to be executed again. As described in Problem #1 above,
+apq_reset_check() does not specifically check for AP_RESPONSE_Q_NOT_AVAIL,
+thereby potentially leaking KVM GISC registration and the pinned guest page
+holding the NIB.
+
+This is fixed by adding a case statement for AP_RESPONSE_Q_NOT_AVAIL to
+apq_status_check() and returning -ENODEV for that case. The caller,
+apq_reset_check() will then check for this return code and call
+vfio_ap_free_aqic_resources() to prevent the leak.
+
+Problem 3:
+~~~~~~~~~
+vfio_ap_free_aqic_resources() leaks saved_isc when kvm is NULL
+
+vfio_ap_free_aqic_resources() guards the call to
+kvm_s390_gisc_unregister() with:
+
+    if (q->saved_isc != VFIO_AP_ISC_INVALID &&
+        !WARN_ON(!(q->matrix_mdev && q->matrix_mdev->kvm)))
+
+If matrix_mdev->kvm is NULL -- which can happen when
+vfio_ap_mdev_unset_kvm() has already run and cleared kvm before a
+subsequent cleanup path reaches this function -- the WARN_ON fires
+and the entire block is skipped. This leaves q->saved_isc set to a
+non-invalid value, creating a potential double-free on any subsequent
+call to this function.
+
+When kvm is NULL the KVM guest is already torn down, so
+kvm_s390_gisc_unregister() need not and cannot be called; however,
+q->saved_isc must always be cleared. Fix this by separating the
+kvm_s390_gisc_unregister() call from the q->saved_isc reset. The
+WARN_ON now guards only the genuinely impossible case of matrix_mdev
+being NULL. A NULL kvm is handled gracefully by skipping only the
+unregister call, and q->saved_isc = VFIO_AP_ISC_INVALID is set
+unconditionally whenever saved_isc was not already invalid.
+
+Additionally, add an else clause to the host-config check in
+vfio_ap_mdev_remove_queue() to call vfio_ap_free_aqic_resources()
+directly when the queue is not in the host's AP configuration. This
+serves as a backstop: when the AP bus fires the driver .remove
+callback after an adapter is removed from the host config, the queue
+is by definition no longer addressable, so vfio_ap_mdev_reset_queue()
+would always return Q_NOT_AVAIL. The else clause handles this case
+directly without the unnecessary ap_zapq() call, and ensures cleanup
+occurs even if kvm has already been set to NULL by a prior call to
+vfio_ap_mdev_unset_kvm().
+
+Fixes: b9bd10c43456d ("s390/vfio-ap: do not reset queue removed from host config")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 0/1] Fix leak of KVM GISC resources
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+This is a continuation of the following patch:
+[PATCH v5 9/9] s390/vfio-ap: Fix memory leak when queue removed from host
+               AP config
+
+https://lore.kernel.org/linux-s390/20260812200240.818004-10-akrowiak@linux.ibm.com/
+
+That patch was posted with a series of patches, but was no part of the pull
+request for the series due to some code review comments that needed to be
+addressed. The first 8/9 patches were part of a pull request to make the
+merge window which was about to close; so the referenced patch is posted on
+its own for review.
+
+Anthony Krowiak (1):
+  s390/vfio-ap: fix KVM GISC and page leak when queue removed from host
+    config
+
+ drivers/s390/crypto/vfio_ap_ops.c | 18 ++++++++++++++----
+ 1 file changed, 14 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/4] KVM: selftests: Adapt to the updated VMPTRST behavior when eVMCS is used
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+Previously, VMPTRST was forbidden with eVMCS and selftests were mocking the
+correct behavior in vmptrst() by returning enlightened vmptr directly.
+Since KVM's behavior has changed to match genuine Hyper-V, adjust evmcs
+test accordingly.
+
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+---
+ tools/testing/selftests/kvm/include/x86/evmcs.h | 8 --------
+ tools/testing/selftests/kvm/include/x86/vmx.h   | 3 ---
+ tools/testing/selftests/kvm/x86/hyperv_evmcs.c  | 5 ++---
+ 3 files changed, 2 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/4] KVM: selftests: Check VMPTRLD with active eVMCS
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+Check that VMPTRLD when eVMCS is active results in #UD. This matches
+genuine Hyper-V's behavior.
+
+Use KVM_ASM_SAFE framework to handle #UD from VMPTRLD. Unfortunately, the
+same trick cannot be applied to the existing #UD check on VMLAUNCH as
+VMLAUNCH clobbers all registers which KVM_ASM_SAFE depends on. Keep
+VMLAUNCH handling separately.
+
+Assisted-by: Claude:claude-sonnet-4-6
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 19 +++++++++++---
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  | 26 +++++++++++++++----
+ 2 files changed, 37 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/4] KVM: nVMX: Make VMPTRST return eVMCS GPA when it is used
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+VMPTRST with active eVMCS is currently forbidden, however, returning 1
+without skipping the instruction will likely result in L1 getting
+stuck. While TLFS does not specify the expected behavior, genuine Hyper-V
+seems to be returning eVMCS GPA. Implement the same behavior in KVM.
+
+Reported-by: f734222792@gmail.com
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=221841
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/4] KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+VMPTRLD with active eVMCS is already forbidden, however, returning 1
+without skipping the instruction or queuing an exception will likely
+result in L1 getting stuck. Genuine Hyper-V seems to inject #UD under
+similar circumstances, mimic the behavior in KVM.
+
+Reported-by: f734222792@gmail.com
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=221841
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/4] KVM: nVMX: Adjust VMPTRLD/VMPTRST behavior with active eVMCS
+Author: Vitaly Kuznetsov <vkuznets@redhat.com>
+
+Changes since v1:
+- Fix build when !CONFIG_KVM_HYPERV [Sashiko]
+- Drop now-unneeded evmcs_vmptrst() [Sashiko]
+- Avoid hardcoding VMPTRLD insn length in hyperv_evmcs [Sashiko], use
+  KVM_ASM_SAFE framework instead [Sean]
+
+It was reported (https://bugzilla.kernel.org/show_bug.cgi?id=221841) that
+KVM's emulation of VMPTRLD/VMPTRST instructions when Enlightened VMCS is
+active is sub-optimal: returning '1' does not make the L1 guest skip the
+instruction so a hang is likely to happen. While TLFS does not really
+specify the expected behavior, genuine Hyper-V seems to return #UD for
+VMPTRLD and eVMCS pointer for VMPTRST. Alter the behavior in KVM and check
+it in selftests.
+
+Note: this is not a security issue. Misbehaving L1 can only do self-harm
+by doing VMPTRLD/VMPTRST when it also uses eVMCS.
+
+Vitaly Kuznetsov (4):
+  KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+  KVM: nVMX: Make VMPTRST return eVMCS GPA when it is used
+  KVM: selftests: Adapt to the updated VMPTRST behavior when eVMCS is
+    used
+  KVM: selftests: Check VMPTRLD with active eVMCS
+
+ arch/x86/kvm/vmx/nested.c                     | 24 +++++++++-----
+ .../testing/selftests/kvm/include/x86/evmcs.h |  8 -----
+ tools/testing/selftests/kvm/include/x86/vmx.h | 22 +++++++++----
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  | 31 ++++++++++++++-----
+ 4 files changed, 56 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH] svm: Add SMI handler for svm_intr_intercept_mix_smi test
+Author: Ryosuke Yasuoka <ryasuoka@redhat.com>
+
+L1 intercepts L2's SMI and the SMI is still pending at L0. When L1
+re-enables GIF via stgi(), L0 delivers the SMI to L1. Without an SMI
+handler, L1 enters SMM and aborts.
+
+Install a trivial RSM handler at the default SMBASE entry point so L1
+can return from SMM.
+
+Signed-off-by: Ryosuke Yasuoka <ryasuoka@redhat.com>
+---
+ x86/svm_tests.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] s390/vfio-ap: Fix leak of KVM GISC resources
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+s390/vfio-ap: fix KVM GISC and page leak when queue removed from host config
+
+Two related problems exist in the handling of KVM interrupt and page
+resources when a queue is removed from the host's AP configuration
+while assigned to a mediated device (mdev).
+
+Problem 1: AP_RESPONSE_Q_NOT_AVAIL not handled in
+vfio_ap_mdev_reset_queue()
+
+When the AP bus removes a queue device whose adapter or domain has
+been removed from the host's AP configuration,
+vfio_ap_mdev_remove_queue() is called. If the queue is still in the
+host's AP configuration at that point, it calls
+vfio_ap_mdev_reset_queue(), which issues a PQAP(ZAPQ). Since the
+adapter is already gone from the host configuration, ap_zapq() returns
+AP_RESPONSE_Q_NOT_AVAIL (0x01). This response code is not handled in
+vfio_ap_mdev_reset_queue()'s switch statement and falls through to
+the default case, which issues a WARN but does not call
+vfio_ap_free_aqic_resources(). As a result, if IRQ handling was
+enabled for the queue by the guest, the KVM GISC registration and
+the pinned guest page holding the notification indicator byte (NIB)
+are both leaked.
+
+This is fixed by adding AP_RESPONSE_Q_NOT_AVAIL to the same case as
+AP_RESPONSE_DECONFIGURED and AP_RESPONSE_CHECKSTOPPED in
+vfio_ap_mdev_reset_queue(). Like those response codes, Q_NOT_AVAIL
+indicates the queue is not operational and no further reset attempts
+are possible; the correct action is to free the IRQ resources
+immediately.
+
+Problem 2: vfio_ap_free_aqic_resources() leaks saved_isc when
+kvm is NULL
+
+vfio_ap_free_aqic_resources() guards the call to
+kvm_s390_gisc_unregister() with:
+
+    if (q->saved_isc != VFIO_AP_ISC_INVALID &&
+        !WARN_ON(!(q->matrix_mdev && q->matrix_mdev->kvm)))
+
+If matrix_mdev->kvm is NULL -- which can happen when
+vfio_ap_mdev_unset_kvm() has already run and cleared kvm before a
+subsequent cleanup path reaches this function -- the WARN_ON fires
+and the entire block is skipped. This leaves q->saved_isc set to a
+non-invalid value, creating a potential double-free on any subsequent
+call to this function.
+
+When kvm is NULL the KVM guest is already torn down, so
+kvm_s390_gisc_unregister() need not and cannot be called; however,
+q->saved_isc must always be cleared. Fix this by separating the
+kvm_s390_gisc_unregister() call from the q->saved_isc reset. The
+WARN_ON now guards only the genuinely impossible case of matrix_mdev
+being NULL. A NULL kvm is handled gracefully by skipping only the
+unregister call, and q->saved_isc = VFIO_AP_ISC_INVALID is set
+unconditionally whenever saved_isc was not already invalid.
+
+Additionally, add an else clause to the host-config check in
+vfio_ap_mdev_remove_queue() to call vfio_ap_free_aqic_resources()
+directly when the queue is not in the host's AP configuration. This
+serves as a backstop: when the AP bus fires the driver .remove
+callback after an adapter is removed from the host config, the queue
+is by definition no longer addressable, so vfio_ap_mdev_reset_queue()
+would always return Q_NOT_AVAIL. The else clause handles this case
+directly without the unnecessary ap_zapq() call, and ensures cleanup
+occurs even if kvm has already been set to NULL by a prior call to
+vfio_ap_mdev_unset_kvm().
+
+Fixes: b9bd10c43456d ("s390/vfio-ap: do not reset queue removed from host config")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 12 ++++++++----
+ 1 file changed, 8 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] KVM: selftests: arm64: Skip sea_to_user without 1GB hugepages
+Author: Like Xu <like.xu.linux@gmail.com>
+
+sea_to_user backs guest memory with 1GB hugepages but never checks that
+any are reserved. On a host with an empty pool it aborts instead of
+skipping:
+
+  kvm_syscalls.h:68: mem != MAP_FAILED, errno=12 (ENOMEM)
+  not ok 1 selftests: kvm: sea_to_user # exit=254
+
+The mmap() of the hugetlb region fails with -ENOMEM because no 1GB pages
+are available, and the test treats that as a hard failure even though it
+simply cannot run without the backing pages. Check the free 1GB hugepage
+count up front and skip cleanly when the host cannot satisfy the region.
+
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ tools/testing/selftests/kvm/arm64/sea_to_user.c |  6 ++++++
+ tools/testing/selftests/kvm/include/test_util.h |  1 +
+ tools/testing/selftests/kvm/lib/test_util.c     | 15 +++++++++++++++
+ 3 files changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] KVM: selftests: arm64: Skip sea_to_user when EINJ places no poison
+Author: Like Xu <like.xu.linux@gmail.com>
+
+sea_to_user injects a memory UER with EINJ notrigger=1 and expects the
+guest to consume it and trap to KVM as an SEA. On some firmware the test
+aborts instead:
+
+  arm64/sea_to_user.c:223: exit_reason == (41)
+  Wanted KVM exit reason: 41 (ARM_SEA), got: 6 (MMIO)
+
+notrigger=1 asks firmware to arm the poison without consuming it, but on
+these platforms the poison is only armed as part of the trigger step that
+notrigger skips, so nothing consumable is left in memory. The guest reads
+back the sentinel, no SEA occurs, and GUEST_FAIL fires. On arm64 a ucall
+is delivered as an MMIO write, which surfaces as the KVM_EXIT_MMIO above
+rather than a KVM bug.
+
+The file already documents that the test must be skipped when firmware
+cannot deliver a consumable error. Detect the guest abort that follows a
+missing SEA and skip, instead of failing on a firmware limitation the
+test cannot control.
+
+Assisted-by: Claude:claude-opus-4-8
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 24 +++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] KVM: selftests: arm64: Fix EINJ handling in sea_to_user
+Author: Like Xu <like.xu.linux@gmail.com>
+
+sea_to_user drives EINJ injection through popen("echo ... > file"). A
+failed write is hidden behind the shell pipeline, so a botched injection
+is silently ignored and the test proceeds as if a poison were placed.
+Drive the debugfs interface directly so a write failure is reported
+rather than swallowed.
+
+The EINJ support probe is also unreliable. It checks the ACPI EINJ table
+with access(R_OK), but reading that table needs CAP_SYS_ADMIN, so the
+check gives a false negative for unprivileged runs and skips a test that
+could otherwise report a real problem. Probe by opening the debugfs
+injection interface instead and classify errno: absence means EINJ is
+not built or firmware lacks support, EACCES/EPERM means the test is not
+running as root -- both are skips -- while anything else is a genuine
+failure.
+
+The injection path is only reachable through debugfs; the kernel EINJ
+driver exposes no other interface, so the test must depend on it.
+
+Link: https://lore.kernel.org/kvm/86y0le9cvz.wl-maz@kernel.org/
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 45 ++++++++++++++-----
+ 1 file changed, 33 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] KVM: selftests: arm64: Make sea_to_user skip cleanly
+Author: Like Xu <like.xu.linux@gmail.com>
+
+This series hardens the arm64 sea_to_user selftest so that it reports a
+clean skip on hosts that cannot actually run it, instead of aborting or
+silently passing.
+
+The test drives a real recoverable memory UER through APEI EINJ and
+expects the guest to consume the poison and exit to userspace with
+KVM_EXIT_ARM_SEA. That relies on host and firmware support that is not
+present everywhere, and each unmet dependency is now turned into a skip:
+
+  - EINJ injection is driven directly through debugfs, and an unusable
+    EINJ (not built, no firmware support, or not running as root) is
+    classified from errno and skipped rather than mishandled.
+  - Guest memory is backed by 1GB hugepages; with an empty pool the test
+    now skips up front instead of failing an mmap() with -ENOMEM.
+  - Some firmware only arms EINJ poison as part of the trigger step that
+    notrigger=1 skips, so nothing consumable is left for the guest to
+    read. That case is detected and skipped rather than reported as a
+    spurious KVM_EXIT_MMIO failure.
+
+Tested on an arm64 host with CONFIG_ACPI_APEI_EINJ: on a platform whose
+firmware places no consumable poison under notrigger=1 the test now
+skips cleanly, and the earlier -ENOMEM and abort paths are gone.
+
+v1 [1] was a single patch doing only the 1GB hugepage check. Following
+Marc's review [2], it is expanded into a series that also fixes the EINJ
+handling the test depends on.
+
+Test Results:
+
+  Case 1 (echo 0 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages): 
+
+  # timeout set to 120
+  # selftests: kvm: sea_to_user
+  # Random seed: 0x6b8b4567
+  # 1..0 # SKIP - Requirement not met: get_free_hugepages(backing_page_size) >= VM_MEM_SIZE
+  ok 1 selftests: kvm: sea_to_user # SKIP
+  # 1 skipped test(s) detected.  Consider enabling relevant config options to improve coverage.
+  # Totals: pass:0 fail:0 xfail:0 xpass:0 skip:1 error:0
+
+  Case 2 (rmmod einj):
+
+  # selftests: kvm: sea_to_user
+  # Random seed: 0x6b8b4567
+  # # Mapped 0x40000 pages: gva=0x80000000 to gpa=0xff80000000
+  # # Before EINJect: data=0xbaadcafe
+  # # EINJ_GVA=0x81234bad, einj_gpa=0xff81234bad, einj_hva=0xffff41234bad, einj_hpa=0x42c1234bad
+  # 1..0 # SKIP need CONFIG_ACPI_APEI_EINJ and firmware EINJ support
+  ok 1 selftests: kvm: sea_to_user # SKIP
+  # 1 skipped test(s) detected.  Consider enabling relevant config options to improve coverage.
+  # Totals: pass:0 fail:0 xfail:0 xpass:0 skip:1 error:0
+
+  Case 3 (modprobe einj):
+
+  # selftests: kvm: sea_to_user
+  # Random seed: 0x6b8b4567
+  # # Mapped 0x40000 pages: gva=0x80000000 to gpa=0xff80000000
+  # # Before EINJect: data=0xbaadcafe
+  # # EINJ_GVA=0x81234bad, einj_gpa=0xff81234bad, einj_hva=0xffff41234bad, einj_hpa=0x42c1234bad
+  # # 0x10 > /sys/kernel/debug/apei/einj/error_type - done
+  # # 0x2 > /sys/kernel/debug/apei/einj/flags - done
+  # # 0x42c1234bad > /sys/kernel/debug/apei/einj/param1 - done
+  # # 0xffffffffffffffff > /sys/kernel/debug/apei/einj/param2 - done
+  # # 0x1 > /sys/kernel/debug/apei/einj/notrigger - done
+  # # 0x1 > /sys/kernel/debug/apei/einj/error_inject - done
+  # # Memory UER EINJected
+  # # SIGBUS (7) received, dumping siginfo...
+  # # si_signo=7, si_errno=0, si_code=128, si_addr=(nil)
+  # not ok 1 Exit with signal unhandled
+  ok 1 selftests: kvm: sea_to_user
+  # Totals: pass:1 fail:0 xfail:0 xpass:0 skip:0 error:0
+
+Changes since v1:
+  - New patch 1: drive EINJ injection directly through debugfs with
+    open()/write() instead of access()+popen(). Classify the open()
+    errno so an unprivileged run skips as "requires root" instead of
+    falsely reporting missing firmware EINJ, and report a genuine write
+    failure instead of the ambiguous "Failed... Success (0)".
+  - New patch 3: detect when notrigger=1 leaves no consumable poison and
+    skip cleanly, instead of exiting with a confusing KVM_EXIT_MMIO.
+  - Patch 2 is the original v1 change, unchanged.
+
+Not yet addressed from [2]: dropping the hard 1GB-hugepage and 4kB
+base-page requirements. Suggestions on an acceptable backing scheme are
+welcome.
+
+[1] https://lore.kernel.org/kvm/20260817080759.25601-1-likexu@tencent.com/
+[2] https://lore.kernel.org/all/86y0le9cvz.wl-maz@kernel.org/
+
+Like Xu (3):
+  KVM: selftests: arm64: Fix EINJ handling in sea_to_user
+  KVM: selftests: arm64: Skip sea_to_user without 1GB hugepages
+  KVM: selftests: arm64: Skip sea_to_user when EINJ places no poison
+
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 75 +++++++++++++++----
+ .../testing/selftests/kvm/include/test_util.h |  1 +
+ tools/testing/selftests/kvm/lib/test_util.c   | 15 ++++
+ 3 files changed, 77 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 45/74] qom: convert scalar properties to QAPI-aware
+Author: Marc-André Lureau <marcandre.lureau@redhat.com>
+
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+---
+ accel/kvm/kvm-all.c                 |  5 ++-
+ accel/nitro/nitro-accel.c           |  3 +-
+ accel/tcg/tcg-all.c                 |  3 +-
+ backends/cryptodev.c                |  7 ++--
+ backends/hostmem-file.c             |  4 +-
+ backends/hostmem-memfd.c            |  3 +-
+ backends/hostmem.c                  |  6 +--
+ block/throttle-groups.c             |  5 ++-
+ crypto/secret_keyring.c             |  9 +++--
+ event-loop-base.c                   |  7 ++--
+ hw/acpi/ich9.c                      |  3 +-
+ hw/acpi/pci.c                       |  7 ++--
+ hw/arm/virt.c                       |  4 +-
+ hw/core/clock.c                     |  3 +-
+ hw/core/machine.c                   |  2 +-
+ hw/cpu/core.c                       | 10 +++--
+ hw/cxl/cxl-host.c                   |  2 +-
+ hw/gpio/aspeed_gpio.c               |  5 ++-
+ hw/gpio/aspeed_sgpio.c              |  3 +-
+ hw/gpio/stm32l4x5_gpio.c            |  5 ++-
+ hw/i386/pc.c                        |  6 +--
+ hw/i386/sgx-epc.c                   |  3 +-
+ hw/i386/x86.c                       |  6 +--
+ hw/ide/ide-dev.c                    |  3 +-
+ hw/intc/apic_common.c               |  3 +-
+ hw/loongarch/virt.c                 |  2 +-
+ hw/mem/nvdimm.c                     |  7 ++--
+ hw/mem/pc-dimm.c                    |  3 +-
+ hw/misc/aspeed_lpc.c                | 73 +++++++++++++++++++++++++------------
+ hw/misc/aspeed_sdmc.c               |  3 +-
+ hw/misc/npcm7xx_mft.c               |  3 +-
+ hw/net/ne2000-isa.c                 |  3 +-
+ hw/nvme/ctrl.c                      |  3 +-
+ hw/pci-bridge/pci_expander_bridge.c |  3 +-
+ hw/pci-host/i440fx.c                | 29 +++++++++------
+ hw/pci-host/pnv_phb3.c              |  5 ++-
+ hw/pci-host/pnv_phb4.c              |  5 ++-
+ hw/pci-host/q35.c                   |  9 +++--
+ hw/ppc/spapr_drc.c                  |  3 +-
+ hw/riscv/microchip_pfsoc.c          |  3 +-
+ hw/s390x/sclpcpi.c                  |  8 ++--
+ hw/s390x/virtio-ccw-mem.c           |  3 +-
+ hw/sensor/adc128d818.c              | 16 +++++---
+ hw/sensor/adm1266.c                 |  3 +-
+ hw/sensor/adm1272.c                 |  9 +++--
+ hw/sensor/emc141x.c                 |  9 +++--
+ hw/sensor/isl_pmbus_vr.c            | 19 +++++-----
+ hw/sensor/lsm303dlhc_mag.c          |  9 +++--
+ hw/sensor/max34451.c                |  5 ++-
+ hw/sensor/tmp105.c                  |  3 +-
+ hw/sensor/tmp421.c                  |  9 +++--
+ hw/usb/dev-storage-classic.c        |  3 +-
+ hw/virtio/virtio-balloon.c          |  3 +-
+ hw/virtio/virtio-mem-pci.c          |  3 +-
+ hw/virtio/virtio-mem.c              | 18 +++++----
+ hw/xen/xen-pvh-common.c             |  9 +++--
+ iothread.c                          |  9 +++--
+ net/colo-compare.c                  |  7 ++--
+ net/dump.c                          |  6 ++-
+ net/filter-buffer.c                 |  3 +-
+ qom/object.c                        | 42 ++++++++++-----------
+ system/bootdevice.c                 |  3 +-
+ system/memory.c                     |  5 ++-
+ target/arm/cpu64.c                  | 11 +++---
+ target/arm/kvm.c                    |  3 +-
+ target/arm/tcg/cpu64.c              |  5 ++-
+ target/i386/cpu.c                   | 12 +++---
+ target/i386/kvm/kvm.c               |  8 ++--
+ target/i386/sev.c                   |  2 +-
+ target/ppc/compat.c                 |  3 +-
+ target/riscv/cpu.c                  | 15 ++++----
+ target/riscv/kvm/kvm-cpu.c          |  7 ++--
+ target/riscv/tcg/tcg-cpu.c          | 13 ++++---
+ target/s390x/cpu_models.c           |  5 ++-
+ tests/unit/test-qdev-global-props.c | 11 ++++--
+ ui/console.c                        |  3 +-
+ util/thread-context.c               |  7 ++--
+ 77 files changed, 341 insertions(+), 239 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 27/74] accel/kvm: convert OnOffSplit property to
+Author: Marc-André Lureau <marcandre.lureau@redhat.com>
+
+Convert the OnOffSplit property from manual visitor-based
+callbacks to property_add_qapi_enum().
+
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+---
+ accel/kvm/kvm-all.c | 26 ++++++++++----------------
+ 1 file changed, 10 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 24/74] sev: convert OnOffAuto legacy-vm-type property to
+Author: Marc-André Lureau <marcandre.lureau@redhat.com>
+
+Convert the legacy-vm-type OnOffAuto property from manual
+visitor-based callbacks to property_add_qapi_enum().
+
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+---
+ target/i386/sev.c | 29 +++++++++++++----------------
+ 1 file changed, 13 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 16/74] qom: convert struct properties to QAPI-aware
+Author: Marc-André Lureau <marcandre.lureau@redhat.com>
+
+Convert all callers of object_property_add() and
+object_class_property_add() that register struct-typed properties with
+QAPI visitor-based getters/setters to use object_property_add_qapi() and
+object_class_property_add_qapi() instead.
+
+This replaces the manual string type name with a reference to the
+generated QAPITypeInfo constant, enabling QMP introspection to report
+accurate QAPI type information for struct properties. Existing
+getters/setters are preserved unchanged.
+
+The cxl-fmw property type is corrected from "CXLFixedMemoryWindow"
+(not a real QAPI type) to "CXLFixedMemoryWindowOptions".
+
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+---
+ authz/list.c              |  2 +-
+ block/throttle-groups.c   |  5 +++--
+ chardev/char-socket.c     |  3 ++-
+ hw/core/machine.c         | 11 +++++++----
+ hw/cxl/cxl-host.c         |  4 +++-
+ hw/remote/vfio-user-obj.c |  5 +++--
+ hw/vfio-user/pci.c        |  5 +++--
+ target/i386/cpu.c         | 11 ++++++++---
+ target/i386/kvm/tdx.c     |  4 +++-
+ target/s390x/cpu-system.c |  4 +++-
+ 10 files changed, 36 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 14/74] qom: convert enum properties to QAPI-aware
+Author: Marc-André Lureau <marcandre.lureau@redhat.com>
+
+Convert all callers of object_class_property_add_enum() to use the new
+object_class_property_add_qapi_enum() with the QAPI_ENUM_PROP()
+macro, which provides type information via QAPITypeInfo instead of
+raw lookup tables and string type names.
+
+This enables QMP introspection to report accurate QAPI type names
+for enum properties. Where a separate set_description call was used,
+the description is now embedded in the QAPI_ENUM_PROP initializer.
+
+Signed-off-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+---
+ authz/list.c                             | 12 +++++++-----
+ backends/hostmem.c                       | 14 ++++++++------
+ crypto/secret_common.c                   | 12 +++++++-----
+ crypto/tlscreds.c                        | 12 +++++++-----
+ hw/i386/pc_piix.c                        | 18 ++++++++++++------
+ hw/microblaze/petalogix_s3adsp1800_mmu.c | 19 +++++++++++--------
+ include/chardev/char.h                   |  8 --------
+ monitor/qmp.c                            | 12 +++++++-----
+ net/filter.c                             | 10 +++++++---
+ target/i386/kvm/kvm.c                    | 30 +++++++++++++++++-------------
+ ui/console-vc.c                          |  8 +++++++-
+ ui/dbus.c                                | 18 ++++++++++++++----
+ ui/input-linux.c                         | 11 +++++++----
+ 13 files changed, 111 insertions(+), 73 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/4] KVM: guest_memfd: Stop returning struct page from PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+KVM currently expects guest_memfd PFN lookups to return a refcounted
+struct page, which callers hold across fault handling.
+
+Holding a page reference across fault handling is problematic for
+guest_memfd. In-place memory conversions between confidential
+computing shared and private states inspect folio refcounts to ensure
+exclusive ownership by guest_memfd. A concurrent guest page fault
+taking a reference on the folio causes conversions to fail due to an
+elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so callers
+within KVM only need to respect the MMU invalidation protocol to safely
+rely on guest_memfd for page presence.
+
+Furthermore, removing struct page from the guest_memfd PFN lookup moves
+KVM closer toward supporting memory backends that are not backed by
+struct page.
+
+Drop the folio reference immediately before returning from the
+guest_memfd PFN lookup, and stop returning the struct page pointer.
+
+For ARM, initialize the local page pointer to NULL so that the shared
+cleanup path that releases fault-in pages safely no-ops for guest_memfd.
+
+For x86, no additional changes are required in the MMU fault path
+because the page fault tracking structure is zero-initialized at the
+start of page fault handling, ensuring the refcounted page pointer is
+already NULL.
+
+Reported-by: Yan Zhao <yan.y.zhao@intel.com>
+Closes: https://lore.kernel.org/all/anZ4W9o5pTWIEgMY@yzhao56-desk.sh.intel.com/
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/arm64/kvm/mmu.c     | 4 ++--
+ arch/arm64/kvm/nested.c  | 4 ++--
+ arch/x86/kvm/mmu/mmu.c   | 2 +-
+ arch/x86/kvm/svm/sev.c   | 8 ++------
+ include/linux/kvm_host.h | 6 ++----
+ virt/kvm/guest_memfd.c   | 9 ++-------
+ 6 files changed, 11 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/4] KVM: SEV: Drop page refcount early in VMSA reload
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When reloading the guest VMSA for an SEV-SNP vCPU, KVM retrieves the PFN
+from guest_memfd.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across MMU lock acquisition in preparation for a follow-up patch
+to stop returning page pointers from guest_memfd PFN lookups.
+
+This is safe because the page's validity and presence are governed by KVM's
+MMU invalidation protocol rather than the page reference.
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/4] KVM: SEV: Drop page refcount early during RMP fault handling
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+When handling an RMP fault, KVM retrieves the PFN for a private GPA from
+guest_memfd.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across the entire handler so that the later patch can follow up
+with completely not returning refcounted pages from kvm_gmem_get_pfn().
+
+On a first look, existing RMP table handling (psmash and checking for
+errors) might seem like it works fine, since truncation of the page from
+guest_memfd would have called rmp_make_shared() and removed the PFN from
+the RMP table. However, that is insufficient since a freed page may already
+be used in a different SNP VM.
+
+Hence, adopt the MMU invalidation protocol to guard committing anything
+based on the PFN.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 39 ++++++++++++++++++++++++---------------
+ 1 file changed, 24 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/4] KVM: SEV: Treat unassigned RMP entry as benign race on
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM attempts to split a 2MB page via PSMASH.
+If PSMASH fails, the only expected return value is FAIL_BADADDR, which does
+not distinguish the reason for the bad address. Hence, another RMP entry
+lookup is required to determine whether the failure was benign.
+
+Specifically, KVM re-checks the RMP entry to determine if another CPU raced
+and already smashed the entry into 4KB pages.
+
+A concurrent operation (such as guest_memfd truncation or hole punching)
+can also race and transition the page to shared, removing the page from the
+RMP table and causing PSMASH to fail. This can happen even if the page is
+still referenced by KVM, because guest_memfd reclaim transitions the RMP
+entry to shared when the folio is removed from the page cache.
+
+Treat an unassigned RMP entry as an expected race when re-checking after a
+failed PSMASH, and skip logging an error warning.
+
+Fixes: c63cf135cc99 ("KVM: SEV: Add support to handle RMP nested page faults")
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/4] Stop returning struct page from guest_memfd PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+KVM currently expects kvm_gmem_get_pfn() to return a refcounted struct
+page. Callers (such as x86 TDP MMU, arm64 Stage-2 fault handler, and SEV-SNP
+VMSA / RMP handlers) hold this refcount across page fault handling.
+
+Holding a page refcount across fault handling is problematic for guest_memfd.
+In-place memory conversions between confidential computing shared and private
+states inspect folio refcounts to ensure exclusive ownership by guest_memfd.  A
+concurrent guest page fault taking a reference on the folio causes conversions
+to fail due to an elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so users of guest_memfd
+within KVM only need to respect the MMU invalidation protocol to safely rely on
+guest_memfd to ensure page presence.
+
+This series first prepares the SEV-SNP handlers by treating unassigned RMP
+entries as benign races on PSMASH failure (which can occur on concurrent
+truncation) and dropping page references early in the RMP fault and VMSA reload
+paths. It then updates kvm_gmem_get_pfn() to drop the folio reference internally
+and stop returning a struct page pointer across x86 and arm64.
+
+Removing struct page from kvm_gmem_get_pfn() also moves KVM closer toward
+supporting memory backends that are not backed by struct page.
+
+I really want in-place conversions to merge in time for 7.4 and so I went
+ahead to try this, building off Sean's sample code [1].
+
+[1] https://lore.kernel.org/all/an5RJYTwlYeym--O@google.com/
+
+I also split the patch up so it's easier to review :)
+
+Changes from v1:
+
++ sev_handle_rmp_fault() does need to adopt the MMU invalidation protocol,
+  please see reason in patch description.
+
+v1: https://patch.msgid.link/20260818-gmem-no-return-page-v1-0-4f8d939efdbc@google.com
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (2):
+      KVM: SEV: Treat unassigned RMP entry as benign race on PSMASH failure
+      KVM: SEV: Drop page refcount early in VMSA reload
+
+Sean Christopherson (2):
+      KVM: SEV: Drop page refcount early during RMP fault handling
+      KVM: guest_memfd: Stop returning struct page from PFN lookup
+
+ arch/arm64/kvm/mmu.c     |  4 ++--
+ arch/arm64/kvm/nested.c  |  4 ++--
+ arch/x86/kvm/mmu/mmu.c   |  2 +-
+ arch/x86/kvm/svm/sev.c   | 45 +++++++++++++++++++++++++--------------------
+ include/linux/kvm_host.h |  6 ++----
+ virt/kvm/guest_memfd.c   |  9 ++-------
+ 6 files changed, 34 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/4] KVM: guest_memfd: Stop returning struct page from PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+KVM currently expects guest_memfd PFN lookups to return a refcounted
+struct page, which callers hold across fault handling.
+
+Holding a page reference across fault handling is problematic for
+guest_memfd. In-place memory conversions between confidential
+computing shared and private states inspect folio refcounts to ensure
+exclusive ownership by guest_memfd. A concurrent guest page fault
+taking a reference on the folio causes conversions to fail due to an
+elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so callers
+within KVM only need to respect the MMU invalidation protocol to safely
+rely on guest_memfd for page presence.
+
+Furthermore, removing struct page from the guest_memfd PFN lookup moves
+KVM closer toward supporting memory backends that are not backed by
+struct page.
+
+Drop the folio reference immediately before returning from the
+guest_memfd PFN lookup, and stop returning the struct page pointer.
+
+For ARM, initialize the local page pointer to NULL so that the shared
+cleanup path that releases fault-in pages safely no-ops for guest_memfd.
+
+For x86, no additional changes are required in the MMU fault path
+because the page fault tracking structure is zero-initialized at the
+start of page fault handling, ensuring the refcounted page pointer is
+already NULL.
+
+Reported-by: Yan Zhao <yan.y.zhao@intel.com>
+Closes: https://lore.kernel.org/all/anZ4W9o5pTWIEgMY@yzhao56-desk.sh.intel.com/
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/arm64/kvm/mmu.c     | 4 ++--
+ arch/arm64/kvm/nested.c  | 4 ++--
+ arch/x86/kvm/mmu/mmu.c   | 2 +-
+ arch/x86/kvm/svm/sev.c   | 8 ++------
+ include/linux/kvm_host.h | 6 ++----
+ virt/kvm/guest_memfd.c   | 9 ++-------
+ 6 files changed, 11 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/4] KVM: SEV: Drop page refcount early in VMSA reload
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When reloading the guest VMSA for an SEV-SNP vCPU, KVM retrieves the PFN
+from guest_memfd.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across MMU lock acquisition in preparation for a follow-up patch
+to stop returning page pointers from guest_memfd PFN lookups.
+
+This is safe because the page's validity and presence are governed by KVM's
+MMU invalidation protocol rather than the page reference.
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/4] KVM: SEV: Drop page refcount early during RMP fault handling
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM retrieves the PFN for a private GPA from
+guest_memfd. The page reference taken during PFN lookup is not needed for
+the remainder of the handler, as checking the RMP entry, splitting the
+2MB page via PSMASH, and zapping shadow page tables only operate on PFNs.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across the entire handler.
+
+A later patch will follow up with completely not returning refcounted pages
+from kvm_gmem_get_pfn().
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/4] KVM: SEV: Treat unassigned RMP entry as benign race on
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM attempts to split a 2MB page via PSMASH.
+If PSMASH fails, the only expected return value is FAIL_BADADDR, which does
+not distinguish the reason for the bad address. Hence, another RMP entry
+lookup is required to determine whether the failure was benign.
+
+Specifically, KVM re-checks the RMP entry to determine if another CPU raced
+and already smashed the entry into 4KB pages.
+
+A concurrent operation (such as guest_memfd truncation or hole punching)
+can also race and transition the page to shared, removing the page from the
+RMP table and causing PSMASH to fail. This can happen even if the page is
+still referenced by KVM, because guest_memfd reclaim transitions the RMP
+entry to shared when the folio is removed from the page cache.
+
+Treat an unassigned RMP entry as an expected race when re-checking after a
+failed PSMASH, and skip logging an error warning.
+
+Fixes: c63cf135cc99 ("KVM: SEV: Add support to handle RMP nested page faults")
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/4] Stop returning struct page from guest_memfd PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+KVM currently expects kvm_gmem_get_pfn() to return a refcounted struct
+page. Callers (such as x86 TDP MMU, arm64 Stage-2 fault handler, and SEV-SNP
+VMSA / RMP handlers) hold this refcount across page fault handling.
+
+Holding a page refcount across fault handling is problematic for guest_memfd.
+In-place memory conversions between confidential computing shared and private
+states inspect folio refcounts to ensure exclusive ownership by guest_memfd.  A
+concurrent guest page fault taking a reference on the folio causes conversions
+to fail due to an elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so users of guest_memfd
+within KVM only need to respect the MMU invalidation protocol to safely rely on
+guest_memfd to ensure page presence.
+
+This series first prepares the SEV-SNP handlers by treating unassigned RMP
+entries as benign races on PSMASH failure (which can occur on concurrent
+truncation) and dropping page references early in the RMP fault and VMSA reload
+paths. It then updates kvm_gmem_get_pfn() to drop the folio reference internally
+and stop returning a struct page pointer across x86 and arm64.
+
+Removing struct page from kvm_gmem_get_pfn() also moves KVM closer toward
+supporting memory backends that are not backed by struct page.
+
+I really want in-place conversions to merge in time for 7.4 and so I went
+ahead to try this, building off Sean's sample code [1].
+
+The main difference from [1] is that I think sev_handle_rmp_fault()
+currently doesn't correctly handle the case where a racing truncation
+removed the page from the RMP table. With that fixed, I think
+sev_handle_rmp_fault() doesn't need to adopt the MMU invalidation protocol.
+
+I also split the patch up so it's easier to review :)
+
+[1] https://lore.kernel.org/all/an5RJYTwlYeym--O@google.com/
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (3):
+      KVM: SEV: Treat unassigned RMP entry as benign race on PSMASH failure
+      KVM: SEV: Drop page refcount early during RMP fault handling
+      KVM: SEV: Drop page refcount early in VMSA reload
+
+Sean Christopherson (1):
+      KVM: guest_memfd: Stop returning struct page from PFN lookup
+
+ arch/arm64/kvm/mmu.c     |  4 ++--
+ arch/arm64/kvm/nested.c  |  4 ++--
+ arch/x86/kvm/mmu/mmu.c   |  2 +-
+ arch/x86/kvm/svm/sev.c   | 17 ++++++-----------
+ include/linux/kvm_host.h |  6 ++----
+ virt/kvm/guest_memfd.c   |  9 ++-------
+ 6 files changed, 15 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 3/3] vhost/net: discard IOTLB when ACCESS_PLATFORM is cleared
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Apply the common device IOTLB teardown when userspace clears
+VIRTIO_F_ACCESS_PLATFORM. This drops stale translations and avoids
+rebuilding an existing IOTLB during feature updates that keep
+ACCESS_PLATFORM enabled.
+
+The transition invalidates cached vring access even with an attached
+backend. The backend remains attached, but userspace must configure the
+vring addresses for the new address mode after a successful live
+transition.
+
+Fixes: 6b1e6cc7855b ("vhost: new device IOTLB API")
+
+Link: https://lore.kernel.org/all/20260726141158.1652386-1-physicalmtea@gmail.com/
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/net.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 2/3] vhost/vsock: discard IOTLB when ACCESS_PLATFORM is cleared
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Clear the device IOTLB when userspace clears VIRTIO_F_ACCESS_PLATFORM.
+Otherwise descriptor translation can continue to use mappings installed
+before the feature change.
+
+The common helper invalidates cached vring access and applies the
+transition even while a backend is attached. The backend remains attached,
+but userspace must configure the vring addresses for the new address mode
+after a successful live transition.
+
+Fixes: e13a6915a03f ("vhost/vsock: add IOTLB API support")
+
+Suggested-by: Michael S. Tsirkin <mst@redhat.com>
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/vsock.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 1/3] vhost: invalidate vring access on IOTLB transitions
+Author: Jia Jia <physicalmtea@gmail.com>
+
+When ACCESS_PLATFORM changes, the addresses cached in desc, avail, and
+used change meaning with the address space. Clear the cached vring access
+state when the device IOTLB is installed or removed so stale IOVAs cannot
+be reused as direct userspace addresses.
+
+Keep device IOTLB initialization idempotent and apply the mode change even
+when a virtqueue backend is attached. Drop the device-wide IOTLB first,
+then clear each VQ state under its own mutex, and keep the old table alive
+until every VQ has completed the handoff.
+
+A successful live mode change leaves the backend attached but invalidates
+the cached vring addresses. Userspace must configure the vring addresses
+for the new address mode before data processing can resume.
+
+Fixes: 6b1e6cc7855b ("vhost: new device IOTLB API")
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/vhost.c | 53 ++++++++++++++++++++++++++++++++++++++++++-
+ drivers/vhost/vhost.h |  1 +
+ 2 files changed, 53 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 0/3] vhost: fix device IOTLB feature lifecycle
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Both vhost-vsock and vhost-net can leave the device IOTLB attached when
+userspace clears VIRTIO_F_ACCESS_PLATFORM. They can also replace an
+existing IOTLB with a new empty table when a later feature update keeps
+ACCESS_PLATFORM enabled, for example when updating logging.
+
+When the IOTLB mode changes, the vring addresses previously supplied by
+userspace no longer have the same address-space meaning. Leaving those
+addresses installed would allow an old IOVA to be used as a direct
+userspace address after the IOTLB is detached.
+
+This series invalidates the vring access state during IOTLB transitions,
+makes IOTLB initialization idempotent, and uses a common teardown helper
+for vhost-vsock and vhost-net. IOTLB mode changes are applied even while a
+virtqueue backend is attached. The device-wide IOTLB is dropped first, each
+virtqueue then clears its IOTLB pointer and cached ring access under its own
+mutex, and the old table is freed only after every virtqueue has completed
+the handoff.
+
+A successful live mode change leaves the backend attached but invalidates
+the cached vring addresses. Userspace must configure the vring addresses for
+the new address mode before data processing can resume. When
+ACCESS_PLATFORM is enabled, the usual IOTLB miss/update protocol repopulates
+the new table.
+
+Changes since v5:
+- invalidate desc, avail, used, logging state, and metadata on IOTLB
+  transitions;
+- apply IOTLB mode changes while a backend is attached, following the
+  per-virtqueue handoff suggested in review;
+- apply the IOTLB teardown to vhost-net as well as vhost-vsock.
+
+Jia Jia (3):
+  vhost: invalidate vring access on IOTLB transitions
+  vhost/vsock: discard IOTLB when ACCESS_PLATFORM is cleared
+  vhost/net: discard IOTLB when ACCESS_PLATFORM is cleared
+
+ drivers/vhost/net.c   |  8 ++++++--
+ drivers/vhost/vhost.c | 53 ++++++++++++++++++++++++++++++++++++++++-
+ drivers/vhost/vhost.h |  1 +
+ drivers/vhost/vsock.c | 10 ++++++---
+ 4 files changed, 66 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 7e83450fa to b6469c9c0
+KVM mailing list update from 7e83450fa to b6469c9c0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     11 google.com
+      4 gmail.com
+      1 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+      7  Ackerley Tng <ackerleytng@google.com>
+      4  Like Xu <like.xu.linux@gmail.com>
+      3  Sean Christopherson <seanjc@google.com>
+      1  Jing Zhang <jingzhangos@google.com>
+      1  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: arm64: vgic-its: Fix O(C*I) loop in vgic_its_free_collection_list
+Author: Jing Zhang <jingzhangos@google.com>
+
+When destroying the vgic-its collection list,
+vgic_its_free_collection_list() iterates over every collection and for
+each, calls vgic_its_free_collection(). This function walks every
+Interrupt Translation Entry (ITE) across all devices via
+for_each_lpi_its() to nullify the collection pointer.
+
+A guest can allocate up to 65536 collections and hundreds of thousands
+of ITEs. By clearing GITS_CTLR.Enable and writing Valid=0 to
+GITS_BASER1, the guest can trigger this teardown path from a single MMIO
+exit. The resulting O(Collections * ITEs) nested loop executes billions
+of iterations without a single cond_resched(). This pins a physical CPU
+and stalls RCU grace periods for seconds or minutes on PREEMPT_NONE
+kernels.
+
+Fix this by replacing the O(Collections * ITEs) teardown with an
+O(Collections + ITEs) pass. Since the entire collection list is being
+freed, we can safely bulk-clear the collection pointers from all ITEs in
+a single pass, and then free all the collections in a second pass.
+
+Signed-off-by: Jing Zhang <jingzhangos@google.com>
+---
+ arch/arm64/kvm/vgic/vgic-its.c | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] KVM: selftests: arm64: Skip sea_to_user when EINJ places no poison
+Author: Like Xu <like.xu.linux@gmail.com>
+
+sea_to_user injects a memory UER with EINJ notrigger=1 and expects the
+guest to consume it and trap to KVM as an SEA. On some firmware the test
+aborts instead:
+
+  arm64/sea_to_user.c:223: exit_reason == (41)
+  Wanted KVM exit reason: 41 (ARM_SEA), got: 6 (MMIO)
+
+notrigger=1 asks firmware to arm the poison without consuming it, but on
+these platforms the poison is only armed as part of the trigger step that
+notrigger skips, so nothing consumable is left in memory. The guest reads
+back the sentinel, no SEA occurs, and GUEST_FAIL fires. On arm64 a ucall
+is delivered as an MMIO write, which surfaces as the KVM_EXIT_MMIO above
+rather than a KVM bug.
+
+The file already documents that the test must be skipped when firmware
+cannot deliver a consumable error. Detect the guest abort that follows a
+missing SEA and skip, instead of failing on a firmware limitation the
+test cannot control.
+
+Assisted-by: Claude:claude-opus-4-8
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 24 +++++++++++++++++--
+ 1 file changed, 22 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] KVM: selftests: arm64: Skip sea_to_user without 1GB hugepages
+Author: Like Xu <like.xu.linux@gmail.com>
+
+sea_to_user backs guest memory with 1GB hugepages but never checks that
+any are reserved. On a host with an empty pool it aborts instead of
+skipping:
+
+  kvm_syscalls.h:68: mem != MAP_FAILED, errno=12 (ENOMEM)
+  not ok 1 selftests: kvm: sea_to_user # exit=254
+
+The mmap() of the hugetlb region fails with -ENOMEM because no 1GB pages
+are available, and the test treats that as a hard failure even though it
+simply cannot run without the backing pages. Check the free 1GB hugepage
+count up front and skip cleanly when the host cannot satisfy the region.
+
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ tools/testing/selftests/kvm/arm64/sea_to_user.c |  6 ++++++
+ tools/testing/selftests/kvm/include/test_util.h |  1 +
+ tools/testing/selftests/kvm/lib/test_util.c     | 15 +++++++++++++++
+ 3 files changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] KVM: selftests: arm64: Fix EINJ handling in sea_to_user
+Author: Like Xu <like.xu.linux@gmail.com>
+
+sea_to_user drives EINJ injection through popen("echo ... > file"). A
+failed write is hidden behind the shell pipeline, so a botched injection
+is silently ignored and the test proceeds as if a poison were placed.
+Drive the debugfs interface directly so a write failure is reported
+rather than swallowed.
+
+The EINJ support probe is also unreliable. It checks the ACPI EINJ table
+with access(R_OK), but reading that table needs CAP_SYS_ADMIN, so the
+check gives a false negative for unprivileged runs and skips a test that
+could otherwise report a real problem. Probe by opening the debugfs
+injection interface instead and classify errno: absence means EINJ is
+not built or firmware lacks support, EACCES/EPERM means the test is not
+running as root -- both are skips -- while anything else is a genuine
+failure.
+
+The injection path is only reachable through debugfs; the kernel EINJ
+driver exposes no other interface, so the test must depend on it.
+
+Link: https://lore.kernel.org/kvm/86y0le9cvz.wl-maz@kernel.org/
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 45 ++++++++++++++-----
+ 1 file changed, 33 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] KVM: selftests: arm64: Make sea_to_user skip cleanly
+Author: Like Xu <like.xu.linux@gmail.com>
+
+This series hardens the arm64 sea_to_user selftest so that it reports a
+clean skip on hosts that cannot actually run it, instead of aborting or
+silently passing.
+
+The test drives a real recoverable memory UER through APEI EINJ and
+expects the guest to consume the poison and exit to userspace with
+KVM_EXIT_ARM_SEA. That relies on host and firmware support that is not
+present everywhere, and each unmet dependency is now turned into a skip:
+
+  - EINJ injection is driven directly through debugfs, and an unusable
+    EINJ (not built, no firmware support, or not running as root) is
+    classified from errno and skipped rather than mishandled.
+  - Guest memory is backed by 1GB hugepages; with an empty pool the test
+    now skips up front instead of failing an mmap() with -ENOMEM.
+  - Some firmware only arms EINJ poison as part of the trigger step that
+    notrigger=1 skips, so nothing consumable is left for the guest to
+    read. That case is detected and skipped rather than reported as a
+    spurious KVM_EXIT_MMIO failure.
+
+Tested on an arm64 host with CONFIG_ACPI_APEI_EINJ: on a platform whose
+firmware places no consumable poison under notrigger=1 the test now
+skips cleanly, and the earlier -ENOMEM and abort paths are gone.
+
+v1 [1] was a single patch doing only the 1GB hugepage check. Following
+Marc's review [2], it is expanded into a series that also fixes the EINJ
+handling the test depends on.
+
+Test Results:
+
+  Case 1 (echo 0 > /sys/kernel/mm/hugepages/hugepages-1048576kB/nr_hugepages): 
+
+  # timeout set to 120
+  # selftests: kvm: sea_to_user
+  # Random seed: 0x6b8b4567
+  # 1..0 # SKIP - Requirement not met: get_free_hugepages(backing_page_size) >= VM_MEM_SIZE
+  ok 1 selftests: kvm: sea_to_user # SKIP
+  # 1 skipped test(s) detected.  Consider enabling relevant config options to improve coverage.
+  # Totals: pass:0 fail:0 xfail:0 xpass:0 skip:1 error:0
+
+  Case 2 (rmmod einj):
+
+  # selftests: kvm: sea_to_user
+  # Random seed: 0x6b8b4567
+  # # Mapped 0x40000 pages: gva=0x80000000 to gpa=0xff80000000
+  # # Before EINJect: data=0xbaadcafe
+  # # EINJ_GVA=0x81234bad, einj_gpa=0xff81234bad, einj_hva=0xffff41234bad, einj_hpa=0x42c1234bad
+  # 1..0 # SKIP need CONFIG_ACPI_APEI_EINJ and firmware EINJ support
+  ok 1 selftests: kvm: sea_to_user # SKIP
+  # 1 skipped test(s) detected.  Consider enabling relevant config options to improve coverage.
+  # Totals: pass:0 fail:0 xfail:0 xpass:0 skip:1 error:0
+
+  Case 3 (modprobe einj):
+
+  # selftests: kvm: sea_to_user
+  # Random seed: 0x6b8b4567
+  # # Mapped 0x40000 pages: gva=0x80000000 to gpa=0xff80000000
+  # # Before EINJect: data=0xbaadcafe
+  # # EINJ_GVA=0x81234bad, einj_gpa=0xff81234bad, einj_hva=0xffff41234bad, einj_hpa=0x42c1234bad
+  # # 0x10 > /sys/kernel/debug/apei/einj/error_type - done
+  # # 0x2 > /sys/kernel/debug/apei/einj/flags - done
+  # # 0x42c1234bad > /sys/kernel/debug/apei/einj/param1 - done
+  # # 0xffffffffffffffff > /sys/kernel/debug/apei/einj/param2 - done
+  # # 0x1 > /sys/kernel/debug/apei/einj/notrigger - done
+  # # 0x1 > /sys/kernel/debug/apei/einj/error_inject - done
+  # # Memory UER EINJected
+  # # SIGBUS (7) received, dumping siginfo...
+  # # si_signo=7, si_errno=0, si_code=128, si_addr=(nil)
+  # not ok 1 Exit with signal unhandled
+  ok 1 selftests: kvm: sea_to_user
+  # Totals: pass:1 fail:0 xfail:0 xpass:0 skip:0 error:0
+
+Changes since v1:
+  - New patch 1: drive EINJ injection directly through debugfs with
+    open()/write() instead of access()+popen(). Classify the open()
+    errno so an unprivileged run skips as "requires root" instead of
+    falsely reporting missing firmware EINJ, and report a genuine write
+    failure instead of the ambiguous "Failed... Success (0)".
+  - New patch 3: detect when notrigger=1 leaves no consumable poison and
+    skip cleanly, instead of exiting with a confusing KVM_EXIT_MMIO.
+  - Patch 2 is the original v1 change, unchanged.
+
+Not yet addressed from [2]: dropping the hard 1GB-hugepage and 4kB
+base-page requirements. Suggestions on an acceptable backing scheme are
+welcome.
+
+[1] https://lore.kernel.org/kvm/20260817080759.25601-1-likexu@tencent.com/
+[2] https://lore.kernel.org/all/86y0le9cvz.wl-maz@kernel.org/
+
+Like Xu (3):
+  KVM: selftests: arm64: Fix EINJ handling in sea_to_user
+  KVM: selftests: arm64: Skip sea_to_user without 1GB hugepages
+  KVM: selftests: arm64: Skip sea_to_user when EINJ places no poison
+
+ .../testing/selftests/kvm/arm64/sea_to_user.c | 75 +++++++++++++++----
+ .../testing/selftests/kvm/include/test_util.h |  1 +
+ tools/testing/selftests/kvm/lib/test_util.c   | 15 ++++
+ 3 files changed, 77 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: Validate the SVE vector length in pkvm_vcpu_init_sve()
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+pkvm_vcpu_init_sve() clamps only the upper bound of the host-provided
+sve_max_vl, so an invalid vector length reaches sve_state_size_from_vl()
+and the WARN_ON() there, which is fatal at EL2. The existing
+!sve_state_size test rejects such a length, but only after the macro has
+run.
+
+Check sve_vl_valid() before deriving the state size. A valid length
+cannot yield a zero size, so the !sve_state_size test goes with it.
+
+Fixes: 5db1bef93342 ("KVM: arm64: Track SVE state in the hypervisor vcpu structure")
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+
+Notes:
+    Based on v7.2. Applies cleanly to kvmarm/next as well:
+    pkvm_vcpu_init_sve() is identical on both.
+
+ arch/arm64/kvm/hyp/nvhe/pkvm.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/4] KVM: guest_memfd: Stop returning struct page from PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+KVM currently expects guest_memfd PFN lookups to return a refcounted
+struct page, which callers hold across fault handling.
+
+Holding a page reference across fault handling is problematic for
+guest_memfd. In-place memory conversions between confidential
+computing shared and private states inspect folio refcounts to ensure
+exclusive ownership by guest_memfd. A concurrent guest page fault
+taking a reference on the folio causes conversions to fail due to an
+elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so callers
+within KVM only need to respect the MMU invalidation protocol to safely
+rely on guest_memfd for page presence.
+
+Furthermore, removing struct page from the guest_memfd PFN lookup moves
+KVM closer toward supporting memory backends that are not backed by
+struct page.
+
+Drop the folio reference immediately before returning from the
+guest_memfd PFN lookup, and stop returning the struct page pointer.
+
+For ARM, initialize the local page pointer to NULL so that the shared
+cleanup path that releases fault-in pages safely no-ops for guest_memfd.
+
+For x86, no additional changes are required in the MMU fault path
+because the page fault tracking structure is zero-initialized at the
+start of page fault handling, ensuring the refcounted page pointer is
+already NULL.
+
+Reported-by: Yan Zhao <yan.y.zhao@intel.com>
+Closes: https://lore.kernel.org/all/anZ4W9o5pTWIEgMY@yzhao56-desk.sh.intel.com/
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/arm64/kvm/mmu.c     | 4 ++--
+ arch/arm64/kvm/nested.c  | 4 ++--
+ arch/x86/kvm/mmu/mmu.c   | 2 +-
+ arch/x86/kvm/svm/sev.c   | 8 ++------
+ include/linux/kvm_host.h | 6 ++----
+ virt/kvm/guest_memfd.c   | 9 ++-------
+ 6 files changed, 11 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/4] KVM: SEV: Drop page refcount early in VMSA reload
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When reloading the guest VMSA for an SEV-SNP vCPU, KVM retrieves the PFN
+from guest_memfd.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across MMU lock acquisition in preparation for a follow-up patch
+to stop returning page pointers from guest_memfd PFN lookups.
+
+This is safe because the page's validity and presence are governed by KVM's
+MMU invalidation protocol rather than the page reference.
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/4] KVM: SEV: Drop page refcount early during RMP fault handling
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+When handling an RMP fault, KVM retrieves the PFN for a private GPA from
+guest_memfd.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across the entire handler so that the later patch can follow up
+with completely not returning refcounted pages from kvm_gmem_get_pfn().
+
+On a first look, existing RMP table handling (psmash and checking for
+errors) might seem like it works fine, since truncation of the page from
+guest_memfd would have called rmp_make_shared() and removed the PFN from
+the RMP table. However, that is insufficient since a freed page may already
+be used in a different SNP VM.
+
+Hence, adopt the MMU invalidation protocol to guard committing anything
+based on the PFN.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 39 ++++++++++++++++++++++++---------------
+ 1 file changed, 24 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/4] KVM: SEV: Treat unassigned RMP entry as benign race on
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM attempts to split a 2MB page via PSMASH.
+If PSMASH fails, the only expected return value is FAIL_BADADDR, which does
+not distinguish the reason for the bad address. Hence, another RMP entry
+lookup is required to determine whether the failure was benign.
+
+Specifically, KVM re-checks the RMP entry to determine if another CPU raced
+and already smashed the entry into 4KB pages.
+
+A concurrent operation (such as guest_memfd truncation or hole punching)
+can also race and transition the page to shared, removing the page from the
+RMP table and causing PSMASH to fail. This can happen even if the page is
+still referenced by KVM, because guest_memfd reclaim transitions the RMP
+entry to shared when the folio is removed from the page cache.
+
+Treat an unassigned RMP entry as an expected race when re-checking after a
+failed PSMASH, and skip logging an error warning.
+
+Fixes: c63cf135cc99 ("KVM: SEV: Add support to handle RMP nested page faults")
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/4] Stop returning struct page from guest_memfd PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+KVM currently expects kvm_gmem_get_pfn() to return a refcounted struct
+page. Callers (such as x86 TDP MMU, arm64 Stage-2 fault handler, and SEV-SNP
+VMSA / RMP handlers) hold this refcount across page fault handling.
+
+Holding a page refcount across fault handling is problematic for guest_memfd.
+In-place memory conversions between confidential computing shared and private
+states inspect folio refcounts to ensure exclusive ownership by guest_memfd.  A
+concurrent guest page fault taking a reference on the folio causes conversions
+to fail due to an elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so users of guest_memfd
+within KVM only need to respect the MMU invalidation protocol to safely rely on
+guest_memfd to ensure page presence.
+
+This series first prepares the SEV-SNP handlers by treating unassigned RMP
+entries as benign races on PSMASH failure (which can occur on concurrent
+truncation) and dropping page references early in the RMP fault and VMSA reload
+paths. It then updates kvm_gmem_get_pfn() to drop the folio reference internally
+and stop returning a struct page pointer across x86 and arm64.
+
+Removing struct page from kvm_gmem_get_pfn() also moves KVM closer toward
+supporting memory backends that are not backed by struct page.
+
+I really want in-place conversions to merge in time for 7.4 and so I went
+ahead to try this, building off Sean's sample code [1].
+
+[1] https://lore.kernel.org/all/an5RJYTwlYeym--O@google.com/
+
+I also split the patch up so it's easier to review :)
+
+Changes from v1:
+
++ sev_handle_rmp_fault() does need to adopt the MMU invalidation protocol,
+  please see reason in patch description.
+
+v1: https://patch.msgid.link/20260818-gmem-no-return-page-v1-0-4f8d939efdbc@google.com
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (2):
+      KVM: SEV: Treat unassigned RMP entry as benign race on PSMASH failure
+      KVM: SEV: Drop page refcount early in VMSA reload
+
+Sean Christopherson (2):
+      KVM: SEV: Drop page refcount early during RMP fault handling
+      KVM: guest_memfd: Stop returning struct page from PFN lookup
+
+ arch/arm64/kvm/mmu.c     |  4 ++--
+ arch/arm64/kvm/nested.c  |  4 ++--
+ arch/x86/kvm/mmu/mmu.c   |  2 +-
+ arch/x86/kvm/svm/sev.c   | 45 +++++++++++++++++++++++++--------------------
+ include/linux/kvm_host.h |  6 ++----
+ virt/kvm/guest_memfd.c   |  9 ++-------
+ 6 files changed, 34 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/4] KVM: guest_memfd: Stop returning struct page from PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+KVM currently expects guest_memfd PFN lookups to return a refcounted
+struct page, which callers hold across fault handling.
+
+Holding a page reference across fault handling is problematic for
+guest_memfd. In-place memory conversions between confidential
+computing shared and private states inspect folio refcounts to ensure
+exclusive ownership by guest_memfd. A concurrent guest page fault
+taking a reference on the folio causes conversions to fail due to an
+elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so callers
+within KVM only need to respect the MMU invalidation protocol to safely
+rely on guest_memfd for page presence.
+
+Furthermore, removing struct page from the guest_memfd PFN lookup moves
+KVM closer toward supporting memory backends that are not backed by
+struct page.
+
+Drop the folio reference immediately before returning from the
+guest_memfd PFN lookup, and stop returning the struct page pointer.
+
+For ARM, initialize the local page pointer to NULL so that the shared
+cleanup path that releases fault-in pages safely no-ops for guest_memfd.
+
+For x86, no additional changes are required in the MMU fault path
+because the page fault tracking structure is zero-initialized at the
+start of page fault handling, ensuring the refcounted page pointer is
+already NULL.
+
+Reported-by: Yan Zhao <yan.y.zhao@intel.com>
+Closes: https://lore.kernel.org/all/anZ4W9o5pTWIEgMY@yzhao56-desk.sh.intel.com/
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Yan Zhao <yan.y.zhao@intel.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/arm64/kvm/mmu.c     | 4 ++--
+ arch/arm64/kvm/nested.c  | 4 ++--
+ arch/x86/kvm/mmu/mmu.c   | 2 +-
+ arch/x86/kvm/svm/sev.c   | 8 ++------
+ include/linux/kvm_host.h | 6 ++----
+ virt/kvm/guest_memfd.c   | 9 ++-------
+ 6 files changed, 11 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/4] KVM: SEV: Drop page refcount early in VMSA reload
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When reloading the guest VMSA for an SEV-SNP vCPU, KVM retrieves the PFN
+from guest_memfd.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across MMU lock acquisition in preparation for a follow-up patch
+to stop returning page pointers from guest_memfd PFN lookups.
+
+This is safe because the page's validity and presence are governed by KVM's
+MMU invalidation protocol rather than the page reference.
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/4] KVM: SEV: Drop page refcount early during RMP fault handling
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM retrieves the PFN for a private GPA from
+guest_memfd. The page reference taken during PFN lookup is not needed for
+the remainder of the handler, as checking the RMP entry, splitting the
+2MB page via PSMASH, and zapping shadow page tables only operate on PFNs.
+
+Drop the page reference immediately after retrieving the PFN instead of
+holding it across the entire handler.
+
+A later patch will follow up with completely not returning refcounted pages
+from kvm_gmem_get_pfn().
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/4] KVM: SEV: Treat unassigned RMP entry as benign race on
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM attempts to split a 2MB page via PSMASH.
+If PSMASH fails, the only expected return value is FAIL_BADADDR, which does
+not distinguish the reason for the bad address. Hence, another RMP entry
+lookup is required to determine whether the failure was benign.
+
+Specifically, KVM re-checks the RMP entry to determine if another CPU raced
+and already smashed the entry into 4KB pages.
+
+A concurrent operation (such as guest_memfd truncation or hole punching)
+can also race and transition the page to shared, removing the page from the
+RMP table and causing PSMASH to fail. This can happen even if the page is
+still referenced by KVM, because guest_memfd reclaim transitions the RMP
+entry to shared when the folio is removed from the page cache.
+
+Treat an unassigned RMP entry as an expected race when re-checking after a
+failed PSMASH, and skip logging an error warning.
+
+Fixes: c63cf135cc99 ("KVM: SEV: Add support to handle RMP nested page faults")
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/4] Stop returning struct page from guest_memfd PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+KVM currently expects kvm_gmem_get_pfn() to return a refcounted struct
+page. Callers (such as x86 TDP MMU, arm64 Stage-2 fault handler, and SEV-SNP
+VMSA / RMP handlers) hold this refcount across page fault handling.
+
+Holding a page refcount across fault handling is problematic for guest_memfd.
+In-place memory conversions between confidential computing shared and private
+states inspect folio refcounts to ensure exclusive ownership by guest_memfd.  A
+concurrent guest page fault taking a reference on the folio causes conversions
+to fail due to an elevated refcount.
+
+guest_memfd already notifies KVM of page invalidations, so users of guest_memfd
+within KVM only need to respect the MMU invalidation protocol to safely rely on
+guest_memfd to ensure page presence.
+
+This series first prepares the SEV-SNP handlers by treating unassigned RMP
+entries as benign races on PSMASH failure (which can occur on concurrent
+truncation) and dropping page references early in the RMP fault and VMSA reload
+paths. It then updates kvm_gmem_get_pfn() to drop the folio reference internally
+and stop returning a struct page pointer across x86 and arm64.
+
+Removing struct page from kvm_gmem_get_pfn() also moves KVM closer toward
+supporting memory backends that are not backed by struct page.
+
+I really want in-place conversions to merge in time for 7.4 and so I went
+ahead to try this, building off Sean's sample code [1].
+
+The main difference from [1] is that I think sev_handle_rmp_fault()
+currently doesn't correctly handle the case where a racing truncation
+removed the page from the RMP table. With that fixed, I think
+sev_handle_rmp_fault() doesn't need to adopt the MMU invalidation protocol.
+
+I also split the patch up so it's easier to review :)
+
+[1] https://lore.kernel.org/all/an5RJYTwlYeym--O@google.com/
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (3):
+      KVM: SEV: Treat unassigned RMP entry as benign race on PSMASH failure
+      KVM: SEV: Drop page refcount early during RMP fault handling
+      KVM: SEV: Drop page refcount early in VMSA reload
+
+Sean Christopherson (1):
+      KVM: guest_memfd: Stop returning struct page from PFN lookup
+
+ arch/arm64/kvm/mmu.c     |  4 ++--
+ arch/arm64/kvm/nested.c  |  4 ++--
+ arch/x86/kvm/mmu/mmu.c   |  2 +-
+ arch/x86/kvm/svm/sev.c   | 17 ++++++-----------
+ include/linux/kvm_host.h |  6 ++----
+ virt/kvm/guest_memfd.c   |  9 ++-------
+ 6 files changed, 15 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
