@@ -1,0 +1,1101 @@
+
+On /root/mail/repo:
+From 70602b49f to df2709eef
+KVM mailing list update from 70602b49f to df2709eef
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     21 intel.com
+      9 amd.com
+      4 linux.intel.com
+      2 google.com
+      2 gmail.com
+      1 suse.com
+      1 redhat.com
+      1 infradead.org
+
+Top 15 contributors (Based on Email Body)
+
+     21  Zide Chen <zide.chen@intel.com>
+      8  Sairaj Kodilkar <sarunkod@amd.com>
+      3  Kan Liang <kan.liang@linux.intel.com>
+      2  Vipin Sharma <vipinsh@google.com>
+      1  Juergen Gross <jgross@suse.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+      1  Hisam Mehboob <hisamshar@gmail.com>
+      1  David Woodhouse <dwmw2@infradead.org>
+      1  Binbin Wu <binbin.wu@linux.intel.com>
+      1  Ashish Kalra <ashish.kalra@amd.com>
+      1  Albert Esteve <aesteve@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  perf/x86/intel: Guard counter masks against zero counters
+[PATCH 01/23] perf/x86/intel: Guard counter masks against zero counters
+Author: Zide Chen <zide.chen@intel.com>
+
+When running as a guest with a vPMU exposed, the host may expose zero
+general-purpose counters or zero fixed counters. In that case,
+GENMASK_ULL() is called with a negative high-bit argument, resulting
+in an out-of-range shift and undefined behavior.
+
+On systems with PMU partitioning enabled, this configuration is more
+likely. Change GENMASK_ULL() to BIT_ULL() to guard mask generation
+against zero counters.
+
+Fixes: 722e42e45c2f ("perf/x86: Support counter mask")
+Cc: stable@vger.kernel.org
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+ arch/x86/events/intel/core.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  perf/KVM: Support PMU partitioning for x86 platforms
+[PATCH 00/23] perf/KVM: Support PMU partitioning for x86 platforms
+Author: Zide Chen <zide.chen@intel.com>
+
+Introduction
+============
+
+PMU partitioning allows a VMM to assign a subset of PMU resources to a
+guest while retaining the remainder for host use, enabling concurrent
+host and guest PMU usage while the guest is running.
+
+Intel PerfMon masking provides architectural support for PMU
+partitioning. This VMX extension provides fine-grained, bit-level
+control over global PerfMon MSRs and RDPMC, allowing a guest to
+natively access PMU resources while hardware ensures that guest
+accesses cannot affect host-owned resources. This eliminates the need
+to intercept those accesses for PMU isolation.
+
+The feature is enumerated by IA32_VMX_PROCBASED_CTLS3[17] and enabled
+via the new PerfMon masking VM-execution control in tertiary
+processor-based VM-execution controls.
+
+A new 64-bit VMCS field, PERFMON_MASK (encoding 0x2054/0x2055), defines
+the guest-owned PMU resources. The mask follows the
+IA32_PERF_GLOBAL_STATUS bit layout.
+
+When enabled, hardware enforces guest access to selected PerfMon MSRs
+and RDPMC according to PERFMON_MASK, reducing the need for software
+emulation and interception.
+
+The full description of PerfMon masking can be found at Intel ISA,
+319433-062 [1]. Diamond Rapids is the first platform to support this
+feature.
+
+Design
+======
+
+1. KVM
+
+This series builds PMU partitioning on top of the mediated vPMU, which
+allows guest access to PerfMon MSRs without emulation, making it a
+natural foundation for PerfMon masking.
+
+A new Intel-specific KVM module parameter, perfmon_mask, defines the
+host-wide PMU partition. The mask uses the PERFMON_MASK VMCS encoding,
+where set bits identify guest-owned PMU resources and cleared bits
+identify host-owned resources. The setting is shared by all mediated
+vPMU guests on the host.
+
+KVM constrains its PMU capability based on the perfmon_mask parameter,
+so only minimal additional changes are needed to manage PMU capability
+advertisement and MSR emulation.
+
+Upon VMX transition, unlike the non-partitioned mediated vPMU, KVM
+always preserves the host-owned bits in the global MSRs.
+
+This series does not yet implement the full PerfMon masking software
+guideline in section 10.5 of [1]. For example, the RELOAD_{PMCx,FIXED_CTRx}
+and IA32_PMC_GPn_CFG_{A,B,C} MSRs are not yet supported by KVM.
+
+2. perf core
+
+The perf scheduler is taught to honor the PMU partition mask:
+
+- Loading guest context: reschedule system-wide events onto host-owned
+  counters.
+- Putting guest context: schedule out system-wide events before
+  rescheduling in so that they can be scheduled on now more available
+  counters.
+- In guest context, don't schedule in exclude_guest events, but allow
+  !exclude_guest to be scheduled in.
+
+As a current limitation, !exclude_guest events that rely on exclusive
+PMU facilities (e.g. Intel PT, LBR, or PEBS) are not supported under PMU
+partitioning and are rejected.
+
+3. perf/x86
+
+Apply PMU partitioning constraints to PMC allocation: while a
+partitioned guest is running, guest-owned counters are reserved for
+guest use and are unavailable to host event scheduling. Outside
+guest execution, all counters remain available to the host.
+
+In PMI handling in guest mode, handle only the host-owned bits that
+are set in IA32_PERF_GLOBAL_STATUS, and leave the guest-owned bits
+for KVM.
+
+4. PMI design
+
+Unlike mediated vPMU, PMU partitioning does not switch LVTPC to a
+dedicated guest PMI vector. Host-owned counters remain active while the
+guest is running and may trigger PMIs.
+
+PMIs therefore remain routed through the host NMI handler. PMI handling
+is split: host-induced counter overflows are handled by the host perf
+NMI handler as usual, while guest-induced overflows are left pending
+and KVM injects the corresponding PMI into the guest.
+
+Related Work
+============
+
+ARM's PMU Partitioning series [2] solves a similar problem. It relies
+on MDCR_EL2.HPMN to enforce the host/guest counter boundary and lets
+the guest access its counters without trapping.
+
+Similar to the perfmon_mask parameter, ARM's series has a module
+parameter, reserved_host_counters, that defines the maximum number of
+guest counters; userspace VMMs may then configure a smaller number of
+counters for each guest, up to that host-wide maximum.
+
+Probably the biggest difference is that ARM's series chooses to
+context-switch guest/host PMU state only at vcpu_{load,put}(), and
+evict host events from would-be guest-owned counters if needed, while
+this series continues the mediated vPMU design and performs it on
+every VM-entry/VM-exit.
+
+Also, while a guest is running, this series allows host events to be
+scheduled on exactly the complement of the effective guest counter
+mask, whereas ARM's series uses the single, global
+reserved_host_counters value, regardless of how many counters any
+given guest is actually using.
+
+Tests
+=====
+
+Tested in the engineering environment with various perfmon_mask
+configurations.
+
+1. Passed KVM selftests on L0 and L1.
+
+2. No issues related to PMU partitioning were found by `perf test` running
+  on L0 and L1.
+
+3. Host exclude_guest events do not count non-root activity:
+  # The following host command reports similar counts with or without
+  # guest workloads.
+  $ perf stat -e instructions:H,cycles:H,branches:H -a -I 1000
+
+4. Host system-wide !exclude_guest events count non-root activity.
+  # The following host command captures counts generated by guest
+  # workloads.
+  $ perf stat -e instructions:HG,cycles:HG,branches:HG -a -I 1000
+
+5. Put test 3 and 4 together.
+  # Guest idle.
+  $ stat -C 1 -e cycles:GH,instructions:G,branches:H -a
+  Performance counter stats for 'system wide':
+
+       113,933,309      cycles:GH              (100.00%)
+       135,454,451      instructions:G         (100.00%)
+        26,966,970      branches:H
+
+       1.959020017 seconds time elapsed
+
+  # Ran sysbench on the guest.
+  $ stat -C 1 -e cycles:GH,instructions:G,branches:H -a
+  Performance counter stats for 'system wide':
+
+     5,012,158,432      cycles:GH              (99.94%)
+     5,468,621,724      instructions:G         (99.94%)
+        26,654,821      branches:H
+
+       1.948625192 seconds time elapsed
+
+6. Host system-wide !exclude_guest sampling events observe guest-induced
+  PMIs.
+  # When running a guest workload with a known PMI rate, the following
+  # host command captures the corresponding overflow activity.
+
+  # Guest idle.
+  $ perf record -e instructions:H,cycles:HG,branches:HG -c 1000000 -a -- sleep 10
+  [ perf record: Captured and wrote 0.322 MB perf.data (1432 samples) ]
+              SAMPLE events:       1432  (30.4%)
+              SAMPLE events:        730
+              SAMPLE events:        549
+              SAMPLE events:        153
+
+  # Independantly ran workload on the guest to know the expected PMIs.
+  $ perf record -e instructions,cycles,branches -c1000000 tchain_edit
+  [ perf record: Captured and wrote 0.176 MB perf.data (4536 samples) ]
+              SAMPLE events:       4536  (99.0%)
+              SAMPLE events:       2037
+              SAMPLE events:       1821
+              SAMPLE events:        678
+
+  # Profile this on host again while ran tchain_edit on the guest.
+  $ perf record -e instructions:H,cycles:HG,branches:HG -c 1000000 -a -- sleep 10
+  [ perf record: Captured and wrote 0.433 MB perf.data (3959 samples) ]
+              SAMPLE events:       3959  (55.0%)
+              SAMPLE events:        762
+              SAMPLE events:       2362
+              SAMPLE events:        835
+
+7. Perf Metrics tests.
+  # If perf_metrics is assigned to the guests, guests can run slots and
+  # metrics events. Host exclude_host slots and metrics events are not
+  # scheduled in non-root mode.
+  $ perf stat -e '{topdown-bad-spec,topdown-retiring,topdown-be-bound,slots}:G' -a --sleep 1
+   Performance counter stats for 'system wide':
+
+                 0      slots                  (18.11%)
+                 0      topdown-bad-spec       (18.11%)
+                 0      topdown-retiring       (18.11%)
+                 0      topdown-be-bound       (18.11%)
+
+       1.001590434 seconds time elapsed
+
+  # Same events run on the host if perf_metrics is not assigned to the
+  # guests. 
+  $ perf stat -e '{topdown-bad-spec,topdown-retiring,topdown-be-bound,slots}:G' -a --sleep 1
+   Performance counter stats for 'system wide':
+
+        14,632,663      slots                  (100.00%)
+           918,127      topdown-bad-spec       (100.00%)
+         1,319,808      topdown-retiring       (100.00%)
+         3,514,335      topdown-be-bound       (100.00%)
+
+       1.001938038 seconds time elapsed
+
+8. Some other sanity tests.
+
+Patch Summary
+=============
+1. perf/x86 core enablement (patches 1-8)
+   Introduce guest-state tracking, host/guest PMI splitting, and the
+   counter/event constraints the mask depends on.
+
+2. perf core scheduling (patches 9-11)
+   Propagate the partition mask into mediated-PMU VMs and teach the
+   generic perf scheduler to honor it when loading/putting guest
+   context.
+
+3. KVM PerfMon masking (patches 12-20)
+   perfmon_mask module parameter, PERFMON_MASK VMCS setup, MSR
+   intercept relaxation, and GLOBAL_CTRL/GLOBAL_STATUS/GLOBAL_INUSE
+   handling for the mediated vPMU under PerfMon masking.
+
+4. Enablement (patch 21)
+   Turn on PerfMon masking on supported Intel platforms.
+
+5. Selftests (patches 22-23)
+
+Many thanks to Kan Liang for the original PerfMon masking design, Andi
+Kleen for his guidance, and Dapeng Mi for the many discussions,
+reviews, and suggestions that helped shape this series.
+
+Rebased to kvm-x86/next: 1b731e5ded48
+Thie series depends on the PMU v5 series [3] and Topdown metrics series [4].
+
+Code also available at [5].
+
+[1]: https://www.intel.com/content/www/us/en/content-details/922690/intel-architecture-instruction-set-extensions-programming-reference.html
+[2]: https://lore.kernel.org/lkml/20260612192909.1153907-1-coltonlewis@google.com/T/
+[3]: https://lore.kernel.org/kvm/20260707183405.15571-1-zide.chen@intel.com/
+[4]: https://lore.kernel.org/kvm/20260817183143.226156-1-zide.chen@intel.com/
+[5]: https://github.com/ZideChen0/linux-kernel/tree/pmu_partitioning_v1
+
+Kan Liang (3):
+  perf/x86: Restrict !exclude_guest events to host-owned counters
+  perf: Skip exclude_guest events on PMU partitioned counters
+  perf: Reschedule events across PMU partition transitions
+
+Zide Chen (20):
+  perf/x86/intel: Guard counter masks against zero counters
+  perf, perf/x86: Pass partition mask from KVM to perf/x86
+  perf/x86: Add GUEST_PMU states for PMU partitioning
+  perf/x86: Split host/guest PMI handling under PMU partitioning
+  perf/x86: Allow exclude_host events to run in non-root mode
+  perf/x86: Apply PMU partition mask on static constraints
+  perf/x86: Export available PMU counters to sysfs
+  perf, perf/x86: Allow host !exclude_guest events in PMU partitioning
+  KVM: x86/pmu: Add the perfmon_mask module parameter
+  KVM: x86/pmu: Set up the PERFMON_MASK VMCS field
+  KVM: x86/pmu, perf/x86: Update effective PMU partition mask
+  KVM: x86/pmu: Relax MSR intercept policy under PerfMon masking
+  KVM: x86/pmu: Handle FIXED_CTR_CTRL under PerfMon masking
+  KVM: x86/pmu: Handle GLOBAL_CTRL under PerfMon masking
+  KVM: x86/pmu: Handle GLOBAL_STATUS MSRs under PerfMon masking
+  KVM: x86/pmu: Always intercept GLOBAL_INUSE under PerfMon masking
+  KVM: x86/pmu: Request guest PMI for guest-induced PMIs
+  KVM: x86/pmu: Enable PerfMon masking
+  KVM: selftests: Fix PERF_METRICS test by checking FC3 availability
+  KVM: selftests: Allow no general purpose counters on the host
+
+ .../sysfs-bus-event_source-devices-caps       |   5 +
+ .../admin-guide/kernel-parameters.txt         |  30 +++
+ arch/x86/events/core.c                        | 227 +++++++++++++++++-
+ arch/x86/events/intel/core.c                  | 185 ++++++++++++--
+ arch/x86/events/perf_event.h                  |  20 ++
+ arch/x86/include/asm/kvm_host.h               |   1 +
+ arch/x86/include/asm/perf_event.h             |   3 +
+ arch/x86/include/asm/vmx.h                    |   3 +
+ arch/x86/include/asm/vmxfeatures.h            |   1 +
+ arch/x86/kvm/pmu.c                            |  53 +++-
+ arch/x86/kvm/pmu.h                            |  13 +-
+ arch/x86/kvm/svm/pmu.c                        |   2 +-
+ arch/x86/kvm/vmx/capabilities.h               |   6 +
+ arch/x86/kvm/vmx/pmu_intel.c                  | 206 +++++++++++++++-
+ arch/x86/kvm/vmx/vmx.c                        |  86 ++++++-
+ arch/x86/kvm/vmx/vmx.h                        |   3 +-
+ arch/x86/kvm/x86.c                            |   6 +-
+ include/linux/perf_event.h                    |   8 +-
+ kernel/events/core.c                          | 122 ++++++++--
+ .../selftests/kvm/x86/pmu_counters_test.c     |  29 ++-
+ 20 files changed, 929 insertions(+), 80 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/sev: Skip DR7 write during kexec when it would trigger an unserviceable #VC
+[PATCH] x86/sev: Skip DR7 write during kexec when it would trigger an unserviceable #VC
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+machine_kexec() calls hw_breakpoint_disable(), which writes DR7. On
+SEV-ES/SNP guests that do not have DebugSwap enabled, DR7 accesses are
+intercepted and delivered to the guest as a #VC exception, which must be
+serviced through the GHCB.
+
+By the time machine_kexec() runs, snp_kexec_finish() (called from
+native_machine_shutdown()) has already converted the per-CPU GHCBs and
+the boot GHCB back to private and set boot_ghcb to NULL, tearing down the
+GHCB infrastructure. The DR7 write therefore raises a #VC that
+dereferences a NULL GHCB pointer, causing a page fault and the kexec to
+fail.
+
+The NULL boot_ghcb pointer is a result of commit 3645eb7e3915 ("x86/fred:
+Fix early boot failures on SEV-ES/SNP guests"): that change makes
+__sev_get_ghcb() return the now-NULL boot_ghcb in this window, turning
+the previously-benign teardown-window #VC (a bogus VMGEXIT the host
+rejected but survived) into a NULL dereference.
+
+Skip the DR7 write in this case. Its value is not needed across kexec
+because the new kernel re-initializes DR7. Guests with DebugSwap enabled
+context-switch DR7 in hardware and do not intercept the write, and
+non-encrypted guests are unaffected, so both continue to call
+hw_breakpoint_disable() as before.
+
+Add a CC_ATTR_GUEST_DEBUG_VIRT confidential-computing attribute, so the
+debug-register-virtualization state (AMD DebugSwap) is queried through
+cc_platform_has().
+
+Reported-by: Srikanth Aithal <Srikanth.Aithal@amd.com>
+Suggested-by: Tom Lendacky <thomas.lendacky@amd.com>
+Fixes: 3074152e56c9 ("x86/sev: Convert shared memory back to private on kexec")
+Cc: stable@vger.kernel.org
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+Reviewed-by: Nikunj A Dadhania <nikunj@amd.com>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Tested-by: Srikanth Aithal <Srikanth.Aithal@amd.com>
+---
+ arch/x86/coco/core.c               |  3 +++
+ arch/x86/kernel/machine_kexec_64.c | 11 ++++++++++-
+ include/linux/cc_platform.h        |  8 ++++++++
+ 3 files changed, 21 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: circular locking dependency in pci_dev_reset_iommu_prepare()
+[RFC PATCH 0/1] vfio: circular locking dependency in pci_dev_reset_iommu_prepare()
+Author: Vipin Sharma <vipinsh@google.com>
+
+Hello,
+
+I have encountered a reproducible circular locking dependency (lockdep)
+warning when performing a device reset via VFIO (e.g. VFIO_DEVICE_RESET ioctl
+or kexec live update) on a device whose BARs have been mmapped and faulted.
+
+This issue was introduced in commit f5b16b802174 ("PCI: Suspend iommu function
+prior to resetting a device"), which added calls to
+pci_dev_reset_iommu_prepare() / pci_dev_reset_iommu_done() inside core PCI
+reset routines (pcie_flr(), pci_pm_reset(), etc.).
+
+Patch 1 adds a new selftest in tools/testing/selftests/vfio/ that triggers
+this warning reliably on systems with ATS and reset support.
+
+I used Intel DSA device 8086:0b25 with the test in Patch 1.
+
+This issue was identified in the VFIO Live Update series
+  https://lore.kernel.org/kvm/20260723181436.GB260824.vipinsh@google.com/
+
+Since issue is independent of Live Update, I am sending this out
+separately to not mix two things.
+
+I have uploaded the patch to github also:
+  https://github.com/shvipin/linux vfio/lockdep-mmap-fault-device-reset
+
+================================================================================
+Lock Hierarchy Analysis (Helped by AI)
+================================================================================
+
+1. In VFIO, handling VFIO_DEVICE_RESET (vfio_pci_ioctl_reset()) or bus/hot reset
+   acquires down_write(&vdev->memory_lock) to zap active MMIO BAR mappings
+   and prevent concurrent MMIO faults during reset.
+   Inside memory_lock, it calls pci_try_reset_function() / pcie_flr().
+
+2. Commit f5b16b802174 added pci_dev_reset_iommu_prepare() into pcie_flr().
+   pci_dev_reset_iommu_prepare() acquires guard(mutex)(&group->mutex).
+   This establishes:
+       &vdev->memory_lock --> &group->mutex
+
+3. Meanwhile, during kernel boot or device discovery (iommu_probe_device() /
+   bus_iommu_probe()), iommu.c holds &group->mutex while calling
+   iommu_setup_dma_ops(), which calls iova_domain_init_rcaches().
+   iova_domain_init_rcaches() registers a multi-instance cpuhp handler via
+   cpuhp_state_add_instance_nocalls(), acquiring cpus_read_lock().
+   This establishes:
+       &group->mutex --> cpu_hotplug_lock
+
+4. cpu_hotplug_lock is an outer lock for various kernel subsystems that
+   execute callbacks or sysfs/firmware/perf interactions, which eventually
+   perform copy_to_user(), copy_from_user(), or filldir() (which can trigger
+   a page fault in user memory under mmap_lock).
+   This establishes:
+       cpu_hotplug_lock --> (kernfs_rwsem / inode->i_rwsem / cpuctx_mutex)
+                        --> &mm->mmap_lock
+
+5. When userspace touches an mmapped VFIO BAR, the page fault handler
+   (vfio_pci_mmap_huge_fault() / vfio_pci_mmap_page_fault()) executes under
+   &mm->mmap_lock and acquires down_read(&vdev->memory_lock).
+   This establishes:
+       &mm->mmap_lock --> &vdev->memory_lock
+
+Combining (1) through (5) yields the circular dependency cycle:
+
+    &group->mutex
+      --> cpu_hotplug_lock
+        --> [kernfs_rwsem | i_mutex_dir_key | cpuctx_mutex]
+          --> &mm->mmap_lock
+            --> &vdev->memory_lock
+              --> &group->mutex  <== DEADLOCK DETECTED
+
+
+================================================================================
+Reproductions / Lockdep Traces
+================================================================================
+
+I observed this lockdep warning closing via multiple distinct paths:
+
+--- Trace 1: via sysfs / kernfs readdir ---
+
+[  438.457974] WARNING: possible circular locking dependency detected
+[  438.477952] vfio_cdev_lockd/17678 is trying to acquire lock:
+[  438.484320] (&group->mutex){+.+.}-{4:4}, at: pci_dev_reset_iommu_prepare+0x6e/0x200
+[  438.494169] but task is already holding lock:
+[  438.501401] (&vdev->memory_lock){++++}-{4:4}, at: vfio_pci_core_ioctl+0x460/0xb20
+[  438.511064] which lock already depends on the new lock.
+...
+[  438.919866] Chain exists of:
+[  438.919866]   &group->mutex --> &mm->mmap_lock --> &vdev->memory_lock
+...
+[  438.999115]  __mutex_lock+0x8c/0xd80
+[  438.999122]  pci_dev_reset_iommu_prepare+0x6e/0x200
+[  438.999123]  pcie_flr+0x32/0xc0
+[  438.999125]  __pci_reset_function_locked+0x84/0x120
+[  438.999126]  pci_try_reset_function+0x51/0xe0
+[  438.999128]  vfio_pci_core_ioctl+0x72b/0xb20
+
+--- Trace 2: via VFS lookup / microcode loading during kexec ---
+
+[  584.552264] WARNING: possible circular locking dependency detected
+[  584.572247] kexec/14239 is trying to acquire lock:
+[  584.577754] (&group->mutex){+.+.}-{4:4}, at: pci_dev_reset_iommu_prepare+0x6e/0x1a0
+[  584.587602] but task is already holding lock:
+[  584.594838] (&vdev->memory_lock){++++}-{4:4}, at: vfio_pci_liveupdate_freeze+0x51/0x100
+...
+[  584.751130] -> #2 (&type->i_mutex_dir_key#4):
+[  584.760319]        lookup_slow+0x26/0x50
+[  584.786970]        _request_firmware+0x4ab/0x8c0
+[  584.797979]        request_microcode_fw+0xf2/0x510
+[  584.834601] -> #1 (cpu_hotplug_lock):
+[  584.842183]        cpus_read_lock+0x3b/0xd0
+[  584.858957]        iommu_setup_dma_ops+0x175/0x540
+
+--- Trace 3: via perf read / watchdog cpuhp callback ---
+
+[  233.859740] WARNING: possible circular locking dependency detected
+[  233.879725] vfio_cdev_lockd/14999 is trying to acquire lock:
+[  233.886094] (&group->mutex){+.+.}-{4:4}, at: pci_dev_reset_iommu_prepare+0x6e/0x200
+[  233.895948] but task is already holding lock:
+[  233.903183] (&vdev->memory_lock){++++}-{4:4}, at: vfio_pci_core_ioctl+0x460/0xb20
+...
+[  234.030037] -> #3 (&cpuctx_mutex):
+[  234.040960]        perf_event_enable+0x18/0xa0
+[  234.046126]        lockup_detector_online_cpu+0x22/0x30
+[  234.057658]        cpuhp_thread_fun+0x164/0x1e0
+[  234.115402] -> #1 (cpu_hotplug_lock):
+[  234.122985]        cpus_read_lock+0x3b/0xd0
+[  234.139757]        iommu_setup_dma_ops+0x18a/0x560
+
+
+================================================================================
+Potential Solutions Suggested by AI
+================================================================================
+
+1. Decouple iommu_setup_dma_ops() from group->mutex in drivers/iommu/iommu.c:
+   iommu_setup_dma_ops() only requires struct device * and the domain pointer
+   (group->default_domain); it does not mutate any fields in struct iommu_group.
+   Moving the iommu_setup_dma_ops() calls after mutex_unlock(&group->mutex) in
+   iommu_probe_device(), bus_iommu_probe(), and iommu_group_store_type() breaks
+   the initial &group->mutex -> cpu_hotplug_lock dependency.
+
+2. Avoid holding down_write(&vdev->memory_lock) across pci_try_reset_function()
+   in VFIO:
+   vfio-pci could zap active BAR mappings under memory_lock and set a state
+   flag / disable memory decoding, drop memory_lock before calling
+   pci_try_reset_function(), and then re-acquire memory_lock to re-enable
+   memory. While resetting, any concurrent user fault will see the memory
+   disabled condition and return VM_FAULT_SIGBUS safely.
+
+3. Refine synchronization in pci_dev_reset_iommu_prepare():
+   Evaluate if attaching to the blocking domain and pausing ATS during device
+   reset can be protected using more fine-grained locking or atomic state
+   flags without holding the coarse &group->mutex.
+
+Feedback and suggestions on the preferred direction to resolve this would be
+greatly appreciated.
+
+Thanks,
+Vipin Sharma
+
+Vipin Sharma (1):
+  selftests: vfio: Add mmap fault and device reset test
+
+ tools/testing/selftests/vfio/Makefile         |  1 +
+ .../selftests/vfio/vfio_pci_mmap_reset_test.c | 60 +++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  selftests: vfio: Add mmap fault and device reset test
+[RFC PATCH 1/1] selftests: vfio: Add mmap fault and device reset test
+Author: Vipin Sharma <vipinsh@google.com>
+
+Add a selftest to verify VFIO PCI device reset on an mmapped and faulted
+device. The test maps all available BARs on the device, faults them,
+and triggers a device reset via the VFIO_DEVICE_RESET ioctl.
+
+This exercise uncovers a circular locking dependency introduced in
+commit f5b16b802174 ("PCI: Suspend iommu function prior to resetting a
+device"), where pci_dev_reset_iommu_prepare() acquires group->mutex
+under vfio's vdev->memory_lock.
+
+Assisted-by: Jetski:gemini-3.1-pro
+Signed-off-by: Vipin Sharma <vipinsh@google.com>
+---
+ tools/testing/selftests/vfio/Makefile         |  1 +
+ .../selftests/vfio/vfio_pci_mmap_reset_test.c | 60 +++++++++++++++++++
+ 2 files changed, 61 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  linux-headers: Update to Linux v7.3-rc1
+[PATCH] linux-headers: Update to Linux v7.3-rc1
+Author: Albert Esteve <aesteve@redhat.com>
+
+Update headers with update-linux-headers.sh against Linux v7.3-rc1,
+mainly for VIRTIO_ID_MEDIA.
+
+Signed-off-by: Albert Esteve <aesteve@redhat.com>
+---
+ include/standard-headers/linux/const.h      |  4 +-
+ include/standard-headers/linux/ethtool.h    |  6 +++
+ include/standard-headers/linux/virtio_ids.h |  1 +
+ linux-headers/asm-arm64/unistd_64.h         |  1 +
+ linux-headers/asm-generic/unistd.h          |  6 ++-
+ linux-headers/asm-loongarch/unistd_64.h     |  1 +
+ linux-headers/asm-mips/unistd_n32.h         |  1 +
+ linux-headers/asm-mips/unistd_n64.h         |  1 +
+ linux-headers/asm-mips/unistd_o32.h         |  1 +
+ linux-headers/asm-powerpc/kvm.h             | 18 +++++++
+ linux-headers/asm-powerpc/unistd_32.h       |  1 +
+ linux-headers/asm-powerpc/unistd_64.h       |  1 +
+ linux-headers/asm-riscv/unistd_32.h         |  1 +
+ linux-headers/asm-riscv/unistd_64.h         |  1 +
+ linux-headers/asm-s390/unistd_64.h          |  1 +
+ linux-headers/asm-x86/unistd_32.h           |  1 +
+ linux-headers/asm-x86/unistd_64.h           |  1 +
+ linux-headers/asm-x86/unistd_x32.h          |  1 +
+ linux-headers/linux/const.h                 |  4 +-
+ linux-headers/linux/iommufd.h               | 45 +++++++++++++++--
+ linux-headers/linux/kvm.h                   |  3 ++
+ linux-headers/linux/userfaultfd.h           | 54 +++++++++++++++++++--
+ linux-headers/linux/vduse.h                 | 28 +++++++++++
+ linux-headers/linux/vfio.h                  | 21 ++++++++
+ linux-headers/linux/vfio_zdev.h             |  2 +
+ 25 files changed, 193 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  selftests/vfio: Include <libgen.h> for basename() on non-glibc builds
+[PATCH] selftests/vfio: Include <libgen.h> for basename() on non-glibc builds
+Author: Hisam Mehboob <hisamshar@gmail.com>
+
+sysfs.c calls basename() but does not include its declaration.
+Glibc exposes basename() through <string.h> with _GNU_SOURCE, while
+musl declares it in <libgen.h>.
+
+With musl, this results in an implicit-function-declaration error and
+subsequent type-mismatch errors at the callers.
+
+Include <libgen.h> so the declaration is available on both glibc and
+musl. This is safe at both call sites: the arguments are local writable
+char[PATH_MAX] buffers filled by readlink_safe().
+
+Link: https://lore.kernel.org/kvm/CALzav=fs4bqMM7BXNPXqhtbqGzA+LW5fgx2-1Q5=sTN5+krYhw@mail.gmail.com/
+Fixes: a262fc49e0aa ("KVM: selftests: Build and link selftests/vfio/lib into KVM selftests")
+Signed-off-by: Hisam Mehboob <hisamshar@gmail.com>
+---
+ tools/testing/selftests/vfio/lib/sysfs.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Charge misc cgroup before allocating HKID
+[PATCH] KVM: TDX: Charge misc cgroup before allocating HKID
+Author: Binbin Wu <binbin.wu@linux.intel.com>
+
+Add a tdx_hkid_alloc() helper that charges the misc cgroup before
+allocating an HKID, and unwind the charge if HKID allocation fails.
+
+__tdx_td_init() currently allocates an HKID before charging the misc
+cgroup. If the charge fails, the error path calls tdx_hkid_free(), which
+uncharges a resource that was never successfully charged. This can make
+the misc-cgroup usage negative.
+
+Charge the cgroup before allocating the HKID.  Wrapping both steps in
+tdx_hkid_alloc() makes it the exact counterpart of tdx_hkid_free(), i.e.
+keeps resource allocation and release symmetric, and lets __tdx_td_init()
+simply bail on failure instead of open coding the unwind.
+
+Reported-by: sashiko-bot@kernel.org
+Closes: https://lore.kernel.org/all/20260710040153.D8EA71F000E9@smtp.kernel.org
+Closes: https://lore.kernel.org/all/20260718020348.3B4221F000E9@smtp.kernel.org
+Fixes: 7c035bea9407 ("KVM: TDX: Register TDX host key IDs to cgroup misc controller")
+Signed-off-by: Binbin Wu <binbin.wu@linux.intel.com>
+---
+ arch/x86/kvm/vmx/tdx.c | 34 +++++++++++++++++++++++++++-------
+ 1 file changed, 27 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  iommu/amd: KVM: SVM: Rename cpu to apicid in IOMMU interface
+[PATCH v4 1/7] iommu/amd: KVM: SVM: Rename cpu to apicid in IOMMU interface
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+The cpu field passed from SVM to the AMD IOMMU driver does not hold a
+linux CPU number. It carries the host physical APIC ID used to program
+the IRTE Destination field when the target vCPU is running
+(IRTE[IsRun] = 1).
+
+Rename the field to apicid everywhere in the IOMMU interface so the
+name matches the hardware semantics.
+
+No functional change is intended.
+
+Signed-off-by: Sairaj Kodilkar <sarunkod@amd.com>
+---
+ arch/x86/include/asm/irq_remapping.h |  2 +-
+ arch/x86/kvm/svm/avic.c              | 12 +++++-----
+ drivers/iommu/amd/iommu.c            | 35 ++++++++++++++--------------
+ include/linux/amd-iommu.h            |  8 +++----
+ 4 files changed, 29 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Add support for AMD IOMMU GAPPI
+[PATCH v4 0/7] Add support for AMD IOMMU GAPPI
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+Introduction
+============
+On newer generations of AMD processors, IOMMU AVIC/x2AVIC guest-mode interrupt
+remapping can use Guest APIC Physical Processor Interrupt (GAPPI) as an
+alternative host-notification path when device interrupts target a vCPU that
+is not running (IRTE[IsRun] = 0).
+
+With AVIC enabled, the IOMMU posts device interrupts into the guest virtual
+APIC backing page. When the vCPU is not running, KVM must additionally be
+notified so it can schedule the vCPU.
+
+The legacy notification path is the GA log (GALOG): the IOMMU appends vCPU
+tags to a shared GA log buffer and raises a single GA log interrupt.  KVM
+registers a notifier and scans the buffer to decide which vCPUs to wake.
+Under heavy interrupt load this adds latency and can overflow the buffer
+because all wakeups funnel through one interrupt and one shared log.
+
+Guest APIC Physical Processor Interrupt (GAPPI), defined in section 2.2.5.4
+of the AMD I/O Virtualization Technology (IOMMU) Specification [1], is an
+alternative.  With GAPPI enabled, the IOMMU still updates the guest vAPIC
+backing page IRR, but may deliver a physical APIC interrupt directly to
+IRTE[Destination], using IRTE[GATag][7:0] as the vector.  This distributes
+host wakeup notifications across CPUs instead of centralizing them in a
+log buffer.
+
+This series programs guest-mode IRTEs accordingly: IRTE[Destination] carries
+the target host physical APIC ID, IRTE[GATag] is set to
+POSTED_INTR_WAKEUP_VECTOR, and IRTE[GAPPIDis] / IRTE[GALogIntr] are set
+based on whether KVM requests host wakeup.  GAPPI is selected at boot via
+the amd_iommu=gappi kernel parameter on capable hardware, otherwise the
+existing GA log path is unchanged.
+
+
+SVM/AMD IOMMU interface changes
+===============================
+The first four patches refactor the SVM/AMD IOMMU interface ahead of GAPPI.
+
+The cpu field is renamed to apicid because it carries the host physical
+APIC ID for IRTE[Destination], not a Linux CPU number.
+
+The ga_log_intr boolean is renamed to wakeup_intr (and the synthetic
+AVIC_PHYSICAL_ID_ENTRY_GA_LOG_INTR shadow bit to
+AVIC_PHYSICAL_ID_ENTRY_WAKEUP_INTR). wakeup_intr describes KVM's intent
+(request host wakeup while the vCPU is not running), not a specific hardware
+mechanism.
+
+A separate is_running boolean is added to IOMMU interface because GAPPI
+requires a valid apicid in IRTE[Destination] even when the vCPU is not running. 
+The prior encoding (apicid >= 0 means running, apicid == -1 means not running)
+no longer works once apicid carries the GAPPI destination while IRTE[IsRun] is
+clear.  The IOMMU driver keys IRTE[IsRun] and destination programming off this
+explicit boolean instead of inferring running state from apicid.
+
+
+KVM GAPPI wakeup scheme
+=======================
+SVM follows the Intel posted-interrupt wakeup model already used by VMX.
+Each pCPU maintains a list of blocked vCPUs that may be woken by a GAPPI
+delivery to that CPU.  When a vCPU blocks while waiting for a device
+interrupt, SVM enqueues it on the wakeup list of the pCPU on which it was
+previously running (gappi_cpu) and passes that pCPU's physical APIC ID to
+the IOMMU to program IRTE[Destination].  The rationale is that the vCPU is
+likely to run again on the same pCPU, which is common when vCPUs are pinned;
+targeting GAPPI notifications there reduces unnecessary VMEXITs from GAPPI
+deliveries on other CPUs.  When the vCPU is scheduled in again, it is
+removed from the list and IRTE[Destination] is updated to the current pCPU.
+
+List maintenance is moved from VMX layer to common KVM layer so that both VMX
+and SVM layer can share the same list handling code. 
+
+Note
+====
+kvm_pi_enable_wakeup_handler() and kvm_pi_disable_wakeup_handler() take the
+target pCPU explicitly instead of using vcpu->cpu, because on SVM the two can
+differ. avic_vcpu_load() returns early while the vCPU is blocking and leaves
+the target wakeup CPU untouched, but the generic layer still refreshes
+vcpu->cpu on every load. Using vcpu->cpu would then unlink the vCPU under the
+wrong per-pCPU lock, so SVM tracks the pCPU it last programmed in
+svm->gappi_cpu and passes that instead.
+
+
+Changes since v3
+================
+https://lore.kernel.org/all/20260713105033.15405-1-sarunkod@amd.com/
+
+Patch 3:
+  - Make amd_iommu_activate_guest_mode() as wrapper around
+    __amd_iommu_activate_guest_mode() to in order to hardcode is_running
+    flag to "true" for external calls
+
+Patch 5:
+  - Newly introduced, moves wakeup list handling from VMX to the KVM layer
+
+Patch 6:
+  - Use common list handling functions introduced in patch 5.
+  - Remove list addition during pi_update_irte by moving list handling
+    functions before list_empty(&svm->ir_list) check.
+
+
+Changes since v2
+================
+https://lore.kernel.org/linux-iommu/20260708091408.12106-1-sarunkod@amd.com/
+
+Patch[1-6]
+  - Expand commit messages to explain GAPPI, the interface changes, and the
+    per-CPU wakeup list scheme [Sean].
+
+Patch[1-3]
+  - Split the monolithic SVM/IOMMU API refactor into four preparatory
+    patches [Sean]
+  - Rename posted_intr to wakeup_intr to reflect host wakeup intent, not
+    guest interrupt posting [Sean]
+  - Pass vCPU running status with a extra parameter (is_running) instead of
+    flags.
+
+Patch[4,5]
+  - Move ga_tag=POSTED_INTR_WAKEUP_VECTOR setting from IOMMU to SVM layer.
+
+
+Changes since V1:
+================
+https://lore.kernel.org/all/20260626105906.14577-1-sarunkod@amd.com/
+
+Patch4
+    - Disable interrupts while holding wakeup list lock inside [sashiko]
+      avic_add_vcpu_to_gappi_wakeup_list and avic_remove_vcpu_from_gappi_wakeup_list
+    - Unregister posted_intr_wakeup_handler during module unload [sashiko]
+
+Patch5
+    - Disable GAPPI feature during kexec and suspend path [sashiko]
+
+
+------
+[1] https://docs.amd.com/v/u/en-US/48882_3.11_IOMMU_PUB
+
+------
+Base: 89516a1c6837156f43525ef49fdbd781145942f5
+
+Sairaj Kodilkar (7):
+  iommu/amd: KVM: SVM: Rename cpu to apicid in IOMMU interface
+  iommu/amd: KVM: SVM: Rename ga_log_intr to wakeup_intr in IOMMU
+    interface
+  iommu/amd: KVM: SVM: Add explicit vCPU running state to IOMMU
+    interface
+  iommu/amd: Program guest-mode IRTEs for GAPPI wakeup when IRTE[IsRun]
+    = 0
+  KVM: VMX: Factor out wakeup list handling code to KVM
+  KVM: SVM: Add support for AMD IOMMU Guest APIC Physical Processor
+    Interrupt (GAPPI)
+  iommu/amd: Provide kernel command line option to enable GAPPI
+
+ .../admin-guide/kernel-parameters.txt         |   3 +-
+ arch/x86/include/asm/irq_remapping.h          |   5 +-
+ arch/x86/include/asm/kvm-x86-ops.h            |   1 +
+ arch/x86/include/asm/kvm_host.h               |   1 +
+ arch/x86/include/asm/svm.h                    |   9 +-
+ arch/x86/kvm/svm/avic.c                       | 109 +++++++++++++----
+ arch/x86/kvm/svm/svm.c                        |   3 +
+ arch/x86/kvm/svm/svm.h                        |   5 +
+ arch/x86/kvm/vmx/common.h                     |   3 -
+ arch/x86/kvm/vmx/main.c                       |   6 +
+ arch/x86/kvm/vmx/posted_intr.c                |  82 +------------
+ arch/x86/kvm/vmx/tdx.c                        |   1 -
+ arch/x86/kvm/vmx/vmx.c                        |  14 +--
+ arch/x86/kvm/vmx/x86_ops.h                    |   1 +
+ arch/x86/kvm/x86.c                            | 111 ++++++++++++++++++
+ drivers/iommu/amd/amd_iommu_types.h           |   6 +-
+ drivers/iommu/amd/init.c                      |  31 ++++-
+ drivers/iommu/amd/iommu.c                     |  65 ++++++----
+ include/linux/amd-iommu.h                     |  16 ++-
+ include/linux/kvm_host.h                      |   6 +
+ 20 files changed, 323 insertions(+), 155 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 5cf1540fa to 41dc8346b
+KVM mailing list update from 5cf1540fa to 41dc8346b
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      5 linux.dev
+      3 kernel.org
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+      5  Fuad Tabba <fuad.tabba@linux.dev>
+      3  Marc Zyngier <maz@kernel.org>
+      1  David Matlack <dmatlack@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: nv: Fix life cycle of the nested_mmus array
+[PATCH v3 1/2] KVM: arm64: nv: Fix life cycle of the nested_mmus array
+Author: Marc Zyngier <maz@kernel.org>
+
+The nested_mmus array holds the shadow page tables that are used when
+a guest is running a nested context. These structures are allocated on
+VCPU_INIT for whole guest, which implies that they may have to be
+relocated as the array grows.
+
+Should a VCPU_INIT occur whilst a vcpu is actively running an L2 and
+that the allocation requires relocation, that vcpu will still be
+running with a pointer to the previous structure, which will have been
+freed.
+
+Fix this by turning the array of structures to an array of pointers,
+which is now allocated at VM creation, sized to the absolute maximum
+that KVM can handle.
+
+In turn, each VCPU_INIT contributes S2_MMU_PER_VCPU to the pool. No
+reallocation is ever performed, and the life cycle of each object is
+much clearer:
+
+- the nested_mmus array is allocated in kvm_init_nested(), and freed
+  in kvm_arch_destroy_vm()
+
+- s2_mmu structures are allocated in kvm_vcpu_init_nested(), and freed
+  on kvm_arch_flush_shadow_all()
+
+Finally, the freeing of vcpu->arch.vncr_array is made consistent
+rather than being done on some failure paths, but not others.
+
+Fixes: 4f128f8e1aaa ("KVM: arm64: nv: Support multiple nested Stage-2 mmu structures")
+Reported-by: Shen Yongchao <grayhat@foxmail.com>
+Reported-by: Karl Mehltretter <kmehltretter@gmail.com>
+Suggested-by: Karl Mehltretter <kmehltretter@gmail.com>
+Acked-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+Link: https://lore.kernel.org/r/20260803224405.41468-1-kmehltretter@gmail.com
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_host.h   |  2 +-
+ arch/arm64/include/asm/kvm_nested.h |  2 +-
+ arch/arm64/kvm/arm.c                |  8 ++-
+ arch/arm64/kvm/nested.c             | 93 +++++++++++++----------------
+ 4 files changed, 51 insertions(+), 54 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Shadow S2 life-cycle fixes
+[PATCH v3 0/2] KVM: arm64: nv: Shadow S2 life-cycle fixes
+Author: Marc Zyngier <maz@kernel.org>
+
+This is the (hopefully) last revision for this set of fixes for the
+shadow S2 life cycle.
+
+* From v2 [1]
+
+  - Fixed the nonsensical type used for allocating the nested S2
+    array, switching to kvmalloc_objs() in the process, guaranteeing
+    some level of type checking
+
+  - Dropped the extra S2 freeing after Wei-Lin pointed out that we are
+    guaranteed to run the MMU notifier release callback, ensuring that
+    nothing is left behind
+
+  - Collected AB from Lorenzo, with thanks.
+
+[1] https://lore.kernel.org/all/20260814103230.858578-1-maz@kernel.org/
+
+Marc Zyngier (2):
+  KVM: arm64: nv: Fix life cycle of the nested_mmus array
+  KVM: arm64: nv: Delay freeing of shadow S2 structures until VM
+    destruction
+
+ arch/arm64/include/asm/kvm_host.h   |   2 +-
+ arch/arm64/include/asm/kvm_nested.h |   3 +-
+ arch/arm64/kvm/arm.c                |   8 ++-
+ arch/arm64/kvm/nested.c             | 100 ++++++++++++++--------------
+ 4 files changed, 58 insertions(+), 55 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-its: Free the caches when GITS_BASER changes
+[PATCH v2 1/4] KVM: arm64: vgic-its: Free the caches when GITS_BASER changes
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+A guest that disables the ITS and re-points or shrinks GITS_BASER<n>
+with VALID still set keeps the devices and collections it mapped
+against the old table, as KVM frees them only when VALID is cleared.
+The contents of the table are IMPLEMENTATION DEFINED, so a write that
+gives GITS_BASER<n> a different address or size may lose whatever the
+old value described. Free the list whenever the stored value changes,
+and drop the translation cache with it.
+
+The cache is not empty just because the ITS is disabled: its->enabled
+is written under the cmd_lock, while vgic_its_resolve_lpi() tests it
+under the its_lock, so an injection can still cache an entry after the
+ITS was disabled. Hence the invalidation inside the its_lock section.
+
+Test for a change rather than a write: its_restore_enable() rewrites
+GITS_BASER<n> from its probe-time cache on resume, and KVM reports
+GITS_TYPER.HCC as 0, so nothing re-maps the boot CPU's collection
+afterwards.
+
+Fixes: 36d6961c2b481 ("KVM: arm/arm64: vgic-its: Free caches when GITS_BASER Valid bit is cleared")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Link: https://lore.kernel.org/all/87ecg9owwa.wl-maz@kernel.org/
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/vgic/vgic-its.c | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-its: Make the ITS table save reliable
+[PATCH v2 0/4] KVM: arm64: vgic-its: Make the ITS table save reliable
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - Free the LPI translation cache in vgic_mmio_write_its_baser() too,
+    inside the its_lock section. (Eric)
+  - Reworded patch 1 to name the register the write is to. (Eric)
+  - Rebased onto kvmarm/next.
+
+Marc pointed out on the v2 ITS series [2] that patch 3 fixed the wrong
+end of the problem: KVM should drop the collections when the guest
+changes the table that described them, rather than validating them at
+save time. He also called that patch's -EINVAL a mistake, since it
+aborts a save userspace has to be able to issue. This series does both,
+following his answers [3] to the two open questions: purge the whole
+list, and skip the offending device rather than fail.
+
+vgic_mmio_write_its_baser() now frees the cached devices or collections
+whenever the stored register value changes, not only when VALID is
+cleared, and drops the translation cache with them. It tests for a
+change rather than a write because the ITS driver rewrites an unchanged
+GITS_BASER<n> on resume. With that in place the check patch 3 added is
+unreachable, so it is reverted, and vgic_its_save_device_tables() skips
+a device the table can no longer address instead of failing the save.
+
+compute_next_devid_offset() now calls vgic_its_check_id(), which reads
+guest memory for an indirect table, so the save does 2n reads rather
+than n. It stays linear, as the scan stops at the first
+reachable successor. Patch 1's Fixes: tag names a v4.15 commit, so it
+will be picked up for stable. Drop the tag if that is not wanted.
+
+Patches 1 and 3 apply to v7.2 unchanged, but patch 2 reverts a commit
+only in kvmarm/next, so the series is based there.
+
+Tested on QEMU: the new selftest, vgic_irq, vgic_lpi_stress and boots.
+Both cases of the new selftest reset and restore the tables they saved,
+and both fail without the series.
+
+Based on kvmarm/next (aa8e5dc6a7a2a).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260819102809.310708-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/87ecg9owwa.wl-maz@kernel.org/
+[3] https://lore.kernel.org/all/86bjaz5s6v.wl-maz@kernel.org/
+
+Fuad Tabba (4):
+  KVM: arm64: vgic-its: Free the caches when GITS_BASER changes
+  Revert "KVM: arm64: vgic-its: Don't save collections the table cannot
+    hold"
+  KVM: arm64: vgic-its: Skip unreachable devices instead of failing the
+    save
+  KVM: arm64: selftests: Add ITS table save tests
+
+ arch/arm64/kvm/vgic/vgic-its.c                |  46 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/arm64/vgic_its_save.c       | 441 ++++++++++++++++++
+ 3 files changed, 469 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
