@@ -1,0 +1,568 @@
+
+On /root/mail/repo:
+From 142d26e47 to 8a945df6a
+KVM mailing list update from 142d26e47 to 8a945df6a
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 amd.com
+      3 google.com
+      3 gmail.com
+      2 oracle.com
+
+Top 15 contributors (Based on Email Body)
+
+      6  Shivank Garg <shivankg@amd.com>
+      3  Lisa Wang <wyihan@google.com>
+      3  Daehyeon Ko <4ncienth@gmail.com>
+      2  Dongli Zhang <dongli.zhang@oracle.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH RFC 0/2] Fix KVM guest scheduling accounting issue related to stealtime
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+This RFC fixes a KVM guest scheduling accounting issue.
+
+The Linux scheduler may allow one CPU to perform accounting for another CPU
+through update_rq_clock_task(). This works well on baremetal.
+
+However, in a KVM guest, stealtime may not be accounted for and deducted
+from runtime correctly.
+
+Suppose vCPU A performs accounting for vCPU B, while vCPU B is preempted
+and stalled by the KVM host for 10 seconds. Unfortunately, the KVM host
+does not update stealtime until vCPU B is about to re-enter the guest. As a
+result, vCPU A cannot observe the increase in vCPU B's stealtime.
+
+Consequently, the guest kernel incorrectly considers a task running on
+vCPU B during the stall to have exclusively used the vCPU for an extended
+period. The task may therefore incur an additional scheduling penalty.
+
+Later, when stealtime is updated, it may exceed the elapsed runtime delta,
+preventing all of the stealtime from being deducted.
+
+To fix this issue, update KVM stealtime before clearing the vCPU's
+preempted state. In the guest scheduler, use vcpu_is_preempted() to help
+defer clock_task updates performed by a remote CPU while the owning vCPU is
+reported as preempted.
+
+
+To reproduce, first configure KVM host pCPU 10 so that a vCPU thread pinned to
+it can be stalled.
+
+hv# echo -1 | sudo tee /proc/sys/kernel/sched_rt_runtime_us
+
+hv# echo 0 | sudo tee /sys/kernel/debug/sched/fair_server/cpu10/runtime
+
+hv# cat /sys/kernel/debug/sched/fair_server/cpu10/runtime
+0
+
+hv# cat /sys/kernel/debug/sched/fair_server/cpu10/period
+1000000000
+
+
+Here is the QEMU command line. The guest kernel has below configs.
+
+CONFIG_PARAVIRT=y
+CONFIG_PARAVIRT_SPINLOCKS=y
+CONFIG_PARAVIRT_TIME_ACCOUNTING=y
+CONFIG_PARAVIRT_CLOCK=y
+
+qemu-system-x86_64 \
+-machine q35,kernel_irqchip=split \
+-accel kvm -cpu host \
+-smp 4 -m 8G \
+-hda boot.qcow2 \
+-monitor stdio -vnc :8 \
+-net nic -net user,hostfwd=tcp::5028-:22 \
+-kernel mainline-linux/arch/x86_64/boot/bzImage \
+-append "root=/dev/sda1 init=/sbin/init text loglevel=7 console=ttyS0"
+
+
+Pin vCPU 2 to pCPU 10.
+
+(qemu) info cpus
+* CPU #0: thread_id=12525 model=host
+  CPU #1: thread_id=12526 model=host
+  CPU #2: thread_id=12528 model=host
+  CPU #3: thread_id=12529 model=host
+
+hv$ sudo taskset -pc 10 12528
+
+
+Run runtime_stall_detector_v2.py in the guest VM. It creates five threads
+pinned to vCPU 2. Each thread periodically reads the clocksource and
+detects sudden forward jumps in time, indicating that the thread was
+previously stalled. The source code is appended to the end of this cover
+letter email.
+
+[root@vm ~]# ./runtime_stall_detector_v2.py 2 5
+started 5 tasks on guest cpu 2
+worker pids: 441 442 443 444 445
+trigger host-side vCPU starvation now
+worker=3 pid=443 pinned_cpu=2
+worker=1 pid=441 pinned_cpu=2
+worker=2 pid=442 pinned_cpu=2
+worker=4 pid=444 pinned_cpu=2
+worker=5 pid=445 pinned_cpu=2
+
+Now run the following command on the KVM host to preempt and stall threads
+on pCPU 10. As a result, vCPU 2 and the five threads pinned to it will also
+be stalled for 10 seconds.
+
+hv$ sudo timeout 10s taskset -c 10 chrt -f 90 bash -c 'while :; do :; done'
+
+
+Ideally, we expect each of the five threads to observe a 10-second forward
+jump. However, one thread running on vCPU 2 during the stall will incur an
+additional penalty.
+
+[root@vm ~]# ./runtime_stall_detector_v2.py 2 5
+... ...
+1787476745.895051479: worker=5 pid=445 gap=9.997750 sec
+1787476745.895614147: worker=1 pid=441 gap=10.004634 sec
+1787476745.898544550: worker=2 pid=442 gap=10.005462 sec
+1787476745.901545286: worker=4 pid=444 gap=10.006361 sec
+1787476785.617044926: worker=3 pid=443 gap=49.718478 sec --> additional penalty!
+
+
+The issue is no longer reproducible when the patchset is applied to both
+the KVM guest and host.
+
+1787507053.410693884: worker=4 pid=436 gap=9.995703 sec
+1787507053.411839247: worker=5 pid=437 gap=10.004244 sec
+1787507053.413943768: worker=2 pid=434 gap=10.002146 sec
+1787507053.414848804: worker=1 pid=433 gap=10.005150 sec
+1787507053.419051886: worker=3 pid=435 gap=10.005138 sec
+
+
+Dongli Zhang (2):
+  KVM: x86: Update stealtime before clearing preempted state
+  sched/core: Defer preempted remote vCPU task clock updates
+
+ arch/x86/kvm/x86.c   | 58 ++++++++++++++++++++++++++---------------------
+ kernel/sched/core.c  | 24 ++++++++++++++++++++
+ kernel/sched/sched.h |  1 +
+ 3 files changed, 57 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH RFC 1/2] KVM: x86: Update stealtime before clearing preempted state
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+The guest Linux scheduler may rely on KVM stealtime to determine whether
+elapsed time should be deducted from task runtime.
+
+However, when vCPU A reads vCPU B's stealtime for scheduler accounting,
+the value may not be up to date. KVM updates stealtime only when the vCPU
+is about to enter the guest.
+
+Update stealtime before clearing the preempted state, so a remote vCPU that
+observes vcpu_is_preempted() as false also observes the new stealtime.
+
+Otherwise, reading a vCPU's stealtime from another vCPU is not reliable.
+The remote vCPU should wait until vcpu_is_preempted() returns false for the
+target vCPU.
+
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+ arch/x86/kvm/x86.c | 58 +++++++++++++++++++++++++---------------------
+ 1 file changed, 32 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 5/5] mm: selftests: Add shmem into memory failure test
+Author: Lisa Wang <wyihan@google.com>
+
+Add a shmem memory failure selftest to test the shmem memory failure is
+correct after modifying shmem return value.
+
+Specifically, test the expected behavior under various scenarios
+combining page dirtiness (dirty vs clean) and failure types (hard vs
+soft):
++ Dirty + Hard: Trigger a SIGBUS on injection, and trigger another
+  SIGBUS when reading the page again.
++ Dirty + Soft: No SIGBUS is triggered, and the original value can be
+  read successfully.
++ Clean + Hard: No SIGBUS is triggered on injection, but trigger a
+  SIGBUS when trying to read the page again.
++ Clean + Soft: No SIGBUS is triggered, and the page can be read
+  successfully.
+
+Acked-by: Miaohe Lin <linmiaohe@huawei.com>
+Signed-off-by: Lisa Wang <wyihan@google.com>
+---
+ tools/testing/selftests/mm/memory-failure.c | 118 +++++++++++++++++++++++++++-
+ 1 file changed, 115 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 3/5] mm: shmem: Update shmem handler to the MF_DELAYED definition
+Author: Lisa Wang <wyihan@google.com>
+
+To align with the definition of MF_DELAYED, update
+shmem_error_remove_folio() to return MF_DELAYED.
+
+shmem handles memory failures but defers the actual file truncation. The
+function's return value should therefore be MF_DELAYED to accurately
+reflect the state.
+
+Currently, this logical error does not cause a bug, because:
+
+- For shmem folios, folio->private is not set.
+- As a result, filemap_release_folio() is a no-op and returns true.
+- This, in turn, causes truncate_error_folio() to incorrectly return
+  MF_RECOVERED.
+- The caller then treats MF_RECOVERED as a success condition, masking the
+  issue.
+
+The previous patch relays MF_DELAYED to the caller of
+truncate_error_folio() before any logging, so returning MF_DELAYED from
+shmem_error_remove_folio() will retain the original behavior of not
+adding any logs.
+
+The return value of truncate_error_folio() is consumed in action_result(),
+which treats MF_DELAYED the same way as MF_RECOVERED, hence action_result()
+also returns the same thing after this change.
+
+Acked-by: David Hildenbrand (Arm) <david@kernel.org>
+Acked-by: Miaohe Lin <linmiaohe@huawei.com>
+Reviewed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Lisa Wang <wyihan@google.com>
+---
+ mm/shmem.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 0/5] mm: Fix MF_DELAYED handling on memory failure
+Author: Lisa Wang <wyihan@google.com>
+
+Here's a fifth revision to fix MF_DELAYED handling on memory failure.
+
+This patch series addresses an issue in the memory failure handling path
+where MF_DELAYED is incorrectly treated as an error. This issue was
+discovered while testing memory failure handling for guest_memfd.
+
+The proposed solution involves -
+1. Clarifying the definition of MF_DELAYED to mean that memory failure
+   handling is only partially completed, and that the metadata for the
+   memory that failed (as in struct page/folio) is still referenced.
+2. Updating shmem=E2=80=99s handling to align with the clarified definition=
+.
+3. Updating how the result of .error_remove_folio() is interpreted.
+
+Changes from v4:
++ Add "fallthrough;" in the memory-failure test, as suggested by David
++ Add Fixes tags in the commit message, as suggested by Miaohe
++ Rebase to the branch "mm-stable"
++ Split the KVM selftests to the future series
+
+Thanks for review from Ackerley, Andrew, David and Miaohe!
+
++ RFC v4: https://lore.kernel.org/all/20260602-memory-failure-mf-delayed-fi=
+x-v4-0-a5bc7db5a9b2@google.com/
+
+Signed-off-by: Lisa Wang <wyihan@google.com>
+---
+Lisa Wang (5):
+      mm: memory_failure: Clarify the MF_DELAYED definition
+      mm: memory_failure: Allow truncate_error_folio to return MF_DELAYED
+      mm: shmem: Update shmem handler to the MF_DELAYED definition
+      mm: memory_failure: Generalize extra_pins handling to all MF_DELAYED =
+cases
+      mm: selftests: Add shmem into memory failure test
+
+ mm/memory-failure.c                         |  29 ++++---
+ mm/shmem.c                                  |   2 +-
+ tools/testing/selftests/mm/memory-failure.c | 118 ++++++++++++++++++++++++=
++++-
+ 3 files changed, 130 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net v3 2/2] vsock/vmci: validate packet source for connected sockets
+Author: Daehyeon Ko <4ncienth@gmail.com>
+
+vmci_transport_recv_stream_cb() looks up sockets first by the full source
+and destination tuple, then by destination only in the bound table. The
+fallback can select a non-listening socket without checking whether the
+packet came from its stored peer.
+
+This was reproduced with two VMCI contexts. A RST from the context not
+stored in a TCP_SYN_SENT socket reset that socket after it was selected by
+the destination-only lookup.
+
+VMCI can process notification packets in bottom-half context when the
+socket is not owned by user context, or defer packets to a workqueue. Use
+vsock_check_source() after taking the socket lock in the bottom-half path,
+and recheck after lock_sock() in the workqueue path. Listening sockets
+continue to accept packets from any source.
+
+Fixes: d021c344051a ("VSOCK: Introduce VM Sockets")
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/netdev/20260814121255.6B5001F000E9@smtp.kernel.org/
+Cc: stable@vger.kernel.org
+Suggested-by: Stefano Garzarella <sgarzare@redhat.com>
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Daehyeon Ko <4ncienth@gmail.com>
+---
+ net/vmw_vsock/vmci_transport.c | 29 +++++++++++++++++++++++------
+ 1 file changed, 23 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net v3 1/2] vsock/virtio: validate packet source for connected sockets
+Author: Daehyeon Ko <4ncienth@gmail.com>
+
+virtio_transport_recv_pkt() looks up sockets first by the full source and
+destination tuple, then by destination only in the bound table. The
+fallback is needed for listening and connecting sockets, but sockets remain
+in the bound table after connect(), so it can also return a non-listening
+socket.
+
+The fallback does not validate the source address. In TCP_SYN_SENT, a
+RESPONSE from an unrelated source can transition the victim socket to
+TCP_ESTABLISHED while its stored remote address remains unchanged.
+Subsequent RW packets from that source are delivered through the same
+destination-only fallback.
+
+This was reproduced with capability-empty processes under different UIDs.
+The attacker discovered the target tuple through unprivileged AF_VSOCK
+sock_diag and caused the victim socket to read 16 attacker-chosen bytes;
+the intended peer-side socket read 0 of those 16 bytes.
+
+Add vsock_check_source() to validate the transport, source port and source
+CID against the peer stored in a non-listening socket. The local transport
+is the CID exception because its packets are generated internally with
+VMADDR_CID_LOCAL as their source, including connections using CID aliases.
+
+Use the helper after lock_sock() in the virtio receive path.
+
+Fixes: 06a8fc78367d ("VSOCK: Introduce virtio_vsock_common.ko")
+Closes: https://lore.kernel.org/netdev/20260813121236.2328599-1-4ncienth@gmail.com/
+Cc: stable@vger.kernel.org
+Suggested-by: Stefano Garzarella <sgarzare@redhat.com>
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Daehyeon Ko <4ncienth@gmail.com>
+---
+ include/net/af_vsock.h                  |  3 +++
+ net/vmw_vsock/af_vsock.c                | 32 +++++++++++++++++++++++++
+ net/vmw_vsock/virtio_transport_common.c |  3 ++-
+ 3 files changed, 37 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH net v3 0/2] vsock: validate packet sources after bound lookup fallback
+Author: Daehyeon Ko <4ncienth@gmail.com>
+
+Both virtio and VMCI look up connected sockets by the full tuple before
+falling back to a destination-only bound lookup. The fallback can select a
+non-listening socket without validating the packet source.
+
+V2 covered only the virtio path. Following Stefano's review, this series
+moves the source and transport validation into a documented AF_VSOCK helper
+and uses it for both virtio and VMCI. The VMCI patch checks both its
+bottom-half and deferred workqueue receive paths.
+
+The combined series was tested on x86_64 KASAN kernels. The original
+cross-UID virtio injection remained blocked in three boots, CID_LOCAL and
+CID_HOST loopback aliases passed, selected VSOCK selftests passed, and VMCI
+accepted a matched RST while rejecting a mismatched-context RST in three
+boots. All changed objects built without warnings under allmodconfig and
+allyesconfig with W=1.
+
+The current-tree guest-CID vhost probe could not be rerun because the test
+user lacks access to /dev/vhost-vsock.
+
+Changes in v3:
+- Move transport and source validation into vsock_check_source().
+- Trust the internally generated source CID for the local transport.
+- Add VMCI validation in the bottom-half and workqueue receive paths.
+- Send the related virtio and VMCI fixes in one series.
+- Do not carry Bobby's v2 Reviewed-by because the helper and loopback logic
+  changed; renewed review is requested.
+
+v2: https://lore.kernel.org/netdev/20260820001517.2148196-1-4ncienth@gmail.com/
+v1: https://lore.kernel.org/netdev/20260813121236.2328599-1-4ncienth@gmail.com/
+
+Daehyeon Ko (2):
+  vsock/virtio: validate packet source for connected sockets
+  vsock/vmci: validate packet source for connected sockets
+
+ include/net/af_vsock.h                  |  3 +++
+ net/vmw_vsock/af_vsock.c                | 32 +++++++++++++++++++++++++
+ net/vmw_vsock/virtio_transport_common.c |  3 ++-
+ net/vmw_vsock/vmci_transport.c          | 29 +++++++++++++++++-----
+ 4 files changed, 60 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/5] KVM: selftests: use allowed NUMA nodes in
+Author: Shivank Garg <shivankg@amd.com>
+
+guest_memfd_test assumes that nodes 0 and 1 exist and have memory.
+is_multi_numa_node_system() only checks that the maximum node ID is
+nonzero, which is not enough for sparse or memoryless nodes.
+
+Select the required nodes from MPOL_F_MEMS_ALLOWED instead. Use the full
+nodemask width plus one to mbind(), and let test_mbind() run when only
+one memory node is available.
+
+The sysfs helpers for finding maxnode are no longer needed.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/guest_memfd_test.c | 86 +++++++++++++++++---------
+ tools/testing/selftests/kvm/include/numaif.h   | 52 ----------------
+ 2 files changed, 58 insertions(+), 80 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/5] KVM: selftests: use BITS_PER_TYPE() for NUMA masks
+Author: Shivank Garg <shivankg@amd.com>
+
+Replace the open-coded sizeof() * 8 calculations in do_migrations() with
+BITS_PER_TYPE().
+
+No functional change intended.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/5] KVM: selftests: add get_numa_mem_nodes()
+Author: Shivank Garg <shivankg@amd.com>
+
+The xAPIC IPI test uses MPOL_F_MEMS_ALLOWED to get the memory nodes
+available to the current process. Move the query to numaif.h as
+get_numa_mem_nodes() so other KVM selftests can use it.
+
+Call get_mempolicy() directly instead of using the assert-on-failure
+kvm_get_mempolicy() wrapper. The xAPIC test already asserts its two
+node requirement.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/include/numaif.h     | 12 ++++++++++++
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c |  6 ++----
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/5] KVM: selftests: fix maxnode arguments in
+Author: Shivank Garg <shivankg@amd.com>
+
+migrate_pages() syscall expect maxnode to be one greater than the
+number of bits in the nodemask. do_migrations() passes the size of
+nodemask in bytes to migrate_pages(). This sets the maxnode to 8,
+so kernel only checks node IDs 0-6 even though the nodemask covers
+node IDs 0-63.
+
+Pass the nodemask size in bits plus one because get_nodes() in
+mempolicy does --maxnode.
+
+Fixes: 678e90a349a4 ("KVM: selftests: Test IPI to halted vCPU in xAPIC while backing page moves")
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/5] KVM: guest_memfd: take the invalidate lock when
+Author: Shivank Garg <shivankg@amd.com>
+
+kvm_gmem_unbind() skips mapping->invalidate_lock when the guest_memfd
+file is already dying. All other paths that modify f->bindings hold
+that lock.
+
+kvm_gmem_invalidate_{start,end}() checks f->bindings independently to
+decide whether to begin or end KVM MMU invalidations. So, the bindings
+must remain stable between the two calls. If a binding is removed in that
+window, start increments mmu_invalidate_in_progress but end does not
+decrement it. Example, unbind race with memory failure:
+
+  CPU 0: memory failure               CPU 1: memslot delete
+  ----------------------------------  ---------------------------
+                                      (guest_memfd file is dying)
+  kvm_gmem_error_folio()
+    kvm_gmem_invalidate_start()
+      finds binding
+      mmu_invalidate_in_progress++
+                                      kvm_gmem_unbind()
+                                        get_file_active() fails
+                                        store NULL in bindings
+    kvm_gmem_invalidate_end()
+      no binding found
+      counter stays elevated
+
+mmu_invalidate_retry() then returns 1 forever, so guest page faults
+retry without ever installing a mapping and the guest hangs.
+
+Take the invalidate lock in the dying-file path too. This prevents unbind
+from removing a binding and leaking mmu_invalidate_in_progress. This is
+safe because any caller that reaches this path holds slots_lock, so
+kvm_gmem_release() cannot nullify the slot->gmem.file, until
+kvm_gmem_unbind() finishes.
+
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260728092027.225CF1F000E9@smtp.kernel.org
+Fixes: ae431059e75d ("KVM: guest_memfd: Remove bindings on memslot deletion when gmem is dying")
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ virt/kvm/guest_memfd.c | 23 ++++++++++++++---------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/5] KVM: guest_memfd: fix unbind race and NUMA selftests
+Author: Shivank Garg <shivankg@amd.com>
+
+Split out the guest_memfd folio migration series [1], where migration part
+needs more discussion. These fixes, reported by Sashiko bot [2][3], are
+independent of it and can be reviewed on their own.
+
+[1] https://lore.kernel.org/all/20260805-shivank-gmem-migrate-v3-0-00d8bdec4e1d@amd.com 
+[2] https://lore.kernel.org/all/20260728092027.225CF1F000E9@smtp.kernel.org
+[3] https://lore.kernel.org/all/20260728091945.EA6C31F000E9@smtp.kernel.org
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+Shivank Garg (5):
+      KVM: guest_memfd: take the invalidate lock when unbinding a dying file
+      KVM: selftests: fix maxnode arguments in xapic_ipi_test
+      KVM: selftests: use BITS_PER_TYPE() for NUMA masks
+      KVM: selftests: add get_numa_mem_nodes()
+      KVM: selftests: use allowed NUMA nodes in guest_memfd_test
+
+ tools/testing/selftests/kvm/guest_memfd_test.c   | 86 ++++++++++++++++--------
+ tools/testing/selftests/kvm/include/numaif.h     | 52 ++------------
+ tools/testing/selftests/kvm/x86/xapic_ipi_test.c | 14 ++--
+ virt/kvm/guest_memfd.c                           | 23 ++++---
+ 4 files changed, 84 insertions(+), 91 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 5b14366ee to 4f75c0144
+KVM mailing list update from 5b14366ee to 4f75c0144
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
