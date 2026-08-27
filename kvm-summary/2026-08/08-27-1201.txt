@@ -1,0 +1,2334 @@
+
+On /root/mail/repo:
+From 02aa6a64f to 3ab240a6b
+KVM mailing list update from 02aa6a64f to 3ab240a6b
+
+Top 15 contributor Email domains (Based on Email Body)
+
+    117 google.com
+     22 linux.ibm.com
+     14 amazon.co.uk
+     13 amd.com
+      7 gmail.com
+      5 linux.intel.com
+      4 redhat.com
+      2 kylinos.cn
+      1 trailofbits.com
+      1 suse.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     89  Sean Christopherson <seanjc@google.com>
+     28  Ackerley Tng <ackerleytng@google.com>
+     22  Christoph Schlameuss <schlameuss@linux.ibm.com>
+     14  David Woodhouse <dwmw@amazon.co.uk>
+      9  Kim Phillips <kim.phillips@amd.com>
+      5  Binbin Wu <binbin.wu@linux.intel.com>
+      4  Vitaly Kuznetsov <vkuznets@redhat.com>
+      4  Hemanth Selam <hemanth.selam@gmail.com>
+      3  Sairaj Kodilkar <sarunkod@amd.com>
+      2  Zongmin Zhou <zhouzongmin@kylinos.cn>
+      2  Jinu Kim <kimjw04271234@gmail.com>
+      1  Nikolay Borisov <nik.borisov@suse.com>
+      1  Nicholas Piggin <npiggin@gmail.com>
+      1  Michael Roth <michael.roth@amd.com>
+      1  "David Hildenbrand (Arm)" <david@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: TDX: Track configurable CPUID bits allowed by KVM
+[PATCH v3 1/4] KVM: TDX: Track configurable CPUID bits allowed by KVM
+Author: Binbin Wu <binbin.wu@linux.intel.com>
+
+Add tdx_cpu_cfg_caps[] to track the subset of TDX directly configurable
+CPUID feature bits that KVM supports, and build the masks during TDX
+hardware setup via tdx_initialize_cpu_cfg_caps().
+
+The TDX module reports the CPUID bits that the VMM can directly configure
+for a TD, but KVM cannot blindly expose all reported bits to userspace.
+Certain features imply additional architectural state, e.g. one or more
+MSRs, that KVM must explicitly manage across host/guest transitions to
+prevent host state corruption.
+
+Today KVM relies on a hardcoded denylist, i.e. it clears a few known
+problematic bits, e.g. TSX and WAITPKG, and passes everything else through.
+A denylist is fundamentally fragile while an allowlist inverts the default,
+i.e. unknown configurable bits are hidden and not allowed to be enabled
+until KVM explicitly opts in.
+
+Except for a few fixed-1 bits required for basic TDX support, host state
+clobbering features are either directly configurable or gated by TD
+ATTRIBUTES/XFAM.  Tracking only the directly configurable feature bits is
+therefore sufficient to serve the purpose while keeping the code footprint
+small.
+
+Organize tdx_cpu_cfg_caps[] following kvm_cpu_caps[] so that the masks can
+be built with the similar feature-name based initializers.  CPUID registers
+that hold directly configurable non-feature (multi-bit) fields are handled
+separately.
+
+The allowlist is consumed by later patches to filter KVM_TDX_CAPABILITIES
+and to reject unsupported CPUID input to KVM_TDX_INIT_VM, so that newly
+introduced TDX directly configurable CPUID feature bits stay hidden from
+userspace until KVM explicitly opts in.
+
+Add comments as placeholders for HLE, RTM and WAITPKG, which KVM doesn't
+support for TDX yet.
+
+Signed-off-by: Binbin Wu <binbin.wu@linux.intel.com>
+---
+v3:
+- Drop the new data structure in v2 and only track feature bits by
+  following the organization of kvm_cpu_caps[], handle non-feature
+  bits separately. (Sean)
+- Use two versions of macros (TDX_CFG_F() VS. TDX_CFG_EXTRA_F()) to
+  distinguish whether a supported TDX configurable CPUID bit should be
+  checked against KVM's common cpu capabilities.
+- Add AMX_COMPLEX since it has been defined in the CPUID virtualization doc.
+---
+ arch/x86/kvm/vmx/tdx.c | 145 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 145 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Validate directly configurable CPUID bits
+[PATCH v3 0/4] KVM: TDX: Validate directly configurable CPUID bits
+Author: Binbin Wu <binbin.wu@linux.intel.com>
+
+Hi,
+
+The purpose of this patch series is to prevent userspace from enabling
+host state clobbering features that KVM does not support for TDX.  A host
+state clobbering feature exposed on a new TDX module/platform can corrupt
+host state if KVM does not explicitly save and restore the related MSR(s)
+across host/guest transitions.  If such a feature is blindly exposed to
+and used by a TD, the host will behave unexpectedly.
+
+Except for a few fixed-1 bits required for basic TDX support, host state
+clobbering features are either directly configurable or gated by TD
+ATTRIBUTES/XFAM.  So an allowlist covering only the directly configurable
+CPUID bits, plus the corresponding filtering and validation, is sufficient
+to serve the purpose while keeping the code footprint small.
+
+Open question for Sean/Paolo
+============================
+This revision comes long after Sean confirmed the overall direction on
+RFC v2 [1], due to internal discussions about a potential backward
+compatibility issue: a CPUID field can change virtualization type to
+directly configurable.  The TDX module can maintain backward
+compatibility in most cases; the problematic case is a single bit that
+was effectively "1" and non-configurable becoming directly configurable.
+The only scenario we can envision for that is an x86 feature deprecation.
+
+In that case the TDX module has to decide how to handle deprecation,
+especially with respect to TD migration compatibility.  That
+pre-existing VMs with the deprecated feature enabled cannot migrate from
+an old platform to a new one is a problem shared by TDX and VMX, but the
+TDX module additionally has to decide:
+- Whether to allow TDs newly created on old platforms to migrate to new
+  platforms.
+- Whether to allow TDs created on new platforms to migrate to old
+  platforms.
+
+There are two options:
+1. Do not offer the VMM the ability to configure the bit, i.e. simply
+   report it as zero on platforms that no longer support the feature.
+   This disallows both migration cases above.
+2. Make the bit directly configurable so the VMM can clear it even on
+   platforms that still support the feature, allowing both migration
+   cases above.  However, since the bit is not in KVM's allowlist,
+   userspace would no longer be able to enable it on old platforms after
+   a TDX module update.
+
+Adding all supported CPUID bits to the allowlist, regardless of their
+virtualization type in the TDX module, would avoid the compatibility
+issue for option 2, at the cost of a significantly larger series.
+
+Given that x86 feature deprecation is expected to be very rare, and that
+Intel will discuss such cases with the community beforehand, does the
+approach taken by this series look acceptable?  If so, the goal for this
+revision is to collect detailed feedback and, where appropriate,
+Reviewed-by tags.
+
+Expected host state clobbering behavior for TDX
+===============================================
+We also want to call for discussions about the expected host state
+clobbering behavior for TDX here for future features.
+
+For a normal VMX guest, VM entry/exit behavior for a given piece of CPU
+state is architecturally defined: state is either switched by hardware via
+VMCS host/guest fields, or left as the guest value on VM exit and managed
+by KVM in software.
+
+For TDs, the host/guest transition goes through TDH.VP.ENTER, and what the
+TDX module does with a given piece of host state is defined by the TDX
+module ABI rather than by the x86 architecture.
+
+What we would like to align on is the expected baseline behavior of
+TDH.VP.ENTER for future features.  The proposal is to have TDX simply
+match VMX behavior, i.e. on return from TDH.VP.ENTER, state that VMX would
+restore from the VMCS host fields is restored, and state that VMX would
+leave as the guest value is clobbered.  That keeps a single model for VMM,
+and means enabling a new feature for TDs requires the same work flow as
+enabling it for VMX.
+
+FRED is a useful concrete example.  Under VMX, the FRED host state in
+IA32_FRED_CONFIG, IA32_FRED_STKLVLS, IA32_FRED_RSP1-3 and
+IA32_FRED_SSP1-3 is covered by the VMCS host-state area, so the TDX module
+is expected to restore these MSRs on TDH.VP.ENTER return.  IA32_FRED_RSP0
+and IA32_PL0_SSP (a.k.a. IA32_FRED_SSP0) are handled by software, so the
+TDX module is expected to clobber them on TDH.VP.ENTER return.
+
+The series
+==========
+
+Starting with v2 [2], the series takes a simpler, TDX-contained approach
+instead of the comprehensive CPUID paranoid verification framework across
+VMX, SVM, and TDX proposed in v1 [3].  It validates only the TDX directly
+configurable CPUID bits, which are reported by the TDX module in
+CPUID_CONFIG fields that the VMM can configure for a TD.  All filtering
+and validation logic is isolated within TDX code.  This is sufficient to
+address the host clobbering issue because:
+- The TDX module will not introduce new host state clobbering features
+  that are fixed-1.
+- Non-directly configurable feature bits (i.e. features controlled by XFAM
+  or ATTRIBUTES) cannot be enabled by userspace without KVM's support.
+
+Specifically, this series builds a KVM-side allowlist of supported TDX
+directly configurable CPUID bits to:
+ - Filter KVM_TDX_CAPABILITIES
+   Replace the hardcoded denylist to only report configurable bits that
+   KVM explicitly supports.
+ - Validate KVM_TDX_INIT_VM
+   Reject any configurable bit that the TDX module allows but KVM does
+   not support, as well as CPUID entries with an unexpected subleaf.
+
+With this allowlist, newly added TDX configurable CPUID bits will not be
+exposed to userspace until KVM explicitly opts in after fulfilling the
+necessary virtualization requirements.
+
+The allowlist consists of two parts:
+- Feature CPUID bits, which are tracked in tdx_cpu_cfg_caps[] following
+  the organization of kvm_cpu_caps[].  It holds KVM's supported masks for
+  the TDX configurable CPUID feature bits.
+- Non-feature multi-bit fields, which are handled at runtime for the CPUID
+  registers holding such fields.
+
+For compatibility with older TDX modules that report CORE_CAPABILITIES as
+fixed-1, report CORE_CAPABILITIES as configurable even though KVM does not
+support guest access to MSR_IA32_CORE_CAPS.  This allows userspace to keep
+enabling CORE_CAPABILITIES when the bit changes from fixed-1 to directly
+configurable, and allows userspace to infer that the bit is no longer
+fixed-1 so it can adjust its expectations.
+
+Known limitation:
+- The series does not check KVM_SET_CPUID2 input for consistency with the
+  CPUID configuration supplied through KVM_TDX_INIT_VM.  This is not
+  required for host safety today because KVM does not use its vCPU CPUID
+  model to decide whether to manage host-clobbering state for TDs.  A
+  consistency check should be added if KVM ever starts relying on the vCPU
+  CPUID model for such decisions.
+
+Changes from v2 [2]:
+- Drop the dedicated data structure introduced in v2; track only feature
+  bits following the organization of kvm_cpu_caps[], and handle
+  non-feature bits at runtime. (Sean)
+- Add AMX_COMPLEX since it has been defined in the CPUID virtualization
+  doc.
+- Add CPUID.0x24.0.EBX[7:0] into allow list. There is a mismatch of the
+  description about CPUID.0x24.0.EBX[7:0], which is listed as
+  "XFAM & CPUID_Enabled & Native" but should be "XFAM & CPUID_Enabled &
+  Configured & Native".
+- Move the patch for CORE_CAPABILITIES earlier in the series to avoid
+  breaking userspace during bisection. (Xiaoyao)
+- Report CORE_CAPABILITIES as a configurable bit to userspace for
+  backward compatibility, but drop the MSR_IA32_CORE_CAPS access code.
+- Use two versions of macros to distinguish whether a supported TDX
+  configurable CPUID bit should be checked against KVM's common CPU
+  capabilities.
+- Validate KVM_TDX_INIT_VM input against the allowlist instead of masking
+  it, and additionally reject entries whose index does not match the
+  TDX sysinfo configuration. (Sashiko)
+
+Changes from v1 [3]:
+ - Drop the overarching CPUID paranoid verification framework across
+   VMX/SVM/TDX and the opt-in interface. (Sean)
+ - Shift focus entirely to isolating and validating TDX directly
+   configurable CPUID bits.
+
+The series follows the CSV version of the CPUID virtualization document
+from "Intel TDX Module ABI Definitions" [4], updated in June 2026.
+
+AI tools were used to:
+- Check the coverage of the directly configurable CPUID bits in the
+  document against the allowlist in this series.
+- Polish the cover letter and commit messages.
+- Do code review.
+
+[1] https://lore.kernel.org/kvm/aj1fqZEcApyd4sxi@google.com
+[2] https://lore.kernel.org/kvm/20260604023314.3907511-1-binbin.wu@linux.intel.com
+[3] https://lore.kernel.org/kvm/20260417073610.3246316-1-binbin.wu@linux.intel.com
+[4] https://cdrdv2.intel.com/v1/dl/getContent/795381
+
+Binbin Wu (4):
+  KVM: TDX: Track configurable CPUID bits allowed by KVM
+  KVM: TDX: Report CORE_CAPABILITIES as configurable
+  KVM: TDX: Filter configurable CPUID bits
+  KVM: TDX: Validate userspace CPUID input for KVM_TDX_INIT_VM
+
+ arch/x86/kvm/vmx/tdx.c | 258 ++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 229 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+[PATCH v3 01/13] KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+Author: Sean Christopherson <seanjc@google.com>
+
+
+VMPTRLD with active eVMCS is already forbidden, however, returning 1
+without skipping the instruction or queuing an exception will likely
+result in L1 getting stuck. Genuine Hyper-V seems to inject #UD under
+similar circumstances, mimic the behavior in KVM.
+
+Reported-by: f734222792@gmail.com
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=221841
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Adjust VMPTRLD/VMPTRST behavior with
+[PATCH v3 00/13] KVM: nVMX: Adjust VMPTRLD/VMPTRST behavior with
+Author: Sean Christopherson <seanjc@google.com>
+
+Vitaly's series to adjust KVM's emulation of VMPTRLD/VMPTRST when the vCPU
+has an active eVMCS to match Hyper-V, and more importantly to not put the
+vCPU into an infinite loop.
+
+The patches from Vitaly remain the same from v2.  The churn I piled on top
+came from wanting to use KVM_ASM_SAFE() for more VMX instructions to verify
+the RFLAGS bug+fix Sashiko pointed out, and I lack impulse control when it
+comes to cleanups.
+
+v3:
+ - See above.
+
+v2:
+ - https://lore.kernel.org/all/20260818165258.2613603-1-vkuznets@redhat.com
+ - Fix build when !CONFIG_KVM_HYPERV [Sashiko]
+ - Drop now-unneeded evmcs_vmptrst() [Sashiko]
+ - Avoid hardcoding VMPTRLD insn length in hyperv_evmcs [Sashiko], use
+   KVM_ASM_SAFE framework instead [Sean]
+
+v1: https://lore.kernel.org/all/20260814162221.2144473-1-vkuznets@redhat.com
+
+Sean Christopherson (9):
+  KVM: selftests: Don't clobber RFLAGS in happy path of __KVM_ASM_SAFE()
+  KVM: selftests: Assert success in vmptrst(), kill off vmptrstz()
+  KVM: selftests: Always assert that vmxon() and
+    prepare_for_vmx_operation() succeed
+  KVM: selftests: Always assert that vmclear() succeeds
+  KVM: selftests: Always assert that vmptrld() succeeds
+  KVM: selftests: Drop useless return code from load_vmcs()
+  KVM: selftests: Add macros to handle simple VMX instructions
+  KVM: selftests: Dedup assembly code for VMLAUNCH and VMRESUME
+  KVM: selftests: Add and use double-underscore versions of vmlaunch()
+    and vmresume()
+
+Vitaly Kuznetsov (4):
+  KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+  KVM: nVMX: Make VMPTRST return eVMCS GPA when it is used
+  KVM: selftests: Adapt to the updated VMPTRST behavior when eVMCS is
+    used
+  KVM: selftests: Check VMPTRLD with active eVMCS
+
+ arch/x86/kvm/vmx/nested.c                     |  24 ++-
+ .../testing/selftests/kvm/include/x86/evmcs.h |   8 -
+ .../selftests/kvm/include/x86/processor.h     |   2 +-
+ tools/testing/selftests/kvm/include/x86/vmx.h | 173 +++++++-----------
+ .../testing/selftests/kvm/lib/x86/memstress.c |   6 +-
+ tools/testing/selftests/kvm/lib/x86/vmx.c     |  20 +-
+ .../selftests/kvm/x86/aperfmperf_test.c       |   6 +-
+ .../kvm/x86/evmcs_smm_controls_test.c         |   4 +-
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  |  57 +++---
+ .../selftests/kvm/x86/kvm_buslock_test.c      |   6 +-
+ .../selftests/kvm/x86/nested_close_kvm_test.c |   6 +-
+ .../selftests/kvm/x86/nested_dirty_log_test.c |   6 +-
+ .../selftests/kvm/x86/nested_emulation_test.c |   6 +-
+ .../kvm/x86/nested_exceptions_test.c          |   6 +-
+ .../kvm/x86/nested_invalid_cr3_test.c         |   8 +-
+ .../selftests/kvm/x86/nested_tdp_fault_test.c |   6 +-
+ .../kvm/x86/nested_tsc_adjust_test.c          |   6 +-
+ .../kvm/x86/nested_tsc_scaling_test.c         |   6 +-
+ .../kvm/x86/save_restore_pf_stress_test.c     |   8 +-
+ tools/testing/selftests/kvm/x86/smm_test.c    |   4 +-
+ tools/testing/selftests/kvm/x86/state_test.c  |  42 ++---
+ .../kvm/x86/triple_fault_event_test.c         |   6 +-
+ .../selftests/kvm/x86/vmx_apic_access_test.c  |   8 +-
+ .../kvm/x86/vmx_apicv_updates_test.c          |   8 +-
+ .../kvm/x86/vmx_invalid_nested_guest_state.c  |   6 +-
+ .../kvm/x86/vmx_nested_la57_state_test.c      |   6 +-
+ .../kvm/x86/vmx_preemption_timer_test.c       |  10 +-
+ 27 files changed, 214 insertions(+), 240 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Use MEM_REGION_PT memslot instead of
+[PATCH 01/20] KVM: selftests: Use MEM_REGION_PT memslot instead of
+Author: Sean Christopherson <seanjc@google.com>
+
+Use MEM_REGION_PT to indirectly specify memslot '0' instead of hardcoding
+the memslot in s390's virtual memory allocator, as a first step towards
+taking the allocation type instead of the exact, raw memslot in the
+physical memory allocator.
+
+Note, the only tests that set MEM_REGION_PT to a memslot other than '0' are
+arm64-only, i.e. s390 always uses memslot '0' for page tables.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/lib/s390/processor.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: PPC pre-enabling
+[PATCH 00/20] KVM: selftests: PPC pre-enabling
+Author: Sean Christopherson <seanjc@google.com>
+
+This is a big pile of cleanups and refactoring to prepare for PPC support in
+KVM selftests.  PPC has paging modes that require multi-page page tables, and
+those page tables need to be naturally aligned.  The original proposal was to
+plumb in an @align param to the page allocators[*], but I didn't love the idea
+of adding another rarely used param to the allocators.
+
+Reworking the APIs to take a region type requires a fair bit of churn, and was
+more painful than expected as I didn't realize just how many one-off tests did
+weird things, but overall I think it's worth it?  If only to keep cutting down
+on the use of magic memslot numbers in tests.
+
+This needs explicit testing on s390.  I tested on arm64 and x86, and given the
+number of failures I had to wade through, I wouldn't be at all suprised if I
+broke something subtle on s390 as well.
+
+I'm less concerned about RISC-V and LoongArch as they don't have any custom
+tests that are affected (which is where I got burned).
+
+[*] https://lore.kernel.org/all/df86b5ccdbdafc3509d9538bd5e6796737bab2db.1781093720.git.ritesh.list@gmail.com
+
+Nicholas Piggin (1):
+  KVM: selftests: Use goto instead of do-while to retry finding unused
+    physical pages
+
+Sean Christopherson (19):
+  KVM: selftests: Use MEM_REGION_PT memslot instead of '0' for s390
+    regions/segments
+  KVM: selftests: Bump the minimum GPA for page tables to 0x200000
+  KVM: selftests: Use vm_alloc_page_table() to allocate LoongArch page
+    tables
+  KVM: selftests: Rename "num" param to "nr_pages" for physical page
+    allocators
+  KVM: selftests: Extend page allocator to support naturally aligned
+    allocations
+  KVM: selftests: Make the single-page allocator APIs static inline
+  KVM: selftests: Use the innermost page allocator API in the memslot
+    perf test
+  KVM: selftests: Use the innermost page allocator API in s390's IRQ
+    routing test
+  KVM: selftests: Add a wrapper API to allocate multiple page table
+    pages
+  KVM: selftests: Initialize vm->memslots[] with invalid memslots during
+    creation
+  KVM: selftests: Add APIs to override memory region types with custom
+    memslots
+  KVM: selftests: Add TEST_EXTRA memory region type for "special"
+    memslots
+  KVM: selftests: Use TEST_EXTRA region in arm64's vGIC LPI stress test
+  KVM: selftests: Use TEST_EXTRA region in x86's smaller MAXPHYADDR test
+  KVM: selftests: Use TEST_EXTRA region in set memory region test
+  KVM: selftests: Take the memory region type, not memslot, in page
+    allocators
+  KVM: selftests: Use TEST_ASSERT(), not assert(), in
+    vm_get_mem_region()
+  KVM: selftests: Automatically pick min_gpa for allocations based on
+    region type
+  KVM: selftests: Add arch hook to force page tables to be naturally
+    aligned
+
+ .../selftests/kvm/arm64/page_fault_test.c     |  18 ++-
+ .../selftests/kvm/arm64/vgic_lpi_stress.c     |  19 ++-
+ .../testing/selftests/kvm/include/kvm_util.h  | 106 +++++++++++++--
+ tools/testing/selftests/kvm/include/x86/smm.h |   2 +-
+ .../selftests/kvm/lib/arm64/processor.c       |   4 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 127 +++++++++++-------
+ .../selftests/kvm/lib/loongarch/processor.c   |   5 +-
+ .../selftests/kvm/lib/riscv/processor.c       |   4 +-
+ .../selftests/kvm/lib/s390/processor.c        |   7 +-
+ .../testing/selftests/kvm/lib/x86/processor.c |  15 ++-
+ .../testing/selftests/kvm/memslot_perf_test.c |   3 +-
+ tools/testing/selftests/kvm/s390/cmma_test.c  |  19 +--
+ .../testing/selftests/kvm/s390/irq_routing.c  |   2 +-
+ .../selftests/kvm/set_memory_region_test.c    |   8 +-
+ .../x86/smaller_maxphyaddr_emulation_test.c   |   9 +-
+ 15 files changed, 219 insertions(+), 129 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/bugs: Allow forcing Automatic IBRS with SNP active using spectre_v2=eibrs
+[PATCH v5 1/8] x86/bugs: Allow forcing Automatic IBRS with SNP active using spectre_v2=eibrs
+Author: Kim Phillips <kim.phillips@amd.com>
+
+spectre_v2=eibrs currently enables retpolines when SNP is enabled,
+instead of AutoIBRS (EIBRS) because the commit that disabled
+AutoIBRS if SNP is enabled stopped short of enabling
+X86_FEATURE_IBRS_ENHANCED.
+
+Change the logic to enable X86_FEATURE_IBRS_ENHANCED, and move the
+decision to switch to retpolines in the default/"auto" case in
+spectre_v2_select_mitigation().  This allows the existing
+spectre_v2=eibrs logic to work as intended.
+
+Condition that switch on CONFIG_MITIGATION_RETPOLINE being built in.
+Otherwise spectre_v2_select_retpoline() returns SPECTRE_V2_NONE and an
+SNP host with AutoIBRS available would be left completely unmitigated
+against Spectre v2 in the default/auto case, which is worse than the
+userspace indirect branch performance loss AutoIBRS costs.
+
+Also emit a performance loss warning for using AutoIBRS with SNP
+enabled.  AutoIBRS is activated for all three eIBRS modes via
+spectre_v2_in_eibrs_mode(), so use that helper to cover
+spectre_v2=eibrs, spectre_v2=eibrs,lfence, and
+spectre_v2=eibrs,retpoline uniformly.  Word the warning in terms of the
+eIBRS mitigation enabling AutoIBRS, rather than naming AutoIBRS as the
+selected mitigation, so it reads correctly for the ,lfence and
+,retpoline variants where another component is also active.
+
+Fixes: acaa4b5c4c85 ("x86/speculation: Do not enable Automatic IBRS if SEV-SNP is enabled")
+Reported-by: Tom Lendacky <thomas.lendacky@amd.com>
+Cc: Borislav Petkov (AMD) <bp@alien8.de>
+Cc: Pawan Gupta <pawan.kumar.gupta@linux.intel.com>
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Kim Phillips <kim.phillips@amd.com>
+Assisted-by: ClaudeCode:claude-opus-4-7
+---
+ arch/x86/kernel/cpu/bugs.c   | 15 ++++++++++++++-
+ arch/x86/kernel/cpu/common.c |  6 +-----
+ 2 files changed, 15 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Add SEV-SNP BTB Isolation and IBPB-on-Entry guest features
+[PATCH v5 0/8] Add SEV-SNP BTB Isolation and IBPB-on-Entry guest features
+Author: Kim Phillips <kim.phillips@amd.com>
+
+This series advertises two SEV-SNP guest-selectable side-channel
+protections through KVM's vmsa_features ABI -- BTB Isolation
+(SEV_FEATURES bit 7) and IBPB-on-Entry (SEV_FEATURES bit 21) -- along
+with SVM_SEV_FEAT_SNP_ACTIVE, and fixes two x86 mitigation-selection
+bugs that stand in the way.
+
+The cpu/bugs patches come first because they are prerequisites, not
+drive-by cleanups:
+
+  - Patch 1 fixes spectre_v2=eibrs silently selecting retpolines instead
+    of AutoIBRS on SNP hosts.  Commit acaa4b5c4c85 ("x86/speculation: Do
+    not enable Automatic IBRS if SEV-SNP is enabled") suppressed AutoIBRS
+    by never setting X86_FEATURE_IBRS_ENHANCED, which also disabled the
+    explicit spectre_v2=eibrs request.  Set the feature bit and move the
+    SNP-prefers-retpoline decision into the default/auto case, where it
+    belongs.
+
+  - Patch 2 allows spectre_v2=ibrs on non-Intel vendors.  BTB Isolation
+    uses legacy SPEC_CTRL.IBRS toggling to optimize the SNP VM
+    exit-to-re-entry path, so AMD needs to be able to select it.  It also
+    makes EFER.AUTOIBRS explicitly track the selected mitigation, which
+    matters across kexec since head_64.S preserves incoming EFER bits.
+
+Patches 3-6 are small width/ABI cleanups and the SNP_ACTIVE and
+SNP-only-feature-mask groundwork, and patches 7-8 add IBPB-on-Entry and
+BTB Isolation themselves.
+
+Note that BTB Isolation is advertised unconditionally on SNP-capable
+parts.  That is deliberate: the APM defines it as architecturally
+present on every SEV-SNP-capable processor, so unlike IBPB-on-Entry
+there is no host enumeration bit to gate on.  Patch 8 spells this out.
+
+Changes since v4:
+  https://lore.kernel.org/all/20260804235611.4053375-1-kim.phillips@amd.com/
+
+ - Patch 1 ("x86/bugs: Allow forcing Automatic IBRS with SNP active
+   using spectre_v2=eibrs"): only prefer retpoline over AutoIBRS on SNP
+   hosts when CONFIG_MITIGATION_RETPOLINE is actually built in.  This
+   folds v4's patch 3 into the same condition and avoids the
+   select-then-fall-back ping pong.  Suggested in review:
+   https://lore.kernel.org/all/lctyimdlenyb5kvfxarzajs2ggzkwn4yehxu233lojynqwa7ej@wjur3lh6szlr/
+
+ - Patch 2 ("x86/bugs: Allow spectre_v2=ibrs on x86 vendors other than
+   Intel"): move the EFER.AUTOIBRS kexec cleanup out of
+   spectre_v2_apply_mitigation() and up to the top of
+   cpu_select_mitigations(), next to the existing SPEC_CTRL kexec
+   cleanup, so stale state is dropped before mitigation selection rather
+   than during it.  spectre_v2_apply_mitigation() now only sets the bit,
+   which keeps it much closer to its original shape.  Suggested in
+   review:
+   https://lore.kernel.org/all/ga63o6nf7xebndlo66qqasjx7axpopyph7ilkwhvx3enfaqs4w@r4qfr6eo6kcw/
+
+ - Subject prefix fixes, per review:
+   https://lore.kernel.org/all/20260818232204.GBaoTpHK8k7wD9mMk4@fat_crate.local/
+   The two x86 patches go from "cpu/bugs:" to "x86/bugs:" to match the
+   tip tree convention.  Patch 3 goes from "KVM: SEV:" to "KVM: SVM:",
+   since it only touches arch/x86/include/asm/svm.h.
+
+ - Tag cleanup, per review:
+   https://lore.kernel.org/all/20260818232204.GBaoTpHK8k7wD9mMk4@fat_crate.local/
+   Dropped Cc: stable@kernel.org from both x86/bugs patches.  Patch 2
+   drops its Fixes: too -- it enables spectre_v2=ibrs on a vendor that
+   never had a use for the option rather than fixing a bug anyone is
+   hitting, so neither tag was right.  Patch 1 drops the kernel test
+   robot Reported-by:/Closes: pair; that report was against an earlier
+   posting of this patch rather than against upstream, so there was
+   nothing there for it to close.  The part of patch 1 that is genuinely
+   -stable material -- an SNP host with CONFIG_MITIGATION_RETPOLINE=n
+   booting with Spectre v2 unmitigated -- will be sent separately as a
+   minimal backport once this lands.
+
+ - Dropped v4's patch 3 ("cpu/bugs: Fall back to AutoIBRS when retpoline
+   unavailable on SNP CPUs").  Its fallback is now subsumed by the
+   CONFIG_MITIGATION_RETPOLINE test above.
+
+ - Dropped v4's patch 1 ("x86/bugs: Only log missing retpoline when it's
+   actually the missing mitigation").  After the rework above this
+   series no longer needs it, but it still fixes a real spurious
+   "no mitigation available!" on Intel + RETBleed with
+   CONFIG_MITIGATION_IBRS_ENTRY=y, CONFIG_MITIGATION_RETPOLINE=n and
+   spectre_v2=auto, where spectre_v2_update_mitigation() afterwards
+   promotes SPECTRE_V2_NONE to SPECTRE_V2_IBRS.  Being posted separately
+   as a standalone fix:
+   https://lore.kernel.org/lkml/20260826222228.3668418-1-kim.phillips@amd.com/
+
+ - Added Tom's Reviewed-by to patch 8
+
+Kim Phillips (8):
+  x86/bugs: Allow forcing Automatic IBRS with SNP active using
+    spectre_v2=eibrs
+  x86/bugs: Allow spectre_v2=ibrs on x86 vendors other than Intel
+  KVM: SVM: Define SVM_SEV_FEAT_* flags using BIT_ULL()
+  KVM: selftests: sev_init2: Use BIT_ULL for VMSA feature bit definition
+  KVM: SEV: Disallow setting SNP-only features for non-SNP guests via a
+    single mask
+  KVM: SEV: Advertise SVM_SEV_FEAT_SNP_ACTIVE
+  KVM: SEV: Add support for IBPB-on-Entry
+  KVM: SEV: Add support for SNP BTB Isolation
+
+ arch/x86/Kconfig                              |  7 ++-
+ arch/x86/include/asm/cpufeatures.h            |  1 +
+ arch/x86/include/asm/svm.h                    | 17 ++++--
+ arch/x86/kernel/cpu/bugs.c                    | 59 ++++++++++++++-----
+ arch/x86/kernel/cpu/common.c                  |  6 +-
+ arch/x86/kvm/svm/sev.c                        | 21 ++++++-
+ tools/arch/x86/include/asm/cpufeatures.h      |  1 +
+ .../selftests/kvm/x86/sev_init2_tests.c       | 20 +++++--
+ 8 files changed, 96 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Explicitly track TDX VMs' root level instead
+[PATCH v2 1/2] KVM: VMX: Explicitly track TDX VMs' root level instead
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly track the root level for TDX VMs instead of trying to infer the
+depth of the paging tree based on an individual vCPU's CPUID information.
+Applying KVM's existing logic to select the root level to TDX is flawed as
+nothing *requires* userspace to fill in the correct guest.MAXPHYADDR for a
+vCPU's CPUID.  Guessing at the correct root level is also ridiculous given
+that userspace has already told KVM the root level during TD initialization.
+
+Relying on userspace to set the expected/correct CPUID lets a misbehaving
+userspace trip the KVM_BUG_ON() in tdx_load_mmu_pgd() by configuring guest
+CPUID to use an "incorrect" guest.MAXPHYADDR.
+
+Don't use kvm_gfn_direct_bits() to infer the mirror root level, as the
+connection between TDX's one and only "direct" bit and the predetermined
+root level is a TDX implementation detail.  I.e. avoid baking in the
+assumption that there is exactly one "direct bits", that the one bit is a
+pivot between normal and mirror roots, and that the pivot bit is the most
+significant bit of the effective GPA space.  For the same reason, set the
+root level and direct bits in TDX code, i.e. don't provide a helper in the
+MMU, because from the MMU's perspective, they are two separate concepts.
+
+Keep gfn_direct_bits even though it can be trivially derived from
+mirror_root_level as saving a whole eight bytes per VM is meaningless,
+keeping the TDX details buried in TDX would require a kvm_x86_ops hook, and
+the value is queried fairly often and in hot paths.
+
+And for the moment, keep the S-bit sanity check in tdx_load_mmu_pgd(), even
+though it really only needs to ensure the incoming level matches the
+preconfigured mirror root level.  Because KVM manually configures the
+S-bit location, there's technically a risk that the S-bit location and
+mirror root level could get out of sync.  That can be addressed by more
+programmatically computing the S-bit, but that doesn't need to be done now.
+
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Fixes: 20d913729c11 ("KVM: x86/mmu: Taking guest pa into consideration when calculate tdp level")
+Reviewed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Tested-by: Yan Zhao <yan.y.zhao@intel.com>
+Tested-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/cpuid.c            | 14 --------------
+ arch/x86/kvm/cpuid.h            |  1 -
+ arch/x86/kvm/mmu/mmu.c          | 19 +++++++++++--------
+ arch/x86/kvm/vmx/tdx.c          | 14 ++++++++++++--
+ 5 files changed, 24 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH v2 1/2] KVM: VMX: Explicitly track TDX VMs' root level instead
+ Skip: [PATCH v2 0/2] KVM: VMX: Explicitly track TDX VMs' root level
+New:  KVM: x86: Update "last guest TSC" snapshot prior to
+[PATCH v10 01/21] KVM: x86: Update "last guest TSC" snapshot prior to
+Author: Sean Christopherson <seanjc@google.com>
+
+When refreshing the last observed guest TSC during a guest time update,
+write the snapshot before enabling IRQs, i.e. before enabling preemption.
+If the task is migrated between updating the local tsc_timestamp, e.g. to
+account for catch-up mode, and setting last_guest_tsc, kvm_arch_vcpu_load()
+would set the vCPU's TSC offset using the old last_guest_tsc.
+
+In practice, the bug is largely benign as it's not even strictly necessary
+for KVM to refresh last_guest_tsc when updating guest time, as KVM's goal
+is purely to prevent the guest from observing time jump backwards, i.e.
+super duper strictly speaking, KVM only *needs* to update last_guest_tsc in
+the VM-Exit path.
+
+In fact, the update kvm_guest_time_update() in wasn't even added to play
+nice with kvm_arch_vcpu_load(), it was added by commit 28e4639adf0c ("KVM:
+x86: Fix kvmclock bug") to fix code that no longer exists.  As of commit
+28e4639adf0c, kvm_guest_time_update() also consumed last_guest_tsc, to try
+and prevent guest time from jumping backwards.  That code was eventually
+removed by commit f25e656d31ad ("KVM: x86: fix tsc catchup issue with tsc
+scaling"), but the last_guest_tsc update hung around.
+
+Keep the update even though it's technically ok to drop the update, e.g. so
+that the tsc_catchup updates aren't lost, and so that the guest won't see a
+PV clock timestamp that appears to be in the future.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Cleaning up the KVM clock mess, part 1
+[PATCH v10 00/21] KVM: x86: Cleaning up the KVM clock mess, part 1
+Author: Sean Christopherson <seanjc@google.com>
+
+Part 1 of David's series to clean up the host-side mess of kvmclock.  The cut
+point in this version is still quite arbitrary, but what's left for "part 2" 
+fits nicely into 2-3 buckets:
+
+  1: Masterclock overhaul
+  2. New uAPI and tests
+
+v10:
+ - Drop the stale reference to using div_u64() for the now-removed CPUID leaf.
+   [Sashiko]
+ - Don't bother with a enabling the pvclock_gtod notifier on 32-bit, and go
+   straight to ktime_mono_to_any(). [Sashiko]
+
+v9:
+ - https://lore.kernel.org/all/20260810225500.869288-1-seanjc@google.com
+ - Pull in "Compute kvmclock base without pvclock_gtod_data" before "Avoid NTP
+   frequency skew for KVM clock on 32-bit host" to avoid having to provide what
+   is effectively an open-coded version of ktime_mono_to_any() to avoid data
+   races. [Sashiko].
+ - Pull in use of kernel timekeeping snapshots, split in three patches purely
+   to aid review and bisection.
+ - Check and clear KVM_REQ_MASTERCLOCK_UPDATE in kvm_arch_vcpu_postcreate().
+   [me, Sashiko]
+ - Add the missing return value in "Move "no master clock" fallback from...".
+   [Sashiko]
+
+v8:
+ - Obviously cut partway through the full series.
+ - Update commit references for 633d7652f80f ("KVM: x86/xen: Do not corrupt
+   KVM clock in kvm_xen_shared_info_init()").
+ - Chunk the "Restructure ..." patches into individual logical changes
+   ("Restructure kvm_guest_time_update() for TSC upscaling" in particular was
+   quite gnarly).
+ - Ensure the TSC+freq pair during guest time updates happens on a single
+   CPU. [Sashiko]
+ - Keep __get_kvmclock() as a masterclock-specific helper to avoid deep
+   indentation and gotos.
+ - Do waaaaay too much spelunking to try piece together the history of some
+   of the many warts.
+ - Ensure preemption is disabled in get_kvmclock() when getting the TSC freq.
+
+v7: https://lore.kernel.org/all/20260728144954.355376-1-dwmw2@infradead.org
+
+David Woodhouse (14):
+  KVM: x86: Improve accuracy of KVM clock when TSC scaling is in force
+  KVM: x86: Explicitly disable TSC scaling without CONSTANT_TSC
+  KVM: x86: Activate master clock immediately on vCPU creation
+  KVM: x86: Compute kvmclock base without pvclock_gtod_data
+  KVM: x86: Avoid NTP frequency skew for KVM clock on 32-bit host
+  KVM: x86: Wrap all of __get_kvmclock_master_clock() with
+    CONFIG_X86_64=y
+  KVM: x86: Fall back to non-master-clock if clockread fails in
+    get_kvmclock()
+  KVM: x86: Fix KVM clock precision in get_kvmclock() with TSC scaling
+  KVM: x86: Use get_kvmclock() in kvm_get_wall_clock_epoch()
+  KVM: x86: Fix compute_guest_tsc() to handle negative time deltas
+  KVM: x86: Upscale TSC to "now", not master clock when updating PV
+    clocks
+  KVM: x86: Simplify and comment kvm_get_time_scale()
+  KVM: x86: Remove implicit rdtsc() from kvm_compute_l1_tsc_offset()
+  KVM: x86: Use kernel timekeeping snapshots for getting kvmclock time
+    since boot
+
+Sean Christopherson (7):
+  KVM: x86: Update "last guest TSC" snapshot prior to enabling
+    IRQs/preemption
+  KVM: x86: Drop unnecessary CPU pinning when computing/getting kvmclock
+  KVM: x86: Move "no master clock" fallback from __get_kvmclock() to
+    get_kvmclock()
+  KVM: x86: Disable preemption, not IRQs, when getting TSC+freq pair
+  KVM: x86: Make master clock logic in guest PV clock updates 64-bit
+    only
+  KVM: x86: Use kernel timekeeping snapshot for monotonic clock
+  KVM: x86: Use kernel timekeeping snapshot to get walltime+TSC
+
+ arch/x86/include/asm/kvm_host.h |   6 +-
+ arch/x86/kvm/cpuid.c            |   1 +
+ arch/x86/kvm/msrs.c             |   3 +-
+ arch/x86/kvm/svm/svm.c          |   3 +-
+ arch/x86/kvm/vmx/vmx.c          |  10 +
+ arch/x86/kvm/x86.c              | 480 +++++++++++++++-----------------
+ arch/x86/kvm/x86.h              |   3 +-
+ 7 files changed, 240 insertions(+), 266 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nSVM: Reject KVM_SET_NESTED_STATE if L1 has
+[PATCH 1/4] KVM: nSVM: Reject KVM_SET_NESTED_STATE if L1 has
+Author: Sean Christopherson <seanjc@google.com>
+
+Reject KVM_SET_NESTED_STATE if the incoming L1 host state has what is
+effectively an impossible EFER combination of LMA=1 but LME=0, i.e. if the
+state says long mode is active but not enabled.  Unlike VMX, SVM doesn't
+have an explicit consistent check for the illegal combination; presumably
+hardware simply ignores EFER.LMA if EFER.LME=0.
+
+Unfortunately, KVM doesn't ignore EFER.LMA in this case and consumes the
+illegal state when constructing the shadow MMU for L2.  E.g. if userspace
+also clears CR4.PAE, then kvm_calc_cpu_role() will compute a role with 4 or
+5 levels of paging, but shadow_mmu_init_context() will wire up the MMU to
+use the paging32 template, which maxes out its levels at 2.
+
+Note, the "real badness" is effectively the same as what happened with the
+nVMX bug fixed by commit 112e66017bff ("KVM: nVMX: add missing consistency
+checks for CR0 and CR4").  Unfortunately, the sanity check added by commit
+72e2fb24a0b0 ("KVM: x86/mmu: Bug the VM if a vCPU ends up in long mode
+without PAE enabled") doesn't work for this case, since L2 state is active
+at the time of the page fault, but it's L1 that has the bad state.
+
+Fixes: cc440cdad5b7 ("KVM: nSVM: implement KVM_GET_NESTED_STATE and KVM_SET_NESTED_STATE")
+Cc: stable@vger.kernel.org
+Cc: Yosry Ahmed <yosry@kernel.org>
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/svm/nested.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: nSVM: Disallow bad L1 EFER for KVM_SET_NESTED_STATE
+[PATCH 0/4] KVM: nSVM: Disallow bad L1 EFER for KVM_SET_NESTED_STATE
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix a bug where KVM allows userspace to set an impossible EFER for L1 via
+KVM_SET_NESTED_STATE, which ultimately can lead to KVM misconfiguring L2's
+MMU (yay, NPT!) and overflowing the guest_walker arrays.  Then, harden the
+MMU against similar bugs (hopefully it works this time; nVMX also had a
+similar bug, but the "NPT uses L1's EFER/CR4" wrinkle rendered the existing
+hardening useless).
+
+Sean Christopherson (4):
+  KVM: nSVM: Reject KVM_SET_NESTED_STATE if L1 has EFER.LMA=1 &&
+    EFER.LME=0
+  KVM: x86/mmu: Bug the VM if KVM attempts to walk more levels than the
+    MMU has
+  KVM: x86/mmu: Bug the VM if KVM calcs a CPU role with EFER.LMA=1 &&
+    CR4.PAE=0
+  KVM: x86/mmu: Convert MMU walker's bounds check from BUG_ON() to
+    KVM_BUG_ON()
+
+ arch/x86/kvm/mmu/mmu.c         |  3 +++
+ arch/x86/kvm/mmu/paging_tmpl.h | 17 ++++++++++-------
+ arch/x86/kvm/svm/nested.c      |  1 +
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Check write tracking in all address spaces
+[PATCH 6.6.y 1/2] KVM: x86/mmu: Check write tracking in all address spaces
+Author: Artem Dinaburg <artem@trailofbits.com>
+
+
+commit 0f38453cdb2e17566ccb7c0f3dabd5bd21caca26 upstream.
+
+kvm_gfn_is_write_tracked() checks only the supplied memslot, but page
+tracking is per-address-space and shadow pages are shared across all
+address spaces.  With SMM, a GFN can therefore be write-tracked in one
+address space and appear untracked through the other.
+
+Check the supplied slot first, then the slot for the other address space.
+This ensures all callers honor write tracking regardless of the active
+address space.  In particular, it prevents mmu_try_to_unsync_pages() from
+marking an upper-level shadow page unsync and eventually triggering the
+BUG in pte_list_remove().
+
+Fixes: 699023e23965 ("KVM: x86: add SMM to the MMU role, support SMRAM address space")
+Assisted-by: Codex:GPT-5
+Signed-off-by: Jinu Kim <kimjw04271234@gmail.com>
+Message-ID: <20260721103512.2136240-2-kimjw04271234@gmail.com>
+[invert direction of the conditional. - Paolo]
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[ artem: adapt to 6.6, which has neither KVM_MAX_NR_ADDRESS_SPACES nor
+  kvm_arch_nr_memslot_as_ids(); use KVM_ADDRESS_SPACE_NUM instead. That
+  macro is CONFIG_KVM_SMM-conditional in 6.6, so the guard on
+  KVM_ADDRESS_SPACE_NUM > 1 around the peer-slot lookup is retained ]
+Signed-off-by: Artem Dinaburg <artem@trailofbits.com>
+---
+Target tree: linux-6.6.y (stable).
+
+Verified: applies to v6.6.153; arch/x86/kvm/mmu/page_track.o builds clean
+with CONFIG_KVM_SMM=y and with CONFIG_KVM_SMM=n.
+
+ arch/x86/kvm/mmu/page_track.c | 32 ++++++++++++++++++++++++++------
+ 1 file changed, 26 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH 6.6.y 1/2] KVM: x86/mmu: Check write tracking in all address spaces
+ Skip: [PATCH 6.6.y+6.1.y 0/2] KVM: x86/mmu: Check write tracking in all address spaces
+New:  KVM: x86: Zero reserved synic flags when delivering message
+[PATCH] KVM: x86: Zero reserved synic flags when delivering message
+Author: Sean Christopherson <seanjc@google.com>
+
+Ensure all reserved flags are zeroed when setting the msg_pending flag as
+part of SynIC message delivery, as setting only msg_pending can leak seven
+bits of kernel stack data to the guest.  E.g. gcc typically uses a
+bitwise-OR to set the msg_pending flag, without initializing the on-stack
+variable.
+
+Precisely zero the flags, e.g. as opposed to zeroing the entire structure,
+to make it somewhat more obvious that the flags *need* to be zeroed.  E.g.
+it would be quite easy to misread the initial read of guest memory and
+think that zeroing the entire structure is completely superfluous.
+
+Fixes: 3a0e7731724f ("x86: kvm: hyperv: simplify SynIC message delivery")
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/hyperv.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Harden against interpreting TDX vCPU as vcpu_vmx
+[PATCH v2 0/8] KVM: VMX: Harden against interpreting TDX vCPU as vcpu_vmx
+Author: Sean Christopherson <seanjc@google.com>
+
+Move and rename "all" (read: everything I could find) common helpers out of
+vmx.c and/or replace their vmx_ prefix with vt_, and then poison to_vmx() for
+all common .c files to harden KVM against misinterpreting a TDX vCPU as a VMX
+vCPU, i.e. consuming to_vmx() on a TDX vCPU.  Spotted when working through
+the bus lock series.
+
+As with v1, the TDX changes are compile-tested only.
+
+v2:
+ - Complete my train of though in patch 1's changelog. [Binbin]
+ - Rename vmx_handle_exit_irqoff() => vt_handle_exit_irqoff. [Binbin, Sashiko]
+ - Collect a review. [Binbin]
+ - Move and rename everything I could find, using a dummy "struct vcpu_vmx_tdx"
+   to allow relocating common inline helpers from vmx.h to common.h.
+
+v1: https://lore.kernel.org/all/20260814161129.2177118-1-seanjc@google.com
+
+Sean Christopherson (8):
+  KVM: VMX: Move the shared "IRQs off" exit handler(s) to common code
+  KVM: VMX: Move the shared NMI handler/trampoline to common code
+  KVM: VMX: Disallowing using to_vmx() in common VT code
+  KVM: VMX: Rename posted interrupt prefixes from "vmx" to "vt"
+  KVM: VMX: Rename EPT violation handler prefix from "vmx" to "vt"
+  KVM: VMX: Use dummy pseudo-overlay struct for to_vt() and vt_to_vcpu()
+  KVM: VMX: Move common VT getters/converters to common.h
+  KVM: VMX: Rename common exit info getters prefixes from "vmx" to "vt"
+
+ arch/x86/kvm/vmx/common.h      |  60 +++++++++++--
+ arch/x86/kvm/vmx/main.c        |  92 ++++++++++++++++++-
+ arch/x86/kvm/vmx/nested.c      |  36 ++++----
+ arch/x86/kvm/vmx/posted_intr.c |  20 +++--
+ arch/x86/kvm/vmx/posted_intr.h |   8 +-
+ arch/x86/kvm/vmx/tdx.c         |  32 +++----
+ arch/x86/kvm/vmx/vmx.c         | 155 ++++++++-------------------------
+ arch/x86/kvm/vmx/vmx.h         |  37 --------
+ arch/x86/kvm/vmx/x86_ops.h     |   1 -
+ 9 files changed, 227 insertions(+), 214 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: VMX: Move the shared "IRQs off" exit handler(s)
+[PATCH v2 1/8] KVM: VMX: Move the shared "IRQs off" exit handler(s)
+Author: Sean Christopherson <seanjc@google.com>
+
+Move vmx_handle_exit_irqoff() and its helpers to common.h / main.c to
+capture that it's a common handler and to allow guarding against incorrectly
+using to_vmx().
+
+Opportunistically use a "vt" prefix instead of "vmx" to communicate that
+it's a shared handler.
+
+No functional change intended.
+
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Binbin Wu <binbin.wu@linux.intel.com>
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h  |  6 ++++
+ arch/x86/kvm/vmx/main.c    | 71 +++++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/vmx/vmx.c     | 74 --------------------------------------
+ arch/x86/kvm/vmx/x86_ops.h |  1 -
+ 4 files changed, 76 insertions(+), 76 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Handle xarray binding errors
+[PATCH 0/2] KVM: guest_memfd: Handle xarray binding errors
+Author: Sean Christopherson <seanjc@google.com>
+
+Handle errors when inserting into guest_memfd's binding xarray, e.g. to
+do the right thing on ENOMEM.
+
+Patch 2 is a related cleanup to remove a superflous WRITE_ONCE() (unwinding
+the slot update on insertion failure isn't an option if the slot is observable,
+i.e. if the WRITE_ONCE() is actually necessary).
+
+Sean Christopherson (2):
+  KVM: guest_memfd: Gracefully handle xarray errors when binding a
+    memslot
+  KVM: guest_memfd: Drop superfluous WRITE_ONCE() when binding a memslot
+
+ virt/kvm/guest_memfd.c | 15 ++++++++++++---
+ 1 file changed, 12 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Gracefully handle xarray errors when
+[PATCH 1/2] KVM: guest_memfd: Gracefully handle xarray errors when
+Author: Sean Christopherson <seanjc@google.com>
+
+If inserting a memslot into a guest_memfd's bindings xarray fails,
+propagate the error back to the caller, i.e. fail memslot creation as well.
+Signalling success and continuing on with memslot creation results in
+use-after-free, as the guest_memfd instance will remain reachable via the
+memslot after the file is freed (kvm_gmem_release() won't nullify the file
+pointer due to lack of a valid binding).
+
+Opportunistically WARN and reject binding if KVM_MEMSLOT_GMEM_ONLY is
+already set, partly to guard against goofs elsewhere, but mostly so that
+KVM doesn't need to worry about clobbering flags when unwinding on failure.
+
+Fixes: a7800aa80ea4 ("KVM: Add KVM_CREATE_GUEST_MEMFD ioctl() for guest-specific backing memory")
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Reported-by: Dennis Tighe <dtighe@google.com>
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260823135031.4F6DC1F000E9%40smtp.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/guest_memfd.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Fix pre-fault and map private loops
+[PATCH v2 0/4] KVM: x86/mmu: Fix pre-fault and map private loops
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix a bug in the pre-fault path where KVM fails to reload an invalidated
+MMU root, which puts the KVM_PRE_FAULT_MEMORY task into an infinite loop
+(although it's breakable, so not fatal to the host).  My best guess is that
+the test started failing once PREEMPT_LAZY was enabled by default.  Note,
+the bug is *really* easy to repro with a to-be-proposed patch to have KVM
+do auto-pre-faulting[*], i.e. prefetch surrounding pages on fault.
+
+Then harden the similar "map private PFN" to also guard against unexpected
+root invalidations, because Sashiko keeps pointing out that it's theoretically
+possible for that code to end up in the same type of infinite loop.
+
+[*] https://lore.kernel.org/all/ao4CufEI_pRCjbMF@google.com
+
+v2:
+ - Collect reviews. [Rick, Kai]
+ - Tweak the slots_comment in kvm_tdp_mmu_map_private_pfn() to better capture
+   the nuances of KVM_REQ_MMU_FREE_OBSOLETE_ROOTS. [Rick]
+ - Call out in the changelog for patch 2 that simply warning on
+   KVM_REQ_MMU_FREE_OBSOLETE_ROOTS is flawed, but handled in a subsequent
+   patch. [Sashiko]
+ - Make it more clear that encountering retry in kvm_tdp_mmu_map_private_pfn()
+   can only happen if there are KVM bugs. [Rick]
+ - Set r to RET_PF_RETRY when a stale page fault is detected. [Sashiko]
+
+v1: https://lore.kernel.org/all/20260806214050.78058-1-seanjc@google.com
+
+Sean Christopherson (4):
+  KVM: x86/mmu: Reload MMU on *every* page pre-fault attempt/iteration
+  KVM: x86/mmu: Harden "map private PFN" against unexpected root
+    invalidation
+  KVM: x86/mmu: Top-up memory caches when retrying "map private PFN"
+  KVM: x86/mmu: Add sanity check to detect stale page faults in "map
+    private PFN"
+
+ arch/x86/kvm/mmu/mmu.c | 48 ++++++++++++++++++++++++++++--------------
+ 1 file changed, 32 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Reload MMU on *every* page pre-fault attempt/iteration
+[PATCH v2 1/4] KVM: x86/mmu: Reload MMU on *every* page pre-fault attempt/iteration
+Author: Sean Christopherson <seanjc@google.com>
+
+Reload the MMU (which is a nop if the MMU doesn't need to be reloaded) on
+every attempt to pre-fault a guest page, i.e. when the page fault path
+signals that the caller should retry.  If the synchronize_srcu_expedited()
+in kvm_invalidate_memslot() completes before kvm_vcpu_pre_fault_memory()
+grabs SRCU, but kvm_mmu_reload() in the pre-fault path completes before
+kvm_invalidate_memslot() triggers x86's "fast zap all", then the pre-fault
+task will reach kvm_tdp_page_prefault() with an invalid root.
+
+Attempting to fault-in memory with an invalid root ultimately puts
+kvm_tdp_page_prefault() into an infinite (breakable) retry loop, which
+manifests most obviously as a hang in the pre_fault_memory_test selftest,
+but also eventually causes RCU (SRCU?) to complain.
+
+  INFO: rcu_tasks detected stalls on tasks:
+  000000000cda47bd: .. nvcsw: 6/6 holdout: 1 idle_cpu: -1/25
+  task:pre_fault_memor state:R  running task     stack:12696
+  pid:95588 tgid:95588 ppid:95584  task_flags:0x400000 flags:0x00080801
+  Call Trace:
+   <TASK>
+   lock_release+0x4e/0x320
+   __get_user_pages+0x546/0xcd0
+   up_read+0x1b/0x30
+   get_user_pages_unlocked+0xee/0x350
+   hva_to_pfn+0xd3/0x3d0 [kvm]
+   lock_release+0x4e/0x320
+   xa_load+0x5c/0x170
+   xa_load+0x14c/0x170
+   __kvm_faultin_pfn+0xd9/0x130 [kvm]
+   lock_acquire+0x65/0x2b0
+   lock_release+0x4e/0x320
+   kvm_mmu_faultin_pfn+0x1e1/0x690 [kvm]
+   gup_fast_fallback+0x63e/0xdf0
+   kvm_tdp_page_fault+0xeb/0x140 [kvm]
+   kvm_mmu_do_page_fault+0x12e/0x200 [kvm]
+   kvm_arch_vcpu_pre_fault_memory+0x16e/0x200 [kvm]
+   kvm_vcpu_pre_fault_memory+0xc1/0x1f0 [kvm]
+   kvm_vcpu_pre_fault_memory+0x116/0x1f0 [kvm]
+   kvm_vcpu_ioctl+0x3a4/0x6b0 [kvm]
+   clockevents_program_event+0x5d/0x170
+   __se_sys_ioctl+0x6d/0xb0
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+   do_syscall_64+0x10a/0x480
+   __irq_exit_rcu+0x8e/0x140
+   entry_SYSCALL_64_after_hwframe+0x4b/0x53
+   </TASK>
+
+Fixes: 6e01b7601dfe ("KVM: x86: Implement kvm_arch_vcpu_pre_fault_memory()")
+Reviewed-by: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu/mmu.c | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Use __GLIBC__, not _GNU_SOURCE, to detect
+[PATCH] KVM: selftests: Use __GLIBC__, not _GNU_SOURCE, to detect
+Author: Sean Christopherson <seanjc@google.com>
+
+Use __GLIBC__ in the hardware disable test to detect when selftests are
+being built/linked against glibc and thus pthread_attr_setaffinity_np() is
+(hopefully) available.  As pointed out by Sashiko and Hisam, _GNU_SOURCE is
+effectively a "request" macro to enable functionality, whereas __GLIBC__ is
+an announcement of support and selftests' idiomatic way of guarding code
+that's specific to glibc.
+
+Fixes: 496779b54943 ("KVM: selftests: Pre-set threads affinity in hardware disable test when possible")
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260731201140.5AF0C1F00AC4@smtp.kernel.org
+Suggested-by: Hisam Mehboob <hisamshar@gmail.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/hardware_disable_test.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: vsie: Add VSIE SIGP ECALL and SRSI
+[PATCH v5 00/21] KVM: s390: vsie: Add VSIE SIGP ECALL and SRSI
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+In the IBM Z machine generation z17 the s390x architecture does have a
+VSIE Interpretation Extension Facility to improve guest-3
+guest performance.
+
+To exploit the machine support the guest-1 KVM needs to create and
+maintain shadow structures pointing to the original state descriptions
+and system control areas of currently running guest-3 configurations.
+These pointers are followed by the machines firmware and modifications
+of the original SCA for guest-3 (located in guest-2) are monitored and
+handled by firmware. This results in fewer VSIE exits.
+
+The SIGP orders EXTERNAL CALL (2) and SENSE RUNNING STATUS (21) can be
+handled if requested by the setting the ECA_SIGPI respective ECB_SRSI
+state description bits.
+
+The series includes some changes to the non ssca path as well.
+- original SCA pinning is lazily kept after exiting vsie
+- addr_to_page radix_tree usage is replaced by xarray
+
+**Performance Expectations**
+SIGP sense running instructions perform about −97% faster without the
+intercept. External call is harder to measure but about the same
+(faster) on the sending side.
+Entry/exit are within +-4% variation against the prior state.
+Only tested on shared systems so far, so the numbers are to be taken
+with caution.
+
+**Limitations**
+Due to no ESCA support in old g2 kernel and qemu the patches do
+introduce a limitation for setups with a unaware g2 when g1 KVM has
+ssca=1 the g2 kernel will report KVM_CAP_MAX_VCPUS=64.
+
+---
+Changes in v5:
+- Rebased to current master already containing dependency
+- Dropped "Guard against invalid CPU address" patch, replaced with
+  masking icpua usages - upper bits of icpua do not need to be checked
+- Switched patch order 05 <-> 06 as un/pin_scb() depends on
+  un/pin_guest_pages()
+- Fix data race on flags fields (reported by sashiko)
+- Remove addr_to_page usage on ssca path - vsie_pages are held in
+  vsie_sca
+- Change pin_guest_pages() to rc and out-parameter for clarity
+- Inject intercept into current cpu on bad secondary cpu flags
+- Harmonized method names (reset_vsie_page, init_vsie_page)
+- Extracted _shadow_sca() to make _shadow_sca_cpu() to make easier to
+  read
+- Fixed non ssca path loosing scao on reentry
+- Link to v4: https://patch.msgid.link/20260812-vsie-sigpi-v4-0-f19e49666315@linux.ibm.com
+
+Changes in v4:
+- Sorry for the spam!
+- Same code as v2 / v3, rebased to v7.2-rc7 so that sashiko can
+  definitely apply it and provide feedback
+- Removed dependency on change-id: 20260716-vsie-cleanup-202607-8690ba7ac3ea:v1
+- Link to v3: https://patch.msgid.link/20260811-vsie-sigpi-v3-0-45aa1ab07c7c@linux.ibm.com
+
+Changes in v3:
+- Same code as v2, just rebased to kvms390/next so that sashiko can
+  apply it and provide feedback
+- Link to v2: https://patch.msgid.link/20260810-vsie-sigpi-v2-0-e8d59a2f2f70@linux.ibm.com
+
+Changes in v2:
+
+Changes requested by Janosch (Thanks!)
+- First 3 commits split out to its own vsie-cleanup series
+- Re-split main code into commits a bit differently and hopefully easier
+- Renamed sclp bit to has_vsie_interp_extf
+- Renamed module parameter to ssca
+- Renamed arch struct variable to ssca
+- Add head and tail struct groups in struct vsie_sca
+- Make writes to ssca atomic
+- Add patch introducing SCA_ALIGNMENT_SHIFT
+- Force vsie_sca->ssca offset to 0 instead of complex assertion
+- Do not error out on scb_addr 0 (architecture compliant)
+- move VSIE_PAGE_PINNED const
+- decrease sca_o_nr_pages variable size
+
+- Fixed Sashiko findings
+  - allow 4 page esca if properly aligned
+  - put sca on error in get_vsie_sca()
+  - force reshadow on _shadow_sca() fail
+  - unpin when destroy vsie_page
+  - fix locking in sca change cases
+  - fix writeback of SCAO in unpin_blocks() if g3 does not use 64bscao
+  - fix err goto from shadow_sca()
+  - set validity on shadow sca from pin_blocks()
+  - remove vsie_page mention from comment
+  - fix get_sca_entry_addr() for sca pages 2-5
+  - fixed commit message, fix double read conditions for configuration values
+  - use xarray insert instead of store and change alloc flags to *_ACCOUNT
+  - fix double read conditions for max_sc* configuration values
+  - empty xarrays on destroy
+  - correct stat counter increments
+- Link to v1: https://lore.kernel.org/r/20260709-vsie-sigpi-v1-0-ea9f12066408@linux.ibm.com
+
+Changes from RFC:
+- fix locking and vsie_page reuse to run stable
+- pull some methods out of the main patch to simplify the review
+- rework kvm_s390_handle_vsie() to allocate vsie_sca first to store
+  vsie_page references directly
+- move sie_uses_esca() to patch 1 as it is used there as well - thanks
+  Eric
+- change pointers in {read,write}_scao() to generic 'unsigned long' to
+  not imply gpa or hpa as it can in fact be either depending on the
+  situation - thanks Claudio
+- simplify code in sca_mcn_equals() using memcmp() - thanks Janosch
+- copy mcn into vsie_sca using memcpy() instead of loop
+- only shadow sca if the g3 wants and can to use sigpif - thanks Janosch
+- change vsie_sca->ssca from pointer to embedded struct to as vsie_sca
+  is only needed when we actually also want the ssca
+- fix kvm_s390_handle_vsie() cleanup order
+- rename sca variables to vsie_sca
+- cleanup error paths
+- adjust some comments
+
+To: kvm@vger.kernel.org
+To: linux-s390@vger.kernel.org
+Cc: Alexander Gordeev <agordeev@linux.ibm.com>
+Cc: Christian Borntraeger <borntraeger@linux.ibm.com>
+Cc: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: Eric Farman <farman@linux.ibm.com>
+Cc: Heiko Carstens <hca@linux.ibm.com>
+Cc: Janosch Frank <frankja@linux.ibm.com>
+Cc: Nico Boehr <nrb@linux.ibm.com>
+Cc: Sven Schnelle <svens@linux.ibm.com>
+Cc: Vasily Gorbik <gor@linux.ibm.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Shuah Khan <shuah@kernel.org>
+Cc: Sean Christopherson <seanjc@google.com>
+
+---
+Christoph Schlameuss (21):
+      KVM: s390: vsie: Add SCAO read and write helpers
+      KVM: s390: vsie: Move SCAO validation into a function
+      KVM: s390: vsie: Add vsie_interp_extf detection
+      KVM: s390: vsie: Add ssca_block and ssca_entry structs
+      KVM: s390: vsie: Move pin/unpin guest page
+      KVM: s390: vsie: Move pin/unpin_scb methods
+      KVM: s390: vsie: Move release/acquire gmap shadow
+      KVM: s390: vsie: Create helpers to alloc and free vsie_pages
+      KVM: s390: vsie: Replace radix_tree with xarray addr_to_page
+      KVM: s390: vsie: Refactor kvm_s390_vsie_destroy and extract reusable methods
+      KVM: s390: vsie: Add helper reset_vsie_page() and unshadow_intercept()
+      KVM: s390: vsie: Add helper unshadow_intercept()
+      KVM: s390: vsie: Lazily keep original scb pinned after vsie exit
+      KVM: s390: vsie: Add helper to pin and unpin multiple guest pages
+      KVM: s390: vsie: Add struct vsie_sca with pin and unpin methods
+      KVM: s390: vsie: Shadow VSIE SCA in guest-1
+      KVM: s390: vsie: Allow guest-3 cpu add and remove with ssca
+      KVM: s390: vsie: Add VSIE max shadow configuration
+      KVM: s390: vsie: Add VSIE shadow stat counters
+      KVM: s390: vsie: Create minimal scb shadows for not running g3 blocks
+      KVM: s390: vsie: Enable use of VSIE SSCA
+
+ arch/s390/include/asm/kvm_host_s390.h          |   28 +-
+ arch/s390/include/asm/kvm_host_s390_types.h    |   28 +-
+ arch/s390/include/asm/sclp.h                   |    1 +
+ arch/s390/kvm/s390/s390.c                      |   15 +-
+ arch/s390/kvm/s390/vsie.c                      | 1311 +++++++++++++++++++-----
+ drivers/s390/char/sclp_early.c                 |    1 +
+ tools/testing/selftests/kvm/include/s390/sie.h |    2 +-
+ 7 files changed, 1111 insertions(+), 275 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: vsie: Add SCAO read and write helpers
+[PATCH v5 01/21] KVM: s390: vsie: Add SCAO read and write helpers
+Author: Christoph Schlameuss <schlameuss@linux.ibm.com>
+
+Introduce some small helper functions to get and set the system control
+area origin address from the SIE control block.
+
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+---
+ arch/s390/kvm/s390/vsie.c | 26 +++++++++++++++++++-------
+ 1 file changed, 19 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Add a helper to read a vCPU's APIC ID
+[PATCH v2 1/2] KVM: selftests: Add a helper to read a vCPU's APIC ID
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Reading a vCPU's APIC ID from the host means open coding KVM_GET_LAPIC and
+picking the field out of the register block, which several tests already
+do.  Add a helper next to the other APIC definitions so that a test that
+needs to target a vCPU, e.g. to send it an IPI, can just ask for its ID.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ tools/testing/selftests/kvm/include/x86/apic.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Actually test PV_UNHALT
+[PATCH v2 0/2] KVM: selftests: Actually test PV_UNHALT
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+test_pv_unhalt() only checks that KVM clears KVM_FEATURE_PV_UNHALT from
+guest CPUID when HLT-exiting is disabled; the feature itself has never
+been exercised, hence the FIXME.  Patch 2 tests it by halting one vCPU
+with interrupts disabled and kicking it from another, so that reaching the
+instruction after HLT is proof that KVM_HC_KICK_CPU was delivered.
+
+Patch 1 adds the helper that patch 2 needs to learn a vCPU's APIC ID from
+the host, rather than open coding KVM_GET_LAPIC as a few tests already do.
+
+Changes in v2:
+ - Pass the APIC ID to kick in a1, not a0.  KVM reads it from a1, as the
+   in-kernel guest does in kvm_kick_cpu(), so v1 asked KVM to kick APIC ID
+   0 and only passed because the halting vCPU happened to be vCPU 0.
+   Spotted by the Sashiko AI reviewer.
+ - Halt on a vCPU with a non-zero APIC ID, so that a kick sent to the wrong
+   vCPU can no longer pass by accident, and enable that vCPU's APIC, as a
+   guest using PV spinlocks would: KVM only routes the kick once the vCPU
+   is in the APIC map, which is also why xapic_ipi_test enables it.
+ - Move the APIC ID helper into apic.h instead of keeping it private to
+   the test (new patch 1).
+ - Report the return value of pthread_create()/pthread_join() rather than
+   errno; they return the error directly and do not set errno.
+
+Built and run on x86_64 (AMD).  Untested on Intel, though the kick is
+handled in common code and delivered through the generic LAPIC path.
+
+ - On kvm-x86/next, the whole selftest suite builds warning-free and
+   kvm_pv_test passed 10 of 10 runs.
+
+ - Also run inside a VM booted on a kernel built from kvm-x86/next, i.e.
+   against the KVM this targets rather than the host's.
+
+ - Whole x86 suite with the series applied: 61 passed, 24 skipped, and
+   set_sregs_test failed with "KVM allowed invalid efer bit (0x100)".  That
+   one fails identically without the series, i.e. it is the host kernel.
+
+The test was checked against four deliberate breakages, to make sure it
+can only pass when the kick really works:
+
+ - pass the APIC ID in a0, i.e. the v1 bug: the kick goes to the wrong
+   vCPU and the test times out, so this version does catch it;
+
+ - drop the KVM_HC_KICK_CPU call: the halted vCPU is never resumed and the
+   test times out;
+
+ - clear PV_UNHALT from the kicking vCPU's CPUID while enforcement is on:
+   the hypercall returns -KVM_ENOSYS and the test fails with
+
+     0xfffffffffffffc18 != 0x0 (kvm_hypercall(KVM_HC_KICK_CPU, ...) != 0)
+
+ - remove the halt: the bounded wait trips and the test fails with
+   "vCPU never halted" rather than hanging.
+
+Hemanth Selam (2):
+  KVM: selftests: Add a helper to read a vCPU's APIC ID
+  KVM: selftests: Test the PV_UNHALT feature, not just its CPUID bit
+
+ tools/testing/selftests/kvm/include/x86/apic.h |  9 ++
+ tools/testing/selftests/kvm/x86/kvm_pv_test.c  | 97 +++++++++++++++++++++-
+ 2 files changed, 105 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Test the PV_UNHALT feature, not just its CPUID bit
+[PATCH] KVM: selftests: Test the PV_UNHALT feature, not just its CPUID bit
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+test_pv_unhalt() only checks that KVM clears KVM_FEATURE_PV_UNHALT from
+guest CPUID when HLT-exiting is disabled.  The feature itself has never
+been exercised, hence the FIXME.
+
+Add a two vCPU test for it.  The first vCPU halts with interrupts
+disabled, so nothing except the KVM_HC_KICK_CPU issued by the second can
+resume it: KVM delivers the kick as APIC_DM_REMRD, which sets pv_unhalted
+and makes the vCPU runnable without injecting an interrupt.  Reaching the
+instruction after HLT is therefore proof that the kick arrived.
+
+Wait for the halter's halt_exits to tick before kicking so that the kick
+lands on a vCPU that has actually halted, and bound the wait so a vCPU
+that never halts fails the test instead of hanging it.
+
+The kicking vCPU runs with KVM_CAP_ENFORCE_PV_FEATURE_CPUID enabled and
+PV_UNHALT advertised, so that KVM services the hypercall because the
+feature is exposed rather than because enforcement is off.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+Built and run on x86_64 (AMD).  Untested on Intel, though the kick is
+handled in common code and delivered through the generic LAPIC path.
+
+ - On kvm-x86/next, built warning-free and passed 10 of 10 runs, and 20 of
+   20 runs on a mainline build.
+
+ - Also run inside a VM booted on a kernel built from kvm-x86/next, so
+   against the KVM this targets rather than the host's: 6 of 6 runs passed,
+   which also exercises the halt/kick ordering under much slower timing.
+
+ - Whole x86 selftest suite with this applied: 61 passed, 24 skipped, and
+   set_sregs_test failed with "KVM allowed invalid efer bit (0x100)".  That
+   one fails identically with this patch reverted, i.e. it is the host
+   kernel, not this change.
+
+The test was checked against three deliberate breakages, to make sure it
+can only pass when the kick really works:
+
+ - drop the KVM_HC_KICK_CPU call from the kicking vCPU: the halted vCPU is
+   never resumed and the test times out, i.e. nothing else wakes it;
+
+ - clear PV_UNHALT from the kicking vCPU's CPUID while enforcement is on:
+   the hypercall returns -KVM_ENOSYS and the test fails with
+
+     0xfffffffffffffc18 != 0x0 (kvm_hypercall(KVM_HC_KICK_CPU, ...) != 0)
+
+ - remove the halt from the halting vCPU: the bounded wait trips and the
+   test fails with "vCPU never halted" rather than hanging.
+
+The explicit vcpu_set_cpuid_feature() is redundant today, since KVM
+advertises PV_UNHALT by default while HLT-exiting is enabled - verified by
+asserting on it - but it keeps the test honest if that ever changes.
+
+ tools/testing/selftests/kvm/x86/kvm_pv_test.c | 93 ++++++++++++++++++-
+ 1 file changed, 92 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Remove always true ifdef
+[PATCH] KVM: TDX: Remove always true ifdef
+Author: Nikolay Borisov <nik.borisov@suse.com>
+
+CONFIG_KVM_INTEL_TDX depends on KVM_TDX_HOST, which in turn depends on
+CONFIG_X86_64. So it's guaranteed that any code under ifdef
+CONFIG_KVM_INTEL_TDX is also running under CONFIG_X86_64 being true,
+remove pointless ifdef guard.
+
+Signed-off-by: Nikolay Borisov <nik.borisov@suse.com>
+---
+ arch/x86/kvm/vmx/main.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  guest_memfd: In-place conversion support
+[PATCH v11 00/46] guest_memfd: In-place conversion support
+Author: Ackerley Tng <ackerleytng@google.com>
+
+Here's v11, thanks everyone for the reviewing and testing!  We're at
+~5 weeks to soft-close at 7.3-rc5 for the 7.4 merge.
+
+v11 is based on kvm-x86/next, and a cherry-picked version of David's
+refactoring patch [6], and is now dependent on another series [5],
+which makes kvm_gmem_get_pfn() NOT return a refcounted page to KVM.
+
+Here's everything stitched together for your convenience:
+
+https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-v11
+
+v11 changes:
+
++ Added this to "KVM: guest_memfd: Introduce per-gmem attributes, use
+    to guard user mappings" as Yan requested In kvm_gmem_get_pfn(),
+    drop the folio refcount before releasing
+    filemap_invalidate_lock(). This ensures that a competing
+    conversion request from userspace (to be added in a later patch),
+    which also takes the filemap_invalidate_lock(), will never see an
+    elevated refcount due to kvm_gmem_get_pfn().
++ Added patch "KVM: Rename kvm_mem_is_private() to
+  kvm_is_private_gfn()"
+    + I added it before "KVM: Provide generic interface for checking
+      memory private/shared status", so that this second patch can
+      clarify the VM version for kvm_is_private_gfn() to
+      kvm_vm_is_private_gfn()
+    + In summary, we have
+        + kvm_is_private_gfn(kvm, gfn), kvm_vm_is_private_gfn(kvm,
+          gfn), kvm_gmem_is_private_gfn(kvm, gfn)
+		+ kvm_gmem_is_private_mem(inode, index): called by
+          kvm_gmem_is_private_gfn(kvm, gfn)
++ Added documentation for module parameter
+  kvm.gmem_in_place_conversion in "KVM: Let userspace disable per-VM
+  mem attributes, enable per-gmem attributes" as discussed by Yan and
+  Sean in [1]. I was reminded after more discussions on v10 [2][3].
++ Added Sean's patch "KVM: guest_memfd: Invalidate both SHARED and
+  PRIVATE mappings", then a no-functional-change patch to allow filter
+  to be passed to kvm_gmem_invalidate_start(), then the actual patch
+  that introduces conversions.
++ Split out a patch that just updates private_mem_conversions_test to
+  support gmem_in_place_conversion, as Xiaoyao suggested
++ I realized that in the v10 patch "Update
+  private_mem_conversions_test to mmap() guest_memfd", the requirement
+  to have src_type be VM_MEM_SRC_SHMEM is an artificial
+  requirement. If private_mem_conversions_test and vm_mem_add()
+  figured out alignment correctly for guest_memfd in-place conversion,
+  that requirement could be removed. Added a new patch "KVM:
+  selftests: Set up page size and alignment independently for
+  guest_memfd".
++ Renamed v10 patch "Update private_mem_conversions_test to mmap()
+  guest_memfd" to "KVM: selftests: Test in-place conversions in
+  private_mem_conversions_test" to better reflect what changed.
++ Regarding conversions of the VMSA page, Sashiko pointed out
+  something in the prereq patch series "Stop returning struct page
+  from guest_memfd PFN lookup". That turned out to already be handled.
+  :) kvm_gmem_invalidate_start eventually calls
+  sev_gmem_invalidate_range(), which ensures that if a VMSA page is
+  being converted, the vCPU associated with the VMSA page will not be
+  allowed to enter the guest until kvm_gmem_invalidate_end(). This
+  allows kvm_gmem_make_shared() and eventually rmp_make_shared() to
+  never fail due to a VMSA page being in-use (since the vCPU using the
+  VMSA page was prevented from running). Conversions fit right into
+  the invalidate_start and invalidate_end model :).
+
+Here's v11 with extra tests:
+
+https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-coco-selftests-v11
+
+Tested with both CONFIG_KVM_VM_MEMORY_ATTRIBUTES enabled and disabled:
+
++ tools/testing/selftests/kvm/guest_memfd_test.c
++ tools/testing/selftests/kvm/pre_fault_memory_test.c
++ tools/testing/selftests/kvm/x86/guest_memfd_conversions_test.c
++ tools/testing/selftests/kvm/x86/private_mem_conversions_test.c
++ tools/testing/selftests/kvm/x86/private_mem_kvm_exits_test.c
+
+Also tested ./gmem_convert_fault_race (this test is not for merging)
+
+This test reproduces the race that Yan brought up in v10 of this
+series (without TDX), where a vCPU faulting in a page using
+kvm_gmem_get_pfn() would cause conversion failures.
+
+The test has 4 vCPUs continuously try to fault in the pages while
+conversion to private is attempted. Each attempt is a shared to
+private conversion. In between attempts, the entire range is converted
+back to shared in preparation for the next attempt.
+
+Without patch series "Stop returning struct page from guest_memfd PFN
+lookup", the race causes conversions to fail with -EAGAIN quite
+quickly:
+
+Random seed: 0x704e99ea
+Reproduced -EAGAIN on attempt 1374 at error_offset 0x30000
+
+Random seed: 0x3123e3de
+Reproduced -EAGAIN on attempt 983 at error_offset 0x137000
+
+Random seed: 0x2900e25d
+Reproduced -EAGAIN on attempt 870 at error_offset 0x1e1000
+
+Random seed: 0x721a2540
+Reproduced -EAGAIN on attempt 1571 at error_offset 0x1ce000
+
+Random seed: 0x46db97b4
+Reproduced -EAGAIN on attempt 6601 at error_offset 0x1af000
+
+Random seed: 0x7eca9fbd
+Reproduced -EAGAIN on attempt 5894 at error_offset 0x19c000
+
+Random seed: 0x41355a8a
+Reproduced -EAGAIN on attempt 369 at error_offset 0x15a000
+
+With patch series, within 10000 iterations there's no -EAGAIN:
+
+Random seed: 0x51fb3075
+__vm_create: mode='PA-bits:ANY, VA-bits:48 or 57, 4K pages' type='1', pages='674'
+Guest physical address width detected: 46
+Guest virtual address width detected: 48
+==== Test Assertion Failure ====
+  gmem_convert_fault_race.c:170: iter < iterations
+  pid=243 tid=243 errno=0 - Success
+     1  0x0000000000243215: test_gmem_convert_fault_race at gmem_convert_fault_race.c:168
+     2   (inlined by) main at gmem_convert_fault_race.c:198
+     3  0x0000000000267022: __libc_start_call_main at dsa.c:?
+     4  0x000000000026919c: __libc_start_main at dsa.c:?
+     5  0x0000000000242ba0: _start at ??:?
+  Failed to reproduce -EAGAIN within 10000 attempts
+
+[1] https://lore.kernel.org/all/aj7NwCRwWEfLK-gQ@google.com/
+[2] https://lore.kernel.org/all/ed483d25-d908-4248-b8c7-862dd35dc6d4@kernel.org/
+[3] https://lore.kernel.org/all/a410cca6-0776-44af-8353-9b7375e2fd4e@intel.com/
+[4] https://lore.kernel.org/all/CAEvNRgH5ZQPGYzg+YdtEktZ72DgK9PBbzcmC_QFN6M0_6wuo1w@mail.gmail.com/
+[5] https://lore.kernel.org/all/20260820-gmem-no-return-page-v3-0-3bf8f80a7b4d@google.com/
+[6] https://lore.kernel.org/all/20260825015337.B58AD1F000E9@smtp.kernel.org/
+
+Older series:
+
+v10: https://lore.kernel.org/r/20260807-gmem-inplace-conversion-v10-0-2fc18ee6d3ba@google.com
+v9: https://lore.kernel.org/r/20260728-gmem-inplace-conversion-v9-0-35f9aec2aed2@google.com
+v8: https://lore.kernel.org/r/20260618-gmem-inplace-conversion-v8-0-9d2959357853@google.com
+v7: https://lore.kernel.org/r/20260522-gmem-inplace-conversion-v7-0-2f0fae496530@google.com
+v6: https://lore.kernel.org/r/20260507-gmem-inplace-conversion-v6-0-91ab5a8b19a4@google.com
+RFC v5: https://lore.kernel.org/r/20260428-gmem-inplace-conversion-v5-0-d8608ccfca22@google.com
+RFC v4: https://lore.kernel.org/all/20260326-gmem-inplace-conversion-v4-0-e202fe950ffd@google.com/T/
+RFC v3: https://lore.kernel.org/r/20260313-gmem-inplace-conversion-v3-0-5fc12a70ec89@google.com/T/
+RFC v2: https://lore.kernel.org/all/cover.1770071243.git.ackerleytng@google.com/T/
+RFC v1: https://lore.kernel.org/all/cover.1760731772.git.ackerleytng@google.com/T/
+
+Previous versions of this feature, part of other series, are available at:
+
++ https://lore.kernel.org/all/bd163de3118b626d1005aa88e71ef2fb72f0be0f.1726009989.git.ackerleytng@google.com/
++ https://lore.kernel.org/all/20250117163001.2326672-6-tabba@google.com/
++ https://lore.kernel.org/all/b784326e9ccae6a08388f1bf39db70a2204bdc51.1747264138.git.ackerleytng@google.com/
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (23):
+      KVM: Rename kvm_mem_is_private() to kvm_is_private_gfn()
+      KVM: guest_memfd: Pass mapping type filter to invalidation helper
+      KVM: guest_memfd: Add base support for KVM_SET_MEMORY_ATTRIBUTES2
+      KVM: guest_memfd: Ensure pages are not in use before conversion
+      KVM: guest_memfd: Call arch make_shared callback for to-shared conversion
+      KVM: guest_memfd: Return early if range already has requested attributes
+      KVM: guest_memfd: Handle lru_add fbatch refcounts during conversion safety check
+      KVM: guest_memfd: Zero page while getting pfn
+      KVM: TDX: Make source page optional for KVM_TDX_INIT_MEM_REGION
+      KVM: selftests: Test basic single-page conversion flow
+      KVM: selftests: Test conversion flow when INIT_SHARED
+      KVM: selftests: Test conversion precision in guest_memfd
+      KVM: selftests: Test conversion before allocation
+      KVM: selftests: Convert with allocated folios in different layouts
+      KVM: selftests: Test that truncation does not change shared/private status
+      KVM: selftests: Add helpers to pin pages with CONFIG_GUP_TEST
+      KVM: selftests: Test conversion with elevated page refcount
+      KVM: selftests: Reset shared memory after hole-punching
+      KVM: selftests: Provide function to look up guest_memfd details from gpa
+      KVM: selftests: Make TEST_EXPECT_SIGBUS thread-safe
+      KVM: selftests: Support guest_memfd attributes in private_mem_conversions_test
+      KVM: selftests: Set up page size and alignment independently for guest_memfd
+      KVM: selftests: Test in-place conversions in private_mem_conversions_test
+
+David Hildenbrand (Arm) (1):
+      mm/gup: factor out LRU cache draining for folio into lru_cache_drain_for_folio()
+
+Michael Roth (1):
+      KVM: SEV: Make 'uaddr' parameter optional for KVM_SEV_SNP_LAUNCH_UPDATE
+
+Sean Christopherson (21):
+      KVM: guest_memfd: Optimize away conversion overheads via dead-code elimination
+      KVM: guest_memfd: Use kvm_mem_is_private() when populating guest_memfd memory
+      KVM: guest_memfd: Introduce per-gmem attributes, use to guard user mappings
+      KVM: Rename KVM_GENERIC_MEMORY_ATTRIBUTES to KVM_VM_MEMORY_ATTRIBUTES
+      KVM: Enumerate support for PRIVATE memory iff kvm_arch_has_private_mem is defined
+      KVM: Rename memory attribute APIs to prepare for in-place gmem conversion
+      KVM: Provide generic interface for checking memory private/shared status
+      KVM: guest_memfd: Stub in ability to enable in-place shared<=>private conversion
+      KVM: Consolidate private memory and guest_memfd ifdeffery in kvm_host.h
+      KVM: guest_memfd: Invalidate both SHARED and PRIVATE mappings for in-place conversions
+      KVM: Move KVM_VM_MEMORY_ATTRIBUTES config definition to x86
+      KVM: Let userspace disable per-VM mem attributes, enable per-gmem attributes
+      KVM: guest_memfd: Enable INIT_SHARED on guest_memfd for x86 Coco VMs
+      KVM: selftests: Create gmem fd before "regular" fd when adding memslot
+      KVM: selftests: Rename guest_memfd{,_offset} to gmem_{fd,offset}
+      KVM: selftests: Add support for mmap() on guest_memfd in core library
+      KVM: selftests: Add selftests global for guest memory attributes capability
+      KVM: selftests: Add helpers for calling ioctls on guest_memfd
+      KVM: selftests: Test that shared/private status is consistent across processes
+      KVM: selftests: Provide common function to set memory attributes
+      KVM: selftests: Update private memory exits test to work with per-gmem attributes
+
+ Documentation/admin-guide/kernel-parameters.txt    |  25 +
+ Documentation/virt/kvm/api.rst                     |  85 +++-
+ .../virt/kvm/x86/amd-memory-encryption.rst         |  14 +-
+ Documentation/virt/kvm/x86/intel-tdx.rst           |   4 +
+ arch/x86/include/asm/kvm-x86-ops.h                 |   2 +-
+ arch/x86/include/asm/kvm_host.h                    |   9 +-
+ arch/x86/kvm/Kconfig                               |  15 +-
+ arch/x86/kvm/mmu/mmu.c                             |  28 +-
+ arch/x86/kvm/svm/sev.c                             |  13 +-
+ arch/x86/kvm/vmx/tdx.c                             |   8 +-
+ arch/x86/kvm/x86.c                                 |  20 +-
+ include/linux/kvm_host.h                           |  83 ++--
+ include/linux/swap.h                               |  11 +-
+ include/trace/events/kvm.h                         |   6 +-
+ include/uapi/linux/kvm.h                           |  16 +
+ mm/gup.c                                           |  20 +-
+ mm/swap.c                                          |  48 ++
+ tools/testing/selftests/kvm/Makefile.kvm           |   1 +
+ tools/testing/selftests/kvm/include/kvm_util.h     | 139 +++++-
+ tools/testing/selftests/kvm/include/test_util.h    |  32 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c         | 222 +++++----
+ tools/testing/selftests/kvm/lib/test_util.c        |   7 -
+ .../kvm/x86/guest_memfd_conversions_test.c         | 512 +++++++++++++++++++++
+ .../kvm/x86/private_mem_conversions_test.c         |  82 +++-
+ .../selftests/kvm/x86/private_mem_kvm_exits_test.c |  36 +-
+ virt/kvm/Kconfig                                   |   3 -
+ virt/kvm/guest_memfd.c                             | 467 +++++++++++++++++--
+ virt/kvm/kvm_main.c                                |  92 ++--
+ 28 files changed, 1701 insertions(+), 299 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Optimize away conversion
+[PATCH v11 01/46] KVM: guest_memfd: Optimize away conversion
+Author: Ackerley Tng <ackerleytng@google.com>
+
+
+Add and use kvm_arch_has_gmem_convert() to guard guest_memfd's invocation
+of arch hooks related to converting memory between private and shared, as
+only one half of the x86 CoCo duo needs the runtime hooks (any pre-work is
+pure overhead for TDX).  At this exact moment, the overhead is negligible,
+but that will change when in-place conversion comes along, at which point
+to-shared conversions will "need" to find all affected folios prior to
+calling into arch code.  In quotes because very technically that work could
+be pushed to arch code, but that would bleed guest_memfd details into arch
+code and would be far worse than adding yet another kvm_arch_has... hook.
+
+Opportunistically provide the kvm_arch_gmem_make_private() declaration, and
+rely on dead-code elimination to eliminate the call to non-existent code
+when CONFIG_HAVE_KVM_ARCH_GMEM_CONVERT=n.
+
+Reported-by: Binbin Wu <binbin.wu@linux.intel.com>
+Closes: https://lore.kernel.org/all/1ec08cd8-3072-4753-ad5e-cd34956647f8@linux.intel.com
+Suggested-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 3 +++
+ include/linux/kvm_host.h        | 3 ++-
+ virt/kvm/guest_memfd.c          | 5 ++---
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: Treat unassigned RMP entry as benign race on
+[PATCH v4 1/5] KVM: SEV: Treat unassigned RMP entry as benign race on
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM attempts to split a 2MB page via PSMASH.
+If PSMASH fails, the only expected return value is FAIL_BADADDR, which does
+not distinguish the reason for the bad address. Hence, another RMP entry
+lookup is required to determine whether the failure was benign.
+
+Specifically, KVM re-checks the RMP entry to determine if another CPU raced
+and already smashed the entry into 4KB pages.
+
+A concurrent operation (such as guest_memfd truncation or hole punching)
+can also race and transition the page to shared, removing the page from the
+RMP table and causing PSMASH to fail. This can happen even if the page is
+still referenced by KVM, because guest_memfd reclaim transitions the RMP
+entry to shared when the folio is removed from the page cache.
+
+Treat an unassigned RMP entry as an expected race when re-checking after a
+failed PSMASH, and skip logging an error warning.
+
+Fixes: c63cf135cc99 ("KVM: SEV: Add support to handle RMP nested page faults")
+Reviewed-by: Michael Roth <michael.roth@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Stop returning struct page from guest_memfd PFN lookup
+[PATCH v4 0/5] Stop returning struct page from guest_memfd PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+v4 splits out a new patch (3) that makes use of KVM MMU invalidation logic
+introduced into the RMP fault handling in patch 2 to avoid warning on a
+benign case.
+
+Other changes in v4:
+
++ Took Sean's version of the changelog for patch 2
++ Picked up Fuad's Reviewed-by: and Tested-by:
+
+v3: https://patch.msgid.link/20260820-gmem-no-return-page-v3-0-3bf8f80a7b4d@google.com
+v2: https://patch.msgid.link/20260818-gmem-no-return-page-v2-0-5298f42d49bb@google.com
+v1: https://patch.msgid.link/20260818-gmem-no-return-page-v1-0-4f8d939efdbc@google.com
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (3):
+      KVM: SEV: Treat unassigned RMP entry as benign race on PSMASH failure
+      KVM: SEV: Check for invalidation before warning on unassigned RMP entry
+      KVM: SEV: Drop page refcount early in VMSA reload
+
+Sean Christopherson (2):
+      KVM: SEV: Drop page refcount early during RMP fault handling
+      KVM: guest_memfd: Stop returning struct page from PFN lookup
+
+ arch/arm64/kvm/mmu.c     |  4 +---
+ arch/arm64/kvm/nested.c  |  4 ++--
+ arch/x86/kvm/mmu/mmu.c   |  2 +-
+ arch/x86/kvm/svm/sev.c   | 53 ++++++++++++++++++++++++++++--------------------
+ include/linux/kvm_host.h |  6 ++----
+ virt/kvm/guest_memfd.c   |  9 ++------
+ 6 files changed, 39 insertions(+), 39 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: riscv: Fix NACL hfence entry update order
+[PATCH] KVM: riscv: Fix NACL hfence entry update order
+Author: Zongmin Zhou <min_halo@163.com>
+
+
+The SBI v3.0 specification (section 15.1.2) requires a nested HFENCE
+entry to be populated as follows:
+1) find an unused entry with Config.Pending == 0
+2) update the Page_Number and Page_Count words
+3) update the Config word with Config.Pending set
+
+__kvm_riscv_nacl_hfence() writes the Config word first, so the SBI
+implementation (or NACL hardware) can observe a pending entry with
+pnum/pcount values left over from the previous use of that entry,
+resulting in incorrect TLB flush ranges.
+
+Write pnum and pcount first and the Config word last. Since the
+consumer is an external agent on coherent shared memory, use
+WRITE_ONCE() to stop the compiler from reordering the stores and
+smp_wmb() to make the parameter words globally visible before the
+Pending bit is set.
+
+Fixes: d466c19cead5 ("RISC-V: KVM: Add common nested acceleration support")
+Signed-off-by: Zongmin Zhou <zhouzongmin@kylinos.cn>
+---
+ arch/riscv/kvm/nacl.c | 20 ++++++++++++++++----
+ 1 file changed, 16 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/uaccess: Extend CMPXCHG user helpers to 128-bit operands
+[PATCH v3 1/2] x86/uaccess: Extend CMPXCHG user helpers to 128-bit operands
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+Extend the existing user CMPXCHG helpers to support 16-byte operands on
+x86-64, using LOCK_PREFIX "cmpxchg16b".  This mirrors the existing
+__try_cmpxchg64_user_asm() / cmpxchg8b path provided for 32-bit kernels,
+where KVM needs an atomic compare-exchange wider than the generic
+cmpxchg helper can provide.
+
+On 32-bit kernels, stub the helper to always return failure because cmpxchg16b
+requires 64-bit GPRs and is not available.
+
+KVM uses this to atomically emulate guest cmpxchg16b on guest RAM mapped
+via userspace addresses.
+
+Signed-off-by: Sairaj Kodilkar <sarunkod@amd.com>
+---
+ arch/x86/include/asm/uaccess.h | 56 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 55 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Add support for cmpxchg16b emulation
+[PATCH v3 0/2] Add support for cmpxchg16b emulation
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+This series adds 128-bit compare-exchange support needed for KVM to
+emulate guest cmpxchg16b instructions.
+
+The AMD IOMMU driver updates 256-bit device table entries with two
+128-bit cmpxchg operations.  For hardware-accelerated vIOMMU, QEMU traps
+those DTE accesses to install nested page tables [1].  KVM must emulate
+guest cmpxchg16b on the trapped MMIO regions; without that, DTE access
+emulation fails.
+
+Patch 1: extends the x86 user CMPXCHG helpers with
+__try_cmpxchg128_user_asm() (cmpxchg16b on x86-64), wired into
+unsafe_try_cmpxchg_user().
+
+Patch 2: extends KVM CMPXCHG8B emulation to 16-byte operands (REX.W=1) and
+uses the new helper for atomic 16-byte compare-exchange on guest RAM via
+emulator_cmpxchg_emulated().
+
+You can find the KUT to test this series at [2].
+
+[1] https://github.com/AMDESE/qemu-iommu/blob/wip/for_iommufd_hw_queue-v8_amd_viommu_20260106/hw/i386/amd_viommu.c#L517
+[2] https://lore.kernel.org/kvm/20260706062153.346-1-sarunkod@amd.com/T/#u
+
+Changes since v2:
+https://lore.kernel.org/all/20260706063035.1139-1-sarunkod@amd.com/
+Patch 1: Trigger build failure if __try_cmpxchg128_user_asm is called on 32 bit
+	 machines [Sean]
+
+Sairaj Kodilkar (2):
+  x86/uaccess: Extend CMPXCHG user helpers to 128-bit operands
+  KVM: x86: Add support for cmpxchg16b emulation
+
+ arch/x86/include/asm/uaccess.h | 56 +++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/emulate.c         | 50 ++++++++++++++++++++----------
+ arch/x86/kvm/kvm_emulate.h     |  6 ++++
+ arch/x86/kvm/x86.c             |  7 ++++-
+ 4 files changed, 101 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Fix sdata leak and stale snapshot_addr in snapshot_set_shmem
+[PATCH] RISC-V: KVM: Fix sdata leak and stale snapshot_addr in snapshot_set_shmem
+Author: Zongmin Zhou <min_halo@163.com>
+
+
+A guest may call SBI_PMU_SNAPSHOT_SET_SHMEM repeatedly. Each call
+overwrites kvpmu->sdata without freeing the old buffer (memory leak),
+and if a later kvm_vcpu_write_guest() fails, the error path frees
+sdata but leaves snapshot_addr stale. A subsequent
+SBI_PMU_COUNTER_START then passes the INVALID_GPA check and crashes
+the host with a NULL buffer in kvm_vcpu_read_guest().
+
+Fix this by clearing the previously installed snapshot area before
+installing a new one, which keeps sdata and snapshot_addr consistent.
+The SBI spec suggests a single invocation but defines no error code
+for repeated calls, so KVM must tolerate them.
+
+Fixes: c2f41ddbcdd756 ("RISC-V: KVM: Implement SBI PMU Snapshot feature")
+Cc: stable@vger.kernel.org
+Signed-off-by: Zongmin Zhou <zhouzongmin@kylinos.cn>
+---
+ arch/riscv/kvm/vcpu_pmu.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 35fc8acbe to 3dbd4b7ae
+KVM mailing list update from 35fc8acbe to 3dbd4b7ae
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     26 google.com
+     20 redhat.com
+      1 nutanix.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     22  Sean Christopherson <seanjc@google.com>
+     17  Eric Auger <eric.auger@redhat.com>
+      4  Ackerley Tng <ackerleytng@google.com>
+      3  Cornelia Huck <cohuck@redhat.com>
+      1  Shaju Abraham <shaju.abraham@nutanix.com>
+      1  Nicholas Piggin <npiggin@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: selftests: Use MEM_REGION_PT memslot instead of
+[PATCH 01/20] KVM: selftests: Use MEM_REGION_PT memslot instead of
+Author: Sean Christopherson <seanjc@google.com>
+
+Use MEM_REGION_PT to indirectly specify memslot '0' instead of hardcoding
+the memslot in s390's virtual memory allocator, as a first step towards
+taking the allocation type instead of the exact, raw memslot in the
+physical memory allocator.
+
+Note, the only tests that set MEM_REGION_PT to a memslot other than '0' are
+arm64-only, i.e. s390 always uses memslot '0' for page tables.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/lib/s390/processor.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: PPC pre-enabling
+[PATCH 00/20] KVM: selftests: PPC pre-enabling
+Author: Sean Christopherson <seanjc@google.com>
+
+This is a big pile of cleanups and refactoring to prepare for PPC support in
+KVM selftests.  PPC has paging modes that require multi-page page tables, and
+those page tables need to be naturally aligned.  The original proposal was to
+plumb in an @align param to the page allocators[*], but I didn't love the idea
+of adding another rarely used param to the allocators.
+
+Reworking the APIs to take a region type requires a fair bit of churn, and was
+more painful than expected as I didn't realize just how many one-off tests did
+weird things, but overall I think it's worth it?  If only to keep cutting down
+on the use of magic memslot numbers in tests.
+
+This needs explicit testing on s390.  I tested on arm64 and x86, and given the
+number of failures I had to wade through, I wouldn't be at all suprised if I
+broke something subtle on s390 as well.
+
+I'm less concerned about RISC-V and LoongArch as they don't have any custom
+tests that are affected (which is where I got burned).
+
+[*] https://lore.kernel.org/all/df86b5ccdbdafc3509d9538bd5e6796737bab2db.1781093720.git.ritesh.list@gmail.com
+
+Nicholas Piggin (1):
+  KVM: selftests: Use goto instead of do-while to retry finding unused
+    physical pages
+
+Sean Christopherson (19):
+  KVM: selftests: Use MEM_REGION_PT memslot instead of '0' for s390
+    regions/segments
+  KVM: selftests: Bump the minimum GPA for page tables to 0x200000
+  KVM: selftests: Use vm_alloc_page_table() to allocate LoongArch page
+    tables
+  KVM: selftests: Rename "num" param to "nr_pages" for physical page
+    allocators
+  KVM: selftests: Extend page allocator to support naturally aligned
+    allocations
+  KVM: selftests: Make the single-page allocator APIs static inline
+  KVM: selftests: Use the innermost page allocator API in the memslot
+    perf test
+  KVM: selftests: Use the innermost page allocator API in s390's IRQ
+    routing test
+  KVM: selftests: Add a wrapper API to allocate multiple page table
+    pages
+  KVM: selftests: Initialize vm->memslots[] with invalid memslots during
+    creation
+  KVM: selftests: Add APIs to override memory region types with custom
+    memslots
+  KVM: selftests: Add TEST_EXTRA memory region type for "special"
+    memslots
+  KVM: selftests: Use TEST_EXTRA region in arm64's vGIC LPI stress test
+  KVM: selftests: Use TEST_EXTRA region in x86's smaller MAXPHYADDR test
+  KVM: selftests: Use TEST_EXTRA region in set memory region test
+  KVM: selftests: Take the memory region type, not memslot, in page
+    allocators
+  KVM: selftests: Use TEST_ASSERT(), not assert(), in
+    vm_get_mem_region()
+  KVM: selftests: Automatically pick min_gpa for allocations based on
+    region type
+  KVM: selftests: Add arch hook to force page tables to be naturally
+    aligned
+
+ .../selftests/kvm/arm64/page_fault_test.c     |  18 ++-
+ .../selftests/kvm/arm64/vgic_lpi_stress.c     |  19 ++-
+ .../testing/selftests/kvm/include/kvm_util.h  | 106 +++++++++++++--
+ tools/testing/selftests/kvm/include/x86/smm.h |   2 +-
+ .../selftests/kvm/lib/arm64/processor.c       |   4 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 127 +++++++++++-------
+ .../selftests/kvm/lib/loongarch/processor.c   |   5 +-
+ .../selftests/kvm/lib/riscv/processor.c       |   4 +-
+ .../selftests/kvm/lib/s390/processor.c        |   7 +-
+ .../testing/selftests/kvm/lib/x86/processor.c |  15 ++-
+ .../testing/selftests/kvm/memslot_perf_test.c |   3 +-
+ tools/testing/selftests/kvm/s390/cmma_test.c  |  19 +--
+ .../testing/selftests/kvm/s390/irq_routing.c  |   2 +-
+ .../selftests/kvm/set_memory_region_test.c    |   8 +-
+ .../x86/smaller_maxphyaddr_emulation_test.c   |   9 +-
+ 15 files changed, 219 insertions(+), 129 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+[RFC PATCH v8 01/20] scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and outputs the list of ID regs in target/arm/cpu-sysregs.h.inc
+under the form of DEF(<name>, <op0>, <op1>, <crn>, <crm>, <op2>).
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Reviewed-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ scripts/update-aarch64-cpu-sysregs-header.py | 146 +++++++++++++++++++
+ 1 file changed, 146 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  kvm/arm: Introduce a customizable aarch64 KVM host model
+[RFC PATCH v8 00/20] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields.
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+
+The end goal is to get more flexibility when migrating guests
+between different host hardware.
+
+QEMU retrieves the writable ID fields from KVM UAPI [1] and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file. It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction.
+
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+The list of SYSREG_ID properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion.
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v8
+
+History:
+--------
+v7 -> v8:
+- fixed make check errors
+- removed demux regs from cpu-sysregs.h.inc
+- Proper handling of ValueRange messed up on v7
+- removed ArmIdRegArchVal
+- introduced kvm_arm_create_scratch_max_host_vcpu and pass
+  error handle to kvm_arm_create_scratch_host_vcpu()
+
+
+Cornelia Huck (3):
+  target/arm/kvm: Retrieve writable ID reg map
+  arm/cpu-features: document ID reg properties
+  arm-qmp-cmds: introspection for ID register props
+
+Eric Auger (16):
+  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+  target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  scripts: Introduce scripts/aarch64_sysreg_helpers module
+  scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+  target/arm/cpu-idregs.h.inc: generate with script
+  target/arm/cpu-idregs.h.inc: Generate enum values
+  arm/kvm: Initialize all writable ID registers from host
+  target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+  target/arm/cpu: Expose writable ID reg field properties on the kvm
+    host vcpu model
+  target/arm/cpu-idregs.h.inc: Generate reserved fields
+  target/arm/kvm: Ignore and trace unexpected writable reserved fields
+  target/arm/kvm: add utility to write idregs in scratch vcpu
+  target/arm/kvm: Add an error handle to
+    kvm_arm_create_scratch_host_vcpu
+  kvm: Introduce kvm_arm_create_scratch_max_host_vcpu
+
+Shaju Abraham (1):
+  target/arm/cpu_idregs: generate tables for Arm64 ID registers and
+    fields
+
+ docs/system/arm/cpu-features.rst              |  106 +-
+ target/arm/cpu-idregs.h                       |   36 +
+ target/arm/kvm_arm.h                          |   36 +-
+ target/arm/cpu-idregs.h.inc                   | 2512 +++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |   55 +-
+ target/arm/arm-qmp-cmds.c                     |   73 +
+ target/arm/cpu-idregs.c                       |   96 +
+ target/arm/cpu64.c                            |    5 +
+ target/arm/kvm-stub.c                         |   18 +
+ target/arm/kvm.c                              |  480 +++-
+ scripts/aarch64_sysreg_helpers.py             |  121 +
+ .../update-aarch64-cpu-sysreg-properties.py   |  299 ++
+ scripts/update-aarch64-cpu-sysregs-header.py  |   51 +
+ target/arm/meson.build                        |    1 +
+ target/arm/trace-events                       |    8 +
+ 15 files changed, 3813 insertions(+), 84 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: Treat unassigned RMP entry as benign race on
+[PATCH v4 1/5] KVM: SEV: Treat unassigned RMP entry as benign race on
+Author: Ackerley Tng <ackerleytng@google.com>
+
+When handling an RMP fault, KVM attempts to split a 2MB page via PSMASH.
+If PSMASH fails, the only expected return value is FAIL_BADADDR, which does
+not distinguish the reason for the bad address. Hence, another RMP entry
+lookup is required to determine whether the failure was benign.
+
+Specifically, KVM re-checks the RMP entry to determine if another CPU raced
+and already smashed the entry into 4KB pages.
+
+A concurrent operation (such as guest_memfd truncation or hole punching)
+can also race and transition the page to shared, removing the page from the
+RMP table and causing PSMASH to fail. This can happen even if the page is
+still referenced by KVM, because guest_memfd reclaim transitions the RMP
+entry to shared when the folio is removed from the page cache.
+
+Treat an unassigned RMP entry as an expected race when re-checking after a
+failed PSMASH, and skip logging an error warning.
+
+Fixes: c63cf135cc99 ("KVM: SEV: Add support to handle RMP nested page faults")
+Reviewed-by: Michael Roth <michael.roth@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/svm/sev.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Stop returning struct page from guest_memfd PFN lookup
+[PATCH v4 0/5] Stop returning struct page from guest_memfd PFN lookup
+Author: Ackerley Tng <ackerleytng@google.com>
+
+v4 splits out a new patch (3) that makes use of KVM MMU invalidation logic
+introduced into the RMP fault handling in patch 2 to avoid warning on a
+benign case.
+
+Other changes in v4:
+
++ Took Sean's version of the changelog for patch 2
++ Picked up Fuad's Reviewed-by: and Tested-by:
+
+v3: https://patch.msgid.link/20260820-gmem-no-return-page-v3-0-3bf8f80a7b4d@google.com
+v2: https://patch.msgid.link/20260818-gmem-no-return-page-v2-0-5298f42d49bb@google.com
+v1: https://patch.msgid.link/20260818-gmem-no-return-page-v1-0-4f8d939efdbc@google.com
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (3):
+      KVM: SEV: Treat unassigned RMP entry as benign race on PSMASH failure
+      KVM: SEV: Check for invalidation before warning on unassigned RMP entry
+      KVM: SEV: Drop page refcount early in VMSA reload
+
+Sean Christopherson (2):
+      KVM: SEV: Drop page refcount early during RMP fault handling
+      KVM: guest_memfd: Stop returning struct page from PFN lookup
+
+ arch/arm64/kvm/mmu.c     |  4 +---
+ arch/arm64/kvm/nested.c  |  4 ++--
+ arch/x86/kvm/mmu/mmu.c   |  2 +-
+ arch/x86/kvm/svm/sev.c   | 53 ++++++++++++++++++++++++++++--------------------
+ include/linux/kvm_host.h |  6 ++----
+ virt/kvm/guest_memfd.c   |  9 ++------
+ 6 files changed, 39 insertions(+), 39 deletions(-)
+
+----------------------------------------------------------------------
+
