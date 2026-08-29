@@ -1,0 +1,381 @@
+
+On /root/mail/repo:
+From 695eda988 to f547abdb2
+KVM mailing list update from 695eda988 to f547abdb2
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     14 linux.ibm.com
+      5 kylinos.cn
+      4 redhat.com
+      2 openai.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      9  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      5  Anthony Krowiak <akrowiak@linux.ibm.com>
+      4  =?utf-8?q?Marc-Andr=C3=A9_Lureau?= <marcandre.lureau@redhat.com>
+      3  Zeng Chi <zengchi@kylinos.cn>
+      2  Kyle Zeng <kylebot@openai.com>
+      2  Hao Zhang <zhanghao1@kylinos.cn>
+      1  Jia Jia <physicalmtea@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  s390/vfio-ap: Fix leak of pinned NIB and registered NISC in vfio_ap_irq_enable/disable()
+[PATCH v4 1/4] s390/vfio-ap: Fix leak of pinned NIB and registered NISC in vfio_ap_irq_enable/disable()
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The vfio_ap_irq_enable() and vfio_ap_disable() functions execute the
+PQAP(AQIC) instructions to enable/disable interrupts for an AP queue.
+A switch statement is used to examine the status response code returned
+from the instruction to determine whether it succeeded or failed and react
+accordingly.
+
+vfio_ap_irq_enable()
+~~~~~~~~~~~~~~~~~~~~
+For the default case, the vfio_ap_irq_disable function is invoked to
+disable interrupts for the queue and clean up the AQIC resources (i.e.,
+unpin the NIB and unregister the NISC) that are stored with the
+vfio_ap_queue object. There are a number of problems with this:
+
+1. Neither the q->saved_iova nor q->saved_isc has been set for the current
+   AQIC call, so the AQIC resources - assuming those values have been
+   previously set - will be the NIB and NISC resources from a prior call;
+   the NIB and NISC from the current call are therefore leaked.
+
+2. Interrupts may never have been enabled. Sending a disable instruction to
+   a queue that the hardware just told you is in a bad state (CHECKSTOPPED,
+   DECONFIGURED, Q_NOT_AVAIL) is at best wasted work and at worst generates
+   a further WARN_ONCE from inside vfio_ap_irq_disable's own default.
+
+3. The hardware just rejected the new ap_aqic() enable attempt with an
+   unexpected status. Disabling a previously-working IRQ config - assuming
+   that is even possible - as a reaction to a failed enable attempt does
+   not make sense; it is actively destructive, tearing down something that
+   was working for no valid reason.
+
+The fix is to unregister the NISC and an unpin the NIB used in the AQIC
+call in the default case of the switch statement and leave the AQIC
+resources stored with the vfio_ap_queue object alone.
+
+Another problem with vfio_ap_irq_enable() is that the old NIB stored in
+q->saved_iova from a previous AQIC are immediately freed - assuming they
+are stored - as soon as the AQIC response status returns
+AP_RESPONSE_NORMAL. The problem with this is, AQIC is an asynchronous
+operation; the only way to tell if it has completed is to check the
+I-bit (7) in the status returned from AQIC. This bit indicates whether
+interrupts are enabled (1) or disabled (0).
+
+The fix for this is to wait a specified period of time until the I-bit is
+set, similar to vfio_ap_wait_for_irqclear() - waits for I-bit==0 - which
+is called from vfio_ap_irq_disable() to verify the operation has completed.
+If verification of I-bit == 1 occurs within a specified period of time,
+freeing the old NIB (q->saved_iova) because once the I-bit is set, the new
+NIB is made available for queue interrupts and any old NIB will no longer
+be used. If the verification times out, then the new NIB will
+be freed and the old NIB will be allowed to leak which is preferable
+because the queue might still have in-flight DMA writes directed to the
+old NIB which would result in a use-after-free kernel crash.
+
+vfio_ap_irq_disable()
+~~~~~~~~~~~~~~~~~~~~~
+There are two problems with the way this function handles the response
+code returned from the PQAP(AQIC) instruction:
+
+1. For response codes AP_RESPONSE_NORMAL or AP_RESPONSE_OTHERWISE_CHANGED,
+   a call is made to vfio_ap_wait_for_irqclear() which waits for the
+   I-bit (7) - indicates whether interrupts are enabled (1) or
+   disabled (0) - to be cleared. That function does not return anything, so
+   there is no way to determine whether it succeeded or not. The
+   vfio_ap_irq_disable() function then frees the AQIC resources. This is a
+   problem because the hardware may still write to the NIB resulting in a
+   use-after-free kernel crash.
+
+   The fix for this is to add a boolean return code from
+   vfio_ap_wait_for_irqclear(). This will be checked in
+   vfio_ap_irq_disable() and if clearing of the IR bit could not be
+   verified, the AQIC resources will be allowed to leak. This is
+   preferable to a kernel crash.
+
+2. For response code AP_RESPONSE_INVALID_ADDRESS - indicates the NIB
+   address passed to PQAP(AQIC) is not valid - as well as the default case,
+   the vfio_ap_irq_disable() frees the AQIC resources. Since the AQIC
+   disable was rejected, the IRQ is still enabled and the hardware still
+   holds the NIB address, so freeing the NIB could result in a
+   use-after-free kernel crash.
+
+   The fix for this is to allow the AQIC resources to be leaked. This is
+   preferable to a kernel crash.
+
+Fixes: ec89b55e3bce7 ("s390: ap: implement PAPQ AQIC interception in kernel")
+Cc: stable@vger.kernel.org
+Signed-off-by: Anthony Krowiak <akrowiak@linux.ibm.com>
+---
+ drivers/s390/crypto/vfio_ap_ops.c | 152 +++++++++++++++++++++++++-----
+ 1 file changed, 129 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/vfio-ap: Fix pre-existing bugs in vfio_ap device driver
+[PATCH v4 0/4] s390/vfio-ap: Fix pre-existing bugs in vfio_ap device driver
+Author: Anthony Krowiak <akrowiak@linux.ibm.com>
+
+The sashiko AI reported several pre-existing bugs in the vfio_ap device
+driver code while reviewing unrelated patches. This series fixes four
+such bugs.
+
+Change log v3 => v4:
+~~~~~~~~~~~~~~~~~~~
+Patch 1/4: Fix leak of pinned NIB and registered NISC in
+           vfio_ap_irq_enable/disable()
+* Overrode the response status in vfio_irq_disable() for the
+  AP_RESPONSE_NORMAL case when vfio_ap_wait_for_irqclear() returns false.
+* Changed name of vfio_ap_wait_for_irqclear() to
+  vfio_ap_wait_for_irq_state() and added a parameter to specify
+  the value (0 = disabled, 1 = enabled) to which the status.irq_enabled
+  (I-bit) is to be compared.
+* Added a call to vfio_ap_wait_for_irq_state() to vfio_ap_irq_enable()
+  to verify that the I-bit is set when AP_RESPONSE_NORMAL is returned
+  from the AQIC call before proceeding.
+
+Patch 3/4: Fix unbounded loop in apq_reset_check()
+* Check return code from apq_status_check() called from apq_reset_check().
+  If it returns 0 when the AP_RESET_MAX_WAIT timeout is detected, then
+  clean up AQIC resources.
+
+Anthony Krowiak (4):
+  s390/vfio-ap: Fix leak of pinned NIB and registered NISC in
+    vfio_ap_irq_enable/disable()
+  s390/vfio-ap: Fix failure to release IRQ notification eventfd contexts
+  s390/vfio-ap: Fix unbounded loop in apq_reset_check()
+  s390/vfio-ap: Use AP_DOMAINS for adm_add bitmap size in
+    vfio_ap_mdev_cfg_add()
+
+ drivers/s390/crypto/vfio_ap_ops.c | 216 +++++++++++++++++++++++++-----
+ 1 file changed, 186 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Restrict saved GPA writes to hardware write faults
+[PATCH] KVM: x86: Restrict saved GPA writes to hardware write faults
+Author: Kyle Zeng <kylebot@openai.com>
+
+A GPA supplied by a hardware page fault describes the access that
+faulted, not an arbitrary instruction decoded afterwards.  A guest can
+change an MMIO read into a store before KVM fetches the instruction.  The
+saved-GPA shortcut then skips the write-aware guest page-table walk and
+can issue a write through a guest-read-only mapping.
+
+Carry final-write fault information into the emulator and retain it
+alongside the saved GPA.  Only reuse that GPA for a write when hardware
+reported a final data write.  Reads, faults with unknown access direction,
+and implicit guest page-table writes do not authorize an emulated write;
+fall back to the existing permission-aware translation in those cases.
+
+Keep the authorization across MMIO completion without decoding a new
+instruction, and reset it when initializing a fresh emulator context.
+This also covers writes reached through the cmpxchg fallback.
+
+Preserve the shortcut for hardware-authorized writes.  In particular,
+legacy SEV guests can have encrypted page tables that KVM cannot walk,
+so forcing every emulated write through a software walk is not suitable.
+
+Fixes: 0f89b207b04a ("kvm: svm: Use the hardware provided GPA instead of page walk")
+Reported-by: Oleg Boiko <oboiko@openai.com>
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Kyle Zeng <kylebot@openai.com>
+---
+ arch/x86/kvm/kvm_emulate.h |  3 ++-
+ arch/x86/kvm/mmu/mmu.c     | 10 ++++++++++
+ arch/x86/kvm/x86.c         |  9 ++++++++-
+ arch/x86/kvm/x86.h         |  4 ++++
+ 4 files changed, 24 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Even more misc fixes
+[PATCH v3 0/8] KVM: s390: Even more misc fixes
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+A few fixes that had been dropped from previous series due to still
+having issues, plus a few new fixes.
+
+v2->v3:
+* Rebase on master
+* Reworked first patch to use scoped_guard() more, and restrict the
+  scope of the srcu so that it excludes the page pinning
+* Add missing const to parameter "old" of kvm_s390_update_cmma_dirty()
+* Fix potential infinite loop in dat_get_storage_key() and
+  dat_reset_reference_bit()
+* Fix potential race in _destroy_pages_crste()
+
+v1->v2:
+* Fix racy usage of sg->parent in patch 2
+* Fix wrong number of arguments for dat_delete_slot() in patch 3
+* Restrict srcu usage to the bare minimum necessary to avoid potentially
+  triggering page faults in the guest while holding the srcu
+* Fix races also in other skey functions
+
+
+Claudio Imbrenda (8):
+  KVM: s390: Fix dirty marking in adapter_indicators_set*()
+  KVM: s390: Fix compile warning for kvm_s390_update_cmma_dirty()
+  KVM: s390: Fix _gaccess_shadow_fault()
+  KVM: s390: Refactor dat_set_slot()
+  KVM: s390: Move all code into s390_kvm_mmu_prepare_memory_region()
+  KVM: s390: Add missing srcu in kvm_s390_set_irq_state()
+  KVM: s390: Fix potential races in dat skey functions
+  KVM: s390: Fix race in _destroy_pages_crste()
+
+ arch/s390/kvm/gmap/dat.c       | 65 +++++++++++++-----------
+ arch/s390/kvm/gmap/dat.h       | 10 ++--
+ arch/s390/kvm/gmap/gmap.c      |  6 ++-
+ arch/s390/kvm/gmap/kvm_mmu.c   | 91 ++++++++++++++--------------------
+ arch/s390/kvm/gmap/kvm_mmu.h   |  4 --
+ arch/s390/kvm/s390/gaccess.c   | 13 +++++
+ arch/s390/kvm/s390/interrupt.c | 79 ++++++++++++++---------------
+ arch/s390/kvm/s390/s390.c      |  3 +-
+ arch/s390/kvm/s390/s390.h      |  2 +-
+ 9 files changed, 137 insertions(+), 136 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Fix dirty marking in adapter_indicators_set*()
+[PATCH v3 1/8] KVM: s390: Fix dirty marking in adapter_indicators_set*()
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When the indicator and/or summary bits are set in the guest, the
+accessed page was only marked dirty in KVM if the access was performed
+using the slow path; accesses through the new kvm_arch_set_irq_inatomic
+fast inject path would not mark the page as dirty.
+
+Fix by adding/moving the missing calls to mark_page_dirty(). Note that
+for the inatomic path set_page_dirty{,_lock}() is not needed as the
+page stays pinned; the unpin path correctly marks it as dirty.
+
+Opportunistically reorder the local variables to be in reverse
+Christmas tree order and refactor to use guard().
+
+Fixes: 1e95e3bc6b05 ("KVM: s390: Enable adapter_indicators_set to use mapped pages")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+---
+ arch/s390/kvm/s390/interrupt.c | 75 +++++++++++++++++-----------------
+ 1 file changed, 38 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Preserve memslot arch flags on KVM_MR_FLAGS_ONLY
+[PATCH] LoongArch: KVM: Preserve memslot arch flags on KVM_MR_FLAGS_ONLY
+Author: Zeng Chi <zeng_chi911@163.com>
+
+
+kvm_arch_prepare_memory_region() computes new->arch.flags, i.e. whether
+a memslot is KVM_MEM_HUGEPAGE_CAPABLE or KVM_MEM_HUGEPAGE_INCAPABLE, only
+for KVM_MR_CREATE and KVM_MR_MOVE, and returns early for every other
+change.  But the generic code allocates a zeroed memslot for every
+change and never copies old->arch, so after a KVM_MR_FLAGS_ONLY update,
+e.g. toggling KVM_MEM_LOG_DIRTY_PAGES for live migration, the active
+memslot has arch.flags == 0.
+
+With both flags clear, fault_supports_huge_mapping() falls through to
+the alignment check on the HVA range alone, which no longer verifies
+that the GPA and HVA have the same offset within a PMD.  A memslot that
+was marked KVM_MEM_HUGEPAGE_INCAPABLE because of a GPA/HVA offset
+mismatch can then be mapped with PMD entries on read faults, and since
+kvm_map_page() aligns the gfn and the pfn independently, the guest ends
+up accessing the wrong host pages, exactly the "d -> f, e -> g" case
+described in the comment above the check.
+
+Carry the arch flags over from the old memslot for KVM_MR_FLAGS_ONLY,
+as the GPA, HVA and size are guaranteed to be unchanged for that case.
+
+Fixes: 7ab6fb505b2a ("LoongArch: KVM: Optimization for memslot hugepage checking")
+Cc: stable@vger.kernel.org
+Signed-off-by: Zeng Chi <zengchi@kylinos.cn>
+---
+ arch/loongarch/kvm/mmu.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  LoongArch: KVM: Validate MSI data before routing it to EIOINTC
+[PATCH] LoongArch: KVM: Validate MSI data before routing it to EIOINTC
+Author: Zeng Chi <zeng_chi911@163.com>
+
+
+pch_msi_set_irq() passes e->msi.data straight into eiointc_set_irq() as
+the irq number.  The MSI data comes from userspace, either via a
+KVM_IRQ_ROUTING_MSI entry set with KVM_SET_GSI_ROUTING (used by irqfd
+and KVM_IRQ_LINE) or directly via KVM_SIGNAL_MSI, and is never checked
+against EIOINTC_IRQS.
+
+eiointc_set_irq() uses the value with __set_bit()/__clear_bit() on the
+256-bit isr bitmap, eiointc_update_irq() then indexes sw_coremap[] and
+the per-cpu coreisr/sw_coreisr bitmaps with it.  A data value >= 256
+therefore reads and writes memory past the end of those arrays, i.e.
+any process holding a VM fd can corrupt kernel memory beyond the
+loongarch_eiointc allocation.
+
+Reject MSI data that doesn't fit in the EIOINTC irq space.  The DMSINTC
+path is unaffected as it decodes the vector from the address and masks
+it.
+
+Fixes: 1928254c5ccb ("LoongArch: KVM: Add irqfd support")
+Cc: stable@vger.kernel.org
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260531140921.1B1181F00893@smtp.kernel.org/
+Signed-off-by: Zeng Chi <zengchi@kylinos.cn>
+---
+ arch/loongarch/kvm/intc/pch_pic.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: Flush dirty ring resets before handling signals
+[PATCH 1/2] KVM: Flush dirty ring resets before handling signals
+Author: Hao Zhang <hao_zhang_kdev@163.com>
+
+
+KVM bails out of KVM_RESET_DIRTY_RINGS if a signal is pending, but the
+dirty ring reset flow can already have consumed harvested entries before
+noticing the signal.  In that case, the entries have been marked invalid
+and reset_index has been advanced, but the batched GFNs may not yet have
+been reprotected by kvm_reset_dirty_gfn().
+
+This breaks the dirty ring state machine: userspace has handed the GFNs
+back to KVM, but KVM can leave the corresponding pages writable.  Future
+guest writes to those pages may then fail to generate new dirty-ring
+entries, causing dirty tracking to miss updates.
+
+Make the signal path break out of the scan loop instead of returning
+immediately, so any pending batch is flushed before kvm_dirty_ring_reset()
+returns.
+
+Fixes: 49005a2a3d2a ("KVM: Bail from the dirty ring reset flow if a signal is pending")
+Signed-off-by: Hao Zhang <zhanghao1@kylinos.cn>
+---
+ virt/kvm/dirty_ring.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From f37b9c291 to 2de087a0b
+KVM mailing list update from f37b9c291 to 2de087a0b
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
