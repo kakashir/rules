@@ -1,0 +1,1718 @@
+
+On /root/mail/repo:
+From 31d488116 to b4c4619dd
+KVM mailing list update from 31d488116 to b4c4619dd
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     44 google.com
+      1 kernel.org
+      1 amd.com
+
+Top 15 contributors (Based on Email Body)
+
+     23  Ackerley Tng <ackerleytng@google.com>
+     21  Sean Christopherson <seanjc@google.com>
+      1  Michael Roth <michael.roth@amd.com>
+      1  Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v12 45/45] KVM: selftests: Update private memory exits test
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Skip setting memory to private in the private memory exits test when using
+per-gmem memory attributes, as memory is initialized to private by default
+for guest_memfd, and using vm_mem_set_private() on a guest_memfd instance
+requires creating guest_memfd with GUEST_MEMFD_FLAG_MMAP (which is totally
+doable, but would need to be conditional and is ultimately unnecessary).
+
+Expect an emulated MMIO instead of a memory fault exit when attributes are
+per-gmem, as deleting the memslot effectively drops the private status,
+i.e. the GPA becomes shared and thus supports emulated MMIO.
+
+Skip the "memslot not private" test entirely, as private vs. shared state
+for x86 software-protected VMs comes from the memory attributes themselves,
+and so when doing in-place conversions there can never be a disconnect
+between the expected and actual states.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../selftests/kvm/x86/private_mem_kvm_exits_test.c | 36 ++++++++++++++++++----
+ 1 file changed, 30 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 42/45] KVM: selftests: Make TEST_EXPECT_SIGBUS
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+The TEST_EXPECT_SIGBUS macro is not thread-safe as it uses a global
+sigjmp_buf and installs a global SIGBUS signal handler. If multiple threads
+execute the macro concurrently, they will race on installing the signal
+handler and stomp on other threads' jump buffers, leading to incorrect test
+behavior.
+
+Make TEST_EXPECT_SIGBUS thread-safe with the following changes:
+
+Share the KVM tests' global signal handler. sigaction() applies to all
+threads; without sharing a global signal handler, one thread may have
+removed the signal handler that another thread added, hence leading to
+unexpected signals.
+
+The alternative of layering signal handlers was considered, but calling
+sigaction() within TEST_EXPECT_SIGBUS() necessarily creates a race. To
+avoid adding new setup and teardown routines to do sigaction() and keep
+usage of TEST_EXPECT_SIGBUS() simple, share the KVM tests' global signal
+handler.
+
+Opportunistically rename report_unexpected_signal to
+catchall_signal_handler.
+
+To continue to only expect SIGBUS within specific regions of code, use a
+thread-specific variable, expecting_sigbus, to replace installing and
+removing signal handlers.
+
+Make the execution environment for the thread, sigjmp_buf, a
+thread-specific variable.
+
+As part of TEST_EXPECT_SIGBUS(), assert the prerequisite for this setup,
+that the current signal handler is the catchall_signal_handler.
+
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/test_util.h | 32 +++++++++++++------------
+ tools/testing/selftests/kvm/lib/kvm_util.c      | 18 ++++++++++----
+ tools/testing/selftests/kvm/lib/test_util.c     |  7 ------
+ 3 files changed, 30 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 44/45] KVM: selftests: Update
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Update private_mem_conversions_test for in-place conversions. In-place
+conversions support is detected in selftests with kvm_has_gmem_attributes.
+
+With in-place conversions, specifying userspace_addr from some other memory
+provider that is not the guest_memfd associated with the memslot is a user
+error, since KVM will only use both shared and private memory from the
+guest_memfd.
+
+Hence, when kvm_has_gmem_attributes, only test in-place conversions with
+single backing, where guest_memfd provides both shared and private memory.
+
+For single backing, guest_memfd must be created with
+GUEST_MEMFD_FLAG_MMAP. Initialize the guest_memfd as shared to align with
+how memory would default to shared when shared/private state was tracked at
+the VM level (the test expects this, it was written for
+non-in-place-conversions).
+
+When handling a hypercall to set attributes, use
+vm_mem_set_memory_attributes() to send the ioctl to the guest_memfd instead
+of the VM.
+
+When testing in-place conversions (single-backing), don't allow the user to
+configure src_type, since src_type will be ignored. Don't use src_type to
+determine alignment for rounding up per-cpu test memory size, since
+guest_memfd's backing page size is always the system PAGE_SIZE.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../kvm/x86/private_mem_conversions_test.c         | 57 +++++++++++++++++-----
+ 1 file changed, 44 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 39/45] KVM: selftests: Reset shared memory after
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+private_mem_conversions_test used to reset the shared memory that was used
+for the test to an initial pattern at the end of each test iteration. Then,
+it would punch out the pages, which would zero memory.
+
+Without in-place conversion, the resetting would write shared memory, and
+hole-punching will zero private memory, hence resetting the test to the
+state at the beginning of the for loop.
+
+With in-place conversion, resetting writes memory as shared, and
+hole-punching zeroes the same physical memory, hence undoing the reset
+done before the hole punch.
+
+Move the resetting after the hole-punching, and reset the entire
+PER_CPU_DATA_SIZE instead of just the tested range.
+
+With in-place conversion, this zeroes and then resets the same physical
+memory. Without in-place conversion, the private memory is zeroed, and the
+shared memory is reset to init_p.
+
+This is sufficient since at each test stage, the memory is assumed to start
+as shared, and private memory is always assumed to start zeroed. Conversion
+zeroes memory, so the future test stages will work as expected.
+
+Fixes: 43f623f350ce1 ("KVM: selftests: Add x86-only selftest for private memory conversions")
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/x86/private_mem_conversions_test.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 43/45] KVM: selftests: Set up page size and alignment
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Currently, vm_mem_add derives the backing source page size, alignment
+padding, and mmap size from the backing source type upfront before checking
+if guest_memfd is being mmapped.
+
+With shared memory also mmap()-ed from guest_memfd, the alignment of the
+mmap-ed address needs to respect guest_memfd's backing page size.
+
+Refactor the backing store setup to configure the backing source page
+size, alignment, mmap flags, and mmap offset directly for guest_memfd
+when it is mmapped, ignoring the backing source type.
+
+Skip hugepage validation and anonymous memory madvise calls when mmapping
+from guest_memfd, since those are not applicable when mmapping guest_memfd.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 74 ++++++++++++++++++------------
+ 1 file changed, 45 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 40/45] KVM: selftests: Provide function to look up
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Introduce a new helper, kvm_gpa_to_guest_memfd(), to find the
+guest_memfd-related details of a memory region that contains a given guest
+physical address (GPA).
+
+The function returns the file descriptor for the memfd, the offset into
+the file that corresponds to the GPA, and the number of bytes remaining
+in the region from that GPA.
+
+kvm_gpa_to_guest_memfd() was factored out from vm_guest_mem_fallocate();
+refactor vm_guest_mem_fallocate() to use the new helper.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h |  3 +++
+ tools/testing/selftests/kvm/lib/kvm_util.c     | 37 ++++++++++++++++----------
+ 2 files changed, 26 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 38/45] KVM: selftests: Test conversion with elevated
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a selftest to verify that converting a shared guest_memfd page to a
+private page fails if the page has an elevated reference count.
+
+When KVM converts a shared page to a private one, it expects the page to
+have a reference count equal to the reference counts taken by the
+filemap. If another kernel subsystem holds a reference to the page, the
+conversion must be aborted.
+
+The test asserts that both bulk and single-page conversion attempts
+correctly fail with EAGAIN for the pinned page. After the page is unpinned,
+the test verifies that subsequent conversions succeed.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../kvm/x86/guest_memfd_conversions_test.c         | 56 ++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 41/45] KVM: selftests: Provide common function to set
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Introduce vm_mem_set_memory_attributes(), which handles setting of memory
+attributes for a range of guest physical addresses, regardless of whether
+the attributes should be set via guest_memfd or via the memory attributes
+at the VM level.
+
+Refactor existing vm_mem_set_{shared,private} functions to use the new
+function. Opportunistically update the size parameter to use size_t instead
+of u64.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h | 46 +++++++++++++++++++-------
+ 1 file changed, 34 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 36/45] KVM: selftests: Test that shared/private status
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a test to verify that a guest_memfd's shared/private status is
+consistent across processes, and that any shared pages previously mapped in
+any process are unmapped from all processes.
+
+The test forks a child process after creating the shared guest_memfd
+region so that the second process exists alongside the main process for the
+entire test.
+
+The processes then take turns to access memory to check that the
+shared/private status is consistent across processes.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../kvm/x86/guest_memfd_conversions_test.c         | 118 +++++++++++++++++++++
+ 1 file changed, 118 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 37/45] KVM: selftests: Add helpers to pin pages with
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add helper functions to allow KVM selftests to pin memory using
+CONFIG_GUP_TEST. This is useful for creating test scenarios where some page
+has an increased refcount, such as when testing guest_memfd in-place
+conversion.
+
+The helpers open /sys/kernel/debug/gup_test and invoke the
+PIN_LONGTERM_TEST_START and PIN_LONGTERM_TEST_STOP ioctls. Since this
+functionality depends on the kernel being built with CONFIG_GUP_TEST,
+provide stub implementations that trigger a test failure if the
+configuration is missing.
+
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h |  3 +++
+ tools/testing/selftests/kvm/lib/kvm_util.c     | 25 +++++++++++++++++++++++++
+ 2 files changed, 28 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 35/45] KVM: selftests: Test that truncation does not
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a test to verify that deallocating a page in a guest memfd region via
+fallocate() with FALLOC_FL_PUNCH_HOLE does not alter the shared or private
+status of the corresponding memory range.
+
+When a page backing a guest memfd mapping is deallocated, e.g., by punching
+a hole or truncating the file, and then subsequently faulted back in, the
+new page must inherit the correct shared/private status tracked by
+guest_memfd.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../selftests/kvm/x86/guest_memfd_conversions_test.c       | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 34/45] KVM: selftests: Convert with allocated folios in
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a guest_memfd selftest to verify that memory conversions work
+correctly with allocated folios in different layouts.
+
+By iterating through which pages are initially faulted, the test covers
+various layouts of contiguous allocated and unallocated regions, exercising
+conversion with different range layouts.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../kvm/x86/guest_memfd_conversions_test.c         | 30 ++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 33/45] KVM: selftests: Test conversion before
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add two test cases to the guest_memfd conversions selftest to cover
+the scenario where a conversion is requested before any memory has been
+allocated in the guest_memfd region.
+
+The KVM_SET_MEMORY_ATTRIBUTES2 ioctl can be called on a memory region at
+any time. If the guest had not yet faulted in any pages for that region,
+the kernel must record the conversion request and apply the requested state
+when the pages are eventually allocated.
+
+The new tests cover both conversion directions.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../selftests/kvm/x86/guest_memfd_conversions_test.c       | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 32/45] KVM: selftests: Test conversion precision in
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+The existing guest_memfd conversion tests only use single-page memory
+regions. This provides no coverage for multi-page guest_memfd objects,
+specifically whether KVM correctly handles the page index for conversion
+operations. An incorrect implementation could, for example, always operate
+on the first page regardless of the index provided.
+
+Add a new test case to verify that conversions between private and shared
+memory correctly target the specified page within a multi-page guest_memfd.
+
+This test also verifies the precision of memory conversions by converting a
+single page and then iterating through all other pages to ensure they
+remain in their original state.
+
+To support this test, add a new GMEM_CONVERSION_MULTIPAGE_TEST_INIT_SHARED
+macro that handles setting up and tearing down the VM for each page
+iteration. The teardown logic is adjusted to prevent a double-free in this
+new scenario.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+
+---
+
+v10: Update macro GMEM_CONVERSION_MULTIPAGE_TEST_INIT_SHARED to avoid
+     potential macro argument reuse
+---
+ .../kvm/x86/guest_memfd_conversions_test.c         | 67 ++++++++++++++++++++++
+ 1 file changed, 67 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 30/45] KVM: selftests: Test basic single-page
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a selftest for the guest_memfd memory attribute conversion ioctls.
+The test starts the guest_memfd as all-private (the default state), and
+verifies the basic flow of converting a single page to shared and then back
+to private.
+
+Add infrastructure that supports extensions to other conversion flow
+tests. This infrastructure will be used in upcoming patches for other
+conversion tests.
+
+Add test as an x86-specific test since guest_memfd's testing
+vehicle (KVM_X86_SW_PROTECTED_VM) is x86-specific.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+
+---
+v10: Updated __GMEM_CONVERSION_TEST macro to avoid potential macro argument
+     reuse
+---
+ tools/testing/selftests/kvm/Makefile.kvm           |   1 +
+ .../kvm/x86/guest_memfd_conversions_test.c         | 200 +++++++++++++++++++++
+ 2 files changed, 201 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 28/45] KVM: selftests: Add selftests global for guest
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a global variable, kvm_has_gmem_attributes, to make the result of
+checking for KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES available to all tests.
+
+kvm_has_gmem_attributes is true if guest_memfd tracks memory attributes, as
+opposed to VM-level tracking.
+
+This global variable is synced to the guest for testing convenience, to
+avoid introducing subtle bugs when host/guest state is desynced.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/test_util.h | 2 ++
+ tools/testing/selftests/kvm/lib/kvm_util.c      | 5 +++++
+ 2 files changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 27/45] KVM: selftests: Add support for mmap() on
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Accept gmem_flags in vm_mem_add() to be able to create a guest_memfd within
+vm_mem_add().
+
+When vm_mem_add() is used to set up a guest_memfd for a memslot, set up the
+provided (or created) gmem_fd as the fd for the user memory region. This
+makes it available to be mmap()-ed from just like fds from other memory
+sources.
+
+For guest_memfds, mmap() using gmem_offset instead of 0 all the time.
+
+Always use MAP_SHARED if mmap-ing from guest_memfd instead of reading flag
+from the configured src_type, which doesn't include guest_memfd.
+
+Add a kvm_slot_to_fd() helper to provide convenient access to the file
+descriptor of a memslot.
+
+Update existing callers of vm_mem_add() to pass 0 for gmem_flags to
+preserve existing behavior.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+[mmap() with gmem_offset, and always with MAP_SHARED.]
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h     |  7 +++++-
+ tools/testing/selftests/kvm/lib/kvm_util.c         | 28 ++++++++++++----------
+ .../kvm/x86/private_mem_conversions_test.c         |  2 +-
+ 3 files changed, 23 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 31/45] KVM: selftests: Test conversion flow when
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a test case to verify that conversions between private and shared
+memory work correctly when the memory is initially created as shared.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ .../selftests/kvm/x86/guest_memfd_conversions_test.c        | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v12 29/45] KVM: selftests: Add helpers for calling ioctls
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add helper functions to kvm_util.h to support calling ioctls, specifically
+KVM_SET_MEMORY_ATTRIBUTES2, on a guest_memfd file descriptor.
+
+Introduce gmem_ioctl() and __gmem_ioctl() macros, modeled after the
+existing vm_ioctl() helpers, to provide a standard way to call ioctls
+on a guest_memfd.
+
+Add gmem_set_memory_attributes() and its derivatives (gmem_set_private(),
+gmem_set_shared()) to set memory attributes on a guest_memfd region.
+Also provide "__" variants that return the ioctl error code instead of
+aborting the test. These helpers will be used by upcoming guest_memfd
+tests.
+
+To avoid code duplication, factor out the check for supported memory
+attributes into a new macro, TEST_ASSERT_SUPPORTED_ATTRIBUTES, and use
+it in both the existing vm_set_memory_attributes() and the new
+gmem_set_memory_attributes() helpers.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h | 94 +++++++++++++++++++++++---
+ 1 file changed, 86 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 26/45] KVM: selftests: Rename guest_memfd{,_offset} to
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Rename local variables and function parameters for the guest memory file
+descriptor and its offset to use a "gmem_" prefix instead of
+"guest_memfd_".
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/include/kvm_util.h |  6 +++---
+ tools/testing/selftests/kvm/lib/kvm_util.c     | 26 +++++++++++++-------------
+ 2 files changed, 16 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 22/45] KVM: Move KVM_VM_MEMORY_ATTRIBUTES config
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Bury KVM_VM_MEMORY_ATTRIBUTES in x86 to discourage other architectures
+from adding support for per-VM memory attributes, because tracking private
+vs. shared memory on a per-VM basis is now deprecated in favor of tracking
+on a per-guest_memfd basis, and while RWX memory attributes are on the
+horizon, they too are expected to be x86-only.
+
+This will also allow modifying KVM_VM_MEMORY_ATTRIBUTES to be
+user-selectable (in x86) without creating weirdness in KVM's Kconfigs.
+Now that guest_memfd supports in-place conversions, it's entirely possible
+to run x86 CoCo VMs without support for KVM_VM_MEMORY_ATTRIBUTES.
+
+Leave the code itself in common KVM so that it's trivial to undo this
+change if new per-VM attributes do come along.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: David Hildenbrand (Arm) <david@kernel.org>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/Kconfig | 3 +++
+ virt/kvm/Kconfig     | 3 ---
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 24/45] KVM: guest_memfd: Enable INIT_SHARED on
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Now that guest_memfd supports tracking private vs. shared within gmem
+itself, allow userspace to specify INIT_SHARED on a guest_memfd instance
+for x86 Confidential Computing (CoCo) VMs, so long as in-place conversion
+is enabled, i.e. when it's actually possible for a guest_memfd instance to
+contain shared memory.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/x86.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 25/45] KVM: selftests: Create gmem fd before "regular"
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+When adding a memslot associated with a guest_memfd instance, create/dup
+the guest_memfd before creating the "normal" backing file.  This will allow
+dup'ing the gmem fd as the normal fd when guest_memfd supports mmap(),
+i.e. to make guest_memfd the _only_ backing source for the memslot.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ tools/testing/selftests/kvm/lib/kvm_util.c | 45 +++++++++++++++---------------
+ 1 file changed, 23 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 19/45] KVM: guest_memfd: Zero page while getting pfn
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Move the folio initialization logic from kvm_gmem_get_pfn() into
+__kvm_gmem_get_pfn() to also zero pages if the page is to be used in
+kvm_gmem_populate().
+
+With in-place conversion, the existing data in a guest_memfd page can be
+populated into guest memory through platform-specific ioctls.
+
+Without first zeroing the page obtained using __kvm_gmem_get_pfn(), it
+might contain uninitialized host memory, which would leak to the guest if
+the populate completes.
+
+guest_memfd pages are zeroed at most once in the page's entire lifetime
+with guest_memfd, and that is tracked using the uptodate flag.
+
+Zeroing the page in __kvm_gmem_get_pfn() is chosen over zeroing in
+kvm_gmem_get_folio() since other flows, such as a future write() syscall,
+can get a page, write to the page and then set page uptodate without
+zeroing.
+
+There may be some performance penalty due to redundant zeroing, but this
+would pale in comparison to the cost of actually assigning the page to the
+VM.
+
+This aligns with the concept of zeroing before first use - the other place
+where zeroing happens is in kvm_gmem_fault_user_mapping().
+
+On populate failure, the page is not re-zeroed, since on SNP, if firmware
+rejects a CPUID page, the expected CPUID values provided by firmware are
+returned to userspace via page contents. More generally, page contents may
+be modified on populate failure.
+
+Don't mark the page uptodate again after populating, since the page would
+already be marked uptodate before the post_populate() call.
+
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 12 +++++-------
+ 1 file changed, 5 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 21/45] KVM: TDX: Make source page optional for
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Update tdx_gmem_post_populate() to handle cases where userspace requests
+"no source page". To handle "no source page", populate (perform
+TDH.MEM.PAGE.ADD) using memory in-place at the target PFN.
+
+Allow "no source page" only when gmem_in_place_conversion is enabled,
+because retroactively adding support for out-of-place conversion would mean
+requiring a userspace update for a feature that's being deprecated.
+
+Also, KVM supporting "no source page" without in-place conversion would
+effectively be an obscure zero-page optimization that relies on the page
+being zeroed when it is allocated by guest_memfd.
+
+Rejecting "no source page" without in-place conversion scenario is valuable
+for KVM developers since it helps newcomers understand what exactly is and
+isn't possible.
+
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Tested-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/virt/kvm/x86/intel-tdx.rst | 4 ++++
+ arch/x86/kvm/vmx/tdx.c                   | 8 +++++---
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 23/45] KVM: Let userspace disable per-VM mem
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Allow the user to disable KVM_VM_MEMORY_ATTRIBUTES even when KVM supports
+PRIVATE and SHARED attributes, and expose gmem_in_place_conversion as a
+module parameter when per-VM attributes are supported.  I.e. let userspace
+enable in-place PRIVATE<=>SHARED conversion of guest_memfd pages.
+
+Provide both a Kconfig option and a (conditional) module param so that
+deployments that use a custom kernel can fully disable per-VM tracking,
+while not forcing distros to ship two separate kernels in order to provide
+backwards compatibility for downstream users.
+
+Don't allow running VMs with mixed tracking for a given instance of KVM,
+i.e. disallow toggling the module param after KVM is loaded, as the extra
+complexity needed to handle per-VM behavior far outweighs any potential
+benefit.  E.g. neither TDX nor SNP supports live migration, so in effect
+the requirement is that existing deployments that want to support both the
+old and the new models would need to tell their VMM which flavor of
+tracking to use.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+[Define module_param only if CONFIG_KVM_VM_MEMORY_ATTRIBUTES is enabled]
+Suggested-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/admin-guide/kernel-parameters.txt | 25 +++++++++++++++++++++++++
+ arch/x86/include/asm/kvm_host.h                 |  4 +++-
+ arch/x86/kvm/Kconfig                            | 14 ++++++++++----
+ virt/kvm/kvm_main.c                             |  5 ++++-
+ 4 files changed, 42 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 17/45] KVM: guest_memfd: Return early if range already
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Provide a function to check that a range has given attributes.
+
+Optimize setting memory attributes by returning early if all pages in the
+requested range already have the requested attributes.
+
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 15/45] KVM: guest_memfd: Ensure pages are not in use
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+When converting memory to private in guest_memfd, it is necessary to ensure
+that the pages are not currently being accessed by any other part of the
+kernel or userspace to avoid any current user writing to guest private
+memory.
+
+guest_memfd checks for any outstanding references to determine whether a
+page is still in use. The only expected references after unmapping the
+range requested for conversion are those that are held by guest_memfd
+itself.
+
+Update the kvm_memory_attributes2 structure to include an error_offset
+field. This allows KVM to report the exact offset where a conversion
+failed. If the safety check fails, return -EAGAIN and copy the error_offset
+back to userspace so that it can potentially retry the operation or handle
+the failure gracefully.
+
+Update documentation to document the error_offset field and the possible
+-EAGAIN error.
+
+Suggested-by: David Hildenbrand <david@kernel.org>
+Co-developed-by: Vishal Annapurve <vannapurve@google.com>
+Signed-off-by: Vishal Annapurve <vannapurve@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/virt/kvm/api.rst | 19 +++++++++--
+ include/uapi/linux/kvm.h       |  3 +-
+ virt/kvm/guest_memfd.c         | 77 +++++++++++++++++++++++++++++++++++++++---
+ 3 files changed, 91 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 20/45] KVM: SEV: Make 'uaddr' parameter optional for
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Make the source page for populating an SNP guest_memfd instance optional
+if in-place conversion/population is enabled.  If KVM can convert the page
+in-place, then it's possible for guest memory to be initialized directly
+from userspace by mmap()'ing the guest_memfd and writing to it while the
+corresponding GPA ranges are in a 'shared' state, before converting them
+to the 'private' state expected by KVM_SEV_SNP_LAUNCH_UPDATE.
+
+Update the handling/documentation for KVM_SEV_SNP_LAUNCH_UPDATE to allow
+for 'uaddr' to be set to NULL when in-place conversion is enabled, which
+SNP_LAUNCH_UPDATE will then use to determine when it should/shouldn't
+copy in data from a separate memory location. Continue to enforce
+non-NULL when PRIVATE is tracked per-VM, not per-guest_memfd.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+[Moved condition to snp_launch_update]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/virt/kvm/x86/amd-memory-encryption.rst | 14 ++++++++++----
+ arch/x86/kvm/svm/sev.c                               | 11 ++++++-----
+ virt/kvm/kvm_main.c                                  |  1 +
+ 3 files changed, 17 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 16/45] KVM: guest_memfd: Call arch make_shared callback
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+When doing in-place conversion from PRIVATE to SHARED, immediately inform
+arch code of the conversion for all allocated pages/folios, e.g. so that
+arch code can put hardware metadata tables in the correct state.  Eagerly
+updating the table for to SHARED conversions avoids having to implement
+on-demand updates, e.g. when faulting in host userspace mappings.  Skip the
+entire flow if the arch doesn't implement conversion callbacks, as getting
+folios from the filemap is noticeably expensive, especially when converting
+large chunks of memory.
+
+Deliberately don't eagerly update the metadata table on conversions from
+SHARED to PRIVATE, because assigning a page to a VM (versus "returning" it
+to the host) requires the exact GFN associated with the page, i.e would
+require walking the memslot bindings.  And because KVM *must* do on-demand
+metadata updates when getting a PFN for KVM-internal usage, as that's the
+only time a relevant memslot binding is guaranteed to exist.
+
+Note!  Inform arch code of the conversion within the protection of the
+invalidation sequence, to ensure that any existing mappings are dropped
+before hardware is updated, and to ensure that new mappings can't be
+established until after the conversion is complete.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  2 +-
+ arch/x86/include/asm/kvm_host.h    |  2 +-
+ arch/x86/kvm/x86.c                 |  5 +++++
+ include/linux/kvm_host.h           |  1 +
+ virt/kvm/guest_memfd.c             | 42 ++++++++++++++++++++++++++++++++++++++
+ 5 files changed, 50 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 18/45] KVM: guest_memfd: Handle lru_add fbatch
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+A guest_memfd folio has no outstanding references if guest_memfd holds the
+only references on it. Any other references on the folio may indicate
+another user, and guest_memfd cannot convert it to private if there may be
+an existing host user.
+
+A folio will have outstanding references if it is present in a per-CPU
+lru_add fbatch. guest_memfd does not actually participate in LRU, but
+freshly-allocated folios are still added to the lru_add fbatch for batch
+LRU statistics processing.
+
+A folio may also have extra refcounts if it is on the mlock fbatch.
+
+These two known "usages" of the folio are handled by calling
+lru_cache_drain_for_folio, which drains both the lru_add and mlock
+fbatches. After draining, if the refcount is still elevated, then there are
+truly outstanding references.
+
+If the page may be dma pinned, DMA is using it and hence there are
+outstanding references. folio_maybe_dma_pinned() can have false positives,
+but that's only with a significant number of refcounts, at which point
+draining LRU is not going to move the needle - it can still be concluded
+that the folio has outstanding references.
+
+If the page is still mapped after guest_memfd tried to unmap it earlier in
+the conversion process, it also has outstanding references.
+
+Return true and exit early to avoid unnecessary draining in these 2 cases.
+
+Provide a drain status to only drain once ever while processing a batch of
+folios.
+
+Acked-by: Vlastimil Babka (SUSE) <vbabka@kernel.org>
+Suggested-by: David Hildenbrand <david@kernel.org>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ mm/folio.c             |  2 ++
+ virt/kvm/guest_memfd.c | 30 ++++++++++++++++++++++--------
+ 2 files changed, 24 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 14/45] KVM: guest_memfd: Add base support for
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add a new ioctl (and matching struct), KVM_SET_MEMORY_ATTRIBUTES2, using
+the same base ioctl number (0xd2), but with R/W semantics for the kernel
+instead of just read semantics.  "Officially" documenting that KVM writes
+to the payload will allow KVM to support partial/incremental conversions,
+instead of all-or-nothing updates (which requires complex unwinding), by
+recording the failing offset if an error occurs.
+
+Opportunistically add a new struct as well, even though KVM could squeeze
+the error offset into "struct kvm_memory_attributes", as there's no cost to
+doing so in practice.  Pad the struct with a pile of extra space to try and
+avoid ending up with "struct kvm_memory_attributes3" in the future.  Use
+the same layout for the fields common to version 1 of the struct, e.g. to
+ease upgrading userspace, and to provide flexibility if KVM ever adds
+support for KVM_SET_MEMORY_ATTRIBUTES2 at VM scope.
+
+Introduce KVM_CAP_GUEST_MEMFD_MEMORY_ATTRIBUTES to advertise the
+availability of the KVM_SET_MEMORY_ATTRIBUTES2 ioctl.
+
+Update the KVM API documentation to define the new ioctl and its behavior,
+and add the necessary UAPI definitions and capability checks.
+
+The process of setting memory attributes has a clear point of no return
+because, for CoCo VMs, zapping stage 2 page tables is a destructive
+operation. Unlike regular VMs, where re-faulting pages into the stage 2
+page tables merely incurs a performance penalty, CoCo guests must
+(re-):accept pages after every fault. To preserve CoCo security guarantees,
+guests will not accept pages they did not explicitly request faults
+for. Consequently, during memory conversions, any operation that could
+cause the process to abort must be completed before the stage 2 page tables
+are zapped.
+
+Zap only the ranges that are not already in the requested state to avoid
+inadvertently destroying (CoCo) data. ARM CCA guests will try to mark the
+entire DRAM as private at boot. If there are no shared pages at all, the
+to-private conversion can be skipped, but the existence of a single shared
+page would require the conversion process to proceed, and if it proceeds,
+zapping both shared and private pages would destroy data and break the
+guest.
+
+Co-developed-by: Vishal Annapurve <vannapurve@google.com>
+Signed-off-by: Vishal Annapurve <vannapurve@google.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Suggested-by: Michael Roth <michael.roth@amd.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Suggested-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/virt/kvm/api.rst |  71 +++++++++++++++++++++++-
+ include/uapi/linux/kvm.h       |  15 ++++++
+ virt/kvm/guest_memfd.c         | 119 +++++++++++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c            |  23 +++++---
+ 4 files changed, 219 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 13/45] KVM: guest_memfd: Pass mapping type filter to
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Accept the mapping type filter as a parameter in the invalidation start
+helper instead of querying it internally. This allows callers to specify
+which mappings (shared, private, or both) should be invalidated.
+
+In the next patch, the conversion process will use this new parameter to
+invalidate mappings only when they're different from the target state of
+the conversion, i.e. invalidate only shared mappings on a shared to private
+conversion and not both.
+
+No functional change intended.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 12/45] KVM: guest_memfd: Always fault from guest_memfd
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+If a guest_memfd memslot is created but the guest_memfd does not have the
+GUEST_MEMFD_FLAG_MMAP set, KVM still fulfils guest faults by looking up the
+memslot's userspace_addr.
+
+Set KVM_MEMSLOT_GMEM_ONLY if in-place conversion is enabled so that the
+guest_memfd's memory will be used for both shared and private memory. With
+in-place conversion, guest_memfd will be the only backing memory for the
+memslot.
+
+No validation is performed to require userspace_addr to be a mapping from
+the associated guest_memfd because even after validation, userspace is free
+to remap something else at the provided userspace_addr.
+
+userspace_addr will still be used by functions like kvm_read_guest(), and
+if userspace_addr does not match up with the corresponding memory in the
+memslot's guest_memfd (whether userspace_addr points to the wrong offset or
+some non-guest_memfd memory, etc), that is a user error.
+
+Requiring both shared and private memory to come from the only associated
+guest_memfd simplifies invalidation in stage 2 page tables. On a PUNCH_HOLE
+operation on a guest_memfd, the invalidation is now guaranteed to be
+invalidating only memory mapped from the given guest_memfd.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/virt/kvm/api.rst | 22 ++++++++++++++--------
+ virt/kvm/guest_memfd.c         |  2 +-
+ 2 files changed, 15 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 11/45] KVM: guest_memfd: Invalidate both SHARED and
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+When removing one or more folios from a guest_memfd instance, invalidate
+both SHARED and PRIVATE mappings if in-place conversion is enabled, because
+stating the obvious, KVM needs to ensure that all mappings to the folio(s)
+are dropped.
+
+Opportunistically rename the helper to capture that it returns a filter for
+all gfns in anticipation of zapping only the previous mapping types on
+conversion.  I.e. when doing in-place conversion to PRIVATE, only SHARED
+mappings need to be zapped (ignoring that KVM would ideally not invalidate
+ranges whose attributes aren't changing in the first place).
+
+Note, precisely zapping only the possible mapping types when in-place
+conversion is disabled is important for functional correctness, not just
+for performance.  Specifically, if KVM zaps both when SHARED vs. PRIVATE is
+tracked per-VM, then a PUNCH_HOLE operation on a PRIVATE guest_memfd will
+incorrectly zap SHARED mappings that have nothing to do with that gmem
+instance (because they're mapped via a VMA, not a gmem fd).
+
+The incorrect over-zapping of SHARED memory that doesn't belong to the gmem
+fd requesting the zapping will be resolved in a later patch, where, if
+in-place conversion is enabled, KVM will use both shared and private memory
+from the guest_memfd. If both shared and private memory are from the
+guest_memfd, invalidation will only zap memory belonging to the given gmem
+instance.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 07/45] KVM: Rename kvm_mem_is_private() to
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Rename kvm_mem_is_private() to kvm_is_private_gfn() to prepare for in-place
+conversion, where there will be two lookup functions,
+kvm_vm_is_private_gfn() and kvm_gmem_is_private_gfn().
+
+This renaming allows consistent prefixing of "vm" vs "gmem" for
+kvm_*_is_private_gfn(), as opposed to kvm_gmem_mem_is_private(), which
+looks like a typo.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/mmu/mmu.c   | 12 ++++++------
+ arch/x86/kvm/svm/sev.c   |  2 +-
+ include/linux/kvm_host.h |  4 ++--
+ virt/kvm/guest_memfd.c   |  2 +-
+ 4 files changed, 10 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 10/45] KVM: Consolidate private memory and guest_memfd
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Move the kvm_arch_has_private_mem() stub and a few guest_memfd function
+definitions/declarations "down" in kvm_host.h to utilize existing #ifdefs,
+and so that related code is clustered together.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: David Hildenbrand (Arm) <david@kernel.org>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ include/linux/kvm_host.h | 37 ++++++++++++++++---------------------
+ 1 file changed, 16 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 09/45] KVM: guest_memfd: Stub in ability to enable
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Stub in global variable to enable in-place guest_memfd private<=>shared
+memory conversion, which will eventually be exposed to userspace via a
+module param, and wire up the __kvm_is_private_gfn() static call to the
+guest_memfd version when in-place conversion is enabled, i.e. when gmem is
+the sole authority on private vs. shared memory.
+
+Cc: Fuad Tabba <tabba@google.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ Documentation/virt/kvm/api.rst |  7 +++++++
+ include/linux/kvm_host.h       |  6 ++++++
+ virt/kvm/guest_memfd.c         | 26 ++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c            | 12 +++++++++++-
+ 4 files changed, 50 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 08/45] KVM: Provide generic interface for checking
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Introduce a generic kvm_is_private_gfn() interface using a static call to
+determine if a GFN is private. This allows the implementation for checking
+a GFN's private/shared status to be set at runtime.
+
+In preparation for choosing implementations between a guest_memfd lookup
+and the existing VM attribute lookup, rename the existing
+VM-attribute-based check to kvm_vm_is_private_gfn() to emphasize that it
+looks up VM attributes.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ include/linux/kvm_host.h | 14 ++++++++++++--
+ virt/kvm/kvm_main.c      | 15 +++++++++++++++
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 06/45] KVM: Rename memory attribute APIs to prepare for
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Rename memory attribute APIs to add a "vm_" in the name in anticipation of
+moving PRIVATE tracking into guest_memfd, to allow in-place conversion
+between SHARED and PRIVATE.  At that point, there will effectively be two
+(potential) sources of memory attributes: the VM and guest_memfd.
+
+kvm_vm_set_mem_attributes() already has "vm" in the name to indicate that
+it is a VM ioctl. Rename it to kvm_set_vm_mem_attributes() to show that it
+is setting the VM's memory attributes. (Drop the VM-ioctl scoping since it
+is a helper local to the file.) Update the accompanying trace function to
+match.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/kvm/mmu/mmu.c     | 14 +++++++-------
+ include/linux/kvm_host.h   | 16 ++++++++--------
+ include/trace/events/kvm.h |  2 +-
+ virt/kvm/kvm_main.c        | 32 ++++++++++++++++----------------
+ 4 files changed, 32 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 04/45] KVM: Rename KVM_GENERIC_MEMORY_ATTRIBUTES to
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Rename the per-VM memory attributes Kconfig to make it explicitly about
+per-VM attributes in anticipation of adding memory attributes support to
+guest_memfd, at which point it will be possible (and desirable) to have
+memory attributes without the per-VM support, even in x86.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/Kconfig            |  6 +++---
+ arch/x86/kvm/mmu/mmu.c          |  2 +-
+ arch/x86/kvm/x86.c              |  2 +-
+ include/linux/kvm_host.h        |  8 ++++----
+ include/trace/events/kvm.h      |  4 ++--
+ virt/kvm/Kconfig                |  2 +-
+ virt/kvm/kvm_main.c             | 14 +++++++-------
+ 8 files changed, 20 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 05/45] KVM: Enumerate support for PRIVATE memory iff
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Explicitly guard reporting support for KVM_MEMORY_ATTRIBUTE_PRIVATE based
+on kvm_arch_has_private_mem being #defined in anticipation of tracking
+PRIVATE vs. SHARED state per-guest_memfd, not per-VM (to allow in-place
+conversion).
+
+guest_memfd support for memory attributes is expected to be unconditional
+to avoid yet more macros (all architectures that support guest_memfd are
+expected to use per-gmem attributes at some point), at which point
+enumerating support KVM_MEMORY_ATTRIBUTE_PRIVATE based solely on memory
+attributes being supported by KVM at-large would result in a system-scope
+check (NULL @kvm) over-reporting support on arm64.
+
+Give architectures full control over overriding the default definition of
+kvm_arch_has_private_mem() by removing the coupling with
+CONFIG_KVM_VM_MEMORY_ATTRIBUTES.
+
+In a later patch, kvm_arch_has_private_mem() will be defined based on
+whether architectural features are compiled in, and made orthogonal to
+CONFIG_KVM_VM_MEMORY_ATTRIBUTES.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Fuad Tabba <tabba@google.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ include/linux/kvm_host.h | 2 +-
+ virt/kvm/kvm_main.c      | 2 ++
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 02/45] KVM: guest_memfd: Use kvm_mem_is_private() when
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Use kvm_mem_is_private() when populating guest_memfd instead of using an
+open coded equivalent.  In addition to simplifying the populate code *now*,
+this avoids the need to provide a range-based gmem lookup API in the future
+as well.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Suggested-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 03/45] KVM: guest_memfd: Introduce per-gmem attributes,
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Start plumbing in guest_memfd support for in-place private<=>shared
+conversions by tracking attributes via a maple tree.  KVM currently tracks
+private vs. shared attributes on a per-VM basis, which made sense when a
+guest_memfd _only_ supported private memory, but tracking per-VM simply
+can't work for in-place conversions as the shared/private status of a given
+page needs to be per-gmem_inode, not per-VM.
+
+Use the filemap invalidation lock to protect the maple tree, as taking the
+lock for read when faulting in memory (for userspace or the guest) isn't
+expected to result in meaningful contention, and using a separate lock
+would add significant complexity (avoiding deadlock is quite difficult).
+
+In kvm_gmem_get_pfn(), drop the folio refcount before releasing
+filemap_invalidate_lock(). This ensures that a competing conversion request
+from userspace (to be added in a later patch), which also takes the
+filemap_invalidate_lock(), will never see an elevated refcount due to
+kvm_gmem_get_pfn().
+
+Co-developed-by: Vishal Annapurve <vannapurve@google.com>
+Signed-off-by: Vishal Annapurve <vannapurve@google.com>
+Co-developed-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Tested-by: Shivank Garg <shivankg@amd.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Co-developed-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ virt/kvm/guest_memfd.c | 136 ++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 119 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 00/45] guest_memfd: In-place conversion support
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+Here's v12. Thanks everyone for the comments and fast responses!  We're now
+at ~4 weeks to soft-close at 7.3-rc5.
+
+v12 is based on 7.3-rc1 (contains the mm/ bugfixes). Like v11, v12 is also
+dependent on another series [3], which makes kvm_gmem_get_pfn() NOT return
+a refcounted page to KVM.
+
+Here's everything stitched together for your convenience:
+
+https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-v12
+
+This revision resolves the issue on v10/v11 to do with over-zapping of
+non-gmem memory because of the requested filters. [1]
+
+The resolution is in a new patch "KVM: guest_memfd: Always fault from
+guest_memfd if in-place conversion is enabled". I also updated the
+documentation as requested.
+
+Documentation updates are in these patches:
+
++ KVM: guest_memfd: Stub in ability to enable in-place shared<=>private conversion
++ KVM: guest_memfd: Always fault from guest_memfd if in-place conversion is enabled
++ KVM: guest_memfd: Add base support for KVM_SET_MEMORY_ATTRIBUTES2
+
+The documentation update in v10's "KVM: Let userspace disable per-VM mem
+attributes, enable per-gmem attributes" was misplaced imo so I folded it
+conceptually into the patches above.
+
+private_mem_conversions_test was updated in v11 to test dual backing, and
+that's meaningless now since with gmem_in_place_conversions, we're now
+always faulting from guest_memfd, and the userspace_addr not being from the
+gmem associated with the memslot is considered a user error.
+
+I now only have 1 patch "KVM: selftests: Update
+private_mem_conversions_test for in-place conversions" instead of 2 in v11.
+
+Resolves discussion at [2].
+
+Here's v12 with tests:
+
+https://github.com/googleprodkernel/linux-cc/commits/guest_memfd-inplace-conversion-coco-selftests-v12
+
+Tested with both CONFIG_KVM_VM_MEMORY_ATTRIBUTES enabled and disabled:
+
++ tools/testing/selftests/kvm/guest_memfd_test.c
++ tools/testing/selftests/kvm/pre_fault_memory_test.c
++ tools/testing/selftests/kvm/x86/guest_memfd_conversions_test.c
++ tools/testing/selftests/kvm/x86/private_mem_conversions_test.c
++ tools/testing/selftests/kvm/x86/private_mem_kvm_exits_test.c
+
+[1] https://lore.kernel.org/all/apCLFSbj8sq2biJp@google.com/
+[2] https://lore.kernel.org/all/apCj6gz8x24Dkle8@google.com/
+[3] https://lore.kernel.org/all/20260826-gmem-no-return-page-v4-0-3bb9c1ddb4e3@google.com/
+
+v11: https://patch.msgid.link/20260826-gmem-inplace-conversion-v11-0-0a15d8a799aa@google.com
+v10: https://lore.kernel.org/r/20260807-gmem-inplace-conversion-v10-0-2fc18ee6d3ba@google.com
+v9: https://lore.kernel.org/r/20260728-gmem-inplace-conversion-v9-0-35f9aec2aed2@google.com
+v8: https://lore.kernel.org/r/20260618-gmem-inplace-conversion-v8-0-9d2959357853@google.com
+v7: https://lore.kernel.org/r/20260522-gmem-inplace-conversion-v7-0-2f0fae496530@google.com
+v6: https://lore.kernel.org/r/20260507-gmem-inplace-conversion-v6-0-91ab5a8b19a4@google.com
+RFC v5: https://lore.kernel.org/r/20260428-gmem-inplace-conversion-v5-0-d8608ccfca22@google.com
+RFC v4: https://lore.kernel.org/all/20260326-gmem-inplace-conversion-v4-0-e202fe950ffd@google.com/T/
+RFC v3: https://lore.kernel.org/r/20260313-gmem-inplace-conversion-v3-0-5fc12a70ec89@google.com/T/
+RFC v2: https://lore.kernel.org/all/cover.1770071243.git.ackerleytng@google.com/T/
+RFC v1: https://lore.kernel.org/all/cover.1760731772.git.ackerleytng@google.com/T/
+
+Previous versions of this feature, part of other series, are available at:
+
++ https://lore.kernel.org/all/bd163de3118b626d1005aa88e71ef2fb72f0be0f.1726009989.git.ackerleytng@google.com/
++ https://lore.kernel.org/all/20250117163001.2326672-6-tabba@google.com/
++ https://lore.kernel.org/all/b784326e9ccae6a08388f1bf39db70a2204bdc51.1747264138.git.ackerleytng@google.com/
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+Ackerley Tng (23):
+      KVM: Rename kvm_mem_is_private() to kvm_is_private_gfn()
+      KVM: guest_memfd: Always fault from guest_memfd if in-place conversion is enabled
+      KVM: guest_memfd: Pass mapping type filter to invalidation helper
+      KVM: guest_memfd: Add base support for KVM_SET_MEMORY_ATTRIBUTES2
+      KVM: guest_memfd: Ensure pages are not in use before conversion
+      KVM: guest_memfd: Call arch make_shared callback for to-shared conversion
+      KVM: guest_memfd: Return early if range already has requested attributes
+      KVM: guest_memfd: Handle lru_add fbatch refcounts during conversion safety check
+      KVM: guest_memfd: Zero page while getting pfn
+      KVM: TDX: Make source page optional for KVM_TDX_INIT_MEM_REGION
+      KVM: selftests: Test basic single-page conversion flow
+      KVM: selftests: Test conversion flow when INIT_SHARED
+      KVM: selftests: Test conversion precision in guest_memfd
+      KVM: selftests: Test conversion before allocation
+      KVM: selftests: Convert with allocated folios in different layouts
+      KVM: selftests: Test that truncation does not change shared/private status
+      KVM: selftests: Add helpers to pin pages with CONFIG_GUP_TEST
+      KVM: selftests: Test conversion with elevated page refcount
+      KVM: selftests: Reset shared memory after hole-punching
+      KVM: selftests: Provide function to look up guest_memfd details from gpa
+      KVM: selftests: Make TEST_EXPECT_SIGBUS thread-safe
+      KVM: selftests: Set up page size and alignment independently for guest_memfd
+      KVM: selftests: Update private_mem_conversions_test for in-place conversions
+
+Michael Roth (1):
+      KVM: SEV: Make 'uaddr' parameter optional for KVM_SEV_SNP_LAUNCH_UPDATE
+
+Sean Christopherson (21):
+      KVM: guest_memfd: Optimize away conversion overheads via dead-code elimination
+      KVM: guest_memfd: Use kvm_mem_is_private() when populating guest_memfd memory
+      KVM: guest_memfd: Introduce per-gmem attributes, use to guard user mappings
+      KVM: Rename KVM_GENERIC_MEMORY_ATTRIBUTES to KVM_VM_MEMORY_ATTRIBUTES
+      KVM: Enumerate support for PRIVATE memory iff kvm_arch_has_private_mem is defined
+      KVM: Rename memory attribute APIs to prepare for in-place gmem conversion
+      KVM: Provide generic interface for checking memory private/shared status
+      KVM: guest_memfd: Stub in ability to enable in-place shared<=>private conversion
+      KVM: Consolidate private memory and guest_memfd ifdeffery in kvm_host.h
+      KVM: guest_memfd: Invalidate both SHARED and PRIVATE mappings for in-place conversions
+      KVM: Move KVM_VM_MEMORY_ATTRIBUTES config definition to x86
+      KVM: Let userspace disable per-VM mem attributes, enable per-gmem attributes
+      KVM: guest_memfd: Enable INIT_SHARED on guest_memfd for x86 Coco VMs
+      KVM: selftests: Create gmem fd before "regular" fd when adding memslot
+      KVM: selftests: Rename guest_memfd{,_offset} to gmem_{fd,offset}
+      KVM: selftests: Add support for mmap() on guest_memfd in core library
+      KVM: selftests: Add selftests global for guest memory attributes capability
+      KVM: selftests: Add helpers for calling ioctls on guest_memfd
+      KVM: selftests: Test that shared/private status is consistent across processes
+      KVM: selftests: Provide common function to set memory attributes
+      KVM: selftests: Update private memory exits test to work with per-gmem attributes
+
+ Documentation/admin-guide/kernel-parameters.txt    |  25 +
+ Documentation/virt/kvm/api.rst                     | 107 ++++-
+ .../virt/kvm/x86/amd-memory-encryption.rst         |  14 +-
+ Documentation/virt/kvm/x86/intel-tdx.rst           |   4 +
+ arch/x86/include/asm/kvm-x86-ops.h                 |   2 +-
+ arch/x86/include/asm/kvm_host.h                    |   9 +-
+ arch/x86/kvm/Kconfig                               |  15 +-
+ arch/x86/kvm/mmu/mmu.c                             |  28 +-
+ arch/x86/kvm/svm/sev.c                             |  13 +-
+ arch/x86/kvm/vmx/tdx.c                             |   8 +-
+ arch/x86/kvm/x86.c                                 |  20 +-
+ include/linux/kvm_host.h                           |  83 ++--
+ include/trace/events/kvm.h                         |   6 +-
+ include/uapi/linux/kvm.h                           |  16 +
+ mm/folio.c                                         |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm           |   1 +
+ tools/testing/selftests/kvm/include/kvm_util.h     | 139 +++++-
+ tools/testing/selftests/kvm/include/test_util.h    |  34 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c         | 222 +++++----
+ tools/testing/selftests/kvm/lib/test_util.c        |   7 -
+ .../kvm/x86/guest_memfd_conversions_test.c         | 512 +++++++++++++++++++++
+ .../kvm/x86/private_mem_conversions_test.c         |  66 ++-
+ .../selftests/kvm/x86/private_mem_kvm_exits_test.c |  36 +-
+ virt/kvm/Kconfig                                   |   3 -
+ virt/kvm/guest_memfd.c                             | 469 +++++++++++++++++--
+ virt/kvm/kvm_main.c                                |  92 ++--
+ 26 files changed, 1646 insertions(+), 287 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v12 01/45] KVM: guest_memfd: Optimize away conversion
+Author: Ackerley Tng via B4 Relay <devnull+ackerleytng.google.com@kernel.org>
+
+
+Add and use kvm_arch_has_gmem_convert() to guard guest_memfd's invocation
+of arch hooks related to converting memory between private and shared, as
+only one half of the x86 CoCo duo needs the runtime hooks (any pre-work is
+pure overhead for TDX).  At this exact moment, the overhead is negligible,
+but that will change when in-place conversion comes along, at which point
+to-shared conversions will "need" to find all affected folios prior to
+calling into arch code.  In quotes because very technically that work could
+be pushed to arch code, but that would bleed guest_memfd details into arch
+code and would be far worse than adding yet another kvm_arch_has... hook.
+
+Opportunistically provide the kvm_arch_gmem_make_private() declaration, and
+rely on dead-code elimination to eliminate the call to non-existent code
+when CONFIG_HAVE_KVM_ARCH_GMEM_CONVERT=n.
+
+Reported-by: Binbin Wu <binbin.wu@linux.intel.com>
+Closes: https://lore.kernel.org/all/1ec08cd8-3072-4753-ad5e-cd34956647f8@linux.intel.com
+Suggested-by: Ackerley Tng <ackerleytng@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+---
+ arch/x86/include/asm/kvm_host.h | 3 +++
+ include/linux/kvm_host.h        | 3 ++-
+ virt/kvm/guest_memfd.c          | 5 ++---
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 671dceb0f to be09e0fbf
+KVM mailing list update from 671dceb0f to be09e0fbf
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 google.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+      2  Per Larsen <perlarsen@google.com>
+      1  Sebastian Ene <sebastianene@google.com>
+      1  Per Larsen via B4 Relay <devnull+perlarsen.google.com@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v7 0/3] KVM: arm64: Support FF-A direct messaging
+Author: Per Larsen via B4 Relay <devnull+perlarsen.google.com@kernel.org>
+
+Block host-initiated FF-A direct responses.
+Support FFA_MSG_SEND_DIRECT_REQ unconditionally.
+Support FFA_MSG_SEND_DIRECT_REQ2 if hypervisor negotiated version 1.2+.
+
+Framework messages (FF-A control plane) are filtered out. For
+FFA_MSG_SEND_DIRECT_REQ, we look at flags in w2. Messages using the REQ2
+interface are always partition messages.
+
+The third patch was part of a previous patch set [0] but was dropped
+since the use case was unclear. A clear use case has now appeared: use
+TPM device with CRB over FF-A when kernel boots with pkvm [1].
+
+Tested by booting Android under QEMU.
+
+Best Regards,
+Per
+
+[0]: https://lore.kernel.org/all/20250730-virtio-msg-ffa-v9-0-7f1b55c8d149@google.com/
+[1]: https://lore.kernel.org/all/20251027191729.1704744-1-yeoreum.yun@arm.com/
+
+Signed-off-by: Per Larsen <perlarsen@google.com>
+---
+Changes in v7:
+- New patch 1/3: block FFA_FN64_MSG_SEND_DIRECT_RESP. Only the 32-bit
+  variant was denied, so the host could send unvalidated 64-bit direct
+  responses to EL3, including a forged sender endpoint ID
+- Use hyp_smccc_1_2_smc() so the call is bracketed by hyp_exit/hyp_enter;
+  the pass-through path already traced these calls
+- Declare endp/flags as u64 and reject a non-zero x1[63:32]: these are
+  w1/w2, but the raw 64-bit registers are forwarded to EL3
+- Pass the canonicalised func_id to do_ffa_direct_msg() rather than
+  re-reading x0, which still carries ARM_SMCCC_CALL_HINTS
+- Link to v6: https://lore.kernel.org/r/20260501-host-direct-messages-v6-0-3f4af727ed85@google.com
+
+Changes in v6:
+- 1/2: validate that bits 31:16 of w1 is HOST_FFA_ID.
+- Link to v5: https://lore.kernel.org/r/20260121-host-direct-messages-v5-0-2c1614c94e80@google.com
+
+Changes in v5:
+- 1/2: do_ffa_direct_msg: validate that sender is HOST_FFA_ID.
+- Link to v4: https://lore.kernel.org/r/20260109-host-direct-messages-v4-0-95da4221d186@google.com
+
+Changes in v4:
+- 1/2: do_ffa_direct_msg: check that flag in w2 is zero; drop unused vm_handle parameter.
+- 2/2: ffa_call_supported: simplify logic by reordering cases.
+-      do_ffa_direct_msg: switch polarity of check and update comment.
+- Link to v3: https://lore.kernel.org/r/20251119-host-direct-messages-v3-0-c74d04944b26@google.com
+
+Changes in v3:
+- Filter out framework messages as suggested by Will Deacon. Update cover letter accordingly.
+- Update trailers: Reviewed-by: Yeoreum Yun <yeoreum.yun@arm.com>
+- Link to v2: https://lore.kernel.org/r/20251030-host-direct-messages-v2-0-9f27cef36730@google.com
+
+Changes in v2:
+- 1/2: Drop support for FFA_ID_GET interface in host handler.
+- Link to v1: https://lore.kernel.org/r/20251030-host-direct-messages-v1-0-463e57871c8f@google.com
+
+---
+Per Larsen (2):
+      KVM: arm64: Block host-initiated FF-A direct responses
+      KVM: arm64: Support FFA_MSG_SEND_DIRECT_REQ2 in host handler
+
+Sebastian Ene (1):
+      KVM: arm64: Support FFA_MSG_SEND_DIRECT_REQ in host handler
+
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 44 +++++++++++++++++++++++++++++++++++++++++--
+ include/linux/arm_ffa.h       |  2 ++
+ 2 files changed, 44 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 3/3] KVM: arm64: Support FFA_MSG_SEND_DIRECT_REQ2 in
+Author: Per Larsen via B4 Relay <devnull+perlarsen.google.com@kernel.org>
+
+
+FF-A 1.2 adds the DIRECT_REQ2 messaging interface which is similar to
+the existing FFA_MSG_SEND_DIRECT_{REQ,RESP} functions and can use the
+existing handler function. Add support for FFA_MSG_SEND_DIRECT_REQ2 in
+the host ffa handler.
+
+Reviewed-by: Yeoreum Yun <yeoreum.yun@arm.com>
+Signed-off-by: Per Larsen <perlarsen@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v7 2/3] KVM: arm64: Support FFA_MSG_SEND_DIRECT_REQ in host
+Author: Per Larsen via B4 Relay <devnull+perlarsen.google.com@kernel.org>
+
+
+Allow direct messages to be forwarded from the host. The host should
+not be sending framework messages so they are filtered out.
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Reviewed-by: Yeoreum Yun <yeoreum.yun@arm.com>
+Signed-off-by: Per Larsen <perlarsen@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 27 +++++++++++++++++++++++++++
+ include/linux/arm_ffa.h       |  2 ++
+ 2 files changed, 29 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v7 1/3] KVM: arm64: Block host-initiated FF-A direct
+Author: Per Larsen via B4 Relay <devnull+perlarsen.google.com@kernel.org>
+
+
+ffa_call_supported() rejects FFA_MSG_SEND_DIRECT_RESP, but allows
+FFA_FN64_MSG_SEND_DIRECT_RESP to be forwarded to firmware.
+
+The host is never the target of an FF-A direct request and therefore
+cannot initiate a direct response. Reject both calling conventions.
+
+Suggested-by: Fuad Tabba <tabba@google.com>
+Signed-off-by: Per Larsen <perlarsen@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
