@@ -1,0 +1,2350 @@
+
+On /root/mail/repo:
+From d503e36b6 to 7941390e6
+KVM mailing list update from d503e36b6 to 7941390e6
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     29 google.com
+      9 gmail.com
+      4 redhat.com
+      3 kernel.org
+      1 linux.ibm.com
+
+Top 15 contributors (Based on Email Body)
+
+     28  Sean Christopherson <seanjc@google.com>
+      7  Abdifatah Suruur <suruurism@gmail.com>
+      4  Vitaly Kuznetsov <vkuznets@redhat.com>
+      2  Yosry Ahmed <yosry@kernel.org>
+      2  Jia Jia <physicalmtea@gmail.com>
+      1  Steffen Eiden <seiden@linux.ibm.com>
+      1  "Naveen N Rao (AMD)" <naveen@kernel.org>
+      1  David Matlack <dmatlack@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v3] vhost/vsock: batch RX used-ring updates
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_transport_do_send_pkt() calls vhost_add_used() for every Guest RX
+buffer even though it delays the Guest signal until the worker finishes.
+Each call publishes one used entry and updates the used index separately.
+
+Collect the completed buffer heads in the arrays already allocated for the
+virtqueue and publish them with vhost_add_used_n().  Bound the batch by the
+ring size, array capacity, and worker packet budget.  Flush before
+re-enabling notifications or leaving the worker.
+
+Each used entry describes one completed RX buffer and keeps its actual used
+length, so set nheads to 1 for every entry.  This patch does not change
+negotiated features or compress multiple buffers into one used entry.
+
+This patch is limited to the current skb-based vhost-vsock RX path.
+
+Performance:
+
+Tested with a QEMU/KVM guest on a host with 4 online CPUs, using 2 vCPUs
+pinned to host CPUs 2 and 3, QEMU 10.2.1, q35, 1536 MiB, and Linux
+7.2.0-rc3-next-20260713-next-debug-kasan.  The vhost-vsock source is based
+on linux-next master at 49362394dad7df66c274c867a271394c10ca2bb8.
+
+Current vhost-vsock does not implement VIRTIO_F_IN_ORDER or
+VIRTIO_F_RING_PACKED, so both configurations used packed=off and
+in_order=off:
+
+  baseline:                 RX batching=off
+  vhost-vsock RX batching:  RX batching=on
+
+The test used vsock_perf.  The Guest receiver was started with:
+
+  vsock_perf --port PORT --buf-size 64M --vsk-size 64M --rcvlowat 1
+
+The Host sender was started with:
+
+  vsock_perf --sender 3 --port PORT --bytes BYTES \
+      --buf-size SEND_BUF --vsk-size 64M
+
+Each workload transferred BYTES=1 GiB.  The SEND_BUF values were 256 B
+(SEND_BUF=256), 512 B (SEND_BUF=512), 4 KiB (SEND_BUF=4K), and 64 KiB
+(SEND_BUF=64K).
+Each state used a fresh Guest.  Each workload uses 20 paired runs, with 10
+runs in each order.  The reported values are
+Guest RX throughput in Gbits/s.  The baseline and batching columns are the
+geometric means over the 20 runs; change is batching / baseline - 1,
+computed from the unrounded values:
+
+  workload   baseline RX    batching RX   change   faster
+  256 B      0.0795724      0.0831509      +4.497%  20/20
+  512 B      0.1194885      0.1210297      +1.290%  14/20
+  4 KiB      0.7208273      0.7242053      +0.469%  11/20
+  64 KiB     2.1712797      2.1951941      +1.101%  13/20
+
+For reference, the table below gives the 95% normal-approximation intervals
+obtained from the 20 paired log(batching / baseline) values:
+
+  workload   paired 95% interval
+  256 B      +3.985% to +5.011%
+  512 B      +0.206% to +2.385%
+  4 KiB      -1.442% to +2.416%
+  64 KiB     -1.474% to +3.745%
+
+All transfers passed byte-count checks, and no kernel errors were observed
+in the logs.  The 256-byte workload improved in every pair.  The 512 B
+workload was faster in 14 of 20 pairs, with a small gain.  The 4 KiB and
+64 KiB workloads showed no material throughput change; the difference
+between their results may be due to scheduling and execution variation.
+
+The Guest RX throughput results above are the primary performance
+measurement. For additional Host-side context, I measured the vhost
+worker thread servicing the vhost-vsock RX queue in a separate set of
+10 paired runs, with five runs in each AB/BA order. Counters were
+normalized by the verified transferred GiB and summarized using
+geometric means. Worker cycles/GiB improved by 3.846%, 2.162%, and
+4.109% for 256 B, 4 KiB, and 64 KiB, respectively. The corresponding
+worker instructions/GiB improvements were 2.548%, 2.084%, and 4.637%.
+The patched implementation used fewer cycles in 10/10, 8/10, and
+10/10 paired runs, respectively, and fewer instructions in 10/10
+paired runs for all three workloads. This measures the complete vhost
+worker thread during the transfer, rather than an individual helper
+function, and is supplementary to the Guest RX throughput results.
+
+Link: https://lore.kernel.org/r/20181214082146-mutt-send-email-mst@kernel.org
+Link: https://lore.kernel.org/r/20220901055434.824-4-qtxuning1999@sjtu.edu.cn
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+Acked-by: Eugenio Pérez <eperezma@redhat.com>
+---
+Changes in v3:
+- Add supplementary Host-side perf measurements for the complete
+  vhost worker thread during the transfer.
+---
+ drivers/vhost/vsock.c | 53 +++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 51 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 8/8] KVM: VMX: Rename common exit info getters prefixes
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename all common prefixes for the APIs that get exit information common to
+VMX and TDX from "vmx" to "vt" to capture that they are used for both VMX
+and TDX vCPUs.
+
+No functional change intended.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h |  6 ++--
+ arch/x86/kvm/vmx/main.c   | 10 +++----
+ arch/x86/kvm/vmx/nested.c | 36 +++++++++++------------
+ arch/x86/kvm/vmx/tdx.c    | 22 +++++++-------
+ arch/x86/kvm/vmx/vmx.c    | 60 +++++++++++++++++++--------------------
+ 5 files changed, 67 insertions(+), 67 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 7/8] KVM: VMX: Move common VT getters/converters to common.h
+Author: Sean Christopherson <seanjc@google.com>
+
+Move the "to" vCPU converters and common exit information getters from
+vmx.h to common.h to capture that they are indeed common VT code.  Defer
+renaming their prefixes to isolate the code movement from the massive
+churn that will result from said renaming.
+
+No functional change intended.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h | 44 +++++++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/vmx/vmx.h    | 42 -------------------------------------
+ 2 files changed, 44 insertions(+), 42 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 5/8] KVM: VMX: Rename EPT violation handler prefix from
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename __vmx_handle_ept_violation() to __vt_handle_ept_violation to capture
+that it is shared between VMX and TDX.
+
+No functional change intended.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h | 4 ++--
+ arch/x86/kvm/vmx/tdx.c    | 2 +-
+ arch/x86/kvm/vmx/vmx.c    | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 6/8] KVM: VMX: Use dummy pseudo-overlay struct for to_vt()
+Author: Sean Christopherson <seanjc@google.com>
+
+Define a combined vcpu_vmx_tdx structure to represent the common layout of
+vcpu_vmx and vcpu_tdx, instead of having vcpu_tdx piggyback vcpu_vmx.  I.e.
+require VMX and TDX to match the common definition, not for TDX to match
+VMX.  This will allow moving to_vt() and vt_to_vcpu() to common.h where
+they belong.
+
+No functional change intended.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/main.c | 4 +++-
+ arch/x86/kvm/vmx/vmx.h  | 9 +++++++--
+ 2 files changed, 10 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/8] KVM: VMX: Rename posted interrupt prefixes from "vmx"
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename all common posted interrupt APIs that use a "vmx" prefix to instead
+use a "vt" prefix to capture that they are used for both VMX and TDX vCPUs.
+
+No functional change intended.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h      |  4 ++--
+ arch/x86/kvm/vmx/main.c        |  4 ++--
+ arch/x86/kvm/vmx/posted_intr.c | 22 +++++++++++-----------
+ arch/x86/kvm/vmx/posted_intr.h |  8 ++++----
+ arch/x86/kvm/vmx/tdx.c         |  6 +++---
+ arch/x86/kvm/vmx/vmx.c         |  6 +++---
+ 6 files changed, 25 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/8] KVM: VMX: Move the shared NMI handler/trampoline to
+Author: Sean Christopherson <seanjc@google.com>
+
+Move vmx_handle_nmi() to main.c to capture that it's a common handler and
+to allow guarding against incorrectly using to_vmx().
+
+Opportunistically use a "vt" prefix instead of "vmx" to communicate that
+it's a shared handler.
+
+No functional change intended.
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h |  2 +-
+ arch/x86/kvm/vmx/main.c   | 11 +++++++++++
+ arch/x86/kvm/vmx/tdx.c    |  2 +-
+ arch/x86/kvm/vmx/vmx.c    | 13 +------------
+ 4 files changed, 14 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/8] KVM: VMX: Move the shared "IRQs off" exit handler(s)
+Author: Sean Christopherson <seanjc@google.com>
+
+Move vmx_handle_exit_irqoff() and its helpers to common.h / main.c to
+capture that it's a common handler and to allow guarding against incorrectly
+using to_vmx().
+
+Opportunistically use a "vt" prefix instead of "vmx" to communicate that
+it's a shared handler.
+
+No functional change intended.
+
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+Cc: Xiaoyao Li <xiaoyao.li@intel.com>
+Cc: Binbin Wu <binbin.wu@linux.intel.com>
+Cc: Kai Huang <kai.huang@intel.com>
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/common.h  |  6 ++++
+ arch/x86/kvm/vmx/main.c    | 71 +++++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/vmx/vmx.c     | 74 --------------------------------------
+ arch/x86/kvm/vmx/x86_ops.h |  1 -
+ 4 files changed, 76 insertions(+), 76 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/8] KVM: VMX: Disallow using to_vmx() in common VT code
+Author: Sean Christopherson <seanjc@google.com>
+
+Poison to_vmx() in main.c and posted_intr.c so that attempting to interpret
+the vCPU as a VMX vCPU will fail at compile time, as opposed to failing at
+runtime, or worse corrupting state without outright failing.
+
+Note, to_tdx() is buried in tdx.c, i.e. isn't broadly reachable, and so
+doesn't need the same treatment as to_vmx().
+
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Tested-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/main.c        | 2 ++
+ arch/x86/kvm/vmx/posted_intr.c | 2 ++
+ 2 files changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/8] KVM: VMX: Harden against interpreting TDX vCPU as vcpu_vmx
+Author: Sean Christopherson <seanjc@google.com>
+
+Move and rename "all" (read: everything I could find) common helpers out of
+vmx.c and/or replace their vmx_ prefix with vt_, and then poison to_vmx() for
+all common .c files to harden KVM against misinterpreting a TDX vCPU as a VMX
+vCPU, i.e. consuming to_vmx() on a TDX vCPU.  Spotted when working through
+the bus lock series.
+
+v3:
+ - Collect tags. [Kai, Xiaoyao, Binbin]
+ - Move the poisoning to patch 1. [Xiaoyao]
+ - s/Disallowing/Disallow. [Binbin, Kai]
+ - s/vmx_needs_pi_wakeup/vt_needs_pi_wakeup. [Xiaoyao]
+
+v2:
+ - https://lore.kernel.org/all/20260826171246.777729-1-seanjc@google.com
+ - Complete my train of though in patch 1's changelog. [Binbin]
+ - Rename vmx_handle_exit_irqoff() => vt_handle_exit_irqoff. [Binbin, Sashiko]
+ - Collect a review. [Binbin]
+ - Move and rename everything I could find, using a dummy "struct vcpu_vmx_tdx"
+   to allow relocating common inline helpers from vmx.h to common.h.
+
+v1: https://lore.kernel.org/all/20260814161129.2177118-1-seanjc@google.com
+
+Sean Christopherson (8):
+  KVM: VMX: Disallow using to_vmx() in common VT code
+  KVM: VMX: Move the shared "IRQs off" exit handler(s) to common code
+  KVM: VMX: Move the shared NMI handler/trampoline to common code
+  KVM: VMX: Rename posted interrupt prefixes from "vmx" to "vt"
+  KVM: VMX: Rename EPT violation handler prefix from "vmx" to "vt"
+  KVM: VMX: Use dummy pseudo-overlay struct for to_vt() and vt_to_vcpu()
+  KVM: VMX: Move common VT getters/converters to common.h
+  KVM: VMX: Rename common exit info getters prefixes from "vmx" to "vt"
+
+ arch/x86/kvm/vmx/common.h      |  60 +++++++++++--
+ arch/x86/kvm/vmx/main.c        |  92 ++++++++++++++++++-
+ arch/x86/kvm/vmx/nested.c      |  36 ++++----
+ arch/x86/kvm/vmx/posted_intr.c |  24 ++---
+ arch/x86/kvm/vmx/posted_intr.h |   8 +-
+ arch/x86/kvm/vmx/tdx.c         |  32 +++----
+ arch/x86/kvm/vmx/vmx.c         | 155 ++++++++-------------------------
+ arch/x86/kvm/vmx/vmx.h         |  37 --------
+ arch/x86/kvm/vmx/x86_ops.h     |   1 -
+ 9 files changed, 229 insertions(+), 216 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost-scsi: fix event queue iov out-of-bounds
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_scsi_do_evt_work() uses vq->iov[out] after vhost_get_vq_desc()
+without checking that the descriptor chain contains an input segment.
+vq->iov has UIO_MAXIOV entries (1024).  A chain of 1024 output-only
+descriptors yields out == 1024 and in == 0, so the length check reads
+one past the end of the array.
+
+With a host-side harness that sets VHOST_SCSI_SET_EVENTS_MISSED and
+kicks an event queue filled with 1024 OUT descriptors, UBSAN reports:
+
+  UBSAN: array-index-out-of-bounds in drivers/vhost/scsi.c:611:14
+  index 1024 is out of range for type 'iovec [1024]'
+
+  Call Trace:
+   <TASK>
+   dump_stack_lvl+0x5f/0x90
+   dump_stack+0x10/0x18
+   ubsan_epilogue+0x9/0x39
+   __ubsan_handle_out_of_bounds.cold+0x50/0x55
+   vhost_scsi_complete_events+0x55f/0x5a0 [vhost_scsi]
+   vhost_scsi_evt_work+0x17/0x30 [vhost_scsi]
+   vhost_run_work_list+0x8e/0xd0 [vhost]
+   vhost_task_fn+0xe1/0x210
+   ret_from_fork+0x348/0x540
+   ret_from_fork_asm+0x1a/0x30
+   </TASK>
+
+Require at least one input descriptor before indexing iov[out], and
+treat a pure-output chain as a missed event like other invalid event
+buffers.
+
+Fixes: a6c9af87363c ("tcm_vhost: Add hotplug/hotunplug support")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/scsi.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/4] KVM: guest_memfd: Establish memslot<=>guest_memfd
+Author: Sean Christopherson <seanjc@google.com>
+
+Wait to bind a memslot to a guest_memfd instance until *after* the memslot
+is fully prepared, as creating the binding in guest_memfd will effectively
+expose the memslot to readers.  As pointed out by Sashiko, binding the
+memslot before it's ready to be exposed to the rest of the world can break
+various memslot assumption and rules.  E.g. x86 could observe a NULL rmap
+pointer if a PUNCH_HOLE hit the guest_memfd after the binding was created,
+but before KVM made it through kvm_prepare_memory_region().
+
+Begrudgingly resort to passing in the guest_memfd fd+offset pair to
+kvm_set_memslot(), as creating the binding really does need to happen in
+the middle of setting the new memslot.  Alternatively, to preserve the
+aesthetically pleasing function prototype, "struct kvm_memory_slot" could
+be expanded to track the fd and the file, but that would create the
+possibility for TOCTOU bugs on the fd vs. file, and would add zero value
+beyond making kvm_set_memslot() look pretty.
+
+Fixes:a7800aa80ea4 ("KVM: Add KVM_CREATE_GUEST_MEMFD ioctl() for guest-specific backing memory")
+Cc: stable@vger.kernel.org
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260826170551.BEF801F000E9@smtp.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/kvm_main.c | 34 ++++++++++++++++++++++------------
+ 1 file changed, 22 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/4] KVM: guest_memfd: Drop superfluous WRITE_ONCE() when
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop the superfluous WRITE_ONCE() when setting a memslot's guest_memfd file
+during initial binding, as the memslot *must* be inactive and unreachable.
+The superfluous WRITE_ONCE() was added by commit 67b43038ce14 ("KVM:
+guest_memfd: Remove RCU-protected attribute from slot->gmem.file") to
+maintain rough "parity" with the existing rcu_assign_pointer(), not
+realizing that the only reason rcu_assign_pointer() was used was to make
+sparse and other checkers happy.
+
+Cc: Yan Zhao <yan.y.zhao@intel.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/guest_memfd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/4] KVM: Use goto to handle errors during memslot preparation
+Author: Sean Christopherson <seanjc@google.com>
+
+Use a goto to unwind early memslot changes if preparing for a memslot
+operation fails.  This will allow moving the creation of guest_memfd
+bindings into kvm_set_memslot() without needing to copy+paste the unwind
+logic.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/kvm_main.c | 31 ++++++++++++++++---------------
+ 1 file changed, 16 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/4] KVM: guest_memfd: Gracefully handle xarray errors when
+Author: Sean Christopherson <seanjc@google.com>
+
+If inserting a memslot into a guest_memfd's bindings xarray fails,
+propagate the error back to the caller, i.e. fail memslot creation as well.
+Signalling success and continuing on with memslot creation results in
+use-after-free, as the guest_memfd instance will remain reachable via the
+memslot after the file is freed (kvm_gmem_release() won't nullify the file
+pointer due to lack of a valid binding).
+
+Opportunistically WARN and reject binding if KVM_MEMSLOT_GMEM_ONLY is
+already set, partly to guard against goofs elsewhere, but mostly so that
+KVM doesn't need to worry about clobbering flags when unwinding on failure.
+
+Fixes: a7800aa80ea4 ("KVM: Add KVM_CREATE_GUEST_MEMFD ioctl() for guest-specific backing memory")
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Reported-by: Dennis Tighe <dtighe@google.com>
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260823135031.4F6DC1F000E9%40smtp.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/guest_memfd.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/4] KVM: guest_memfd: Fix binding bugs
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix guest_memfd bugs related to binding to a memslot:
+
+ - Handle errors when inserting into guest_memfd's binding xarray, e.g. to
+   do the right thing on ENOMEM.
+
+ - Bind a memslot only once the memslot is fully prepared (because it becomes
+   reachable/visible once its inserted into gmem's bindings arraxy).
+
+Patch 4 is a related cleanup to remove a superflous WRITE_ONCE() (unwinding
+the slot update on insertion failure isn't an option if the slot is observable,
+i.e. if the WRITE_ONCE() is actually necessary).
+
+v3:
+ - Nullify bindings on error before dropping invalidat lock. [Sashiko x3]
+ 
+v2:
+ - https://lore.kernel.org/all/20260902182020.2615443-1-seanjc@google.com
+ - Fix the binding-too-early bug. [Sashiko]
+ - Explicitly zero the bindings entry on failure to ensure there are no
+   partial entries. [Sashiko]
+
+v1: https://lore.kernel.org/all/20260826165154.766699-2-seanjc@google.com
+
+Sean Christopherson (4):
+  KVM: guest_memfd: Gracefully handle xarray errors when binding a
+    memslot
+  KVM: Use goto to handle errors during memslot preparation
+  KVM: guest_memfd: Establish memslot<=>guest_memfd bindings *after*
+    memslot is ready
+  KVM: guest_memfd: Drop superfluous WRITE_ONCE() when binding a memslot
+
+ virt/kvm/guest_memfd.c | 17 ++++++++++--
+ virt/kvm/kvm_main.c    | 63 +++++++++++++++++++++++++-----------------
+ 2 files changed, 51 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/17] KVM: selftests: Always assert that vmreadz() succeeds
+Author: Sean Christopherson <seanjc@google.com>
+
+Rename vmreadz() => vmread() (and vmread() => __vmread()) and have it
+assert success instead of returning garbage on failure.  While the eVMCS
+path avoids clobbering *value on failure, the VMREAD path unconditionally
+stores tmp to *value, without ever zeroing tmp.  I.e. if VMREAD did fail,
+*value would be loaded with random stack data, not '0'.
+
+An audit of the code confirms that nothing is actually relying on vmreadz()
+to zero the result on failure, as all paths either check for a non-zero
+value, propagate the result into vmwrite(), or guard the vmread() with a
+pre-check that the field exists.
+
+Opportunistically fix the bug in what is now __vmread(), so that the code
+isn't consuming uninitialized stack data.  Begrudgingly keep zeroing
+value in vmread(), as gcc-15 at least isn't smart enough to figure out
+that value won't be used uninitialized (though to be fair, strictly
+speaking it isn't actually unreachable code).
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 15 +++---
+ .../testing/selftests/kvm/lib/x86/memstress.c |  2 +-
+ tools/testing/selftests/kvm/lib/x86/vmx.c     | 52 +++++++++----------
+ .../selftests/kvm/x86/aperfmperf_test.c       |  2 +-
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  | 24 ++++-----
+ .../selftests/kvm/x86/nested_dirty_log_test.c |  2 +-
+ .../selftests/kvm/x86/nested_emulation_test.c |  8 +--
+ .../kvm/x86/nested_exceptions_test.c          | 10 ++--
+ .../kvm/x86/nested_invalid_cr3_test.c         |  6 +--
+ .../selftests/kvm/x86/nested_tdp_fault_test.c | 10 ++--
+ .../kvm/x86/nested_tsc_adjust_test.c          |  4 +-
+ .../kvm/x86/nested_tsc_scaling_test.c         |  6 +--
+ .../kvm/x86/save_restore_pf_stress_test.c     |  4 +-
+ tools/testing/selftests/kvm/x86/state_test.c  | 24 ++++-----
+ .../kvm/x86/triple_fault_event_test.c         |  2 +-
+ .../selftests/kvm/x86/vmx_apic_access_test.c  | 12 ++---
+ .../kvm/x86/vmx_apicv_updates_test.c          |  8 +--
+ .../kvm/x86/vmx_invalid_nested_guest_state.c  |  6 +--
+ .../kvm/x86/vmx_nested_la57_state_test.c      |  4 +-
+ .../kvm/x86/vmx_preemption_timer_test.c       |  8 +--
+ 20 files changed, 104 insertions(+), 105 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/17] KVM: selftests: Always assert that vmwrite() succeeds
+Author: Sean Christopherson <seanjc@google.com>
+
+Assert that vmwrite() succeeds instead of forcing all callers to do the
+same (or as is much more common, ignoring VM-Fail and likely letting the
+test fail in weird ways), opportunistically provide a more verbose error
+message on failure.
+
+All usage of vmwrite() "guarantees" success, either because the field in
+question is unconditionally emulated by KVM, by virtue of earlier support
+checks, or by falling over (later in the test) if the VMWRITE fails.
+
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h          |  5 +++--
+ tools/testing/selftests/kvm/x86/aperfmperf_test.c      |  2 +-
+ tools/testing/selftests/kvm/x86/kvm_buslock_test.c     |  2 +-
+ .../testing/selftests/kvm/x86/nested_emulation_test.c  |  6 +++---
+ .../testing/selftests/kvm/x86/nested_exceptions_test.c | 10 +++++-----
+ .../selftests/kvm/x86/save_restore_pf_stress_test.c    |  2 +-
+ tools/testing/selftests/kvm/x86/state_test.c           |  4 ++--
+ .../selftests/kvm/x86/vmx_preemption_timer_test.c      |  8 +++-----
+ 8 files changed, 19 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/17] KVM: selftests: Assert success in vmlaunch() and vmresume()
+Author: Sean Christopherson <seanjc@google.com>
+
+Assert success in the "outer" APIs for VMLAUNCH and VMRESUME to dedup a
+pile of code, and switch to the double-underscores versions as necessary,
+to make it more obvious which paths expect VM-Enter *failure*.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h |  8 +++----
+ .../testing/selftests/kvm/lib/x86/memstress.c |  2 +-
+ .../selftests/kvm/x86/aperfmperf_test.c       |  2 +-
+ .../kvm/x86/evmcs_smm_controls_test.c         |  2 +-
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  | 22 ++++++++---------
+ .../selftests/kvm/x86/kvm_buslock_test.c      |  2 +-
+ .../selftests/kvm/x86/nested_close_kvm_test.c |  2 +-
+ .../selftests/kvm/x86/nested_dirty_log_test.c |  2 +-
+ .../selftests/kvm/x86/nested_emulation_test.c |  5 +++-
+ .../kvm/x86/nested_exceptions_test.c          |  5 +++-
+ .../kvm/x86/nested_invalid_cr3_test.c         |  4 ++--
+ .../selftests/kvm/x86/nested_tdp_fault_test.c |  2 +-
+ .../kvm/x86/nested_tsc_adjust_test.c          |  2 +-
+ .../kvm/x86/nested_tsc_scaling_test.c         |  2 +-
+ .../kvm/x86/save_restore_pf_stress_test.c     |  4 ++--
+ tools/testing/selftests/kvm/x86/state_test.c  | 24 +++++++++----------
+ .../kvm/x86/triple_fault_event_test.c         |  2 +-
+ .../selftests/kvm/x86/vmx_apic_access_test.c  |  4 ++--
+ .../kvm/x86/vmx_apicv_updates_test.c          |  4 ++--
+ .../kvm/x86/vmx_invalid_nested_guest_state.c  |  2 +-
+ .../kvm/x86/vmx_nested_la57_state_test.c      |  2 +-
+ .../kvm/x86/vmx_preemption_timer_test.c       |  4 ++--
+ 22 files changed, 57 insertions(+), 51 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/17] KVM: selftests: Add __vmwrite() and use it when
+Author: Sean Christopherson <seanjc@google.com>
+
+Add __vmwrite() in anticipation of having vmwrite() assert success, and use
+the "failure allowed" version in the common VMCS setup code, which is the
+only code that wants to write fields that may or may not exist (although
+arguably the code should check if the field exists instead of blindly
+writing).
+
+E.g. When doing initial configuration of a VMCS, the core library doesn't
+want to assume secondary controls are supported, and so blindly does a
+VMWRITE and pivots on success/failure.
+
+All usage of vmwrite() outside of common setup already asserts success, or
+100% relies on VMWRITE succeeding in order for the test to function
+correctly.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h |  7 ++++++-
+ tools/testing/selftests/kvm/lib/x86/vmx.c     | 18 +++++++++---------
+ 2 files changed, 15 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/17] KVM: selftests: Dedup assembly code for VMLAUNCH and VMRESUME
+Author: Sean Christopherson <seanjc@google.com>
+
+Dedup the assembly code for VMLAUNCH vs. VMRESUME, for both architectural
+VMCS and eVMCS, as the difference is literally only the actual VM-Enter
+instruction for VMLAUNCH vs. VMRESUME, and VMWRITE vs. MOV for VMCS vs.
+eVMCS.
+
+Opportunistically place the implementations in vmx.c so that the lengthy
+sequence (~580 bytes of code) aren't inlined for every single VM-Enter.
+
+000000000041b910 <__vmlaunch>:
+  41b910:       80 3d 61 5e 10 00 00                            cmpb   $0x0,0x105e61(%rip)        # 521778 <enable_evmcs>
+  41b917:       0f 85 13 01 00 00                               jne    41ba30 <__vmlaunch+0x120>
+  41b91d:       ba 14 6c 00 00                                  mov    $0x6c14,%edx
+  41b922:       b9 16 6c 00 00                                  mov    $0x6c16,%ecx
+  41b927:       6a 00                                           push   $0x0
+  41b929:       0f 79 d4                                        vmwrite %rsp,%rdx
+  41b92c:       48 8d 05 82 00 00 00                            lea    0x82(%rip),%rax        # 41b9b5 <__vmlaunch+0xa5>
+  41b933:       0f 79 c8                                        vmwrite %rax,%rcx
+  <xchg GPRs>
+  41b9ae:       0f 01 c2                                        vmlaunch
+  41b9b1:       48 ff 04 24                                     incq   (%rsp)
+  <xchg GPRs>
+  41ba2d:       58                                              pop    %rax
+  41ba2e:       c3                                              ret
+  41ba2f:       90                                              nop
+  41ba30:       48 8b 35 39 5d 10 00                            mov    0x105d39(%rip),%rsi        # 521770 <current_evmcs>
+  41ba37:       c7 86 38 03 00 00 00 00 00 00                   movl   $0x0,0x338(%rsi)
+  41ba41:       6a 00                                           push   $0x0
+  41ba43:       48 89 a6 68 02 00 00                            mov    %rsp,0x268(%rsi)
+  41ba4a:       48 8d 05 83 00 00 00                            lea    0x83(%rip),%rax        # 41bad4 <__vmlaunch+0x1c4>
+  41ba51:       48 89 46 50                                     mov    %rax,0x50(%rsi)
+  <xchg GPRs>
+  41bacd:       0f 01 c2                                        vmlaunch
+  41bad0:       48 ff 04 24                                     incq   (%rsp)
+  <xchg GPRs>
+  41bb4c:       58                                              pop    %rax
+  41bb4d:       c3                                              ret
+
+No functional change intended (though the code generation will be quite
+different).
+
+Cc: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../testing/selftests/kvm/include/x86/evmcs.h | 58 -------------------
+ tools/testing/selftests/kvm/include/x86/vmx.h | 47 ++-------------
+ tools/testing/selftests/kvm/lib/x86/vmx.c     | 55 ++++++++++++++++++
+ 3 files changed, 60 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/17] KVM: selftests: Drop dead return code from
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop the return codes from evmcs_vmptrld() and load_evmcs() as they are
+hardcoded to return '0' and "true" respectively.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/evmcs.h      | 12 +++---------
+ .../selftests/kvm/x86/evmcs_smm_controls_test.c      |  2 +-
+ tools/testing/selftests/kvm/x86/hyperv_evmcs.c       |  2 +-
+ 3 files changed, 5 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/17] KVM: selftests: Drop useless return code from load_vmcs()
+Author: Sean Christopherson <seanjc@google.com>
+
+Now that load_vmcs() either asserts or returns success, drop the return
+code and the many asserts in its callers.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h                 | 2 +-
+ tools/testing/selftests/kvm/lib/x86/memstress.c               | 2 +-
+ tools/testing/selftests/kvm/lib/x86/vmx.c                     | 4 +---
+ tools/testing/selftests/kvm/x86/aperfmperf_test.c             | 2 +-
+ tools/testing/selftests/kvm/x86/kvm_buslock_test.c            | 2 +-
+ tools/testing/selftests/kvm/x86/nested_close_kvm_test.c       | 2 +-
+ tools/testing/selftests/kvm/x86/nested_dirty_log_test.c       | 2 +-
+ tools/testing/selftests/kvm/x86/nested_emulation_test.c       | 2 +-
+ tools/testing/selftests/kvm/x86/nested_exceptions_test.c      | 2 +-
+ tools/testing/selftests/kvm/x86/nested_invalid_cr3_test.c     | 2 +-
+ tools/testing/selftests/kvm/x86/nested_tdp_fault_test.c       | 2 +-
+ tools/testing/selftests/kvm/x86/nested_tsc_adjust_test.c      | 2 +-
+ tools/testing/selftests/kvm/x86/nested_tsc_scaling_test.c     | 2 +-
+ tools/testing/selftests/kvm/x86/save_restore_pf_stress_test.c | 2 +-
+ tools/testing/selftests/kvm/x86/smm_test.c                    | 2 +-
+ tools/testing/selftests/kvm/x86/state_test.c                  | 2 +-
+ tools/testing/selftests/kvm/x86/triple_fault_event_test.c     | 2 +-
+ tools/testing/selftests/kvm/x86/vmx_apic_access_test.c        | 2 +-
+ tools/testing/selftests/kvm/x86/vmx_apicv_updates_test.c      | 2 +-
+ .../selftests/kvm/x86/vmx_invalid_nested_guest_state.c        | 2 +-
+ tools/testing/selftests/kvm/x86/vmx_nested_la57_state_test.c  | 2 +-
+ tools/testing/selftests/kvm/x86/vmx_preemption_timer_test.c   | 2 +-
+ 22 files changed, 22 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/17] KVM: selftests: Add macros to handle simple VMX instructions
+Author: Sean Christopherson <seanjc@google.com>
+
+Add macros to build helpers for VMXON, VMPTRLD, and VMCLEAR, i.e. the VMX
+instructions that take a VMCS address as input, and don't have outputs.
+Getting the params right is annoying, especially when using KVM_ASM_SAFE().
+
+As a bonus, this adds non-asserting double-underscores versions of VMXON
+and VMCLEAR for "free".
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 71 +++++++------------
+ 1 file changed, 26 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/17] KVM: selftests: Always assert that vmptrld() succeeds
+Author: Sean Christopherson <seanjc@google.com>
+
+Assert that vmptrld() succeeds instead of forcing all callers to do the
+same, and opportunistically provide a macro to print (hopefully) useful
+information on VMX instruction failures.
+
+Leave load_vmcs() as-is for the moment to minimize the amount of churn
+since the vmptrld() changes aren't completely trivial.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 23 +++++++++----------
+ tools/testing/selftests/kvm/lib/x86/vmx.c     |  3 +--
+ tools/testing/selftests/kvm/x86/state_test.c  |  6 ++---
+ 3 files changed, 15 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/17] KVM: selftests: Always assert that vmclear() succeeds
+Author: Sean Christopherson <seanjc@google.com>
+
+Continue removing dead error "handling", and assert that VMCLEAR
+succeeds instead of forcing callers of load_vmcs() to assert success.
+
+For all intents and purposes, no functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 4 ++--
+ tools/testing/selftests/kvm/lib/x86/vmx.c     | 6 ++----
+ 2 files changed, 4 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/17] KVM: selftests: Always assert that vmxon() and
+Author: Sean Christopherson <seanjc@google.com>
+
+Assert that vmxon() succeeds, and by extension prepare_for_vmx_operation().
+Forcing every caller to assert that a core preparation helper succeeds is
+absurd and generates hard-to-read code.
+
+For all intents and purposes, no functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h              | 6 +++---
+ tools/testing/selftests/kvm/lib/x86/memstress.c            | 2 +-
+ tools/testing/selftests/kvm/lib/x86/vmx.c                  | 7 ++-----
+ tools/testing/selftests/kvm/x86/aperfmperf_test.c          | 2 +-
+ tools/testing/selftests/kvm/x86/evmcs_smm_controls_test.c  | 2 +-
+ tools/testing/selftests/kvm/x86/hyperv_evmcs.c             | 2 +-
+ tools/testing/selftests/kvm/x86/kvm_buslock_test.c         | 2 +-
+ tools/testing/selftests/kvm/x86/nested_close_kvm_test.c    | 2 +-
+ tools/testing/selftests/kvm/x86/nested_dirty_log_test.c    | 2 +-
+ tools/testing/selftests/kvm/x86/nested_emulation_test.c    | 2 +-
+ tools/testing/selftests/kvm/x86/nested_exceptions_test.c   | 2 +-
+ tools/testing/selftests/kvm/x86/nested_invalid_cr3_test.c  | 2 +-
+ tools/testing/selftests/kvm/x86/nested_tdp_fault_test.c    | 2 +-
+ tools/testing/selftests/kvm/x86/nested_tsc_adjust_test.c   | 2 +-
+ tools/testing/selftests/kvm/x86/nested_tsc_scaling_test.c  | 2 +-
+ .../selftests/kvm/x86/save_restore_pf_stress_test.c        | 2 +-
+ tools/testing/selftests/kvm/x86/smm_test.c                 | 2 +-
+ tools/testing/selftests/kvm/x86/state_test.c               | 2 +-
+ tools/testing/selftests/kvm/x86/triple_fault_event_test.c  | 2 +-
+ tools/testing/selftests/kvm/x86/vmx_apic_access_test.c     | 2 +-
+ tools/testing/selftests/kvm/x86/vmx_apicv_updates_test.c   | 2 +-
+ .../selftests/kvm/x86/vmx_invalid_nested_guest_state.c     | 2 +-
+ .../testing/selftests/kvm/x86/vmx_nested_la57_state_test.c | 2 +-
+ .../testing/selftests/kvm/x86/vmx_preemption_timer_test.c  | 2 +-
+ 24 files changed, 27 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/17] KVM: selftests: Assert success in vmptrst(), kill
+Author: Sean Christopherson <seanjc@google.com>
+
+Assert success in vmptrst() instead of punting to the caller, as literally
+every user expects VMPTRST to succeed (and because '0' is a valid physical
+address).
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 19 ++++---------------
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  |  4 ++--
+ tools/testing/selftests/kvm/x86/state_test.c  |  8 ++++----
+ .../kvm/x86/vmx_preemption_timer_test.c       |  2 +-
+ 4 files changed, 11 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/17] KVM: selftests: Check VMPTRLD with active eVMCS
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Check that VMPTRLD when eVMCS is active results in #UD. This matches
+genuine Hyper-V's behavior.
+
+Use KVM_ASM_SAFE framework to handle #UD from VMPTRLD.  Unfortunately, the
+same trick cannot be applied to the existing #UD check on VMLAUNCH as
+VMLAUNCH clobbers all registers which KVM_ASM_SAFE depends on.  Keep
+VMLAUNCH handling separately.  Deliberately use a double-underscores
+prefix instead of a "safe" postfix for the helper, to communicate that the
+inner/outer helpers handle more than just exceptions, they also handle
+VM-Fail conditions.
+
+Assisted-by: Claude:claude-sonnet-4-6
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+[sean: use __ instead of _safe]
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/vmx.h | 19 +++++++++++---
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  | 26 +++++++++++++++----
+ 2 files changed, 37 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/17] KVM: selftests: Adapt to the updated VMPTRST
+Author: Sean Christopherson <seanjc@google.com>
+
+
+Previously, VMPTRST was forbidden with eVMCS and selftests were mocking the
+correct behavior in vmptrst() by returning enlightened vmptr directly.
+Since KVM's behavior has changed to match genuine Hyper-V, adjust evmcs
+test accordingly.
+
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/evmcs.h | 8 --------
+ tools/testing/selftests/kvm/include/x86/vmx.h   | 3 ---
+ tools/testing/selftests/kvm/x86/hyperv_evmcs.c  | 5 ++---
+ 3 files changed, 2 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/17] KVM: selftests: Don't clobber RFLAGS in happy path
+Author: Sean Christopherson <seanjc@google.com>
+
+Use a straight MOV instead of an XOR to zero R9 in the non-faulting path of
+__KVM_ASM_SAFE() so as not to clobber RFLAGS.  XOR generates smaller code,
+but optimizing performance by minimizing the code footprint is just about
+the last thing that KVM selftests care about.
+
+The bug is relatively benign in the current code base, e.g. it marginally
+degrades the coverage in the fastops test, but otherwise does no harm.  But
+the bug will become actively problematic if/when the "safe assembly" macros
+are used for instructions that communicate results via RFLAGS, e.g. for VMX
+instructions, which signal failure via RFLAGS.CF and RFLAGS.ZF.
+
+Opportunistically use R9D instead of the full R9, as bits 63:32 of GPRs are
+zeroed on writes to bit 31:0.
+
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260818165258.2613603-5-vkuznets@redhat.com
+Cc: Vitaly Kuznetsov <vkuznets@redhat.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ tools/testing/selftests/kvm/include/x86/processor.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/17] KVM: nVMX: Make VMPTRST return eVMCS GPA when it is used
+Author: Sean Christopherson <seanjc@google.com>
+
+
+VMPTRST with active eVMCS is currently forbidden, however, returning 1
+without skipping the instruction will likely result in L1 getting
+stuck. While TLFS does not specify the expected behavior, genuine Hyper-V
+seems to be returning eVMCS GPA. Implement the same behavior in KVM.
+
+Reported-by: f734222792@gmail.com
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=221841
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 14 +++++++++++---
+ 1 file changed, 11 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/17] KVM: nVMX: Adjust VMPTRLD/VMPTRST behavior with
+Author: Sean Christopherson <seanjc@google.com>
+
+The first four patches are Vitaly's series to adjust KVM's emulation of
+VMPTRLD/VMPTRST when the vCPU has an active eVMCS to match Hyper-V, and more
+importantly to not put the vCPU into an infinite loop.
+
+The churn piled on top came from wanting to use KVM_ASM_SAFE() for more VMX
+instructions to verify the RFLAGS bug+fix Sashiko pointed out, lack impulse
+control when it comes to cleanups, and Yosry being a bad/good influence.
+
+v4:
+ - Redo the VMLAUNCH/VMRESUME handling, dedup eVMCS as well. [Yosry]
+ - Give vmread() and vmwrite() the same treatment. [Yosry]
+ - Drop pointless returns from eVMCS setup.
+
+v3:
+ - https://lore.kernel.org/all/20260826233919.998904-1-seanjc@google.com
+ - MOAR PATCHES.
+
+v2:
+ - https://lore.kernel.org/all/20260818165258.2613603-1-vkuznets@redhat.com
+ - Fix build when !CONFIG_KVM_HYPERV [Sashiko]
+ - Drop now-unneeded evmcs_vmptrst() [Sashiko]
+ - Avoid hardcoding VMPTRLD insn length in hyperv_evmcs [Sashiko], use
+   KVM_ASM_SAFE framework instead [Sean]
+
+v1: https://lore.kernel.org/all/20260814162221.2144473-1-vkuznets@redhat.com
+
+Sean Christopherson (13):
+  KVM: selftests: Don't clobber RFLAGS in happy path of __KVM_ASM_SAFE()
+  KVM: selftests: Assert success in vmptrst(), kill off vmptrstz()
+  KVM: selftests: Always assert that vmxon() and
+    prepare_for_vmx_operation() succeed
+  KVM: selftests: Always assert that vmclear() succeeds
+  KVM: selftests: Always assert that vmptrld() succeeds
+  KVM: selftests: Drop useless return code from load_vmcs()
+  KVM: selftests: Add macros to handle simple VMX instructions
+  KVM: selftests: Drop dead return code from evmcs_vmptrld() and
+    load_evmcs()
+  KVM: selftests: Dedup assembly code for VMLAUNCH and VMRESUME
+  KVM: selftests: Assert success in vmlaunch() and vmresume()
+  KVM: selftests: Add __vmwrite() and use it when initializing optional
+    fields.
+  KVM: selftests: Always assert that vmwrite() succeeds
+  KVM: selftests: Always assert that vmreadz() succeeds
+
+Vitaly Kuznetsov (4):
+  KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+  KVM: nVMX: Make VMPTRST return eVMCS GPA when it is used
+  KVM: selftests: Adapt to the updated VMPTRST behavior when eVMCS is
+    used
+  KVM: selftests: Check VMPTRLD with active eVMCS
+
+ arch/x86/kvm/vmx/nested.c                     |  24 ++-
+ .../testing/selftests/kvm/include/x86/evmcs.h |  78 +--------
+ .../selftests/kvm/include/x86/processor.h     |   2 +-
+ tools/testing/selftests/kvm/include/x86/vmx.h | 165 ++++++------------
+ .../testing/selftests/kvm/lib/x86/memstress.c |   8 +-
+ tools/testing/selftests/kvm/lib/x86/vmx.c     | 143 ++++++++++-----
+ .../selftests/kvm/x86/aperfmperf_test.c       |  10 +-
+ .../kvm/x86/evmcs_smm_controls_test.c         |   6 +-
+ .../testing/selftests/kvm/x86/hyperv_evmcs.c  |  83 +++++----
+ .../selftests/kvm/x86/kvm_buslock_test.c      |   8 +-
+ .../selftests/kvm/x86/nested_close_kvm_test.c |   6 +-
+ .../selftests/kvm/x86/nested_dirty_log_test.c |   8 +-
+ .../selftests/kvm/x86/nested_emulation_test.c |  23 +--
+ .../kvm/x86/nested_exceptions_test.c          |  29 +--
+ .../kvm/x86/nested_invalid_cr3_test.c         |  14 +-
+ .../selftests/kvm/x86/nested_tdp_fault_test.c |  16 +-
+ .../kvm/x86/nested_tsc_adjust_test.c          |  10 +-
+ .../kvm/x86/nested_tsc_scaling_test.c         |  12 +-
+ .../kvm/x86/save_restore_pf_stress_test.c     |  14 +-
+ tools/testing/selftests/kvm/x86/smm_test.c    |   4 +-
+ tools/testing/selftests/kvm/x86/state_test.c  |  70 ++++----
+ .../kvm/x86/triple_fault_event_test.c         |   8 +-
+ .../selftests/kvm/x86/vmx_apic_access_test.c  |  20 +--
+ .../kvm/x86/vmx_apicv_updates_test.c          |  16 +-
+ .../kvm/x86/vmx_invalid_nested_guest_state.c  |  12 +-
+ .../kvm/x86/vmx_nested_la57_state_test.c      |  10 +-
+ .../kvm/x86/vmx_preemption_timer_test.c       |  24 ++-
+ 27 files changed, 387 insertions(+), 436 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/17] KVM: nVMX: Make VMPTRLD result in #UD when eVMCS is used
+Author: Sean Christopherson <seanjc@google.com>
+
+
+VMPTRLD with active eVMCS is already forbidden, however, returning 1
+without skipping the instruction or queuing an exception will likely
+result in L1 getting stuck. Genuine Hyper-V seems to inject #UD under
+similar circumstances, mimic the behavior in KVM.
+
+Reported-by: f734222792@gmail.com
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=221841
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Vitaly Kuznetsov <vkuznets@redhat.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: SVM: Trigger new ASID allocation in both VMCBs on pCPU switch
+Author: Yosry Ahmed <yosry@kernel.org>
+
+When the pCPU where the VMCB was mostly recently used is switched, reset
+the ASID generation in both VMCBs, triggering new ASID allocation for
+the immediate VMRUN as well as the next VMRUN on the other VMCB.
+
+The ASID is shared between vmcb01 and vmcb02, and gets flushed on every
+nested transition. However, since pCPU tracking is done per VMCB, it is
+possible for one VMCB to allocate a new ASID when migrated to a new
+pCPU, and then the other VMCB reuses that ASID on the old pCPU. This can
+result in the same ASID being used by multiple vCPUs on the old pCPU.
+
+Example scenario:
+- vCPU runs on pCPU A, vmcb01 is active, asid=1.
+- vCPU migrates to pCPU B, vmcb01 pCPU changes, new asid=2.
+- Another vCPU runs on pCPU A and allocates asid=2 as well.
+- vCPU migrates back to pCPU A, and then switches to vmcb02 before it
+  runs again with vmcb01.
+- No pCPU switch is detected for vmcb02, so VMRUN is done with asid=2.
+- Two vCPUs end up using asid=2 on the same pCPU.
+
+Keep the VMCB dirtying to the active VMCB only. Clean bits are tracked
+by a pCPU for each VMCB, so do not unnecessarily dirty a VMCB if its
+pCPU does not change.
+
+Additionally, initialize the tracked pCPU for vmcb02 to -1 on nested
+enablement as hardening, so that a new ASID allocation is always
+triggered when nested is disabled and re-enabled.
+
+No performance regression was noticed when overcommitting L1 vCPUs in L0
+(to force rescheduling), pinning L1 <-> L2 vCPUs, and running CPUID in a
+tight loop bouncing between 2 vCPUs in L2.
+
+An alternative (and perhaps more proper) fix would be tracking the ASID
+per-VMCB instead (e.g. [1]). However, that's a more involved change, and
+it would result in having different ASIDs for L1 and L2 without actually
+properly maintaining them. It would probably work because all TLB
+flushes target the current VMCB, and the other VMCB is always flushed on
+nested transitions, but the code ends up in an arguably more fragile
+state. Punt a proper clean fix to an incoming (and overdue) overhaul of
+SVM's ASID usage [2].
+
+[1]https://lore.kernel.org/lkml/20250205182402.2147495-2-yosry.ahmed@linux.dev/
+[2]https://lore.kernel.org/kvm/20260728003557.1136583-1-yosry@kernel.org/
+
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+
+v1 -> v2:
+- Make resetting asid_generation in vmcb02 unconditional (Sean).
+
+---
+ arch/x86/kvm/svm/nested.c |  1 +
+ arch/x86/kvm/svm/svm.c    | 19 +++++++++++++++----
+ 2 files changed, 16 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] vfio: selftests: Add documentation
+Author: David Matlack <dmatlack@google.com>
+
+Add documentation for VFIO selftests in driver-api/vfio-selftests.rst,
+include it in the driver-api index, and update MAINTAINERS.
+
+Since VFIO selftests was introduced it has expanded to include a helper
+library (libvfio), driver-level abstractions for triggering hardware DMA
+and interrupts, multiple IOMMU execution modes, dynamic IOVA allocation,
+and native integration into KVM selftests. Dedicated documentation
+should be helpful to guide kernel developers on writing tests, setting
+up devices, running tests, and understanding the helper library.
+
+Assisted-by: Gemini:3.1-Pro
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+v2:
+ - Add Assisted-by tag
+ - Replace use of emdash (Alex)
+ - Add a "Contribution Guidelines" section that documents the preferred
+   shortlog (Alex) and links to the KVM x86 maintainers handbook
+
+v1: https://lore.kernel.org/kvm/20260818000550.2526247-1-dmatlack@google.com/
+
+ Documentation/driver-api/index.rst          |   1 +
+ Documentation/driver-api/vfio-selftests.rst | 252 ++++++++++++++++++++
+ MAINTAINERS                                 |   1 +
+ 3 files changed, 254 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: SVM: Trigger new ASID allocation in both VMCBs on pCPU switch
+Author: Yosry Ahmed <yosry@kernel.org>
+
+When the pCPU where the VMCB was mostly recently used is switched, reset
+the ASID generation in both VMCBs, triggering new ASID allocation for
+the immediate VMRUN as well as the next VMRUN on the other VMCB.
+
+The ASID is shared between vmcb01 and vmcb02, and gets flushed on every
+nested transition. However, since pCPU tracking is done per VMCB, it is
+possible for one VMCB to allocate a new ASID when migrated to a new
+pCPU, and then the other VMCB reuses that ASID on the old pCPU. This can
+result in the same ASID being used by multiple vCPUs on the old pCPU.
+
+Example scenario:
+- vCPU runs on pCPU A, vmcb01 is active, asid=1.
+- vCPU migrates to pCPU B, vmcb01 pCPU changes, new asid=2.
+- Another vCPU runs on pCPU A and allocates asid=2 as well.
+- vCPU migrates back to pCPU A, and then switches to vmcb02 before it
+  runs again with vmcb01.
+- No pCPU switch is detected for vmcb02, so VMRUN is done with asid=2.
+- Two vCPUs end up using asid=2 on the same pCPU.
+
+Keep the VMCB dirtying to the active VMCB only. Clean bits are tracked
+by a pCPU for each VMCB, so do not unnecessarily dirty a VMCB if its
+pCPU does not change.
+
+Additionally, initialize the tracker pCPU for vmcb02 to -1 on nested
+enablement, so that the new ASID allocation in the scenario above
+happens even if EFER.SVME is disabled in L1 before migrating to the new
+pCPU (so asid_generation in vmcb02 is not reset), but enabled before
+returning to the old pCPU.
+
+No performance regression was noticed when overcommitting L1 vCPUs in L0
+(to force rescheduling), pinning L1 <-> L2 vCPUs, and running CPUID in a
+tight loop bouncing between 2 vCPUs in L2.
+
+An alternative (and perhaps more proper) fix would be tracking the ASID
+per-VMCB instead (e.g. [1]). However, that's a more involved change, and
+it would result in having different ASIDs for L1 and L2 without actually
+properly maintaining them. It would probably work because all TLB
+flushes target the current VMCB, and the other VMCB is always flushed on
+nested transitions, but the code ends up in an arguably more fragile
+state. Punt a proper clean fix to an incoming (and overdue) overhaul of
+SVM's ASID usage [2].
+
+[1]https://lore.kernel.org/lkml/20250205182402.2147495-2-yosry.ahmed@linux.dev/
+[2]https://lore.kernel.org/kvm/20260728003557.1136583-1-yosry@kernel.org/
+
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+
+I wasn't sure if the last paragraph (or parts of it) fit in the
+changelog or below ---, so I just put it all in the changelog, but feel
+free to move things around.
+
+---
+ arch/x86/kvm/svm/nested.c |  1 +
+ arch/x86/kvm/svm/svm.c    | 20 ++++++++++++++++----
+ 2 files changed, 17 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vfio/cdx: keep logical vm_pgoff in MMIO region mmap
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH] vfio/platform: keep logical vm_pgoff in MMIO region mmap
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH] vfio/fsl-mc: keep logical vm_pgoff in MMIO region mmap
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v3] vfio/fsl-mc: prevent read-only region mappings from becoming writable
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v3] vfio/platform: prevent read-only region mappings from becoming writable
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v2] vfio: Use file-based reference counting for KVM
+Author: Steffen Eiden <seiden@linux.ibm.com>
+
+Replace manual module reference counting with file-based reference
+counting for KVM integration. Previously, VFIO used symbol_get() to
+obtain function pointers for kvm_get_kvm_safe() and kvm_put_kvm(),
+then manually tracked module references through these symbols. This
+approach required storing the put_kvm function pointer in each device
+and carefully managing symbol references. Remove the put_kvm field in
+struct vfio_device as is it no longer used.
+
+Pass struct file pointers instead of struct kvm pointers throughout the
+VFIO-KVM interface. This leverages the kernel's existing file reference
+counting mechanism via get_file()/get_file_active() and fput(),
+eliminating the need for manual module reference tracking. The
+file->private_data field provides access to the underlying struct kvm
+when needed.
+
+group->kvm and df->kvm hold a reference of their own, taken when the
+pointer is stored and dropped when it is overwritten or cleared. They
+have to. The kvm-vfio device fd holds a VM reference of its own, so the
+VM file can be closed and released while the kvm-vfio device is still
+alive and still pointing at it.
+
+kvm->file itself carries no reference, so that it does not pin the VM.
+It is only ever read with get_file_active(), which is safe because
+kvm_vm_release() clears it, i.e. before the struct file is freed.
+
+This simplifies the code and removes all remaining externally exported
+symbols for KVM, paving the path for a second concurrent KVM module.
+
+Suggested-by: Jason Gunthorpe <jgg@nvidia.com>
+Co-developed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Reviewed-by: Jason J. Herne <jjherne@linux.ibm.com>
+Signed-off-by: Steffen Eiden <seiden@linux.ibm.com>
+---
+This is a spin-off for the arm-on-s390 series [1] to address all the
+relevant persons w/o polluting their mailbox.
+
+The motivation of this patch is to remove all exported symbols from KVM
+to other modules. This patch helps us having multiple KVMs running in
+parallel. The arm on s390 series creates a second kvm module (kvm-arm64)
+for hosting arm guests on s390 with HW acceleration. For this we need
+two concurrent KVM modules. One for s390 (native) and one for arm64
+guests.
+
+Steffen
+
+[1] https://lore.kernel.org/all/20260831144802.834315-1-seiden@linux.ibm.com/
+
+Changes in v2:
+- Rebase on 7.3-rc1+ and resolve conflict with 9f240376d034 ("s390/pci: Store
+  PCI error information for passthrough devices"),
+- Fix stub prototype for vfio_group_set_kvm for !CONFIG_VFIO_GROUP
+- Link to v1:   https://lore.kernel.org/r/20260812-vfio-v1-1-5cfe0b1fa4e7@linux.ibm.com
+---
+ arch/x86/include/asm/kvm_page_track.h |  8 ++---
+ arch/x86/kvm/Makefile                 |  5 +--
+ arch/x86/kvm/mmu/page_track.c         | 20 +++++++-----
+ drivers/s390/crypto/vfio_ap_ops.c     | 20 ++++++++----
+ drivers/vfio/group.c                  | 11 ++++++-
+ drivers/vfio/pci/vfio_pci_zdev.c      |  8 ++++-
+ drivers/vfio/vfio.h                   | 12 ++++----
+ drivers/vfio/vfio_main.c              | 57 +++++++++++------------------------
+ include/linux/kvm_host.h              |  8 +++++
+ include/linux/vfio.h                  |  5 ++-
+ virt/kvm/kvm_main.c                   | 20 ++++++++++--
+ virt/kvm/vfio.c                       | 13 +++++---
+ 12 files changed, 108 insertions(+), 79 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] vfio/platform: prevent read-only region mappings from becoming writable
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v2] vfio/fsl-mc: prevent read-only region mappings from becoming writable
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: SVM: Clear AVIC Physical ID table entry if vCPU creation fails
+Author: Naveen N Rao (AMD) <naveen@kernel.org>
+
+If vCPU creation fails after kvm_arch_vcpu_create(), the AVIC Physical
+ID table entry corresponding to that vCPU continues to point to the
+freed APIC backing page which can result in UAF. Address this by
+clearing out the corresponding AVIC Physical ID table entry in the
+vcpu_free() callback, similar to the VMX commit b41f2ca6c060 ("KVM: VMX:
+Fix stale PID-pointer table entry left after vCPU free").
+
+Though unlikely, it is also possible that svm_vcpu_create() itself fails
+after the AVIC Physical ID table entry has been setup if memory
+allocation fails in svm_vcpu_alloc_msrpm(). Clear the entry in this path
+as well.
+
+Note: this change depends on commit 97d65b544f48 ("KVM: Check for
+duplicate vcpu_id as early as possible"), which ensures that a vCPU with
+a duplicate ID is never created. Otherwise, a valid AVIC Physical ID
+table entry for an existing vCPU will be cleared.
+
+Fixes: 44a95dae1d22 ("KVM: x86: Detect and Initialize AVIC support")
+Signed-off-by: Naveen N Rao (AMD) <naveen@kernel.org>
+---
+ arch/x86/kvm/svm/svm.h  |  1 +
+ arch/x86/kvm/svm/avic.c | 10 ++++++++++
+ arch/x86/kvm/svm/svm.c  |  6 +++++-
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From b872ed8c2 to c595557fa
+KVM mailing list update from b872ed8c2 to c595557fa
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     29 arm.com
+      3 kernel.org
+      1 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+     27  Alexandru Elisei <alexandru.elisei@arm.com>
+      3  Mark Brown <broonie@kernel.org>
+      2  Sudeep Holla <sudeep.holla@arm.com>
+      1  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 2/2] KVM: arm64: Enable S1PIE for nVHE and hVHE
+Author: Mark Brown <broonie@kernel.org>
+
+When FEAT_S1PIE (stage 1 permission indirection) is supported we
+currently enable and use it in the hypervisor when running in VHE mode
+but not when running in nVHE or hVHE mode.  While systems with
+FEAT_S1PIE would normally use VHE users can configure them for nVHE or
+hVHE, for example in order to run protected guests.  Enable FEAT_S1PIE
+with nVHE and hVHE.
+
+AP[1] is one of the bits used to encode the indirected permissions.
+Since for hVHE this is always 0 and for nVHE it is always 1 we only
+configure the subset of indirected permissions that the system is
+expected to use.
+
+With permission indirection read only permissions must be encoded in the
+bits used by PIE, set DBM for read only mappings.  Only do this when
+using S1PIE, the hypervisor does not otherwise use DBM and if we were
+actually using DBM it would be for writable mappings.
+
+This should have no practical impact other than causing any unexpected
+encodings to map to no permissions instead of their default meanings.
+It will mean that the configuration is closer to that in VHE mode, and
+will be required for future work enabling features like D128 and GCS
+which are only available via indirection.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/kvm_asm.h     |  1 +
+ arch/arm64/include/asm/kvm_pgtable.h | 26 ++++++++++++++++++++++++++
+ arch/arm64/kernel/asm-offsets.c      |  1 +
+ arch/arm64/kvm/arm.c                 |  8 ++++++++
+ arch/arm64/kvm/hyp/nvhe/hyp-init.S   |  6 ++++++
+ arch/arm64/kvm/hyp/pgtable.c         |  7 +++++++
+ 6 files changed, 49 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: arm64: Initialise TCR2_EL2 for nVHE mode
+Author: Mark Brown <broonie@kernel.org>
+
+We currently only configure TCR2_EL2 in VHE mode, this is done in
+__finalise_el2 which only runs for VHE. While all systems with TCR2_EL2
+should have VHE support users may wish to run them in nVHE mode, for
+example in order to use protected VMs.
+
+Determine the value to load for TCR2_EL2 in C code in a similar manner to
+TCR_EL2, further patches will configure some bits in the register. When
+resetting back to the hypervisor stub clear all bits in the register in
+case something without support for TCR2_EL2 runs later.
+
+The only practical impact should be if we are started with a misconfigured
+TCR2_EL2.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ arch/arm64/include/asm/kvm_asm.h   |  1 +
+ arch/arm64/kernel/asm-offsets.c    |  1 +
+ arch/arm64/kvm/arm.c               |  5 ++++-
+ arch/arm64/kvm/hyp/nvhe/hyp-init.S | 18 ++++++++++++++++--
+ 4 files changed, 22 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: arm64: Enable S1PIE for nVHE and hVHE
+Author: Mark Brown <broonie@kernel.org>
+
+When Stage 1 Permission Indirection (FEAT_S1PIE) support was merged KVM
+was updated to enable it in the VHE hypervisor but we do not currently
+use it in the nVHE hypervisor.  Update the nVHE hypervisor to use it as
+well, as with the initial merge of the S1PIE this should have no
+immediate practical impact but it makes the nVHE and VHE hypervisors
+more consistent and will be required for use of features like D128 and
+GCS which depend on permission indirection.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Mark Brown (2):
+      KVM: arm64: Initialise TCR2_EL2 for nVHE mode
+      KVM: arm64: Enable S1PIE for nVHE and hVHE
+
+ arch/arm64/include/asm/kvm_asm.h     |  2 ++
+ arch/arm64/include/asm/kvm_pgtable.h | 26 ++++++++++++++++++++++++++
+ arch/arm64/kernel/asm-offsets.c      |  2 ++
+ arch/arm64/kvm/arm.c                 | 13 ++++++++++++-
+ arch/arm64/kvm/hyp/nvhe/hyp-init.S   | 24 ++++++++++++++++++++++--
+ arch/arm64/kvm/hyp/pgtable.c         |  7 +++++++
+ 6 files changed, 71 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: Trap guest MPAM accesses whenever MPAM is implemented
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+finalise_el2_state() clears the EL2 MPAM traps whenever the ID registers
+advertise MPAM, but KVM sets them only when ARM64_MPAM is set, which
+also requires MPAMEN. Without EL3 the enable is EL2's own and nothing
+sets it, so the cap stays off and a guest reaches the MPAM registers
+while ID_AA64PFR0_EL1.MPAM reads 0 for it.
+
+Gate the traps on the ID registers alone. MPAMEN is not a term in any
+MPAM accessor, so they take effect without it. finalise_el2_state
+already wrote MPAM2_EL2 under the same condition, so MPAM3_EL3.TRAPLOWER
+is clear wherever the cap is set, and arm64.nompam still clears it.
+
+Fixes: 31ff96c38ea3 ("KVM: arm64: Fix missing traps of guest accesses to the MPAM registers")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+Found this while working on the other MPAM thread [1].
+
+[1] https://lore.kernel.org/all/CA+EHjTxeWxZiuSmnKLGLxTBXP4oJT7-LuffbPAyCSZZ5TW=5Ew@mail.gmail.com/
+
+ arch/arm64/include/asm/cpufeature.h     |  5 +++++
+ arch/arm64/kernel/cpufeature.c          | 13 +++++++++++++
+ arch/arm64/kvm/hyp/include/hyp/switch.h |  4 ++--
+ arch/arm64/tools/cpucaps                |  1 +
+ 4 files changed, 21 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 28/28] KVM: arm64: Allow the creation of a SPE enabled VM
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Everything is in place, allow userspace to enable SPE for a virtual
+machine.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 2 +-
+ arch/arm64/kvm/Kconfig            | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 27/28] KVM: arm64: Handle dirty page logging when SPE feature is set
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Dirty page logging requires that memory is marked as read-only at stage 2,
+to track when a guest writes to memory.
+
+For SPE, this will cause a stage 2 fault when a record is written to
+memory, and a profiling blackout window. Avoid it by refusing to run a VCPU
+with the buffer enabled when at least one memslot is logging dirty pages.
+
+Though not prohibited by KVM, to avoid the aforementioned blackout window,
+when the VCPU exits with KVM_EXIT_FAIL_ENTRY and
+hardware_entry_failure_reason set to KVM_EXIT_FAIL_ENTRY_SPE_DIRTY_LOGGING,
+userspace should not run that VCPU until dirty page logging is disabled.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/api.rst                |  7 +-
+ arch/arm64/include/asm/kvm_asm.h              |  1 +
+ arch/arm64/include/asm/kvm_host.h             | 24 +++---
+ arch/arm64/include/asm/kvm_mmu.h              |  1 +
+ arch/arm64/include/asm/kvm_pgtable.h          | 19 +++++
+ arch/arm64/include/asm/kvm_pkvm.h             |  1 +
+ arch/arm64/include/asm/kvm_spe.h              | 16 ++++
+ arch/arm64/include/uapi/asm/kvm.h             |  1 +
+ arch/arm64/kvm/arm.c                          | 27 ++++++-
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |  2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            | 34 +++++---
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |  7 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |  8 ++
+ arch/arm64/kvm/mmu.c                          | 19 +++++
+ arch/arm64/kvm/pkvm.c                         | 27 +++++++
+ arch/arm64/kvm/spe.c                          | 79 +++++++++++++++++++
+ 16 files changed, 246 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 26/28] KVM: arm64: Map memory on a SPE stage 2 fault
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Make sure SPE in a guest can make progress even if something goes terribly
+wrong in KVM by mapping the memory on stage 2 fault SPE buffer management
+event.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +
+ arch/arm64/kvm/arm.c              |  4 +-
+ arch/arm64/kvm/mmu.c              | 53 ++++++++++++++++++
+ arch/arm64/kvm/spe.c              | 93 ++++++++++++++++++++++++++++++-
+ 4 files changed, 148 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 25/28] KVM: arm64: at: Use callback for reading descriptor
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Allow callers of __kvm_translate_va() to use a custom function for reading
+the translation table descriptor from guest memory. This will be useful for
+handling stage 2 faults reported by SPE, to map the stage 1 translation
+tables at stage 2.
+
+Suggested-by: James Morse <james.morse@arm.com>
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_nested.h |  7 +++++++
+ arch/arm64/kvm/at.c                 | 22 ++++++++++++++--------
+ arch/arm64/kvm/nested.c             |  7 ++++---
+ 3 files changed, 25 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 24/28] arm64: errata: Don't enable guest buffer if misprogrammed
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+When PMBPTR_EL1 is programmed to be equal to or greater than
+PMBLIMITR_EL1.Limit, SPE is enabled and PMBSR_EL1.S is zero, the CPU might
+deadlock.
+
+This doesn't affect correctly written software, like the SPE driver, but a
+buggy KVM guest might trigger the erratum. The workaround for KVM is not to
+enable the hardware buffer, and, as a consequence, profiling. According
+to ARM DDI0487M.c, rule R_PGGHS, this is one of the acceptable
+behaviours when the buffer is misprogrammed.
+
+Several parts are affected:
+
+* ARM Neoverse-N1 (MP050), SDEN v35, erratum 1978083
+  https://support.arm.com/documentation/SDEN-885747/35-0
+* ARM Neoverse-V1 (MP076), SDEN v23, erratum 1978082
+  https://support.arm.com/documentation/SDEN-1401781/23-0
+* ARM Cortex-X1 (MP077), SDEN v25, erratum 2004055
+  https://support.arm.com/documentation/SDEN-1401782/25-0
+* ARM Cortex-X1C (MP136), SDEN v20, erratum 2004056
+  https://support.arm.com/documentation/SDEN-1707914/20-0
+* ARM Cortex-A78 (MP102), SDEN v25, erratum 2004055
+  https://support.arm.com/documentation/SDEN-1401784/25-0
+* ARM Cortex-A78AE (MP105), SDEN v22, erratum 2004059
+  https://support.arm.com/documentation/SDEN-1707912/22-0
+* ARM Cortex-A78C (MP138), SDEN v20, erratum 2004056
+  https://support.arm.com/documentation/SDEN-1707916/20-0
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/arch/arm64/silicon-errata.rst | 14 +++++++++++
+ arch/arm64/Kconfig                          | 25 ++++++++++++++++++++
+ arch/arm64/include/asm/kvm_spe.h            |  1 +
+ arch/arm64/kernel/cpu_errata.c              | 26 +++++++++++++++++++++
+ arch/arm64/kvm/hyp/vhe/spe-sr.c             |  6 +++--
+ arch/arm64/kvm/spe.c                        | 22 +++++++++++++++++
+ arch/arm64/tools/cpucaps                    |  1 +
+ drivers/perf/arm_spe_pmu.c                  |  3 +++
+ include/linux/perf/arm_spe_pmu.h            |  1 +
+ 9 files changed, 97 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 23/28] KVM: arm64: Add kvm-arm.ignore_spe_errata kernel parameter
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Add a new kernel command line parameter, kvm-arm.ignore_spe_errata with the
+effect of ignoring any errata that might inhibit userspace from creating a
+SPE enabled virtual machine.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/admin-guide/kernel-parameters.txt |  3 +++
+ arch/arm64/kvm/spe.c                            | 10 +++++++++-
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 22/28] arm64: errata: Disable SPE in KVM
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+When stage 1 is enabled and buffer virtual address VA is mapped as
+read-only, and hardware dirty bit management is disabled at stage 1 and
+stage 2, if stage 2 is enabled, SPE might write to address VA instead of
+generating a fault.
+
+This doesn't affect the SPE driver when running on baremetal, since the
+memory is mapped at stage 1 with write permissions.
+
+KVM does not use hardware dirty bit management and this erratum allows a
+guest to write to read-only memory as long as that address is mapped at
+stage 2.
+
+Since KVM allows userspace to use SPE on heterogenous systems, where there
+might be different SPE instances, tie the workaround to a particular SPE
+instance and do not allow userspace to use that instance when it is
+affected.
+
+Several parts are affected:
+
+* ARM Neoverse-N1 (MP050), SDEN v35, erratum 3023823
+  https://support.arm.com/documentation/SDEN-885747/35-0
+* ARM Neoverse-N2 (MP128), SDEN v21, erratum 3031178
+  https://support.arm.com/documentation/SDEN-1982442/21-0
+* ARM Neoverse-V1 (MP076), SDEN v23, erratum 3028884
+  https://support.arm.com/documentation/SDEN-1401781/23-0
+* ARM Neoverse-V2 (MP158), SDEN v13, erratum 3031173
+  https://support.arm.com/documentation/SDEN-2332927/13-0
+* ARM Cortex-A78 (MP102), SDEN v25, erratum 3031174
+  https://support.arm.com/documentation/SDEN-1401784/25-0
+* ARM Cortex-A78C:
+    * MP138: SDEN v20, erratum 3031176
+      https://support.arm.com/documentation/SDEN-1707916/20-0
+    * MP154: SDEN v14, erratum 3031177
+      https://support.arm.com/documentation/SDEN-2004089/14-0
+* ARM Cortex-A78AE (MP105), SDEN v22, erratum 3031175
+  https://support.arm.com/documentation/SDEN-1707912/22-0
+* ARM Cortex-X1 (MP077), SDEN v25, erratum 3031174
+  https://support.arm.com/documentation/SDEN-1401782/25-0
+* ARM Cortex-X1C (MP136), SDEN v20, erratum 3031176
+  https://support.arm.com/documentation/SDEN-1707914/20-0
+* ARM Cortex-X3 (MP141), SDEN v18, erratum 3022726
+  https://support.arm.com/documentation/SDEN-2055130/18-0
+* ARM Cortex-X4 (MP161), SDEN v13, erratum 3022725
+  https://support.arm.com/documentation/109148/13-0
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/arch/arm64/silicon-errata.rst | 23 ++++++++++++++++
+ arch/arm64/Kconfig                          | 30 +++++++++++++++++++++
+ arch/arm64/kernel/cpu_errata.c              | 25 +++++++++++++++++
+ arch/arm64/kvm/Kconfig                      |  1 +
+ arch/arm64/kvm/spe.c                        |  3 +++
+ arch/arm64/tools/cpucaps                    |  1 +
+ drivers/perf/arm_spe_pmu.c                  |  3 +++
+ include/linux/perf/arm_spe_pmu.h            |  1 +
+ 8 files changed, 87 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 21/28] KVM: arm64: Handle SPE maintenance interrupts
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Inject the maintenance interrupt when the guest writes 1 to PMBSR_EL1.S,
+and deassert the interrupt when the service bit is cleared.
+
+Re-inject all maintenance interrupts raised by the SPE hardware while
+the guest was running.
+
+Save the value of the hardware PMBSR_EL1 register in a separate
+variable, instead of updating the VCPU sysreg directly. That's to allow
+kvm_spe_sync_hwstate() to discern when the service bit was set by the
+hardware, and not by the guest.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_spe.h | 13 ++++++++++
+ arch/arm64/kvm/arm.c             |  2 ++
+ arch/arm64/kvm/hyp/vhe/spe-sr.c  |  4 +--
+ arch/arm64/kvm/spe.c             | 43 ++++++++++++++++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c        |  7 +++++-
+ 5 files changed, 66 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 20/28] KVM: arm64: Allow guest SPE physical timestamps only if kernel allows it
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+The SPE driver allows userspace to use physical timestamps for records only
+if the kernel allows it, do the same for a virtual machine.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_spe.h | 1 +
+ arch/arm64/kvm/hyp/vhe/spe-sr.c  | 5 +++--
+ arch/arm64/kvm/spe.c             | 8 ++++++++
+ 3 files changed, 12 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 19/28] KVM: arm64: VHE: Context switch SPE state
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Save and restore the SPE register state when a VCPU is run. The SPE
+resources are shared between the guest and the host (the resources are not
+partitioned) so KVM has to save the host state, change the owning
+translation regime, and then restore the guest state before entering a
+guest. The sequence is performed in reverse when exiting a guest.
+
+Somewhat unexpectedly, the owning regime is not modified in
+kvm_arm_setup_mdcr_el2(), where MDCR_EL2 is written in the VHE case. That's
+because after kvm_arm_setup_mdcr_el2() there is a window where the VCPU
+runs with interrupts enabled, and during this window perf on the host might
+install a new event on the physical CPU via an IPI. If the owning regime
+were modified in kvm_arm_setup_mdcr_el2(), the buffer would use the guest
+EL1 translation tables to write to memory, leading at best to buffer
+management events due to faults, at worst to random memory corruption.
+
+Note that now the host now stops profiling KVM in
+__kvm_spe_save_host_state_vhe(), as opposed to when the guest starts
+executing with PMSCR_EL1.{E1SPE,E0SPE} = {0,0} following the ERET to EL1.
+
+Buffer management event interrupts will be handled later.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h |   1 +
+ arch/arm64/include/asm/kvm_hyp.h  |  26 +++-
+ arch/arm64/include/asm/kvm_spe.h  |   4 +
+ arch/arm64/kvm/arm.c              |   4 +-
+ arch/arm64/kvm/hyp/vhe/Makefile   |   1 +
+ arch/arm64/kvm/hyp/vhe/debug-sr.c |  18 +++
+ arch/arm64/kvm/hyp/vhe/spe-sr.c   | 209 ++++++++++++++++++++++++++++++
+ arch/arm64/kvm/hyp/vhe/switch.c   |   9 ++
+ arch/arm64/kvm/spe.c              |   9 ++
+ 9 files changed, 279 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 18/28] KVM: arm64: config: Use functions from spe.c to test FEAT_SPE_{FnE,FDS}
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+KVM's FGU mechanism will trap the registers introduced by FEAT_SPE_FnE and
+FEAT_SPE_FDS if the feature is not present for the VM. Move the functions
+that check for the presence of these features out of config.c and into
+spe.c, since that's where the bulk of SPE virtualization lies.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_spe.h | 11 +++++++++++
+ arch/arm64/kvm/config.c          | 30 +++++-------------------------
+ arch/arm64/kvm/spe.c             | 22 ++++++++++++++++++++++
+ 3 files changed, 38 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 17/28] KVM: arm64: Apply a RES0 mask to PMBLIMITR_EL1 writes
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+PMBLIMITR_EL1 is special, because it has feature enable fields. If those
+features are hidden from a guest, ignore them when the guest or the VMM
+attempt to set them.
+
+The least significant bits of the buffer limit address are RES0 based on
+the smallest granule implemented. Make sure they are treated as zero even
+if the smallest granule exposed to the VM is larger than what the hardware
+implements.
+
+Note that it is up to the user to write to the SPE buffer registers only
+after the VM features have been configured in the VM id registers.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst |  3 ++
+ arch/arm64/include/asm/kvm_spe.h        |  7 +++++
+ arch/arm64/kvm/spe.c                    | 40 +++++++++++++++++++++++--
+ arch/arm64/kvm/sys_regs.c               | 38 +++++++++++++++++++++--
+ 4 files changed, 83 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 16/28] KVM: arm64: Add SPE system registers to VCPU context
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Add the SPE registers to the VCPU context. Guest writes to the service bit,
+which change the state of the SPE maintenance interrupt, will be handled in
+a subsequent patch.
+
+Only the buffer registers are trapped, because KVM will need to keep track
+of the buffer enabled state for dirty page logging, errata handling and to
+sanitise writes to PMBLIMITR_EL1 based on the features exposed to the VM.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 13 +++++++
+ arch/arm64/include/asm/kvm_spe.h  | 11 ++++++
+ arch/arm64/kvm/spe.c              | 29 ++++++++++++++++
+ arch/arm64/kvm/sys_regs.c         | 56 ++++++++++++++++++++++++-------
+ 4 files changed, 96 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 15/28] KVM: arm64: Use PMSVer from the assigned SPE instance
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+KVM allows SPE to be virtualized on heterogeneous system, where hardware
+can implement multiple SPE instances for different CPUs, or where SPE
+might even be missing on some of the physical CPUs.
+
+KVM resets the VCPU ID registers following a KVM_ARM_VCPU_INIT ioctl.
+Using the value for ID_AA64DFR0_EL1.PMSVer on the physical CPU where the
+ioctl is executing is unreliable, since userspace might want to later
+assign a different SPE instance, with a different PMSVer value. Worse yet,
+it is be possible that the VCPU reset is being performed on a physical CPU
+without SPE. Be consistent and use PMSVer for the SPE instance assigned to
+the VM to initialize ID_AA64DFR0_EL1.PMSVer.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/include/asm/kvm_spe.h | 10 ++++++++++
+ arch/arm64/kvm/spe.c             | 24 ++++++++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c        |  8 +++++++-
+ 3 files changed, 41 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 14/28] KVM: arm64: Add SPE VCPU device attribute to initialize SPE
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Add KVM_ARM_VCPU_SPE_CTRL(KVM_ARM_VCPU_SPE_INIT) VCPU ioctl to initialize
+SPE. Initialization must be done exactly once for each VCPU.
+
+[ Alexandru E: Split from "KVM: arm64: Add a new VCPU device control group
+	   for SPE" ]
+
+Signed-off-by: Sudeep Holla <sudeep.holla@arm.com>
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 28 ++++++++++++++++++++---
+ arch/arm64/include/asm/kvm_spe.h        |  6 +++++
+ arch/arm64/include/uapi/asm/kvm.h       |  1 +
+ arch/arm64/kvm/arm.c                    |  6 +++++
+ arch/arm64/kvm/spe.c                    | 30 +++++++++++++++++++++++++
+ 5 files changed, 68 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 13/28] KVM: arm64: Add SPE VCPU device attribute to set the SPE device
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+To support systems where there is more than one SPE instance, or where not
+all the PEs have SPE, add KVM_ARM_VCPU_SPE_CTRL(KVM_ARM_VCPU_SPE_ID) for
+userspace to set the SPE instance it wants the virtual machine to use.
+Similar to the PMU, it is entirely up to userspace to make sure the VCPUs
+are run only on the physical CPUs which share this SPE instance.
+
+If the ioctl is called for multiple VCPUs, userspace must use the same
+SPE identifier for each of the VCPUs.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 32 +++++++++
+ arch/arm64/include/asm/kvm_host.h       |  4 ++
+ arch/arm64/include/asm/kvm_spe.h        | 19 ++++++
+ arch/arm64/include/uapi/asm/kvm.h       |  1 +
+ arch/arm64/kvm/arm.c                    | 43 ++++++++++++
+ arch/arm64/kvm/pmu-emul.c               | 11 ++-
+ arch/arm64/kvm/spe.c                    | 90 +++++++++++++++++++++++++
+ 7 files changed, 198 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 12/28] KVM: arm64: Add SPE VCPU device attribute to set the interrupt number
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+
+Add KVM_ARM_VCPU_SPE_CTRL(KVM_ARM_VCPU_SPE_IRQ) to allow the user to set
+the interrupt number for the buffer management interrupt.
+
+[ Alexandru E: Split from "KVM: arm64: Add a new VCPU device control group
+               for SPE" ]
+
+Signed-off-by: Sudeep Holla <sudeep.holla@arm.com>
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 22 +++++++
+ arch/arm64/include/asm/kvm_host.h       |  2 +
+ arch/arm64/include/asm/kvm_spe.h        | 11 ++++
+ arch/arm64/include/uapi/asm/kvm.h       |  1 +
+ arch/arm64/kvm/guest.c                  |  2 +
+ arch/arm64/kvm/spe.c                    | 82 +++++++++++++++++++++++++
+ 6 files changed, 120 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 11/28] KVM: arm64: Add a new VCPU device control group for SPE
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+
+Add a new VCPU device control group to control various aspects of KVM's SPE
+emulation. Functionality will be added in later patches.
+
+[ Alexandru E: Major rework ]
+
+Signed-off-by: Sudeep Holla <sudeep.holla@arm.com>
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst |  5 +++++
+ arch/arm64/include/asm/kvm_spe.h        | 17 +++++++++++++++++
+ arch/arm64/include/uapi/asm/kvm.h       |  1 +
+ arch/arm64/kvm/guest.c                  | 10 ++++++++++
+ arch/arm64/kvm/spe.c                    | 15 +++++++++++++++
+ 5 files changed, 48 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 10/28] HACK! KVM: arm64: Disable SPE virtualization if nested virt is enabled
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+For RFC only.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/kvm/arm.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 09/28] HACK! KVM: arm64: Enable SPE virtualization only in VHE mode
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+For RFC only.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/kvm/spe.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 08/28] HACK! KVM: arm64: Disable SPE virtualization if protected KVM is enabled
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+For RFC only.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/kvm/spe.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 07/28] KVM: arm64: Add KVM_ARM_VCPU_SPE VCPU feature
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Add a new VCPU feature that enables SPE virtualization when set by
+userspace. KVM_VCPU_MAX_FEATURE will be bumped and the feature will
+become selectable by userspace once SPE support in KVM is implemented.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/api.rst    | 2 ++
+ arch/arm64/include/asm/kvm_spe.h  | 5 +++++
+ arch/arm64/include/uapi/asm/kvm.h | 1 +
+ arch/arm64/kvm/arm.c              | 7 +++++++
+ 4 files changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 06/28] KVM: arm64: Add KVM_CAP_ARM_SPE capability
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Add the SPE capability that will be used by userspace to test if KVM
+supports SPE virtualization.
+
+The SPE driver supports heterogenous systems. Keep track of all the
+available Statistical Profiling Units (SPUs) in the system, because KVM
+will require the user to associate a VM with exactly one SPU.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ Documentation/virt/kvm/api.rst   | 10 ++++++
+ arch/arm64/include/asm/kvm_spe.h | 18 ++++++++++
+ arch/arm64/kvm/Makefile          |  1 +
+ arch/arm64/kvm/arm.c             |  4 +++
+ arch/arm64/kvm/spe.c             | 56 ++++++++++++++++++++++++++++++++
+ drivers/perf/arm_spe_pmu.c       |  4 +++
+ include/linux/perf/arm_spe_pmu.h | 12 +++++++
+ include/uapi/linux/kvm.h         |  1 +
+ 8 files changed, 106 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 05/28] perf: arm_spe_pmu: Add PMBIDR_EL1 and PMSIDR_EL1 to struct arm_spe_pmu
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ drivers/perf/arm_spe_pmu.c       | 3 +++
+ include/linux/perf/arm_spe_pmu.h | 2 ++
+ 2 files changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 04/28] perf: arm_spe_pmu: Move struct arm_spe_pmu to a separate header file
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+KVM will soon want to make use of struct arm_spe_pmu, move it to a separate
+header where it will be easily accessible.
+
+Cc: Will Deacon <will@kernel.org>
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ drivers/perf/arm_spe_pmu.c       | 33 +--------------------
+ include/linux/perf/arm_spe_pmu.h | 50 ++++++++++++++++++++++++++++++++
+ 2 files changed, 51 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 03/28] KVM: arm64: Add CONFIG_KVM_ARM_SPE Kconfig option
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Add a new configuration option that will be used for KVM SPE emulation.
+CONFIG_KVM_ARM_SPE depends on the SPE driver being loaded because:
+
+1. The SPE driver maintains a cpumask of physical CPUs that support SPE,
+   and that will be used by KVM to emulate SPE on heterogeneous systems.
+
+2. KVM will rely on the SPE driver enabling the SPE interrupt at the GIC
+   level.
+
+The option will become user selectable after SPE support in KVM is
+implemented.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/kvm/Kconfig | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 02/28] arm64/sysreg: Define MDCR_EL2.E2PB values
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+KVM will make use of the different values for MDCR_EL2.E2PB, document them.
+
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/tools/sysreg | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 01/28] arm64/sysreg: Add the nVM field to PMBLIMITR_EL1
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+Define PMBLIMITR_EL1.nVM, to be used by KVM.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arch/arm64/tools/sysreg | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v7 00/28] KVM: arm64: Add Statistical Profiling Extension (SPE) support
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+For a description of the problem, and why using gup doesn't work, see the
+previous iteration of the series, version v6 [1].
+
+This series is based on v7.3-rc1.
+
+I've completely changed the approach yet again, but I've kept Reviewed-by tags
+for the some of the prerequisite patches. The highlights are:
+
+* The entire memory is effectively pinned at stage 2 before the first VCPU is
+run by having userspace use guest_memfd to back VM memory and then doing
+KVM_PRE_FAULT_MEMORY on that memory.
+
+This change alone simplifies the code immensly.
+
+* The maximum buffer size does not need to be virtualized since the entire VM
+memory is pinned, which means that PMBIDR_EL1 doesn't need to be trapped.
+SPE features cannot be completely hidden from the guest, as some of them (most
+of them?) add new fields to the records. The end result: PMBIDR_EL1 and
+PMSIDR_EL1 don't need to be trapped, so the dependency on FEAT_FGT is dropped.
+
+* It works with the SPE host driver built as a module; KVM requires that the
+module is loaded for SPE to be virtualized.
+
+The end result is that KVM support is mostly reduced to the userspace ABI to
+configure the feature and context switching the SPE state.
+
+
+Prerequisites
+=============
+
+There are several prerequisites:
+
+* The series depends on KVM_PRE_FAULT_MEMORY being implemented for arm64.
+There are two different implementations of that on the mailing list: [2], [3]. I
+have chosen to use the series from Jack Thomson [2] (rebased on top of v7.3-rc1
++ the SPE patches) for the simple reason that it doesn't change the way KVM
+handles stage 2 faults, and can be cherry-picked *after* the KVM SPE patches, to
+allow sashiko to review the SPE patches.
+
+* A patch to explicitely ignore MMU notifiers for guest_memfd-only memslots. The
+patch is on Sean's radar to be merged once he finishes fixing a bug in a related
+area [4].
+
+I believe that it is possible to have memory unmapped from stage 2 (it involves
+automatic NUMA balancing and userspace explicitly setting a mempolicy), but
+haven't tested that; the patch codifies that guest_memfd memory should never be
+unmapped without userspace requesting it (userspace can unmap the memory from
+stage 2 by closing the guest_memfd file descriptor or punching a hole in the
+descriptor).
+
+* Patches to add dirty page logging support to guest_memfd-only memslots
+(rebased on top of v7.3-rc1 + the SPE patches), as it's impossible today to
+change the flags for a guest_memfd-backed memslot. These patches were sent to
+the mailing list [5], and as far as I can tell the conclusion was that allowing
+dirty page logging is a goal to be pursued for guest_memfd memslots. If we do
+decide that dirty page logging for a VM with SPE is useful, I'm planning to
+revisit dirty page logging for guest_memfd.
+
+A branch with the prerequisites **after** the SPE series can be found at [6].
+The prequisites come after the SPE patches so I can send this series with an
+upstream base commit, which allows sashiko to review them.
+
+kvmtool patches are at [7], and kvm-unit-tests are at [8].
+
+
+How it works
+============
+
+1. Userspace sets the KVM_ARM_VCPU_SPE VCPU feature for all VCPUs, configures
+the SPE interrupt number (required), assigns a SPE PMU instance to the VM
+(required) and then calls KVM_ARM_VCPU_SPE_INIT to finalise configuration. All
+of this is done via KVM_SET_DEVICE_ATTR on each VCPU.
+
+Once the VCPU feature is set, KVM_ARM_VCPU_SPE_INIT must be executed before a
+VCPU can be run.
+
+2. Userspace uses guest_memfd-backed memslots to represent guest memory, and
+pre-maps that memory at stage 2 using KVM_PRE_FAULT_MEMORY.
+
+The order between steps 1 and 2 does not matter.
+
+3. Userspace runs the VCPU(s).
+
+For a VM with SPE, KVM will not check if memslots are backed by guest_memfd,
+because KVM cannot know which memslots the guest will use as RAM and which have
+a different use, even if they are not read-only. For example, pvtime.
+
+To create a VM with SPE enabled with kvmtool:
+
+# modprobe arm_spe_pmu # If not already loaded or built-in
+$ lkvm run --kernel <image> --spe --guest-memfd --name spe-test --params "kpti=off <other_params>"
+
+To test dirty page logging with kvmtool, use the debug interface:
+
+# Create a VM with the name spe-test, as above, then:
+$ lkvm debug --name spe-test --enable-dirty-track # to enable dirty page logging
+or
+$ lkvm debug --name spe-test --disable-dirty-track # to disable dirty page logging
+
+To run the tests from kvm-unit-tests:
+
+$ configure --arch=arm64 --cross-prefix=<cross_compile> --target=kvmtool
+$ make clean && make
+$ KVMTOOL=<path/to/kvmtool/binary> ./run_tests.sh -g spe
+
+
+Migration
+=========
+
+This is tricky (read: hacky). Relying on KVM fixing up stage 2 faults triggered
+SPE attempting to write to memory that is read-only doesn't really work, because
+a partial record might be written to the buffer (PMBSR_EL1.DL set). To recover
+from this, KVM, or better yet, the VMM, would need to learn to parse the buffer
+and rewind PMBPTR_EL1 to the first by after the last complete record.
+
+So what I did instead was to introduce a new hardware exit reason, and have
+VCPUs which have the buffer enabled exit to userspace when dirty page logging is
+enabled. A VCPU also exits to userspace if the buffer was disabled when dirty
+page logging was enabled, and the buffer later becomes enabled, before dirty page
+logging is disabled.
+
+When dirty page logging is disabled, the stage 2 permissions are relaxed to
+allow writes. The gory details are in patch #27 ("KVM: arm64: Handle dirty page
+logging when SPE feature is set").
+
+[1] https://lore.kernel.org/kvmarm/20251114160717.163230-1-alexandru.elisei@arm.com/
+[2] https://lore.kernel.org/kvmarm/20260612162354.73378-3-jackabt.amazon@gmail.com/
+[3] https://lore.kernel.org/kvmarm/20260825-kvm-arm-prefault-v1-0-befe8947702e@kernel.org/
+[4] https://lore.kernel.org/kvmarm/amPCdAswlk24Xilf@google.com/
+[5] https://lore.kernel.org/kvmarm/20260702142912.6395-1-alexandru.elisei@arm.com/
+[6] https://gitlab.arm.com/linux-arm/linux-ae/-/tree/kvm-spe-v7
+[7] https://gitlab.arm.com/linux-arm/kvmtool-ae/-/tree/kvm-spe-v7
+[8] https://gitlab.arm.com/linux-arm/kvm-unit-tests-ae/-/tree/kvm-spe-v7
+
+Alexandru Elisei (26):
+  arm64/sysreg: Add the nVM field to PMBLIMITR_EL1
+  arm64/sysreg: Define MDCR_EL2.E2PB values
+  KVM: arm64: Add CONFIG_KVM_ARM_SPE Kconfig option
+  perf: arm_spe_pmu: Move struct arm_spe_pmu to a separate header file
+  perf: arm_spe_pmu: Add PMBIDR_EL1 and PMSIDR_EL1 to struct arm_spe_pmu
+  KVM: arm64: Add KVM_CAP_ARM_SPE capability
+  KVM: arm64: Add KVM_ARM_VCPU_SPE VCPU feature
+  HACK! KVM: arm64: Disable SPE virtualization if protected KVM is
+    enabled
+  HACK! KVM: arm64: Enable SPE virtualization only in VHE mode
+  HACK! KVM: arm64: Disable SPE virtualization if nested virt is enabled
+  KVM: arm64: Add SPE VCPU device attribute to set the SPE device
+  KVM: arm64: Add SPE VCPU device attribute to initialize SPE
+  KVM: arm64: Use PMSVer from the assigned SPE instance
+  KVM: arm64: Add SPE system registers to VCPU context
+  KVM: arm64: Apply a RES0 mask to PMBLIMITR_EL1 writes
+  KVM: arm64: config: Use functions from spe.c to test
+    FEAT_SPE_{FnE,FDS}
+  KVM: arm64: VHE: Context switch SPE state
+  KVM: arm64: Allow guest SPE physical timestamps only if kernel allows
+    it
+  KVM: arm64: Handle SPE maintenance interrupts
+  arm64: errata: Disable SPE in KVM
+  KVM: arm64: Add kvm-arm.ignore_spe_errata kernel parameter
+  arm64: errata: Don't enable guest buffer if misprogrammed
+  KVM: arm64: at: Use callback for reading descriptor
+  KVM: arm64: Map memory on a SPE stage 2 fault
+  KVM: arm64: Handle dirty page logging when SPE feature is set
+  KVM: arm64: Allow the creation of a SPE enabled VM
+
+Sudeep Holla (2):
+  KVM: arm64: Add a new VCPU device control group for SPE
+  KVM: arm64: Add SPE VCPU device attribute to set the interrupt number
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ Documentation/arch/arm64/silicon-errata.rst   |  37 +
+ Documentation/virt/kvm/api.rst                |  19 +-
+ Documentation/virt/kvm/devices/vcpu.rst       |  84 +++
+ arch/arm64/Kconfig                            |  55 ++
+ arch/arm64/include/asm/kvm_asm.h              |   1 +
+ arch/arm64/include/asm/kvm_host.h             |  48 +-
+ arch/arm64/include/asm/kvm_hyp.h              |  26 +-
+ arch/arm64/include/asm/kvm_mmu.h              |   1 +
+ arch/arm64/include/asm/kvm_nested.h           |   7 +
+ arch/arm64/include/asm/kvm_pgtable.h          |  19 +
+ arch/arm64/include/asm/kvm_pkvm.h             |   1 +
+ arch/arm64/include/asm/kvm_spe.h              | 150 ++++
+ arch/arm64/include/uapi/asm/kvm.h             |   6 +
+ arch/arm64/kernel/cpu_errata.c                |  51 ++
+ arch/arm64/kvm/Kconfig                        |  10 +
+ arch/arm64/kvm/Makefile                       |   1 +
+ arch/arm64/kvm/arm.c                          |  98 ++-
+ arch/arm64/kvm/at.c                           |  22 +-
+ arch/arm64/kvm/config.c                       |  30 +-
+ arch/arm64/kvm/guest.c                        |  12 +
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |   2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |  34 +-
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |   7 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   8 +
+ arch/arm64/kvm/hyp/vhe/Makefile               |   1 +
+ arch/arm64/kvm/hyp/vhe/debug-sr.c             |  18 +
+ arch/arm64/kvm/hyp/vhe/spe-sr.c               | 212 ++++++
+ arch/arm64/kvm/hyp/vhe/switch.c               |   9 +
+ arch/arm64/kvm/mmu.c                          |  72 ++
+ arch/arm64/kvm/nested.c                       |   7 +-
+ arch/arm64/kvm/pkvm.c                         |  27 +
+ arch/arm64/kvm/pmu-emul.c                     |  11 +-
+ arch/arm64/kvm/spe.c                          | 647 ++++++++++++++++++
+ arch/arm64/kvm/sys_regs.c                     | 103 ++-
+ arch/arm64/tools/cpucaps                      |   2 +
+ arch/arm64/tools/sysreg                       |  11 +-
+ drivers/perf/arm_spe_pmu.c                    |  46 +-
+ include/linux/perf/arm_spe_pmu.h              |  66 ++
+ include/uapi/linux/kvm.h                      |   1 +
+ 40 files changed, 1849 insertions(+), 116 deletions(-)
+
+----------------------------------------------------------------------
+
