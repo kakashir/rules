@@ -1,0 +1,638 @@
+
+On /root/mail/repo:
+From 1fd567c2c to 5cbd451b4
+KVM mailing list update from 1fd567c2c to 5cbd451b4
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     10 gmail.com
+      2 nvidia.com
+
+Top 15 contributors (Based on Email Body)
+
+      8  Karl Mehltretter <kmehltretter@gmail.com>
+      2  Zhi Wang <zhiw@nvidia.com>
+      1  Tharit Tangkijwanichakul <tharitt97@gmail.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: selftests: Fix VM leak in early return
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+test_mmio_ease() returns early and skips the call to kvm_vm_free() when
+ID_AA64PFR1_EL1 is not available.
+
+Use a goto so that the early return joins the common exit path.
+
+Reported-by: Gokul K <gokul02k@gmail.com>
+Link: https://lore.kernel.org/all/20260808081050.408657-1-gokul02k@gmail.com/
+Fixes: a90aac553249 ("KVM: arm64: selftests: Test SEAs are taken to SError vector when EASE=1")
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+Tested on a Rock 5B (RK3588). ID_AA64PFR1_EL1.DF2 is not implemented,
+so test_mmio_ease() takes the skip path exercised by this fix.
+---
+ tools/testing/selftests/kvm/arm64/external_aborts.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4] vhost/vsock: batch RX used-ring updates
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_transport_do_send_pkt() calls vhost_add_used() for every Guest RX
+buffer even though it delays the Guest signal until the worker finishes.
+Each call publishes one used entry and updates the used index separately.
+
+Collect the completed buffer heads in the arrays already allocated for the
+virtqueue and publish them with vhost_add_used_n().  Bound the batch by the
+ring size and array capacity.  Flush when the batch reaches its limit or
+before leaving the worker.
+
+Each used entry describes one completed RX buffer and keeps its actual used
+length, so set nheads to 1 for every entry.  This patch does not change
+negotiated features or compress multiple buffers into one used entry.
+
+This patch is limited to the current skb-based vhost-vsock RX path.
+
+Performance:
+
+The test used vsock_perf with a fresh Guest for each state and 20 paired
+runs. The Guest receiver used:
+
+  vsock_perf --port PORT --buf-size 64M --vsk-size 64M --rcvlowat 1
+
+The Host sender used:
+
+  vsock_perf --sender 3 --port PORT --bytes 1G \
+      --buf-size SEND_BUF --vsk-size 64M
+
+The table reports geometric mean Guest RX throughput.
+
+  SEND_BUF   baseline RX   batching RX   change
+             (Gbit/s)       (Gbit/s)
+  256 B      0.0795724      0.0831509      +4.497%
+  512 B      0.1194885      0.1210297      +1.290%
+  4 KiB      0.7208273      0.7242053      +0.469%
+  64 KiB     2.1712797      2.1951941      +1.101%
+
+As supplementary data, perf stat measured the vhost worker cycles and
+instructions per GiB in 10 paired runs. The patched implementation
+reduced cycles by 3.846%, 2.162%, and 4.109%, and instructions by
+2.548%, 2.084%, and 4.637% for 256 B, 4 KiB, and 64 KiB, respectively.
+
+An AF_VSOCK request-response latency test with 10 AB/BA pairs showed no
+consistent RTT change: -0.102% for 256-byte messages (4/10 pairs lower) and
++3.281% for 4-KiB messages (5/10 pairs lower), using arithmetic mean RTTs.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+Acked-by: Eugenio Pérez <eperezma@redhat.com>
+---
+Changes in v4:
+- Simplify the performance description.
+- Add a brief AF_VSOCK RTT measurement.
+- Keep the batch limit within the used ring and scratch arrays, without
+  duplicating the worker weight limit.
+- Flush after adding a used entry when the batch reaches the limit, and
+  remove the redundant flush in the empty-queue path.
+---
+ drivers/vhost/vsock.c | 47 +++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 45 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] virtio: implement synchronize_cbs for remaining transports
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+virtio_reset_device() now calls synchronize_cbs to wait for running
+callbacks. Its synchronize_rcu() fallback does not cover workqueue or
+sleepable callbacks.
+
+Add the missing hooks. UML waits for its shared IRQ; TmFIFO takes the
+existing per-direction locks held around vring_interrupt(). Virtio-vdpa
+uses a per-device rwlock around its callbacks, which must already be
+hard-IRQ safe.
+
+Remoteproc callbacks can run in hard-IRQ or process context, and rpmsg
+callbacks can sleep, so use one SRCU domain per rproc. Enter it before
+looking up the queue. Initialize it in rproc_alloc(), returning NULL if
+that fails, and clean it up at final release. cleanup_srcu_struct() can
+sleep, so document that rproc_put() and rproc_free() may sleep when
+dropping the last reference.
+
+These hooks wait for callbacks already running. UML, TmFIFO and
+remoteproc still allow new callbacks after reset.
+
+Suggested-by: Michael S. Tsirkin <mst@redhat.com>
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ arch/um/drivers/virtio_uml.c             | 10 ++++++++++
+ drivers/platform/mellanox/mlxbf-tmfifo.c | 14 ++++++++++++++
+ drivers/remoteproc/remoteproc_core.c     | 10 ++++++++++
+ drivers/remoteproc/remoteproc_virtio.c   | 20 +++++++++++++++++---
+ drivers/virtio/virtio_vdpa.c             | 21 ++++++++++++++++++++-
+ include/linux/remoteproc.h               |  3 +++
+ 6 files changed, 74 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] virtio_input: stop callbacks before unregistering input device
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+virtinput_remove() unregisters the input device before resetting the
+virtio device. virtinput_recv_events() drops vi->lock around input_event(),
+so clearing vi->ready does not stop a callback that passed the entry check.
+It can still use vi->idev, requeue buffers and kick the queue.
+
+Reset first, as virtinput_freeze() already does. With the preceding core
+change, reset waits for callbacks before input_unregister_device() can
+free vi->idev. Recheck vi->ready after taking the lock again: keep draining
+completed events so an input packet is not truncated, but stop requeueing
+buffers and kicking the queue.
+
+With evdev attached, input_unregister_handle() currently waits for an RCU
+grace period, which also waits out IRQ callbacks. This masks the lifetime
+bug on PCI and MMIO, but does not protect sleepable callbacks on other
+transports.
+
+Fixes: 271c865161c5 ("Add virtio-input driver.")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ drivers/virtio/virtio_input.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] virtio: synchronize callbacks during device reset
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+virtio_reset_device() promises that vq callbacks have finished when it
+returns. virtio-pci waits in vp_reset(), but other transports can return
+with a callback still running.
+
+Call virtio_synchronize_cbs() after config->reset() and drop the duplicate
+waits from both PCI reset methods. Add the wait to virtio_device_shutdown()
+too, since it calls config->reset() directly. Keep the pre-reset call under
+CONFIG_VIRTIO_HARDEN_NOTIFICATION so callbacks see vq->broken.
+
+Always take irq_lock in the classic virtio-ccw interrupt handler so it
+pairs with synchronize_cbs even without notification hardening. Use
+is_thinint to choose the lock: airq_info can stay allocated after a
+fallback to classic interrupts.
+
+The transport reset must still stop new callbacks before this wait.
+
+Fixes: d9679d0013a6 ("virtio: wrap config->reset calls")
+Suggested-by: Michael S. Tsirkin <mst@redhat.com>
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ drivers/s390/virtio/virtio_ccw.c   | 6 +-----
+ drivers/virtio/virtio.c            | 2 ++
+ drivers/virtio/virtio_pci_legacy.c | 2 --
+ drivers/virtio/virtio_pci_modern.c | 3 ---
+ include/linux/virtio_config.h      | 6 +++---
+ 5 files changed, 6 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] virtio: synchronize callbacks during device reset
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+A virtqueue callback can outlive virtio_reset_device() and race with a
+driver freeing the state it uses. The reset helper documents that no
+callbacks remain in progress, but that depends on the transport:
+virtio-pci waits in vp_reset(), while virtio-mmio does not.
+
+virtio_input has a related ordering problem: it unregisters the input
+device before resetting the virtio device, while an event callback may
+still be using the input device.
+
+Patch 1 moves the callback wait into the core, using the existing
+virtio_synchronize_cbs() operation. Patch 2 fixes the virtio_input teardown
+order. Patch 3 adds the missing synchronize_cbs hooks for UML, TmFIFO,
+remoteproc and virtio-vdpa. Remoteproc uses one SRCU domain per processor.
+
+The new hooks wait for callbacks already running. UML, TmFIFO and
+remoteproc still allow new callbacks after reset; fixing that is separate
+work. The event-virtqueue DMA mapping issue is also separate.
+
+Changes in v2:
+- Patch 1: move the wait into the core instead of fixing only MMIO, as
+  Michael suggested. Remove the duplicate PCI wait, preserve its shutdown
+  wait, and fix CCW callback locking. Drop the MMIO polling: reset polling
+  for v3 and newer is already in fa8833c085b6 ("virtio-mmio: add support
+  for transport version 3").
+- Patch 2: keep draining completed events when ready becomes false,
+  instead of breaking out, so teardown does not truncate an input packet.
+- Patch 3 is new, at Michael's request.
+
+I reran the 120-cycle unbind/rebind test in an arm64 KASAN guest with four
+vCPUs and a 5 ms busy delay per event. With patch 2 alone over virtio-mmio,
+reset returned with the callback still running in all 84 overlapping
+cycles. With the series, it waited in all 103. Over PCI with per-queue
+MSI-X, it waited in all 66, including runs with threadirqs. No KASAN or
+lockdep reports. These runs predate the per-rproc change, which leaves
+the tested MMIO and PCI paths unchanged. They confirmed the missing wait,
+but did not reproduce a use-after-free: with evdev attached,
+input_unregister_device() waits for an RCU grace period that the IRQ
+callback blocks.
+
+That version also passed QEMU input, rebind and shutdown checks on arm64
+MMIO and x86-64 PCI, including arm64 RT, KASAN and KCSAN builds, and x86
+UP/Tiny SRCU. A legacy INTx NIC was present for an additional x86
+shutdown check. The changed objects built with W=1 without warnings on
+arm64, x86-64, s390 and SMP UML. The per-rproc version built with W=1
+on arm64 KASAN and x86 Tiny SRCU, and passed six remoteproc callback and
+lifetime KUnit tests on each, using mock remoteproc devices.
+
+Link: https://lore.kernel.org/r/20260818040433.66986-1-kmehltretter@gmail.com
+
+Karl Mehltretter (3):
+  virtio: synchronize callbacks during device reset
+  virtio_input: stop callbacks before unregistering input device
+  virtio: implement synchronize_cbs for remaining transports
+
+ arch/um/drivers/virtio_uml.c             | 10 ++++++++++
+ drivers/platform/mellanox/mlxbf-tmfifo.c | 14 ++++++++++++++
+ drivers/remoteproc/remoteproc_core.c     | 10 ++++++++++
+ drivers/remoteproc/remoteproc_virtio.c   | 20 +++++++++++++++++---
+ drivers/s390/virtio/virtio_ccw.c         |  6 +-----
+ drivers/virtio/virtio.c                  |  2 ++
+ drivers/virtio/virtio_input.c            |  8 ++++++--
+ drivers/virtio/virtio_pci_legacy.c       |  2 --
+ drivers/virtio/virtio_pci_modern.c       |  3 ---
+ drivers/virtio/virtio_vdpa.c             | 21 ++++++++++++++++++++-
+ include/linux/remoteproc.h               |  3 +++
+ include/linux/virtio_config.h            |  6 +++---
+ 12 files changed, 86 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: x86: Use struct kvm_clock_pairing in hypercalls.rst
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+struct kvm_clock_offset does not exist; the name is struct
+kvm_clock_pairing.
+
+Use struct kvm_clock_pairing.
+
+Fixes: 55dd00a73a51 ("KVM: x86: add KVM_HC_CLOCK_PAIRING hypercall")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/x86/hypercalls.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: SEV: Use the uapi structure names
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+The document names struct kvm_sev_launch_update,
+struct kvm_sev_attestation, struct kvm_sev_launch_send_update_data and
+struct kvm_sev_launch_receive_update_data. None of them exists in
+arch/x86/include/uapi/asm/kvm.h; the structures are
+kvm_sev_launch_update_data, kvm_sev_attestation_report,
+kvm_sev_send_update_data and kvm_sev_receive_update_data.
+
+Use the uapi names.
+
+Fixes: dc48bae01e5a ("KVM: Define SEV key management command id")
+Fixes: 2c07ded06427 ("KVM/SVM: add support for SEV attestation command")
+Fixes: d3d1af85e2c7 ("KVM: SVM: Add KVM_SEND_UPDATE_DATA command")
+Fixes: 15fb7de1a7f5 ("KVM: SVM: Add KVM_SEV_RECEIVE_UPDATE_DATA command")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/x86/amd-memory-encryption.rst | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: Fix the struct kvm_arm_device_addr name
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+KVM_ARM_SET_DEVICE_ADDR takes struct kvm_arm_device_addr; the document
+names it struct kvm_arm_device_address, which does not exist.
+
+Use the real name.
+
+Fixes: 3401d54696f9 ("KVM: ARM: Introduce KVM_ARM_SET_DEVICE_ADDR ioctl")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/api.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: Fix the event_source sysfs path in the PMU attribute description
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+The PMU device directories live under /sys/bus/event_source/devices,
+the document spells the bus even_source.
+
+Fix the spelling.
+
+Fixes: 6ee7fca2a4a0 ("KVM: arm64: Add KVM_ARM_VCPU_PMU_V3_SET_PMU attribute")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 12/13] vfio/nvidia-vgpu: add the NVIDIA vGPU VFIO variant driver
+Author: Zhi Wang <zhiw@nvidia.com>
+
+NVIDIA vGPU VFs require their open, reset, and close lifecycle to be
+coordinated with the PF-side nova-core driver.
+
+Add a VFIO PCI variant driver that binds NVIDIA devices only through
+driver_override and rejects non-VFs. Delegate instance lifecycle
+operations to nova-core, present the firmware-selected device and
+subsystem IDs in configuration-space reads, and adjust the reported BAR1
+aperture to the assigned profile. Use vfio-pci-core for the remaining
+VFIO operations.
+
+Signed-off-by: Zhi Wang <zhiw@nvidia.com>
+---
+ drivers/vfio/pci/Kconfig              |   2 +
+ drivers/vfio/pci/Makefile             |   2 +
+ drivers/vfio/pci/nvidia-vgpu/Kconfig  |  16 ++
+ drivers/vfio/pci/nvidia-vgpu/Makefile |   2 +
+ drivers/vfio/pci/nvidia-vgpu/main.c   | 253 ++++++++++++++++++++++++++
+ 5 files changed, 275 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 00/13] Introduce NVIDIA vGPU manager and VFIO variant driver
+Author: Zhi Wang <zhiw@nvidia.com>
+
+Add the nova-core support needed to create and manage NVIDIA vGPU
+instances, together with the NVIDIA vGPU VFIO variant driver that consumes
+the lifecycle interface.
+
+The control path introduced by this series is:
+
+ +-----------------------+         +-----------------------+
+ | Linux guest           |         | Windows guest         |
+ | NVIDIA guest driver   |         | NVIDIA guest driver   |
+ +-----------+-----------+         +-----------+-----------+
+             |                                 |
+ +-----------v-----------+         +-----------v-----------+
+ | QEMU (VFIO user)      |         | QEMU (VFIO user)      |
+ +-----------+-----------+         +-----------+-----------+
+             +----------------+----------------+
+                              |
+                      +-------v-------+
+                      |   VFIO core   |
+                      +-------+-------+
+                              |
+        +---------------------v---------------------+
+        | NVIDIA vGPU VFIO variant driver           |
+        +---------------------+---------------------+
+                              |
+              +---------------+----------------------+
+              | binds PCI VF                         | PF lifecycle API
+              |                                      | open / close / reset
+              v                                      v
+     +--------+--------+               +-------------+-------------+
+     |    PCI VF(s)    |               | nova-core (PF driver)     |
+     |  (virtual GPU)  |               |       vGPU Manager        |
+     +--------+--------+               |     VRAM / channels ...   |
+              |                        +-------------+-------------+
+              |                                      |
++-------------v--------------------------------------v----------------+
+|                      NVIDIA physical GPU                            |
+|            VF resources                 PF / GSP / VRAM             |
++---------------------------------------------------------------------+
+
+On the nova-core side, the PF driver owns the GPU firmware-facing part
+of vGPU management. It already detects vGPU mode before GSP boot and
+supplies the SR-IOV topology to the GPU System Processor firmware
+(GSP-RM). This series extends it to:
+
+  - Retain the firmware-reported VMMU segment size and FIFO engine
+    ordering after GSP_INIT, together with nova-core's channel capacity.
+  - Add VramBlock and VramRegion ownership plus Bar1Map for bounded CPU
+    mappings of VRAM-backed control structures.
+  - Query GSP-RM through its command queue for the vGPU type already
+    assigned to a VF and its properties.
+  - Build a layout-validated, profile-wide pool of paired framebuffer and
+    management-heap slots, reserve contiguous channel ranges, and keep
+    live allocations in a per-PF instance registry.
+  - Use the typed r000 firmware bindings for control and response layouts,
+    message IDs, and firmware-defined region sizes.
+  - Handle GMC transactions over the GSP queues, match GMC replies by
+    command and sequence, dispatch interleaved RM RPCs from the shared
+    GSP-to-CPU message queue, and consume stale GMC messages.
+  - Implement the GMCAPI bootload, shutdown, and cleanup operations with
+    typed channel and resource maps for each plugin instance.
+  - Establish the BAR1-backed PluginRpc channel, negotiate its protocol,
+    and send the VM configuration and plugin BME-state update.
+  - Use per-instance CeUtils channels to scrub guest framebuffer memory
+    on allocation, reset, and shutdown. If ownership or completion is
+    uncertain, keep the affected VRAM and channels out of the allocators.
+  - Expose the three per-instance plugin log buffers through debugfs with
+    the header needed by nvlog_decoder.
+  - Keep resource locking, teardown, and rollback inside nova-core.
+  - Select the firmware-defined 48-VM WPR2 heap when a device advertises
+    more than 32 VFs.
+
+On the VFIO side, the NVIDIA vGPU VFIO variant driver:
+
+  - Binds only to an NVIDIA VF explicitly selected through
+    driver_override.
+  - Derives the guest function ID (GFID) from the SR-IOV VF index and
+    registers a vfio-pci-core device.
+  - Presents the vGPU PCI device and subsystem IDs returned by nova-core,
+    and limits the reported framebuffer BAR size.
+  - Delegates the remaining PCI and VFIO operations to vfio-pci-core and
+    uses the standard VFIO physical-device helpers for IOMMUFD.
+
+The ownership boundary between the two drivers is visible at these
+lifecycle points:
+
+  - Open: after vfio_pci_core_enable(), the variant driver passes the PF
+    returned by pci_physfn(vf), the GFID, the VF's PCI
+    domain/bus/device/function (DBDF), and the calling process TGID to
+    nvidia_vgpu_open(). nova-core validates the PF and GFID, creates and
+    activates the instance, and returns the guest-visible PCI IDs and
+    BAR1 size. On failure, the variant driver disables the vfio-pci-core
+    device; on success, it calls
+    vfio_pci_core_finish_enable().
+  - Reset: the variant driver first calls nvidia_vgpu_reset(). nova-core
+    sends the plugin reset RPC and scrubs the guest framebuffer. Only
+    after that succeeds is VFIO_DEVICE_RESET passed to vfio-pci-core for
+    the PCI function reset.
+  - Close: the variant driver invokes the void nvidia_vgpu_close()
+    interface to request plugin shutdown, framebuffer scrubbing, and
+    resource release from nova-core, then closes the vfio-pci-core
+    device.
+
+The cross-module interface is therefore limited to three GPL-only
+symbols in NOVA_CORE_VGPU: nvidia_vgpu_open(), nvidia_vgpu_close(), and
+nvidia_vgpu_reset().
+
+This is a ground-up rework of the earlier vGPU RFC [1]. In particular,
+the vGPU manager has been moved from the VFIO driver into the nova-core
+implementation, and the VFIO side no longer carries copies of RM firmware
+headers. The VFIO driver attaches to the VF and uses its PF's nova-core
+state for management, as discussed in that thread.
+
+The patches are organized as follows:
+
+  1-4   Initialize VgpuManager and add the memory and firmware building
+        blocks.
+  5-8   Allocate instances and implement GMC, plugin boot, and RPC.
+  9-10  Scrub guest framebuffer memory and expose plugin diagnostics.
+ 11-12  Export the lifecycle API and add its VFIO consumer.
+ 13     Select the larger WPR2 heap for 48-VF devices.
+
+The series is based on the nova-core r000 GSP, memory-management,
+SR-IOV, Rust bitmap/id-pool, and PCI abstraction work. The exact base
+commit is recorded below, and the complete prerequisite stack is
+available in [2].
+
+[1] https://lore.kernel.org/kvm/20250903221111.3866249-1-zhiw@nvidia.com/
+[2] https://github.com/zhiwang-nvidia/nova-core/tree/zhi/nova-vgpu-wip-nova-gsp-20260902
+
+Alok Kumar (1):
+  gpu: nova-core: vgpu: add VRAM slot allocator
+
+Zhi Wang (12):
+  gpu: nova-core: vgpu: add post-GSP-boot vGPU initialization
+  gpu: nova-core: mm: add VramBlock and Bar1Map
+  gpu: nova-core: vgpu: add r000 plugin bindings
+  gpu: nova-core: vgpu: add instance create/destroy
+  gpu: nova-core: gsp: add GMC transaction helpers
+  gpu: nova-core: vgpu: add vGPU bootload
+  gpu: nova-core: vgpu: implement PluginRpc channel and config params
+  gpu: nova-core: vgpu: scrub guest framebuffer memory with CeUtils
+  gpu: nova-core: vgpu: export plugin log buffers via debugfs
+  gpu: nova-core: vgpu: export lifecycle operations to VFIO
+  vfio/nvidia-vgpu: add the NVIDIA vGPU VFIO variant driver
+  gpu: nova-core: reserve the 48-VM WPR2 heap
+
+ drivers/gpu/nova-core/driver.rs               |  42 +-
+ drivers/gpu/nova-core/fb.rs                   |   2 +-
+ drivers/gpu/nova-core/gpu.rs                  | 184 +++--
+ drivers/gpu/nova-core/gpu/channel.rs          |   3 +
+ drivers/gpu/nova-core/gsp.rs                  |  29 +-
+ drivers/gpu/nova-core/gsp/boot.rs             |  13 +-
+ drivers/gpu/nova-core/gsp/cmdq.rs             | 356 +++++++--
+ drivers/gpu/nova-core/gsp/commands.rs         |  78 +-
+ drivers/gpu/nova-core/gsp/fw.rs               |  63 +-
+ drivers/gpu/nova-core/gsp/fw/commands.rs      | 185 ++++-
+ .../gpu/nova-core/gsp/fw/r000_00/bindings.rs  | 175 +++++
+ drivers/gpu/nova-core/gsp/hal/gh100.rs        |   2 +-
+ drivers/gpu/nova-core/gsp/hal/tu102.rs        |   2 +-
+ drivers/gpu/nova-core/mm.rs                   |   6 +-
+ drivers/gpu/nova-core/mm/bar_user.rs          | 183 ++++-
+ drivers/gpu/nova-core/mm/vram.rs              | 187 +++++
+ drivers/gpu/nova-core/nova_core_exports.c     |   5 +
+ drivers/gpu/nova-core/vgpu.rs                 |  91 ---
+ drivers/gpu/nova-core/vgpu/bootload.rs        | 162 ++++
+ drivers/gpu/nova-core/vgpu/consts.rs          |  33 +
+ drivers/gpu/nova-core/vgpu/fw.rs              | 490 ++++++++++++
+ drivers/gpu/nova-core/vgpu/fw/commands.rs     |  28 +
+ drivers/gpu/nova-core/vgpu/instance.rs        | 705 ++++++++++++++++++
+ drivers/gpu/nova-core/vgpu/log.rs             | 167 +++++
+ drivers/gpu/nova-core/vgpu/mod.rs             | 170 +++++
+ drivers/gpu/nova-core/vgpu/plugin_rpc.rs      | 274 +++++++
+ drivers/gpu/nova-core/vgpu/scrubber.rs        | 474 ++++++++++++
+ drivers/gpu/nova-core/vgpu/vfio.rs            | 282 +++++++
+ drivers/gpu/nova-core/vgpu/vram.rs            | 140 ++++
+ drivers/vfio/pci/Kconfig                      |   2 +
+ drivers/vfio/pci/Makefile                     |   2 +
+ drivers/vfio/pci/nvidia-vgpu/Kconfig          |  16 +
+ drivers/vfio/pci/nvidia-vgpu/Makefile         |   2 +
+ drivers/vfio/pci/nvidia-vgpu/main.c           | 253 +++++++
+ include/drm/nvidia_vgpu.h                     |  28 +
+ rust/bindings/bindings_helper.h               |   1 +
+ 36 files changed, 4536 insertions(+), 299 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 5f0be6c5d to b866ba521
+KVM mailing list update from 5f0be6c5d to b866ba521
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  Karl Mehltretter <kmehltretter@gmail.com>
+      1  Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: selftests: Fix VM leak in early return
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+test_mmio_ease() returns early and skips the call to kvm_vm_free() when
+ID_AA64PFR1_EL1 is not available.
+
+Use a goto so that the early return joins the common exit path.
+
+Reported-by: Gokul K <gokul02k@gmail.com>
+Link: https://lore.kernel.org/all/20260808081050.408657-1-gokul02k@gmail.com/
+Fixes: a90aac553249 ("KVM: arm64: selftests: Test SEAs are taken to SError vector when EASE=1")
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+Tested on a Rock 5B (RK3588). ID_AA64PFR1_EL1.DF2 is not implemented,
+so test_mmio_ease() takes the skip path exercised by this fix.
+---
+ tools/testing/selftests/kvm/arm64/external_aborts.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: Fix the struct kvm_arm_device_addr name
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+KVM_ARM_SET_DEVICE_ADDR takes struct kvm_arm_device_addr; the document
+names it struct kvm_arm_device_address, which does not exist.
+
+Use the real name.
+
+Fixes: 3401d54696f9 ("KVM: ARM: Introduce KVM_ARM_SET_DEVICE_ADDR ioctl")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/api.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] Documentation: KVM: Fix the event_source sysfs path in the PMU attribute description
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+The PMU device directories live under /sys/bus/event_source/devices,
+the document spells the bus even_source.
+
+Fix the spelling.
+
+Fixes: 6ee7fca2a4a0 ("KVM: arm64: Add KVM_ARM_VCPU_PMU_V3_SET_PMU attribute")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ Documentation/virt/kvm/devices/vcpu.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
