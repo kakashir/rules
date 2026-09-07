@@ -1,0 +1,347 @@
+
+On /root/mail/repo:
+From 5cbd451b4 to 60e24fb0d
+KVM mailing list update from 5cbd451b4 to 60e24fb0d
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      5 kernel.org
+      3 gmail.com
+      1 163.com
+
+Top 15 contributors (Based on Email Body)
+
+      5  "Mike Rapoport (Microsoft)" <rppt@kernel.org>
+      2  Abdifatah Suruur <suruurism@gmail.com>
+      1  Tharit Tangkijwanichakul <tharitt97@gmail.com>
+      1  Pengpeng Hou <hppiscas@163.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] vfio/cdx: reject non-shared MMIO mmaps
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+vfio_cdx_mmap() accepts MAP_PRIVATE mappings.  A non-shared mapping
+with VM_MAYWRITE is a COW mapping, and remap_pfn_range()'s COW special
+case in get_remap_pgoff() then overwrites vma->vm_pgoff with the
+physical frame number:
+
+	if (is_cow) {
+		if (addr != vm_start || end != vm_end)
+			return -EINVAL;
+		*vm_pgoff_p = pfn;
+	}
+
+The VMA is inserted into the device file's mapping->i_mmap interval
+tree keyed by vm_pgoff, which VFIO expects to be the logical file
+offset: the core links every device mmap to the device inode's
+i_mapping precisely so that unmap_mapping_range() can revoke all
+mappings associated with a device (see vfio_device_cdev_open()).
+
+A raw PFN in vm_pgoff lands the interval tree entry in the wrong
+coordinate space, so unmap_mapping_range() cannot find the VMA and a
+stale MMIO mapping survives any revocation attempt.  Without this
+check, a MAP_PRIVATE mapping reintroduces that corruption even with
+the logical-vm_pgoff fix in place.
+
+Require VM_SHARED as vfio-pci, vfio/fsl-mc and vfio/platform already
+do.
+
+Fixes: 234489ac56130 ("vfio/cdx: add support for CDX bus")
+Signed-off-by: Abdifatah Suruur <suruurism@gmail.com>
+---
+ drivers/vfio/cdx/main.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4] vfio/platform: prevent read-only region mappings from becoming writable
+Author: Abdifatah Suruur <suruurism@gmail.com>
+
+vfio_platform_mmap() rejects writable mappings of regions without the
+WRITE flag, but leaves VM_MAYWRITE set.  Userspace can map such a region
+read-only and then upgrade the mapping to writable with mprotect().
+
+Clear VM_MAYWRITE for regions without the WRITE flag, as i915 does for
+its read-only objects and as fixed in drm/vc4 (CVE-2026-68445),
+drm/panthor (CVE-2024-53071) and commit a5edadbae57e ("ptp: vmclock:
+prevent read-only mappings from becoming writable").
+
+Note this is defensive hardening: no in-tree platform driver currently
+publishes a region without the WRITE flag.  The guard costs nothing and
+keeps the mmap() interface honest if a read-only region ever appears.
+
+Fixes: fad4d5b1f042 ("vfio/platform: support MMAP of MMIO regions")
+Signed-off-by: Abdifatah Suruur <suruurism@gmail.com>
+Reviewed-by: Mostafa Saleh <smostafa@google.com>
+Reviewed-by: Eric Auger <eric.auger@redhat.com>
+Reviewed-by: Pranjal Shrivastava <praan@google.com>
+---
+v4:
+- consolidate the duplicated !WRITE condition into one block, per
+  Pranjal's review; no semantic change
+v3:
+- use 'commit <sha> ("<title>")' style for the vmclock reference and
+  point Fixes at the MMAP support commit, per Mostafa's review
+v2:
+- commit log now states plainly that the read-only path is unreachable
+  in practice, per Alex's review; dropped Cc: stable as there is no
+  reachable issue to backport
+---
+ drivers/vfio/platform/vfio_platform_common.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/4] KVM: s390: Replace get_zeroed_page() with kzalloc()
+Author: Mike Rapoport (Microsoft) <rppt@kernel.org>
+
+kvm_arch_init_vm() allocates struct sie_page2 that holds the facility
+list and the crypto control block of a VM and kvm_s390_vcpu_setup_cmma()
+allocates the CMMA collaborative memory management block referenced by
+the SIE control block. Both are passed to the hardware as physical
+addresses and must be page aligned.
+
+kmalloc() guarantees that a power of two sized allocation is aligned to
+its size, so a PAGE_SIZE allocation is page aligned as well.
+
+These buffers can be allocated with kmalloc() as there's nothing special
+about them to go directly to the page allocator.
+
+kmalloc() provides a better API that does not require ugly casts and
+kfree() does not need to know the size of the freed object.
+
+Performance difference between kmalloc() and __get_free_pages() is not
+measurable as both allocators take an object/page from a per-CPU list for
+fast path allocations.
+
+For the slow path the performance is anyway determined by the amount of
+reclaim involved rather than by what allocator is used.
+
+The sie_page allocated in kvm_arch_vcpu_create() is left alone because it
+is mapped to userspace with virt_to_page() in kvm_arch_vcpu_fault() and
+therefore really needs a struct page.
+
+The SIE hardware stores the offset of the next CBR entry in the low bits
+of cbrlo, so mask them out before converting cbrlo back to a virtual
+address. free_page() did not care, kfree() needs the address kzalloc()
+returned.
+
+Replace use of get_zeroed_page() with kzalloc() and free_page() with
+kfree().
+
+Link: https://lore.kernel.org/all/635405e4-9423-4a25-a6e7-e03c8ea0bcbe@redhat.com
+Assisted-by: copilot:claude-opus
+Signed-off-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ arch/s390/kvm/s390/s390.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/4] KVM: s390: Replace get_zeroed_page() with kzalloc()
+Author: Mike Rapoport (Microsoft) <rppt@kernel.org>
+
+kvm_s390_gib_init() allocates the guest information block (GIB). The GIB
+is passed to the hardware as a physical address and must be page aligned.
+
+kmalloc() guarantees that a power of two sized allocation is aligned to
+its size, so a PAGE_SIZE allocation is page aligned as well.
+
+This buffer can be allocated with kmalloc() as there's nothing special
+about it to go directly to the page allocator.
+
+kmalloc() provides a better API that does not require ugly casts and
+kfree() does not need to know the size of the freed object.
+
+Performance difference between kmalloc() and __get_free_pages() is not
+measurable as both allocators take an object/page from a per-CPU list for
+fast path allocations.
+
+For the slow path the performance is anyway determined by the amount of
+reclaim involved rather than by what allocator is used.
+
+Replace use of get_zeroed_page() with kzalloc() and free_page() with
+kfree().
+
+Link: https://lore.kernel.org/all/635405e4-9423-4a25-a6e7-e03c8ea0bcbe@redhat.com
+Assisted-by: copilot:claude-opus
+Signed-off-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ arch/s390/kvm/s390/interrupt.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/4] KVM: s390: Replace get_zeroed_page() with kzalloc()
+Author: Mike Rapoport (Microsoft) <rppt@kernel.org>
+
+handle_stsi() allocates the buffer that receives the STSI response block
+before it is copied to the guest.
+
+This buffer can be allocated with kmalloc() as there's nothing special
+about it to go directly to the page allocator.
+
+kmalloc() provides a better API that does not require ugly casts and
+kfree() does not need to know the size of the freed object.
+
+Performance difference between kmalloc() and __get_free_pages() is not
+measurable as both allocators take an object/page from a per-CPU list for
+fast path allocations.
+
+For the slow path the performance is anyway determined by the amount of
+reclaim involved rather than by what allocator is used.
+
+While on it, make the buffer a void pointer to get rid of the casts.
+
+Replace use of get_zeroed_page() with kzalloc() and free_page() with
+kfree().
+
+Link: https://lore.kernel.org/all/635405e4-9423-4a25-a6e7-e03c8ea0bcbe@redhat.com
+Assisted-by: copilot:claude-opus
+Signed-off-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ arch/s390/kvm/s390/priv.c | 19 ++++++++++---------
+ 1 file changed, 10 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/4] KVM: s390: Replace get_zeroed_page() with kzalloc()
+Author: Mike Rapoport (Microsoft) <rppt@kernel.org>
+
+handle_sthyi() allocates the buffer that receives the STHYI response
+block before it is copied to the guest.
+
+This buffer can be allocated with kmalloc() as there's nothing special
+about it to go directly to the page allocator.
+
+kmalloc() provides a better API that does not require ugly casts and
+kfree() does not need to know the size of the freed object.
+
+Performance difference between kmalloc() and __get_free_pages() is not
+measurable as both allocators take an object/page from a per-CPU list for
+fast path allocations.
+
+For the slow path the performance is anyway determined by the amount of
+reclaim involved rather than by what allocator is used.
+
+The only goto in that function does not unwind anything, it merely skips
+to the exit when the function code is invalid. Turn it into an early
+return so that the buffer can be freed with __free(kfree).
+
+Replace use of get_zeroed_page() with kzalloc() and free_page() with
+kfree().
+
+Assisted-by: copilot:claude-opus
+Signed-off-by: Mike Rapoport (Microsoft) <rppt@kernel.org>
+---
+ arch/s390/kvm/s390/intercept.c | 23 ++++++++++-------------
+ 1 file changed, 10 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/4] KVM: s390: replace page allocator calls with
+Author: Mike Rapoport (Microsoft) <rppt@kernel.org>
+
+This is a (small) part of larger work of replacing page allocator calls
+with kmalloc.
+
+My initial intention a few month ago was to remove ugly casts [1], but then
+willy pointed out that Linus objected to something like this [2] and it
+looks like more than a decade old technical debt.
+
+Largely, anything that doesn't need struct page (or a memdesc in the
+future) should just use kmalloc() or kvmalloc() to allocate memory.
+kmalloc() guarantees alignment, physical contiguity and working
+virt_to_phys() and beside nicer API that returns void * on alloc and
+doesn't require to know the allocation size on free, kmalloc() provides
+better debugging capabilities than page allocator.
+
+Another thing is that touching these allocation sites gives the reviewers
+opportunity to see if a PAGE_SIZE buffer is actually needed or maybe
+another size is appropriate.
+
+For larger allocations that don't need physically contiguous memory
+kvmalloc() can be a better option that __get_free_pages() because under
+memory pressure it's is easier to allocate several order-0 pages than a
+physically contiguous chunk with the same number of pages.
+
+And last, but not least, removing needless calls to page allocator should
+help with memdesc (aka project folio) conversion. There will be way less
+places to audit to see if the user was actually using struct page.
+
+Also in git:
+https://git.kernel.org/pub/scm/linux/kernel/git/rppt/linux.git gfp-to-kmalloc/s390-kvm
+
+[1] https://lore.kernel.org/all/20251018093002.3660549-1-rppt@kernel.org/
+[2] https://lore.kernel.org/all/CA+55aFwp4iy4rtX2gE2WjBGFL=NxMVnoFeHqYa2j1dYOMMGqxg@mail.gmail.com/
+
+---
+v2 changes:
+* Mask out the next CBR entry offset SIE stores in the low bits of cbrlo
+  before handing the address to kfree()
+* Use __free(kfree) in handle_sthyi()
+
+v1: https://patch.msgid.link/20260902-s390-kvm-v1-0-3bc0986550b1@kernel.org
+
+---
+Mike Rapoport (Microsoft) (4):
+      KVM: s390: Replace get_zeroed_page() with kzalloc() for the STHYI buffer
+      KVM: s390: Replace get_zeroed_page() with kzalloc() for the STSI buffer
+      KVM: s390: Replace get_zeroed_page() with kzalloc() for the GIB
+      KVM: s390: Replace get_zeroed_page() with kzalloc() for sie_page2 and CMMA
+
+ arch/s390/kvm/s390/intercept.c | 23 ++++++++++-------------
+ arch/s390/kvm/s390/interrupt.c |  8 ++++----
+ arch/s390/kvm/s390/priv.c      | 19 ++++++++++---------
+ arch/s390/kvm/s390/s390.c      | 12 ++++++------
+ 4 files changed, 30 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Publish NACL HFENCE configuration last
+Author: Pengpeng Hou <hppiscas@163.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: Fix reg_list and VM leak in get_reg_list test
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Calling the test with --list or --list-filtered causes an early return
+in run_test() which skips freeing the reg_list and vm.
+
+Use a goto so that the early return joins the common exit path.
+
+Reported-by: Gokul K <gokul02k@gmail.com>
+Link: https://lore.kernel.org/all/20260808081050.408657-1-gokul02k@gmail.com/
+Fixes: 17da79e009c3 ("KVM: arm64: selftests: Split get-reg-list test code")
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+Tested on a Rock 5B (RK3588). Running the test with --list and
+--list-filtered now exercises the goto path added by this fix and exits
+cleanly.
+---
+ tools/testing/selftests/kvm/get-reg-list.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From b866ba521 to 141f68dbd
+KVM mailing list update from b866ba521 to 141f68dbd
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
