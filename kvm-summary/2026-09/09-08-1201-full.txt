@@ -1,0 +1,1818 @@
+
+On /root/mail/repo:
+From 60e24fb0d to 238ddd208
+KVM mailing list update from 60e24fb0d to 238ddd208
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     13 amd.com
+      8 gmail.com
+      6 redhat.com
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+      8  Nikunj A Dadhania <nikunj@amd.com>
+      7  Hemanth Selam <hemanth.selam@gmail.com>
+      6  Luigi Leonardi <leonardi@redhat.com>
+      5  Shivank Garg <shivankg@amd.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Chaithanya Lagisetty <nagachaithanya9911@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2 5/5] igvm/sev: forward the IGVM guest policy to the
+Author: Luigi Leonardi <leonardi@redhat.com>
+
+set_guest_policy was called from qigvm_handle_policy at the end of
+qigvm_process_file, after LAUNCH_START had already been issued for both
+SEV/SEV-ES and SEV-SNP. The guest was therefore launched with whatever
+policy was already configured (the command-line value, or the platform
+default if none was given) instead of the one requested by the IGVM
+file, quietly breaking attestation since the policy is part of the
+attestation report.
+
+Move the call into qigvm_initialization_guest_policy, which runs while
+the initialization section is processed. Because that section is now
+handled during the pre-launch pass (see previous patch), the call
+happens before LAUNCH_START, so the policy is in effect for launch. Drop
+qigvm_handle_policy, whose only remaining job was that misplaced call.
+cgs_set_guest_policy no longer special-cases SEV_STATE_UNINIT: that
+guard used to skip the pre-processing pass so the policy was applied
+later, but forwarding it during pre-processing, before LAUNCH_START, is
+now precisely the point. The 'policy == 0 means unset' guard is dropped
+too, since the call site now only fires when the IGVM file actually
+provides a GUEST_POLICY header.
+
+The command line can also set a policy. It now takes precedence: if it
+differs from the IGVM one, print a warning and keep the command-line
+value instead of silently overriding it. Also reject a policy that
+doesn't fit in the 32-bit SEV/SEV-ES policy field instead of truncating
+it.
+
+Finally, use the get_guest_policy callback added by the previous patch
+to populate the SNP ID block's policy field. The command line sets its
+policy directly into the SEV/SNP guest's own struct, bypassing IGVM
+entirely, so ctx->sev_policy only ever reflects a GUEST_POLICY header
+and is 0 otherwise, causing SNP_LAUNCH_FINISH to reject the ID block
+whenever the file relies on a command-line policy. Reading the policy
+back from the platform instead always gets the value actually in
+effect, regardless of its source. ctx->sev_policy is now unused and
+removed.
+
+Link: https://gitlab.com/qemu-project/qemu/-/work_items/4189
+Fixes: 915b47078d ("backends/igvm: Handle policy for SEV guests")
+Signed-off-by: Luigi Leonardi <leonardi@redhat.com>
+---
+ backends/igvm.c                | 27 +++++++++++----------------
+ include/system/igvm-internal.h |  3 ---
+ target/i386/sev.c              | 37 +++++++++++++++++++++++++------------
+ 3 files changed, 36 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/5] i386/sev: add a get_guest_policy callback
+Author: Luigi Leonardi <leonardi@redhat.com>
+
+The next patch populates the SEV-SNP ID block's policy field.
+That value must be whatever policy is currently in effect on the platform
+but there is no way to read it back: the policy can come either from an
+IGVM GUEST_POLICY header or from the command line, and the command line
+sets it directly into the SEV/SNP guest struct without going through IGVM.
+Reading it back from the platform is the only source that always reflects
+the value in effect, regardless of where it came from.
+
+Add a get_guest_policy callback to ConfidentialGuestSupportClass for
+this purpose. It is not yet used; the following patch wires it into the
+SNP ID block population.
+
+Signed-off-by: Luigi Leonardi <leonardi@redhat.com>
+---
+ backends/confidential-guest-support.c       |  9 +++++++++
+ include/system/confidential-guest-support.h |  8 ++++++++
+ target/i386/sev.c                           | 24 ++++++++++++++++++++++++
+ 3 files changed, 41 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/5] i386/sev: convert the guest policy properties to
+Author: Luigi Leonardi <leonardi@redhat.com>
+
+Both SEV/SEV-ES and SEV-SNP expose a "policy" object property. The
+SEV/SEV-ES one was registered as a plain uint32 pointer property, and
+the SEV-SNP setter ignored the result of the visit.
+
+Give both properties explicit getter/setter functions and check the
+return value of the visit in the setters. This is preparation for
+tracking whether the guest policy was set on the command line.
+
+No functional change intended.
+
+Reviewed-by: Ani Sinha <anisinha@redhat.com>
+Signed-off-by: Luigi Leonardi <leonardi@redhat.com>
+---
+ target/i386/sev.c | 30 +++++++++++++++++++++++++-----
+ 1 file changed, 25 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/5] igvm: move set_id_block call into the SNP ID block
+Author: Luigi Leonardi <leonardi@redhat.com>
+
+set_id_block only makes sense when the IGVM file contains an
+IGVM_VHT_SNP_ID_BLOCK directive. Move the call from qigvm_handle_policy
+(which continues to handle the set_guest_policy call) into
+qigvm_directive_snp_id_block, where the ID block and ID auth are
+populated. This avoids a no-op call to set_id_block when no ID block
+is present.
+
+The ID block embeds the guest policy, so the policy must be known by the
+time the directive is handled. Process the initialization section (which
+carries the GUEST_POLICY header) before the directive section, and
+copy ctx->sev_policy into the ID block in the directive handler.
+
+Signed-off-by: Luigi Leonardi <leonardi@redhat.com>
+---
+ backends/igvm.c | 80 ++++++++++++++++++++++++++++-----------------------------
+ 1 file changed, 40 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/5] sev: split set_guest_policy into set_guest_policy
+Author: Luigi Leonardi <leonardi@redhat.com>
+
+The set_guest_policy callback on ConfidentialGuestSupportClass mixed
+two unrelated jobs: writing the guest policy bits and providing the
+SEV-SNP ID block/ID auth for LAUNCH_FINISH. The two are only related
+because both come from the same 'policy' section of the SEV/SEV-SNP
+launch flow, but they need to be set at different times: the policy
+must be in effect before LAUNCH_START, while the ID block is only
+needed before LAUNCH_FINISH.
+
+Split the combined callback into set_guest_policy(policy_type, policy,
+errp) and set_id_block(id_block, id_block_size, id_auth, id_auth_size,
+errp), keeping both call sites exactly where the combined callback used
+to be called from. No functional change.
+
+Signed-off-by: Luigi Leonardi <leonardi@redhat.com>
+---
+ backends/confidential-guest-support.c       |  15 ++-
+ backends/igvm.c                             |  14 ++-
+ include/system/confidential-guest-support.h |  28 +++---
+ target/i386/sev.c                           | 140 +++++++++++++++-------------
+ 4 files changed, 111 insertions(+), 86 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/5] igvm/sev: apply the IGVM guest policy before launch
+Author: Luigi Leonardi <leonardi@redhat.com>
+
+The guest policy from an IGVM file never actually made it to the platform
+before launch. The callback that was supposed to forward it ran after
+LAUNCH_START, so it did nothing and the guest was launched with the
+default policy instead of the one requested by the file.
+
+The policy is part of the attestation report, so this quietly breaks
+attestation: the resulting measurement does not match what the IGVM file
+was built for.
+
+Patches 1 to 4 are cleanups needed to get there: dropping an overloaded
+callback, moving the SNP ID block handling, giving the policy properties
+proper accessors, and adding a way to read back the platform's current
+guest policy. Patch 5 is the actual fix.
+
+One thing worth calling out: if a policy is also passed on the command
+line and it differs from the IGVM one, the command-line value takes
+precedence and we print a warning instead of silently picking one over
+the other.
+
+Signed-off-by: Luigi Leonardi <leonardi@redhat.com>
+---
+Changes in v2:
+- Rework the callback split. Now we don't have an unimplemented callback [Stefano, Gerd]
+- Reject a command-line/IGVM policy that doesn't fit in the 32-bit
+  SEV/SEV-ES policy field instead of truncating it [Stefano]
+- On a mismatch between the command-line and IGVM policy, print a warning and
+  keep the command-line value instead of returning an error. [Daniel,
+  Gerd, Stefano]
+- Picked up RoB
+- Rebased to latest upstream
+- Link to v1: https://lore.kernel.org/qemu-devel/20260901-fix_igvm_policy-v1-0-e93a6cf8c5ac@redhat.com
+
+---
+Luigi Leonardi (5):
+      sev: split set_guest_policy into set_guest_policy and set_id_block
+      igvm: move set_id_block call into the SNP ID block directive handler
+      i386/sev: convert the guest policy properties to custom accessors
+      i386/sev: add a get_guest_policy callback
+      igvm/sev: forward the IGVM guest policy to the platform before launch
+
+ backends/confidential-guest-support.c       |  24 +++-
+ backends/igvm.c                             |  91 ++++++------
+ include/system/confidential-guest-support.h |  36 +++--
+ include/system/igvm-internal.h              |   3 -
+ target/i386/sev.c                           | 215 ++++++++++++++++++----------
+ 5 files changed, 230 insertions(+), 139 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/4] KVM: selftests: Drop unused sysfs NUMA helpers
+Author: Shivank Garg <shivankg@amd.com>
+
+No users of get_max_numa_node(), is_numa_available(), or
+is_multi_numa_node_system() remain.  Remove the helpers and the now
+unused dirent.h include.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/include/numaif.h | 52 ----------------------------
+ 1 file changed, 52 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/4] KVM: selftests: Use allowed memory nodes in
+Author: Shivank Garg <shivankg@amd.com>
+
+test_numa_allocation() assumes that nodes 0 and 1 exist and are usable.
+That is not guaranteed on systems with sparse or memoryless nodes, or
+when a cpuset restricts the task.
+
+Pick two nodes from MPOL_F_MEMS_ALLOWED and use MAXNODE_FOR_MASK() when
+passing the masks to mbind().  Keep the two-node requirement because the
+test verifies that pages are allocated on different nodes.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/guest_memfd_test.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/4] KVM: selftests: Use an allowed memory node in
+Author: Shivank Garg <shivankg@amd.com>
+
+test_mbind() hardcodes node 0 and skips the test unless sysfs reports
+more than one NUMA node.  This can fail if node 0 has no memory or is
+excluded by the task's cpuset.
+
+Pick a node from MPOL_F_MEMS_ALLOWED instead.  The test only needs one
+node, so allow it to run on single-node systems too.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/guest_memfd_test.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/4] KVM: selftests: Prepare guest_memfd_test for
+Author: Shivank Garg <shivankg@amd.com>
+
+Store the NUMA node IDs used by test_mbind() and
+test_numa_allocation(), build nodemasks from those IDs, and use the IDs
+when checking move_pages() results.  This prepares both tests to select
+nodes at runtime instead of assuming nodes 0 and 1.
+
+No functional change intended.
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+ tools/testing/selftests/kvm/guest_memfd_test.c | 53 +++++++++++++++++---------
+ 1 file changed, 35 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/4] KVM: guest_memfd: fix NUMA selftests
+Author: Shivank Garg <shivankg@amd.com>
+
+NUMA selftests in guest_memfd_test assumes that node 0 and 1 exist and
+have memory. However, nodes can be sparse or memoryless which would
+break this selftest.  Select the nodes from MPOL_F_MEMS_ALLOWED instead.
+
+Based on KVM: selftests: Fix maxnodes bugs and cleanup related code [1]
+
+Tested on a 7.3-rc1+, AMD EPYC 7713.
+
+[1] https://lore.kernel.org/kvm/20260903001625.2792367-1-seanjc@google.com
+
+Changes in v3:
+- Rebase on Sean's spin-off series [1] which picks up patch 1 and 2.
+- Drop Patch 3 as version in [1] is better. (Sean)
+- Split patch 4 of V2 into 4 patches. (Sean)
+- Use MAXNODE_FOR_MASK() for maxnode value. (Sean)
+- Link to v2: https://lore.kernel.org/r/20260901-gmem-selftests-fix-v2-0-5a273153354c@amd.com
+
+Changes in V2:
+- Split from unbind race fix. (Sean)
+- Include <linux/bits.h> that defines BITS_PER_TYPE for self-containment. (Sashiko)
+- Link to V1: https://lore.kernel.org/kvm/20260823-shivank-gmem-fix-split-v1-0-512a29fb8e86@amd.com
+
+Signed-off-by: Shivank Garg <shivankg@amd.com>
+---
+Shivank Garg (4):
+      KVM: selftests: Prepare guest_memfd_test for arbitrary NUMA nodes
+      KVM: selftests: Use an allowed memory node in test_mbind()
+      KVM: selftests: Use allowed memory nodes in test_numa_allocation()
+      KVM: selftests: Drop unused sysfs NUMA helpers
+
+ tools/testing/selftests/kvm/guest_memfd_test.c | 61 +++++++++++++++++---------
+ tools/testing/selftests/kvm/include/numaif.h   | 52 ----------------------
+ 2 files changed, 40 insertions(+), 73 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] powerpc: fix repeated words in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Drop words accidentally written twice, reported by checkpatch.pl as a
+possible repeated word.  Only touches comments, no code changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/powerpc/kernel/paca.c             | 2 +-
+ arch/powerpc/sysdev/xics/xics-common.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] powerpc: fix typos in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Fix typos in comments, reported by scripts/checkpatch.pl using the
+misspelling list in scripts/spelling.txt.  Only touches comments, no code
+changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/powerpc/include/asm/book3s/64/mmu-hash.h          |  8 ++++----
+ arch/powerpc/include/asm/book3s/64/radix.h             |  2 +-
+ arch/powerpc/include/asm/fsl_hcalls.h                  |  2 +-
+ arch/powerpc/include/asm/io.h                          |  2 +-
+ arch/powerpc/include/asm/machdep.h                     |  2 +-
+ arch/powerpc/include/asm/nohash/32/pte-8xx.h           |  2 +-
+ arch/powerpc/include/asm/pmac_feature.h                |  2 +-
+ arch/powerpc/include/asm/prom.h                        |  2 +-
+ arch/powerpc/include/asm/sfp-machine.h                 |  2 +-
+ arch/powerpc/include/asm/smu.h                         | 10 +++++-----
+ arch/powerpc/include/asm/task_size_64.h                |  2 +-
+ arch/powerpc/include/asm/uaccess.h                     |  2 +-
+ arch/powerpc/include/uapi/asm/bootx.h                  |  2 +-
+ arch/powerpc/kernel/eeh.c                              |  4 ++--
+ arch/powerpc/kernel/eeh_event.c                        |  2 +-
+ arch/powerpc/kernel/exceptions-64e.S                   |  2 +-
+ arch/powerpc/kernel/exceptions-64s.S                   |  4 ++--
+ arch/powerpc/kernel/fadump.c                           |  2 +-
+ arch/powerpc/kernel/irq_64.c                           |  2 +-
+ arch/powerpc/kernel/paca.c                             |  2 +-
+ arch/powerpc/kernel/pci_dn.c                           |  2 +-
+ arch/powerpc/kernel/prom.c                             |  4 ++--
+ arch/powerpc/kernel/setup_64.c                         |  2 +-
+ arch/powerpc/kernel/signal_64.c                        |  2 +-
+ arch/powerpc/kernel/smp.c                              |  2 +-
+ arch/powerpc/kernel/switch.S                           |  2 +-
+ arch/powerpc/kexec/core_64.c                           |  2 +-
+ arch/powerpc/kvm/book3s_pr.c                           |  2 +-
+ arch/powerpc/kvm/book3s_xive.c                         |  8 ++++----
+ arch/powerpc/kvm/bookehv_interrupts.S                  |  2 +-
+ arch/powerpc/lib/copyuser_power7.S                     |  4 ++--
+ arch/powerpc/lib/memcpy_power7.S                       |  4 ++--
+ arch/powerpc/lib/rheap.c                               |  2 +-
+ arch/powerpc/mm/book3s64/hash_native.c                 |  6 +++---
+ arch/powerpc/mm/book3s64/hugetlbpage.c                 |  2 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c                   |  4 ++--
+ arch/powerpc/mm/book3s64/slb.c                         |  4 ++--
+ arch/powerpc/mm/nohash/tlb.c                           |  2 +-
+ arch/powerpc/perf/imc-pmu.c                            |  2 +-
+ arch/powerpc/platforms/powermac/low_i2c.c              |  2 +-
+ arch/powerpc/platforms/powermac/pci.c                  |  2 +-
+ arch/powerpc/platforms/powermac/sleep.S                |  2 +-
+ arch/powerpc/platforms/powernv/opal-memory-errors.c    |  2 +-
+ arch/powerpc/platforms/powernv/opal.c                  |  2 +-
+ arch/powerpc/platforms/powernv/pci-ioda.c              |  2 +-
+ arch/powerpc/platforms/powernv/vas.h                   |  2 +-
+ arch/powerpc/platforms/ps3/platform.h                  |  4 ++--
+ arch/powerpc/platforms/pseries/firmware.c              |  4 ++--
+ arch/powerpc/platforms/pseries/papr_scm.c              |  4 ++--
+ arch/powerpc/xmon/ppc-opc.c                            |  4 ++--
+ arch/powerpc/xmon/ppc.h                                |  2 +-
+ drivers/net/ethernet/ibm/ibmvnic.h                     |  4 ++--
+ drivers/tty/hvc/hvc_opal.c                             |  2 +-
+ .../testing/selftests/powerpc/tm/tm-signal-msr-resv.c  |  2 +-
+ tools/testing/selftests/powerpc/tm/tm-tar.c            |  2 +-
+ 55 files changed, 79 insertions(+), 79 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] powerpc: fix typos and repeated words in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+This corrects 2 misspellings and repeated words in comments.  Each is a
+separate patch so that any one of them can be dropped without touching
+the rest.
+
+Nothing outside comments changes.  Every touched C file was checked by
+dropping its comments, replacing each string literal with a placeholder
+and collapsing whitespace; what remained was identical before and after,
+so the compiled code cannot differ.
+
+The mistakes were found with scripts/checkpatch.pl against the list in
+scripts/spelling.txt.  The scanning, the edits and the changelogs were
+produced with Cursor running the claude-opus-5 model, from a request to
+find and fix spelling mistakes across the tree, and every correction was
+then re-checked by the comparison described above.  Words that name an
+identifier were left alone deliberately, even when they read as typos,
+because correcting the prose would make the comment disagree with the
+code it describes.
+
+Tested by building x86_64 defconfig at v7.3-rc1-269-gbc35965f6940, which
+is clean.  Nothing else was built, so any patch touching code that
+x86_64 defconfig does not compile has been read but not compiled.
+
+Hemanth Selam (2):
+  powerpc: fix typos in comments
+  powerpc: fix repeated words in comments
+
+ arch/powerpc/include/asm/book3s/64/mmu-hash.h          |  8 ++++----
+ arch/powerpc/include/asm/book3s/64/radix.h             |  2 +-
+ arch/powerpc/include/asm/fsl_hcalls.h                  |  2 +-
+ arch/powerpc/include/asm/io.h                          |  2 +-
+ arch/powerpc/include/asm/machdep.h                     |  2 +-
+ arch/powerpc/include/asm/nohash/32/pte-8xx.h           |  2 +-
+ arch/powerpc/include/asm/pmac_feature.h                |  2 +-
+ arch/powerpc/include/asm/prom.h                        |  2 +-
+ arch/powerpc/include/asm/sfp-machine.h                 |  2 +-
+ arch/powerpc/include/asm/smu.h                         | 10 +++++-----
+ arch/powerpc/include/asm/task_size_64.h                |  2 +-
+ arch/powerpc/include/asm/uaccess.h                     |  2 +-
+ arch/powerpc/include/uapi/asm/bootx.h                  |  2 +-
+ arch/powerpc/kernel/eeh.c                              |  4 ++--
+ arch/powerpc/kernel/eeh_event.c                        |  2 +-
+ arch/powerpc/kernel/exceptions-64e.S                   |  2 +-
+ arch/powerpc/kernel/exceptions-64s.S                   |  4 ++--
+ arch/powerpc/kernel/fadump.c                           |  2 +-
+ arch/powerpc/kernel/irq_64.c                           |  2 +-
+ arch/powerpc/kernel/paca.c                             |  4 ++--
+ arch/powerpc/kernel/pci_dn.c                           |  2 +-
+ arch/powerpc/kernel/prom.c                             |  4 ++--
+ arch/powerpc/kernel/setup_64.c                         |  2 +-
+ arch/powerpc/kernel/signal_64.c                        |  2 +-
+ arch/powerpc/kernel/smp.c                              |  2 +-
+ arch/powerpc/kernel/switch.S                           |  2 +-
+ arch/powerpc/kexec/core_64.c                           |  2 +-
+ arch/powerpc/kvm/book3s_pr.c                           |  2 +-
+ arch/powerpc/kvm/book3s_xive.c                         |  8 ++++----
+ arch/powerpc/kvm/bookehv_interrupts.S                  |  2 +-
+ arch/powerpc/lib/copyuser_power7.S                     |  4 ++--
+ arch/powerpc/lib/memcpy_power7.S                       |  4 ++--
+ arch/powerpc/lib/rheap.c                               |  2 +-
+ arch/powerpc/mm/book3s64/hash_native.c                 |  6 +++---
+ arch/powerpc/mm/book3s64/hugetlbpage.c                 |  2 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c                   |  4 ++--
+ arch/powerpc/mm/book3s64/slb.c                         |  4 ++--
+ arch/powerpc/mm/nohash/tlb.c                           |  2 +-
+ arch/powerpc/perf/imc-pmu.c                            |  2 +-
+ arch/powerpc/platforms/powermac/low_i2c.c              |  2 +-
+ arch/powerpc/platforms/powermac/pci.c                  |  2 +-
+ arch/powerpc/platforms/powermac/sleep.S                |  2 +-
+ arch/powerpc/platforms/powernv/opal-memory-errors.c    |  2 +-
+ arch/powerpc/platforms/powernv/opal.c                  |  2 +-
+ arch/powerpc/platforms/powernv/pci-ioda.c              |  2 +-
+ arch/powerpc/platforms/powernv/vas.h                   |  2 +-
+ arch/powerpc/platforms/ps3/platform.h                  |  4 ++--
+ arch/powerpc/platforms/pseries/firmware.c              |  4 ++--
+ arch/powerpc/platforms/pseries/papr_scm.c              |  4 ++--
+ arch/powerpc/sysdev/xics/xics-common.c                 |  2 +-
+ arch/powerpc/xmon/ppc-opc.c                            |  4 ++--
+ arch/powerpc/xmon/ppc.h                                |  2 +-
+ drivers/net/ethernet/ibm/ibmvnic.h                     |  4 ++--
+ drivers/tty/hvc/hvc_opal.c                             |  2 +-
+ .../testing/selftests/powerpc/tm/tm-signal-msr-resv.c  |  2 +-
+ tools/testing/selftests/powerpc/tm/tm-tar.c            |  2 +-
+ 56 files changed, 81 insertions(+), 81 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 8/8] KVM: SVM: Add Page modification logging support
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Currently, dirty logging relies on write protecting guest memory and
+marking dirty GFNs during subsequent write faults. This method works but
+incurs overhead due to additional write faults for each dirty GFN.
+
+Implement support for the Page Modification Logging (PML) feature, a
+hardware-assisted method for efficient dirty logging. PML automatically
+logs dirty GPA[51:12] to a 4K buffer when the CPU sets NPT D-bits. Two new
+VMCB fields are utilized: PML_ADDR and PML_INDEX. The PML_INDEX is
+initialized to 511 (8 bytes per GPA entry), and the CPU decreases the
+PML_INDEX after logging each GPA. When the PML buffer is full, a
+VMEXIT(PML_FULL) with exit code 0x407 is generated.
+
+Since PML_INDEX in the VMCB control area remains valid after an intercepted
+SHUTDOWN, only initialize it on reset and leave it unchanged on INIT to
+avoid discarding already-logged entries that haven't been flushed.
+
+PML operates on guest physical addresses at the NPT level, tracking D-bit
+updates in page tables rather than memory content. This allows it to work
+identically for normal and confidential computing guests
+(SEV/SEV-ES/SEV-SNP), enabling cpu_dirty_log_size to be set uniformly for
+all AMD VMs without special-casing encrypted guests.
+
+Use vmcb01 directly when updating PML controls to ensure L1's state
+remains correct, as svm->vmcb points to vmcb02 when L2 is active.
+
+PML is not enabled in hardware for nested guests; treat PML_FULL as
+unexpected exits.
+
+Add a new module parameter to enable/disable PML, and enable it by default
+when supported.
+
+Acked-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/include/asm/svm.h      |   6 +-
+ arch/x86/include/uapi/asm/svm.h |   2 +
+ arch/x86/kvm/svm/nested.c       |  14 +++++
+ arch/x86/kvm/svm/sev.c          |   2 +-
+ arch/x86/kvm/svm/svm.c          | 106 +++++++++++++++++++++++++++++++-
+ arch/x86/kvm/svm/svm.h          |   1 +
+ 6 files changed, 127 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 7/8] KVM: SVM: Use BIT_ULL for 64-bit misc_ctl bit definitions
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Replace BIT() with BIT_ULL() for SVM misc control bit definitions
+since misc_ctl is a 64-bit field in the VMCB control area structure.
+
+No functional change intended.
+
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/include/asm/svm.h | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 6/8] x86/cpufeatures: Add Page modification logging
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Page modification logging(PML) is a hardware feature designed to track
+guest modified memory pages. PML enables the hypervisor to identify which
+pages in a guest's memory have been changed since the last checkpoint or
+during live migration.
+
+The PML feature is advertised via CPUID leaf 0x8000000A ECX[4] bit.
+
+Acked-by: Borislav Petkov (AMD) <bp@alien8.de>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/include/asm/cpufeatures.h | 1 +
+ arch/x86/kernel/cpu/scattered.c    | 1 +
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v8 5/8] KVM: x86: Carve out common dirty logging update
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Move the PML enable/disable decision logic from the VMX into a new
+common wrapper kvm_update_cpu_dirty_logging() in x86.c to avoid
+code duplication. Update the update_cpu_dirty_logging() signature to
+accept a bool enable parameter accordingly.
+
+Note, this subtly changes the ordering for VMX: currently
+guard(vmx_vmcs01) is taken before the atomic_read of
+nr_memslots_dirty_logging; after this refactoring the atomic_read
+happens in common code before guard(vmx_vmcs01) is taken. The ordering
+flip is harmless as a concurrent change to nr_memslots_dirty_logging
+will queue another update request.
+
+No functional change intended for VMX, restructuring to prepare for SVM
+PML support.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/vmx/main.c         |  4 ++--
+ arch/x86/kvm/vmx/vmx.c          | 12 ++----------
+ arch/x86/kvm/vmx/vmx.h          |  2 +-
+ arch/x86/kvm/vmx/x86_ops.h      |  2 +-
+ arch/x86/kvm/x86.c              | 17 ++++++++++++++++-
+ 6 files changed, 23 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 4/8] KVM: VMX: Use cpu_dirty_log_size instead of enable_pml for PML checks
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Replace the enable_pml check with cpu_dirty_log_size in VMX PML code
+to determine whether PML is enabled on a per-VM basis. The enable_pml
+module parameter is a global setting that doesn't reflect per-VM
+capabilities, whereas cpu_dirty_log_size accurately indicates whether
+a specific VM has PML enabled.
+
+For example, TDX VMs don't yet support PML. Using cpu_dirty_log_size
+ensures the check correctly reflects this, while enable_pml would
+incorrectly indicate PML is available.
+
+This also improves consistency with kvm_mmu_update_cpu_dirty_logging(),
+which already uses cpu_dirty_log_size to determine PML enablement.
+
+Suggested-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Pankaj Gupta <pankaj.gupta@amd.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 3/8] KVM: x86: Carve out PML flush routine
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Move the PML (Page Modification Logging) buffer flushing logic from
+VMX-specific code to common x86 KVM code to enable reuse by SVM and avoid
+code duplication.
+
+The AMD SVM PML implementations share the same behavior as VMX PML:
+ 1) The PML buffer is a 4K page with 512 entries
+ 2) Hardware records dirty GPAs in reverse order (from index 511 to 0)
+ 3) Hardware clears bits 11:0 when recording GPAs
+
+No functional change intended for VMX, except tone down the WARN_ON() to
+WARN_ON_ONCE() for the page alignment check. If hardware exhibits this
+behavior once, it's likely to occur repeatedly, so use WARN_ON_ONCE() to
+avoid log flooding while still capturing the unexpected condition.
+
+The refactoring prepares for SVM to leverage the same PML flushing
+implementation.
+
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 26 ++------------------------
+ arch/x86/kvm/x86.c     | 31 +++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.h     |  2 ++
+ 3 files changed, 35 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 2/8] KVM: x86: Move PML page to common vcpu arch structure
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+Move the PML page pointer from VMX-specific vcpu_vmx structure to the
+common kvm_vcpu_arch structure to enable sharing between VMX and SVM
+implementations. Only the page pointer is moved to x86 common code while
+keeping allocation logic vendor-specific, since AMD requires
+snp_safe_alloc_page() for PML buffer allocation.
+
+Update all VMX references accordingly.
+
+No functional change, restructuring to prepare for SVM PML support.
+
+Suggested-by: Kai Huang <kai.huang@intel.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 ++
+ arch/x86/kvm/vmx/vmx.c          | 21 ++++++++++-----------
+ arch/x86/kvm/vmx/vmx.h          |  7 -------
+ arch/x86/kvm/x86.h              |  5 +++++
+ 4 files changed, 17 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 1/8] KVM: VMX: Pass @vcpu, not @vmx to init_vmcs()
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+
+Pass @vcpu instead of @vmx to init_vmcs(), and switch all of the vmx->vcpu
+usage to a simple vcpu.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Nikunj A Dadhania <nikunj@amd.com>
+Reviewed-by: Kai Huang <kai.huang@intel.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 25 +++++++++++++------------
+ 1 file changed, 13 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 0/8] KVM: SVM: Add Page Modification Logging (PML) support
+Author: Nikunj A Dadhania <nikunj@amd.com>
+
+This series implements Page Modification Logging (PML) for guests on select
+AMD Zen6 and later processors, bringing hardware-assisted dirty logging
+support. PML is designed to track guest modified memory pages. PML enables the
+hypervisor to identify which pages in a guest's memory have been modified
+since the last checkpoint or during live migration. More details can be
+found in the latest AMD APM Volume 2 (System Programming), section
+"15.25.15 Page Modification Logging".
+
+The PML feature uses two new VMCB fields (PML_ADDR and PML_INDEX) and
+generates a VMEXIT when the 4KB log buffer becomes full.
+
+The feature is enabled by default when hardware support is detected and can
+be disabled via the 'pml' module parameter.
+
+Changelog:
+v8:
+* Rebased on latest kvm/next
+* Drop redundant pml_addr=0 in nested_vmcb02_prepare_control() (Yosry)
+* Fix misleading comment, pml_index=-1 is hardening not stale-data
+  cleanup (Yosry, Sean)
+* Route nested SVM_EXIT_PML_FULL to KVM and treat it as unexpected
+  exit (Sean)
+* Refactor update_cpu_dirty_logging() to common code as a separate
+  pre-patch (Sean)
+
+v7: https://lore.kernel.org/kvm/20260518045916.2988667-1-nikunj@amd.com/
+* Swap patch order to avoid adding @pml_page parameter only to remove it
+  (Sean)
+* Add Sean's prep patch to pass @vcpu to init_vmcs() instead of @vmx,
+  cleaning up all vmx->vcpu usage (Sean)
+* Drop guard(svm_vmcb01) patch; access vmcb01 directly in
+  svm_update_cpu_dirty_logging() since VMCB is just memory (Sean, Yosry)
+* Only initialize PML index on reset, leave unchanged on INIT to avoid
+  discarding unflushed entries. PML_INDEX in the control area remains valid
+  after intercepted SHUTDOWN (Sashiko, Sean, Kai)
+
+Nikunj A Dadhania (7):
+  KVM: x86: Move PML page to common vcpu arch structure
+  KVM: x86: Carve out PML flush routine
+  KVM: VMX: Use cpu_dirty_log_size instead of enable_pml for PML checks
+  KVM: x86: Carve out common dirty logging update
+  x86/cpufeatures: Add Page modification logging
+  KVM: SVM: Use BIT_ULL for 64-bit misc_ctl bit definitions
+  KVM: SVM: Add Page modification logging support
+
+Sean Christopherson (1):
+  KVM: VMX: Pass @vcpu, not @vmx to init_vmcs()
+
+ arch/x86/include/asm/cpufeatures.h |   1 +
+ arch/x86/include/asm/kvm_host.h    |   4 +-
+ arch/x86/include/asm/svm.h         |  14 ++--
+ arch/x86/include/uapi/asm/svm.h    |   2 +
+ arch/x86/kernel/cpu/scattered.c    |   1 +
+ arch/x86/kvm/svm/nested.c          |  14 ++++
+ arch/x86/kvm/svm/sev.c             |   2 +-
+ arch/x86/kvm/svm/svm.c             | 106 ++++++++++++++++++++++++++++-
+ arch/x86/kvm/svm/svm.h             |   1 +
+ arch/x86/kvm/vmx/main.c            |   4 +-
+ arch/x86/kvm/vmx/vmx.c             |  82 +++++++---------------
+ arch/x86/kvm/vmx/vmx.h             |   9 +--
+ arch/x86/kvm/vmx/x86_ops.h         |   2 +-
+ arch/x86/kvm/x86.c                 |  48 ++++++++++++-
+ arch/x86/kvm/x86.h                 |   7 ++
+ 15 files changed, 220 insertions(+), 77 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: Fix the never-true negative UFFD delay check
+Author: Chaithanya Lagisetty <nagachaithanya9911@gmail.com>
+
+demand_paging_test parses the -d option with strtoul() and then asserts
+that the result is not negative:
+
+	p.uffd_delay = strtoul(optarg, NULL, 0);
+	TEST_ASSERT(p.uffd_delay >= 0, "A negative UFFD delay is not supported.");
+
+p.uffd_delay is a useconds_t, which is an unsigned type, so the comparison
+is always true and the assertion can never fire. GCC points this out with
+-Wtype-limits, which is enabled by -Wextra.
+
+As a result, "-d -1" is accepted and converted to a very large unsigned
+delay, causing each demand paging fault to sleep for an unexpectedly long
+time in usleep() instead of rejecting the argument up front. The return
+value of strtoul() is not validated either, so a non-numeric argument
+such as "-d abc" is silently treated as a zero delay.
+
+Use atoi_non_negative() instead. It rejects negative values, unparsable
+input, and trailing garbage. It is already used a few lines below for -v,
+and hexadecimal input keeps working because atoi_paranoid() also passes a
+base of 0 to strtol().
+
+Fixes: 0119cb365c93 ("KVM: selftests: Add configurable demand paging delay")
+Signed-off-by: Chaithanya Lagisetty <nagachaithanya9911@gmail.com>
+---
+ tools/testing/selftests/kvm/demand_paging_test.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] arm64: kvm: fix typo in pauth.c comment
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+The comment reads "This code assumes that is is run from EL2".  The first
+"is" is not a repetition, it should be "it".
+
+v1 deleted the second "is" instead, which left the sentence without a
+subject.  Fuad Tabba pointed out the correct reading.
+
+Only touches a comment, no code changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/arm64/kvm/pauth.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] selftests: kvm: fix typos in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Fix typos in comments, reported by scripts/checkpatch.pl using the
+misspelling list in scripts/spelling.txt.  Only touches comments, no code
+changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ tools/testing/selftests/kvm/arm64/debug-exceptions.c | 2 +-
+ tools/testing/selftests/kvm/arm64/hypercalls.c       | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] arm64: kvm: fix typo "synchonized" in comment
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Correct "synchonized" to "synchronized", reported by scripts/checkpatch.pl
+using the misspelling list in scripts/spelling.txt.  Only touches comments,
+no code changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/arm64/kvm/hyp/entry.S | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] arm64: fix typos in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+This is v2 of the spelling fixes for this tree.
+
+Changes since v1:
+The pauth.c change is corrected: the doubled 'is' is a misspelt 'it is',
+so v1 deleted the wrong word.  Spotted by Fuad Tabba.
+
+Only comments change; no code is touched.
+
+ arch/arm64/kvm/hyp/entry.S                           | 2 +-
+ arch/arm64/kvm/pauth.c                               | 2 +-
+ tools/testing/selftests/kvm/arm64/debug-exceptions.c | 2 +-
+ tools/testing/selftests/kvm/arm64/hypercalls.c       | 4 ++--
+ 4 files changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 141f68dbd to aeaefe6a0
+KVM mailing list update from 141f68dbd to aeaefe6a0
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     16 linux.dev
+      8 google.com
+      4 gmail.com
+      2 kernel.org
+      2 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+     16  Fuad Tabba <fuad.tabba@linux.dev>
+      8  Sebastian Ene <sebastianene@google.com>
+      4  Hemanth Selam <hemanth.selam@gmail.com>
+      2  Marc Zyngier <maz@kernel.org>
+      1  Suzuki K Poulose <suzuki.poulose@arm.com>
+      1  Steven Price <steven.price@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v9 7/7] KVM: arm64: Enforce strict SBZ checks in the FF-A proxy
+Author: Sebastian Ene <sebastianene@google.com>
+
+Introduce a helper method ffa_check_unused_args_sbz to enforce strict
+arguments checking when the hypervisor acts as a relayer between the
+host and Trustzone.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Acked-by: Will Deacon <will@kernel.org>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 96 ++++++++++++++++++++++++++++++++++-
+ 1 file changed, 95 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 6/7] KVM: arm64: Support FFA_NOTIFICATION_INFO_GET in host handler
+Author: Sebastian Ene <sebastianene@google.com>
+
+Allow the host to send FF-A notification queries to Trustzone and proxy
+these messages from pKVM.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 5/7] KVM: arm64: Support FFA_NOTIFICATION_GET in host handler
+Author: Sebastian Ene <sebastianene@google.com>
+
+Allow FF-A notification GET messages to be proxied from the pKVM
+hypervisor to Trustzone and verify the arguments sent from the host
+driver.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 4/7] KVM: arm64: Support FFA_NOTIFICATION_SET in host handler
+Author: Sebastian Ene <sebastianene@google.com>
+
+Allow FF-A notification SET messages to be proxied from the pKVM
+hypervisor to Trustzone and verify the arguments.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 26 +++++++++++++++++++++++++-
+ 1 file changed, 25 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 3/7] KVM: arm64: Support FFA_NOTIFICATION_UNBIND in host handler
+Author: Sebastian Ene <sebastianene@google.com>
+
+Verify the arguments of the FF-A notification unbind call and forward
+the message to Trustzone.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/7] KVM: arm64: Support FFA_NOTIFICATION_BIND in host handler
+Author: Sebastian Ene <sebastianene@google.com>
+
+Verify the arguments of the FF-A notification bind call and forward the
+message to Trustzone.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 27 ++++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 1/7] KVM: arm64: Forward FFA_NOTIFICATION_BITMAP calls to Trustzone
+Author: Sebastian Ene <sebastianene@google.com>
+
+Allow FF-A notification bitmap messages to be forwarded to
+Trustzone from the host kernel driver and enforce the host vmid
+check.
+
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 21 +++++++++++++++++++--
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 0/7] KVM: arm64: Forward FFA_NOTIFICATION* calls to TrustZone
+Author: Sebastian Ene <sebastianene@google.com>
+
+Remove the FFA_NOTIFICATION* calls from the blocklist used by the pKVM
+FF-A proxy. This restriction was preventing the use of asynchronous
+signaling mechanisms defined by the Arm FF-A specification to
+communicate with the secure services.
+While these calls are markes as optional, there is no reason why the
+hypervisor proxy would block them because:
+
+1. Host is the Sole Non-Secure Endpoint: The Host operates as the
+   only Non-Secure VM ID (VM ID 0) recognized by the Secure World.
+   Because all forwarded notifications are inherently attributed to
+   the Host by the SPMC, there is no risk of VM ID spoofing
+   originating from the Normal World.
+
+2. No Memory Pointers or Addresses: The FFA_NOTIFICATION_* ABIs
+   operate strictly via register-based parameters, passing only
+   VM IDs, VCPU IDs, flags, and bitmaps. Because these calls do
+   not contain memory addresses, offsets, or pointers, forwarding
+   them doesn't pose a risk of memory-based confused deputy attack
+   (e.g., tricking the SPMC into overwriting protected memory).
+
+The pKVM proxy behaves as a relayer and it doesn't currently have its
+own FF-A ID(only the host has the ID 0). The behavior of the setup
+flow is covered by the spec in the: '10.9 Notification support without
+a Hypervisor'.
+
+While at it, enforce the MBZ/SBZ fields defined by the spec to prevent
+odd behavior when a new version starts making use of the reserved
+registers.
+
+---
+v9:
+- rebased on 7.3-rc2
+- no other changes
+
+v8:
+- rebased on 7.2-rc3
+- no other changes
+
+Changes in v7:
+- rebased on 7.2-rc1
+- collected the Ack from Will
+- check for major version as well when doing the SBZ/MBZ enforcement
+
+Changes in v6:
+- applied Will's feedback and re-ordered the patch series so that we
+  apply the MBZ enforcement at the end of the series
+- update ffa_check_unused_args_sbz so that we take into account the FF-A
+  version because the spec changed the list of unused parameter registers
+  for 64-bit SMCs from v1.1 to v1.2
+
+Changes in v5:
+- handle 32-bit smc variants correctly when doing the MBZ enforcement
+- add check for FFA_FEATURES
+- handle missing FFA_FN64_NOTIFICATION_INFO_GET
+- collected the Review tags from Vincent, thank you 
+
+Changes in v4:
+- previous series(v3) had serious issues with the patch number and it
+  appeared like it used a mixed bag from v2 as well. Resend this to
+  restore the correct order of the patches.
+- fix strict check in ffa_check_unused_args_sbz and make it "<= 17"
+- check the receiver endpoint Id in
+  FFA_NOTIFICATION_BIND/FFA_NOTIFICATION_UNBIND instead of the sender
+- use hyp_smccc_1_2_smc all along 
+- check the receiver endpoit Id when doing FFA_NOTIFICATION_GET  
+
+Changes in v3:
+- applied Will's suggestion to use the introduced method
+  ffa_check_unused_args_sbz for existing calls and added a new
+patch in the beggining of the series to do this.
+- merged the handling of
+  FFA_NOTIFICATION_BITMAP_CREATE/FFA_NOTIFICATION_BITMAP_DESTROY into
+one patch as Vincent suggested and create one handler for both.
+
+Changes in v2:
+- enforce the MBZ/SBZ fields
+- split the calls into separate patches
+- rebase on 7.1-rc7
+
+v8:
+https://lore.kernel.org/all/20260729121306.1519473-2-sebastianene@google.com/
+v7:
+https://lore.kernel.org/all/20260629093558.2425257-1-sebastianene@google.com/
+v6:
+https://lore.kernel.org/all/20260626074545.433234-1-sebastianene@google.com/
+v5:
+https://lore.kernel.org/all/20260623115354.632361-1-sebastianene@google.com/
+v4:
+https://lore.kernel.org/all/20260616154149.2763214-1-sebastianene@google.com/
+v3:
+https://lore.kernel.org/all/20260616105417.2578670-1-sebastianene@google.com/
+v2:
+https://lore.kernel.org/all/20260608165549.1479409-1-sebastianene@google.com/
+v1:
+https://lore.kernel.org/all/20260501114447.2389222-2-sebastianene@google.com/
+
+Sebastian Ene (7):
+  KVM: arm64: Forward FFA_NOTIFICATION_BITMAP calls to Trustzone
+  KVM: arm64: Support FFA_NOTIFICATION_BIND in host handler
+  KVM: arm64: Support FFA_NOTIFICATION_UNBIND in host handler
+  KVM: arm64: Support FFA_NOTIFICATION_SET in host handler
+  KVM: arm64: Support FFA_NOTIFICATION_GET in host handler
+  KVM: arm64: Support FFA_NOTIFICATION_INFO_GET in host handler
+  KVM: arm64: Enforce strict SBZ checks in the FF-A proxy
+
+ arch/arm64/kvm/hyp/nvhe/ffa.c | 220 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 212 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v17 1/1] arm64: mm: Handle Granule Protection Faults (GPFs)
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+If the host attempts to access granules that have been delegated for use
+in a realm these accesses will be caught and will trigger a Granule
+Protection Fault (GPF).
+
+A fault during a page walk signals a bug in the kernel and is handled by
+oopsing the kernel. A non-page walk fault could be caused by user space
+having access to a page which has been delegated to the kernel and will
+trigger a SIGBUS to allow debugging why user space is trying to access a
+delegated page.
+
+Also, until we unmap the "private" memory pages from the linear map, we could
+get spurious GPFs from within the kernel, e.g., load_unaligned_zeropad(). So,
+try to fix them up for now.
+
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v16:
+ * Update the commit description to indicate why we try to fixup GPFs
+Changes since v10:
+ * Don't call arm64_notify_die() in do_gpf() but simply return 1.
+Changes since v2:
+ * Include missing "Granule Protection Fault at level -1"
+---
+ arch/arm64/mm/fault.c | 28 ++++++++++++++++++++++------
+ 1 file changed, 22 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v17 0/1] arm64: mm: Handle Granule Protection Faults (GPFs)
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This single patch teaches the arm64 fault handling code about Granule
+Protection Faults, introduced by FEAT_RME. This was posted with KVM CCA
+support series, but split from that, to allow for other users of GPF.
+
+The immediate user is KVM CCA, where the host may fault if it accesses
+granules that have been delegated for use by a Realm. However, the fault
+handling itself is architectural and not KVM-specific. It should also be useful
+for other FEAT_RME users where an access to secure memory or root memory can
+result in a GPF.
+
+GPFs during a page table walk are treated as kernel bugs, while non-page-walk
+faults can be reported to userspace with SIGBUS. The patch also allows existing
+exception-table fixups to handle known in-kernel accesses such as
+load_unaligned_zeropad() while private memory remains mapped in the linear map.
+
+The KVM CCA v17 integration branch is available here:
+
+[0] https://gitlab.arm.com/linux-arm/linux-cca.git cca/cca-host/kvm-integration/v17
+
+
+Steven Price (1):
+  arm64: mm: Handle Granule Protection Faults (GPFs)
+
+ arch/arm64/mm/fault.c | 28 ++++++++++++++++++++++------
+ 1 file changed, 22 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 17/17] KVM: arm64: Document the protected VM userspace API
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+EL2 owns a protected vCPU's state once it has run, and the ioctls that
+would access it fail rather than silently operate on a copy that is not
+the guest's. Describe the resulting API in pkvm.rst, point api.rst at
+it from each ioctl that behaves differently, and note the errnos beside
+the PVTIME attribute in devices/vcpu.rst and the PSCI version register
+in fw-pseudo-registers.rst.
+
+No functional change intended.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ Documentation/virt/kvm/api.rst                |  22 ++-
+ .../virt/kvm/arm/fw-pseudo-registers.rst      |   2 +
+ Documentation/virt/kvm/arm/pkvm.rst           | 141 +++++++++++++++++-
+ Documentation/virt/kvm/devices/vcpu.rst       |   4 +-
+ 4 files changed, 161 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 16/17] KVM: arm64: Advertise the capabilities that protected VMs support
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+kvm_pkvm_ext_allowed() denies every capability it doesn't name, so a
+protected VM reports 0 for interfaces it implements: KVM_CHECK_EXTENSION
+denies KVM_CAP_ONE_REG while KVM_{GET,SET}_ONE_REG stage the guest's
+boot state.
+
+Allow the capabilities that work for a protected guest under the
+restrictions the preceding patches add, the vGIC and the I/O bus being
+host-managed.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pkvm.h | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 15/17] KVM: arm64: Reject host power-on of a vCPU that EL2 holds powered off
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+A protected vCPU's power state belongs to EL2, which changes it only
+on the guest's own PSCI calls. KVM_SET_MP_STATE(RUNNABLE) on a vCPU
+EL2 holds powered off changes the host's copy alone, and the guest's
+next CPU_ON of that vCPU then fails: mp_state is no longer STOPPED, so
+the host returns ALREADY_ON, which EL2 turns into INTERNAL_FAILURE.
+SUSPENDED has the same effect.
+
+Track at the host whether EL2 holds a protected vCPU powered off and
+return -EPERM for both writes in that state. STOPPED stays permitted,
+so a VMM can pause a vCPU, and RUNNABLE on a vCPU EL2 has powered on,
+so it can resume one.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/arm.c              | 19 +++++++++++++++++++
+ arch/arm64/kvm/pkvm.c             | 21 +++++++++++++++++----
+ arch/arm64/kvm/psci.c             |  3 +++
+ 4 files changed, 41 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 13/17] KVM: arm64: Pend a protected guest's SError with HCR_EL2.VSE only
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+kvm_inject_serror_esr() emulates the exception entry when
+serror_is_masked() reads PSTATE.A clear, but the host has no view of a
+protected guest's PSTATE.A, and an emulated entry never reaches the
+guest: the SError is lost. Set VSE instead and let the guest's own
+PSTATE.A mask it.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/inject_fault.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 14/17] KVM: arm64: Reject host access to protected VM private state
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+A protected vCPU's register and debug state is no longer exposed to
+the host. Host ioctls that would reach that state now fail rather
+than operate on a copy that is not the guest's:
+
+  - KVM_GET_ONE_REG and KVM_SET_ONE_REG return -EPERM once the vCPU has
+    run: the copy then holds reset values plus what the exit handlers
+    marshal out. Pre-run access still builds the guest's boot state.
+  - KVM_ARM_VCPU_INIT returns -EPERM once the vCPU has run: it would
+    reset the host copy alone and rewrite mp_state, which EL2 reads
+    only at hyp vCPU creation, so a vCPU the guest powered off would
+    come back RUNNABLE.
+  - KVM_SET_VCPU_EVENTS rejects external-abort injection with -EPERM;
+    SError injection is forwarded and stays permitted.
+  - KVM_SET_GUEST_DEBUG returns -EPERM: a protected guest's debug state
+    is hypervisor-owned.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/arm.c   |  7 +++++++
+ arch/arm64/kvm/guest.c | 19 +++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 12/17] KVM: arm64: Add per-EC entry/exit state marshalling for protected guests
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Move a protected guest's state between the hyp vCPU and the host per
+exception class instead of copying the whole context. Add
+entry_hyp_pvm_handlers[] and exit_hyp_pvm_handlers[] for WFx, SYS64,
+IABT, DABT and HVC64, and route protected guests through them: on exit
+each handler copies out only what its class needs, and on re-entry
+only what the host may have changed, once the host has completed the
+access (INCREMENT_PC). entry_hyp_vm_handlers[] is removed: a
+non-protected vCPU's iflags are copied wholesale.
+
+The host's fault view is EL2's own syndrome with the guest register
+index withheld, plus the addresses each class needs. The value of a
+written register is passed in r0. MMIO data is clamped to the access
+width and, for a load, sign-extended at EL2 from EL2's syndrome.
+Endianness stays with the host.
+
+Neither dispatch runs for a trap taken with an SError pending: EL2
+doesn't handle it, and the guest replays it once the host has
+injected the SError. The exit handlers would otherwise marshal a trap
+EL2 never handled, and handle_pvm_exit_hvc64() would panic on an
+unfiltered function id.
+
+For HVC64, only the PSCI calls EL2 forwards reach the host: the exit
+handler passes the function id and the arguments each call needs, and
+the entry handler returns the host's result, rolling a CPU_ON the host
+failed back to OFF unless the target already reached ON.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 412 +++++++++++++++++++++++++++--
+ 1 file changed, 387 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 11/17] KVM: arm64: Inject an UNDEF at EL2 for unhandled protected guest exits
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Make pvm_exit_handlers[] an allow-list: a protected guest's exit class
+is handled at EL2, forwarded where the host emulates it, or results in
+an UNDEF at EL2. Any other class, once forwarded, would re-execute
+forever. The host resolves such an exit by injecting an exception or
+incrementing the PC. The marshalling that follows allows neither: a
+protected vCPU takes only the UNDEF on a SYS64 trap and the external
+abort on a forwarded IABT or DABT that EL2 builds for it.
+
+WFxT takes the UNDEF, as it isn't advertised to protected guests.
+FP/SIMD keeps the lazy switch, and the watchpoint entry is dropped: a
+protected vCPU runs with TDE clear.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/switch.c | 29 +++++++++++++++++++++++++----
+ 1 file changed, 25 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 10/17] KVM: arm64: Prevent host PC adjustments for protected vCPUs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+__kvm_adjust_pc() lets the host advance a vCPU's PC or inject an
+exception, which for a protected vCPU would let the host redirect
+guest execution. Drop the request there: the entry handlers apply the
+host's PC_UPDATE_REQ on re-entry, where EL2 allows it.
+
+For a non-protected vCPU, adjusting the hyp vCPU while
+PKVM_HOST_STATE_DIRTY is set loses the update at the next flush and
+the guest re-executes an emulated MMIO access, so the flag selects
+which copy to adjust. Adjusting the hyp vCPU copies PC_UPDATE_REQ in
+and back out again. Without the copy back, INCREMENT_PC outlives the
+adjustment and the next KVM_SET_VCPU_EVENTS trips
+WARN_ON(INCREMENT_PC) in kvm_pend_exception().
+
+Unloaded, the host copy is host-writable, so pin it and its VM before
+adjusting. Only commit_pending_events(), under KVM_SET_VCPU_EVENTS,
+reaches EL2 with no hyp vCPU loaded. KVM_RUN's call always has one.
+enter_exception64() reads the VM's MTE flag and a host copy's
+vcpu->kvm is host-written, so __kvm_adjust_pc_vm() takes the VM as a
+parameter: the pinned host struct kvm when unloaded, the hyp VM
+otherwise.
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_asm.h   |  1 +
+ arch/arm64/kvm/hyp/exception.c     | 27 ++++++++++-------
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 47 +++++++++++++++++++++++++++++-
+ 3 files changed, 63 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 09/17] KVM: arm64: Restrict KVM_ARM_VCPU_INIT and PSCI version for protected VMs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+EL2 masks a protected VM's vCPU features down to the set pKVM allows,
+so a KVM_ARM_VCPU_INIT that requests more succeeds and produces a
+guest without them. Reject such an init with -EINVAL. The host and
+EL2 both take the allowed set from kvm_pkvm_vcpu_allowed_features().
+
+EL2 returns 1.1 for a protected guest's PSCI_VERSION whatever the
+host is configured for, and forwards the platform calls to the host.
+Require KVM_ARM_VCPU_PSCI_0_2: without it the host dispatches the
+forwarded calls as PSCI 0.1. Reject a KVM_REG_ARM_PSCI_VERSION write
+below 1.1: below it the host rejects the SYSTEM_RESET2 that EL2
+advertises. KVM_CAP_ARM_PSCI is no longer advertised to protected VMs.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pkvm.h | 25 ++++++++++++++++++++++++-
+ arch/arm64/kvm/arm.c              | 13 +++++++++++++
+ arch/arm64/kvm/hyp/nvhe/pkvm.c    | 17 ++---------------
+ arch/arm64/kvm/hypercalls.c       |  7 +++++++
+ 4 files changed, 46 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 08/17] KVM: arm64: Handle PSCI calls for protected VMs at EL2
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+EL2 implements PSCI 1.1 for protected VMs: CPU_ON, CPU_OFF,
+AFFINITY_INFO, PSCI_VERSION and PSCI_FEATURES are decided at EL2
+(CPU_ON and CPU_OFF still exit to the host, which only schedules or
+parks the target), CPU_SUSPEND and the platform power operations are
+forwarded to the host, and anything else returns NOT_SUPPORTED,
+including the TRNG calls the host handled for a protected guest until
+now. TRNG for protected guests is a follow-up.
+
+Three consequences follow:
+
+  - A protected VM has one primary vCPU, the first whose hyp vCPU is
+    created with mp_state RUNNABLE. A second one, or an mp_state other
+    than RUNNABLE or STOPPED, fails that vCPU's first KVM_RUN with
+    -EINVAL.
+
+  - CPU_ON finds its target among the hyp vCPUs, which exist from the
+    target's first KVM_RUN; before that the guest gets
+    INVALID_PARAMETERS.
+
+  - A vCPU EL2 holds powered off doesn't run: handle___kvm_vcpu_run()
+    returns ARM_EXCEPTION_IL, reported as KVM_EXIT_FAIL_ENTRY. Its
+    existing bail-outs return the same code instead of an -EINVAL that
+    handle_exit() didn't recognise, for every hyp vCPU.
+
+Non-protected VMs keep power_state ON and accept any mp_state.
+
+Each protected vCPU is OFF, ON_PENDING or ON. CPU_ON moves the target
+to ON_PENDING, and the target's next run resets it and moves it to ON.
+The racing transitions are cmpxchg, and the reset state is published
+with a release/acquire pair, documented at each site. Rolling a CPU_ON
+the host failed back to OFF needs the host's return value, which the
+per-EC marshalling patch delivers along with the rollback. Until then
+such a target stays ON_PENDING.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h |  14 +
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c     |  25 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c         | 348 ++++++++++++++++++++++++-
+ 3 files changed, 376 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 07/17] KVM: arm64: Implement HVC handling for protected guests at EL2
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Extend kvm_handle_pvm_hvc64() to handle SMCCC_VERSION,
+SMCCC_ARCH_FEATURES and the vendor hypervisor call UID at EL2, so
+these queries don't reach the host. ARCH_FEATURES is mandatory from
+SMCCC 1.1, the version EL2 reports: it returns SUCCESS for itself and
+for SMCCC_VERSION, NOT_SUPPORTED for anything else, and handles the
+ARCH_WORKAROUND_1/2/3 queries as the host does, from a copy of the
+host's mitigation state taken at init with the sanitised ID registers.
+The workaround calls themselves are already handled on hyp entry.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_hyp.h |  4 ++
+ arch/arm64/kvm/arm.c             |  4 ++
+ arch/arm64/kvm/hyp/nvhe/pkvm.c   | 70 ++++++++++++++++++++++++++++++++
+ 3 files changed, 78 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 06/17] KVM: arm64: Add system register reset framework for protected VMs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Add kvm_reset_pvm_sys_regs() and the pvm_sys_reg_reset_vals[] table
+that drives it, and call it from init_pkvm_hyp_vcpu() for protected
+vCPUs. The table holds the registers sys_regs.c resets that
+__sysreg_restore_state_nvhe() loads for a protected vCPU. The rest of
+the context keeps the zero the donated hyp vCPU page is cleared to. A
+poison value stands in where sys_regs.c resets to UNKNOWN, and for
+VBAR_EL1 and CONTEXTIDR_EL1 in place of the 0 it uses. MPIDR_EL1 is
+derived from vcpu_id, as for any KVM guest. AMAIR_EL1 resets to 0
+where sys_regs.c reads the hardware: the host writes it freely before
+the hypercall, and it's loaded on every guest entry.
+
+Until the per-EC marshalling patch removes the host's full-context
+copy from flush_hyp_vcpu(), that copy overwrites these values on every
+entry, so this patch has no observable effect on its own.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h |  1 +
+ arch/arm64/kvm/hyp/nvhe/pkvm.c         |  5 ++
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c     | 73 ++++++++++++++++++++++++--
+ 3 files changed, 75 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 05/17] KVM: arm64: Add {flush,sync}_hyp_timer_state() primitives
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+A protected guest's virtual timer is programmed from EL2's own copy of
+the state and read back there, so the host can't change the guest's
+deadline. cntvoff_el2 is zeroed, so the guest's virtual time is the
+physical time.
+
+The flush also preserves the guest's CNTV and CNTP CVAL/CTL across the
+host's full-context copy into the hyp vCPU, until the per-EC
+marshalling patch removes that copy.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Co-developed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 39 ++++++++++++++++++++++++++++++
+ 1 file changed, 39 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 04/17] KVM: arm64: Skip fixed-feature state flush for protected vCPUs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+flush_hyp_vcpu() copies the host's mdcr_el2, TWI/TWE and debug state
+into the hyp vCPU on every entry, so for a protected vCPU the host's
+trap configuration overrides the one pkvm_vcpu_init_traps() computed
+at EL2. Move the mdcr_el2 and TWI/TWE copies into the non-protected
+branch, and return early from flush_debug_state() and
+sync_debug_state() for a protected vCPU: its debug registers are
+hypervisor-owned, and it takes the host's TWI/TWE at vCPU load.
+MDCR_EL2.TDA traps only the guest's own accesses; it doesn't stop the
+world switch from loading host-supplied breakpoints and MDSCR_EL1.
+
+EL2's mdcr_el2 starts from 0, and HPMN == 0 is reserved without
+FEAT_HPMN0. Set HPMN to the CPU's event counter count at vCPU load,
+the value the host's copy carried; a protected guest's PMU accesses
+trap regardless.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 32 +++++++++++++++++++++---------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c     |  2 +-
+ 2 files changed, 24 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 03/17] KVM: arm64: Introduce per-EC entry handlers for pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+Add an ESR_EL2.EC-indexed handler table, entry_hyp_vm_handlers[],
+consulted from flush_hyp_vcpu() on re-entry when the previous exit was
+a trap: sync_hyp_vcpu() records the exit reason in the hyp vCPU as
+exit_code, and the trap's exception class comes from its ESR_EL2. Its
+single generic handler stands in until the per-EC marshalling patch
+replaces the table with protected-only ones.
+
+Entry carries the host's requested PC updates to the hyp vCPU: add
+vcpu_copy_flag() to copy a masked set of flags between the two vCPU
+structures, with PC_UPDATE_REQ covering INCREMENT_PC and the
+pending-exception flags. The wholesale iflags copy moves into the
+non-protected branch; a protected vCPU takes only PC_UPDATE_REQ.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Joey Gouly <joey.gouly@arm.com>
+Co-developed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_host.h      | 19 +++++++++++++
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h |  3 ++
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c     | 39 +++++++++++++++++++++++---
+ 3 files changed, 57 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 02/17] KVM: arm64: Reject the PVTIME vCPU attribute for protected VMs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+pKVM currently doesn't support steal time for protected guests:
+KVM_CAP_STEAL_TIME reports 0 for them. The host still accepts the
+KVM_ARM_VCPU_PVTIME_CTRL attribute, whose IPA would point
+kvm_update_stolen_time() at the guest's private memory on every vCPU
+load. Return -EPERM for the attribute group instead.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/guest.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 01/17] KVM: arm64: Sync HCR_EL2.VSE back to the host vCPU under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+flush_hyp_vcpu() copies HCR_EL2.VSE from the host vCPU into the hyp
+vCPU on every entry, and nothing copies it back. Once the guest takes
+the vSError the hyp vCPU's copy clears with the hardware bit while the
+host's stays set, so the next entry pends the same SError again,
+KVM_GET_VCPU_EVENTS keeps reporting it, and kvm_arch_vcpu_runnable()
+never lets the vCPU block in WFI.
+
+Reflect VSE back on every exit, which the flush-side comment already
+states.
+
+Fixes: 734dc8c01c838 ("KVM: arm64: Implement lazy vCPU state sync for non-protected guests")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 00/16] KVM: arm64: Confine protected VM vCPU state to EL2
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - Handle the SMCCC_ARCH_WORKAROUND_1/2/3 queries at EL2 from the
+    host's mitigation state, instead of returning NOT_SUPPORTED.
+    (Sashiko)
+  - Reset ACTLR_EL1 and AMAIR_EL1 to 0, and trim the reset table to the
+    registers the world switch loads. (Sashiko, Joey)
+  - Move the capability allowlist to the end, after the restrictions
+    it's subject to. (Vincent)
+  - Use vcpu_is_protected() throughout, and move the protected-vCPU
+    check inside the debug flush and sync helpers. (Vincent)
+  - Add the HVC64 entry and exit handlers in the marshalling patch that
+    first uses them, without the wrapper. (Joey)
+  - Rebased onto v7.3-rc2.
+  - Collected Joey's Reviewed-by on the per-EC entry handler patch. His
+    Acked-by on the reset framework patch isn't carried, since its code
+    and message changed. (thanks!)
+
+Following the vCPU state-sync series [2], this series completes the
+job for protected VMs: a protected guest's register state stays at
+EL2, and the host sees only what handling each exit needs.
+
+EL2 marshals a protected vCPU's state per exception class instead of
+copying the whole context both ways. It owns the vCPU's trap
+configuration, system register reset and HVC handling, and implements
+PSCI itself: AFFINITY_INFO never reaches the host, and CPU_ON and
+CPU_OFF are decided at EL2 with the host only scheduling or parking
+the target. Host ioctls that would reach the state EL2 owns fail with
+a clean errno, so a protected VM's state isn't save/restorable. All
+of this is scoped to KVM_VM_TYPE_ARM_PROTECTED, and pkvm.rst describes
+the resulting API.
+
+The kvmtool changes that go with this are posted separately [3].
+
+Patch 1 is the HCR_EL2.VSE fix posted separately [4]. It isn't part
+of this series. It's carried so the series applies as is and Sashiko
+can run on it.
+
+The KVM_ARM_PREFERRED_TARGET documentation fix [5] went out just ahead
+of v1. Nothing here needs it to apply, but patch 17 documents vCPU
+feature availability as something the capabilities report, while
+api.rst 4.83 still points userspace at a bitmap that has always been
+empty.
+
+The series is structured as follows:
+
+  01:     The HCR_EL2.VSE fix, posted separately.
+  02:     The PVTIME rejection.
+  03-04:  Per-exception-class entry handlers; EL2 owns a protected
+          vCPU's trap configuration.
+  05-07:  Timer state, system register reset and HVC handling at EL2.
+  08-09:  PSCI at EL2, and the KVM_ARM_VCPU_INIT and PSCI version
+          restrictions.
+  10-13:  Host PC adjustments blocked; an UNDEF at EL2 for exit
+          classes the host doesn't emulate; per-class state
+          marshalling; a protected guest's SError pended with
+          HCR_EL2.VSE.
+  14-15:  Host access to private state, and host power-on of a vCPU
+          EL2 holds powered off, rejected.
+  16:     Capability allowlist.
+  17:     Documentation.
+
+Still to come: selftests, TRNG, self-hosted debug and SVE for protected
+guests, and much more, as separate series.
+
+Based on v7.3-rc2 (df2908090cda3).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260831163421.272420-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/20260729131823.2021516-1-fuad.tabba@linux.dev/
+[3] https://lore.kernel.org/all/20260831192406.1341841-1-fuad.tabba@linux.dev/
+[4] https://lore.kernel.org/all/20260829071120.2522788-1-fuad.tabba@linux.dev/
+[5] https://lore.kernel.org/all/20260831162815.269851-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (15):
+  KVM: arm64: Sync HCR_EL2.VSE back to the host vCPU under pKVM
+  KVM: arm64: Reject the PVTIME vCPU attribute for protected VMs
+  KVM: arm64: Skip fixed-feature state flush for protected vCPUs
+  KVM: arm64: Add system register reset framework for protected VMs
+  KVM: arm64: Implement HVC handling for protected guests at EL2
+  KVM: arm64: Handle PSCI calls for protected VMs at EL2
+  KVM: arm64: Restrict KVM_ARM_VCPU_INIT and PSCI version for protected
+    VMs
+  KVM: arm64: Prevent host PC adjustments for protected vCPUs
+  KVM: arm64: Inject an UNDEF at EL2 for unhandled protected guest exits
+  KVM: arm64: Add per-EC entry/exit state marshalling for protected
+    guests
+  KVM: arm64: Pend a protected guest's SError with HCR_EL2.VSE only
+  KVM: arm64: Reject host access to protected VM private state
+  KVM: arm64: Reject host power-on of a vCPU that EL2 holds powered off
+  KVM: arm64: Advertise the capabilities that protected VMs support
+  KVM: arm64: Document the protected VM userspace API
+
+Marc Zyngier (2):
+  KVM: arm64: Introduce per-EC entry handlers for pKVM
+  KVM: arm64: Add {flush,sync}_hyp_timer_state() primitives
+
+ Documentation/virt/kvm/api.rst                |  22 +-
+ .../virt/kvm/arm/fw-pseudo-registers.rst      |   2 +
+ Documentation/virt/kvm/arm/pkvm.rst           | 141 ++++-
+ Documentation/virt/kvm/devices/vcpu.rst       |   4 +-
+ arch/arm64/include/asm/kvm_asm.h              |   1 +
+ arch/arm64/include/asm/kvm_host.h             |  21 +
+ arch/arm64/include/asm/kvm_hyp.h              |   4 +
+ arch/arm64/include/asm/kvm_pkvm.h             |  34 +-
+ arch/arm64/kvm/arm.c                          |  43 ++
+ arch/arm64/kvm/guest.c                        |  29 +
+ arch/arm64/kvm/hyp/exception.c                |  27 +-
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h        |  18 +
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            | 560 +++++++++++++++++-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                | 442 +++++++++++++-
+ arch/arm64/kvm/hyp/nvhe/switch.c              |  29 +-
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c            |  73 ++-
+ arch/arm64/kvm/hypercalls.c                   |   7 +
+ arch/arm64/kvm/inject_fault.c                 |   5 +-
+ arch/arm64/kvm/pkvm.c                         |  21 +-
+ arch/arm64/kvm/psci.c                         |   3 +
+ 20 files changed, 1406 insertions(+), 80 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] arm64: kvm: fix typo in pauth.c comment
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+The comment reads "This code assumes that is is run from EL2".  The first
+"is" is not a repetition, it should be "it".
+
+v1 deleted the second "is" instead, which left the sentence without a
+subject.  Fuad Tabba pointed out the correct reading.
+
+Only touches a comment, no code changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/arm64/kvm/pauth.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] selftests: kvm: fix typos in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Fix typos in comments, reported by scripts/checkpatch.pl using the
+misspelling list in scripts/spelling.txt.  Only touches comments, no code
+changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ tools/testing/selftests/kvm/arm64/debug-exceptions.c | 2 +-
+ tools/testing/selftests/kvm/arm64/hypercalls.c       | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] arm64: kvm: fix typo "synchonized" in comment
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Correct "synchonized" to "synchronized", reported by scripts/checkpatch.pl
+using the misspelling list in scripts/spelling.txt.  Only touches comments,
+no code changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/arm64/kvm/hyp/entry.S | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] arm64: fix typos in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+This is v2 of the spelling fixes for this tree.
+
+Changes since v1:
+The pauth.c change is corrected: the doubled 'is' is a misspelt 'it is',
+so v1 deleted the wrong word.  Spotted by Fuad Tabba.
+
+Only comments change; no code is touched.
+
+ arch/arm64/kvm/hyp/entry.S                           | 2 +-
+ arch/arm64/kvm/pauth.c                               | 2 +-
+ tools/testing/selftests/kvm/arm64/debug-exceptions.c | 2 +-
+ tools/testing/selftests/kvm/arm64/hypercalls.c       | 4 ++--
+ 4 files changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
