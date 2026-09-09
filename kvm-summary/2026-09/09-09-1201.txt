@@ -1,0 +1,1680 @@
+
+On /root/mail/repo:
+From 238ddd208 to 8526aad28
+KVM mailing list update from 238ddd208 to 8526aad28
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     40 kernel.org
+     33 amd.com
+     19 arm.com
+     14 gmail.com
+      2 linux.alibaba.com
+      2 linaro.org
+      1 google.com
+      1 baidu.com
+
+Top 15 contributors (Based on Email Body)
+
+     40  "Lorenzo Stoakes (ARM)" <ljs@kernel.org>
+     19  Michael Roth <michael.roth@amd.com>
+     15  Suzuki K Poulose <suzuki.poulose@arm.com>
+      9  Joerg Roedel <joerg.roedel@amd.com>
+      7  Karl Mehltretter <kmehltretter@gmail.com>
+      4  Steven Price <steven.price@arm.com>
+      3  Tharit Tangkijwanichakul <tharitt97@gmail.com>
+      3  Sairaj Kodilkar <sarunkod@amd.com>
+      3  Hemanth Selam <hemanth.selam@gmail.com>
+      2  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      2  "Hao Xiang" <hao.xiang@linux.alibaba.com>
+      1  YuanShang <YuanShang.Mao@amd.com>
+      1  Li RongQing <lirongqing@baidu.com>
+      1  Jim Mattson <jmattson@google.com>
+      1  Chaithanya Lagisetty <nagachaithanya9911@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  accel/kvm: Add helper for handling conversions of MMIO holes
+[PATCH v2 01/19] accel/kvm: Add helper for handling conversions of MMIO holes
+Author: Michael Roth <michael.roth@amd.com>
+
+When converting GPA ranges containing MMIO holes, the general intended
+logic is to skip MMIO ranges as long as it is a private->shared
+conversion, and to fail otherwise.
+
+To better enable some future refactorings to address bugs in the current
+code, go ahead and consolidate all of the MMIO handling to a
+self-contained helper.
+
+The only intended functional change is that the error message for
+shared->private conversion of MMIO ranges corresponding to a
+non-RAM/non-ROM region now report the range of the region that
+specifically caused the failure, as opposed to reporting the entire
+conversion range.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 96 ++++++++++++++++++++++++++++++---------------
+ 1 file changed, 64 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  guest_memfd: support in-place memory conversion
+[PATCH v2 00/19] guest_memfd: support in-place memory conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+v1: https://lore.kernel.org/qemu-devel/20260528000416.8161-1-michael.roth@amd.com/
+v2:
+ - reuse memory-backend-memfd instead of introducing a new
+   guest-memfd-specific backend (Peter)
+ - pull bug-fix-related refactorings/dependencies back into the beginning of
+   this series for more visibility/context (patches 1-4, can be applied
+   independently), originally submitted as:
+   https://lore.kernel.org/qemu-devel/20260527223036.4614-1-michael.roth@amd.com/
+ - move gmem flag specification to KVM-internal code to allow for better
+   control of likely-global policies (like INIT_SHARED, which some confidential
+   VM types might prefer to leave unset) (Lorenzo)
+ - zero-initialize the kvm_memory_attributes2 struct to avoid garbage values
+   ending up in reserved fields (Pankaj)
+ - add a helper to check for in-place conversion instead of accessing CGS
+   directly
+ - add reasoning for introducing ConfidentialGuestSupportProperties base class
+   now instead of deferring (Markus)
+ - minor fixups/refactorings
+
+
+This patchset is also available at:
+
+  https://github.com/amdese/qemu/commits/snp-inplace-v2
+
+which is in turn based on the following series:
+
+  [PATCH v5 00/12] KVM/hostmem: Support init-shared guest-memfd as VM backends
+  https://lore.kernel.org/qemu-devel/20260908133151.836685-1-michael.roth@amd.com/
+
+
+OVERVIEW
+--------
+
+This series adds guest_memfd support for in-place conversion of memory
+between private/shared, and enables it for SEV-SNP guests. It is based
+on recently-added kernel support for mmap()-able guest_memfd
+instances[1], which allow it to be used for shared memory, and the
+following patchset[2], which adds additional guest_memfd interfaces to
+allow it to be used to perform in-place conversion:
+
+  [PATCH v12 00/45] guest_memfd: In-place conversion support
+  https://lore.kernel.org/kvm/20260830-gmem-inplace-conversion-v12-0-85e5fd25252a@google.com/
+
+That series also introduces a new 'gmem_in_place_conversion' KVM
+module option, which sets whether memory attributes are tracked
+VM-wide by KVM (vm_memory_attributes=1: the existing 'legacy' mode),
+or per-guest_memfd instance (vm_memory_attributes=0: the new mode
+which allows for in-place conversion). The latter is intended to
+eventually deprecate the legacy mode, at which point in-place
+conversion would become the primarily-supported mode.
+
+
+MOTIVATION
+----------
+
+Today, SEV-SNP guests (and other CoCo VM types using guest_memfd) keep
+shared and private memory on separate physical backings: a userspace
+memory-backend object for shared pages, and a kernel-allocated
+guest_memfd file descriptor for private pages. KVM_SET_MEMORY_ATTRIBUTES
+flips which backing the guest sees for a given GPA range, and the old
+backing is typically discarded / hole-punched on conversion to avoid
+doubled memory usage.
+
+That model works, but has a number of downsides that impact certain
+use-cases:
+
+  - Each conversion involves discarding pages on one side and faulting
+    them in on the other, which incurs allocation overheads in the
+    host kernel for every conversion.
+
+  - Some use-cases, like pKVM[3], rely on memory isolation rather than
+    encryption and rely on in-place conversion to pass through things
+    like secured framebuffer memory without needing to bounce data
+    through separate shared/private HPAs, which would introduce
+    unacceptable latency for that sort of workload.
+
+  - Hugetlb support[4] for guest_memfd will rely on it, since things like
+    1GB hugepages with a mix of shared/private sub-ranges would generally
+    require 2 1GB hugetlb pages to remain available to handle shared vs.
+    private accesses, which quickly causes doubling of guest memory usage.
+
+Recent kernel work[2] makes guest_memfd mmap()-able and lets the *same*
+physical pages be used for both shared and private states for a given
+GPA range, allowing the above pitfalls to be naturally avoided.
+
+This series wires that support up in QEMU.
+
+
+DESIGN
+------
+
+For confidential VMs, a new 'convert-in-place' flag is added to switch
+on in-place conversion support. When running in this mode, the user
+*MUST* use memory-backend-guest-memfd for backing guest RAM. A new
+RAM_GUEST_MEMFD_SHARED RAMBlock flag is added to track/enforce the
+dependency. Additionally, QEMU is modified to use mmap()-able
+guest_memfd and set this flag for other cases where it allocates RAM
+internally. As a result, block->fd will generally always be a
+guest_memfd, and when RAM_GUEST_MEMFD_SHARED is set then that block->fd
+will be qemu_dup()'d as the FD handle for private memory as well (which
+is currently what block->guest_memfd points to). This allows the prior
+non-in-place handling around block->guest_memfd to be kept mostly
+unchanged for the in-place case.
+
+When running with convert-in-place=true, shared/private conversions
+are no longer handled directly by KVM, but instead by a new guest_memfd
+ioctl, KVM_SET_MEMORY_ATTRIBUTES2, which purposely provides similar
+naming/implementation to the KVM_SET_MEMORY_ATTRIBUTES KVM ioctl that
+it replaces. This series adds handling to route conversion requests to
+the appropriate ioctls based on whether or not in-place conversion is
+enabled.
+
+This support also relies on the memory-backend-memfd,guest-memfd=on
+option, since it is necessary to use guest_memfd for both the shared
+and private memory. This is set automatically based on whether or
+not in-place conversion is enabled.
+
+Since guest_memfd ioctls need to be called against the specific
+guest_memfd inode associated with each memory slot/region, some
+refactoring is needed to handle conversions on a per-region basis. Much
+of that is inherited from the bugfix series this patchset is based on
+top of, which adds the initial logic for handling multiple sections
+within a range.
+
+
+USAGE
+-----
+
+After applying this series against a kernel with the RFC patches above
+present, an SEV-SNP guest can be started with in-place conversion via:
+
+    qemu-system-x86_64 \
+        -machine q35,confidential-guest-support=sev0,memory-backend=ram0 \
+        -object memory-backend-memfd,id=ram0,size=8G,share=on \
+        -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1,\
+                convert-in-place=on \
+        ...
+
+The new memory-backend-guest-memfd can also be used by normal VMs:
+
+    qemu-system-x86_64 \
+        -machine q35,memory-backend=ram0 \
+        -object memory-backend-memfd,id=ram0,size=8G,share=on \
+        ...
+
+This is mainly only useful atm for testing, but in the future there may
+be more use-cases around using guest_memfd as a general-purpose backend
+for non-confidential VMs, so it is intended to work in this manner as
+well.
+
+
+NOTES/TODO
+----------
+
+  - TDX testing would be great, in theory it can be enabled with this
+    series (similarly to the top patch) but I'm not sure if there are
+    other special requirements before we can switch it on.
+  - kernel patches are still in-flight, but fairly mature at this point
+    and nearing upstream
+
+
+REFERENCES
+----------
+
+[1] https://lore.kernel.org/kvm/20250729225455.670324-1-seanjc@google.com/
+[2] https://lore.kernel.org/kvm/20260830-gmem-inplace-conversion-v12-0-85e5fd25252a@google.com/
+[3] https://www.youtube.com/watch?v=MMfAGNW9RVg
+[4] https://lore.kernel.org/kvm/cover.1747264138.git.ackerleytng@google.com/
+
+
+Thoughts, feedback, and testing are very much appreciated.
+
+Thanks,
+
+Mike
+
+
+----------------------------------------------------------------
+Ashish Kalra (1):
+      accel/kvm: Fix kvm_convert_memory() calls crossing memory regions
+
+Michael Roth (18):
+      accel/kvm: Add helper for handling conversions of MMIO holes
+      accel/kvm: Fix handling of MMIO holes at start of conversion ranges
+      accel/kvm: Fix handling of conversion ranges with multiple MMIO holes
+      accel/kvm: Use dedicated helper for creating private-only gmem instances
+      linux-headers: Update headers for v12 of in-place conversion kernel support
+      accel/kvm: Add CGS option to control in-place conversion support
+      system/memory: Re-use memory-backend-guest-memfd inode for private memory
+      accel/kvm: Handle guest_memfd flags internally when creating instances
+      system/memory: Default to guest_memfd for RAM for in-place conversion
+      accel/kvm: Move post-conversion updates to a separate helper
+      accel/kvm: Re-order attribute notifications for in-place conversion
+      accel/kvm: Support shared/private conversions via guest_memfd ioctls
+      accel/kvm: Don't default to private attributes for in-place conversion
+      i386/sev: Update SNP_LAUNCH_UPDATE for in-place conversion
+      i386/sev: Allow in-place conversion for SEV-SNP guests
+      i386/sev: Update CPUID failure handling for in-place conversion
+      accel/kvm: Disable discard for in-place conversion
+      hostmem: Automatically select set guest-memfd=on for in-place conversion
+
+ accel/kvm/kvm-all.c                         | 449 ++++++++++++++++++++++++----
+ accel/stubs/kvm-stub.c                      |   8 +-
+ backends/confidential-guest-support.c       |  26 ++
+ backends/hostmem-memfd.c                    |  41 ++-
+ hw/core/machine.c                           |   5 +
+ include/hw/core/boards.h                    |   1 +
+ include/system/confidential-guest-support.h |  14 +
+ include/system/kvm.h                        |   3 +-
+ include/system/memory.h                     |   3 +
+ linux-headers/linux/kvm.h                   |  16 +
+ qapi/qom.json                               |  21 +-
+ system/memory.c                             |  23 +-
+ system/physmem.c                            |  52 +++-
+ target/i386/sev.c                           |  22 +-
+ 14 files changed, 593 insertions(+), 91 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm/vma: predicate setting mmap_prepare VMA fields on
+[PATCH 01/39] mm/vma: predicate setting mmap_prepare VMA fields on
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+It only makes sense to manipulate VMA fields if we allocated a new VMA,
+rather than merged it.
+
+VMA merging does not compare vm_ops or vm_private_data, so a merged VMA
+keeps its own, which is also what the legacy f_op->mmap path does since it
+never touches an existing VMA. Previously set_vma_user_defined_fields()
+overwrote the merged VMA's fields with those set for the new mapping. In
+practice these are the same values, with rare exceptions such as shmem
+selecting vm_ops based on whether the file has been unlinked, so no
+user-visible change is expected.
+
+Make this dependency explicit, and additionally constify have_mmap_prepare
+while we're here.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+ mm/vma.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: make VMA flag semantics explicit, eliminate
+[PATCH 00/39] mm: make VMA flag semantics explicit, eliminate
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+The VM_SPECIAL / VMA_SPECIAL_FLAGS mask conflates several unrelated
+properties:
+
+* Is this kernel-owned, whether MMIO, kernel-allocated pages, or ordinary
+  pages a driver maps itself?
+* Can it be expanded or merged?
+* Is this a 'weird' case like mlock where migration might race and we
+  'have' to set invalid flags to notify?
+* Is it another 'weird' case where we just want to stop GUP from touching
+  it?
+
+Driver writers have often been confused about this, and who can blame them?
+
+It also interacts badly with the eternal edgecase known as hugetlb - which
+sets VMA_DONTEXPAND_BIT but doesn't also want to be treated like a
+'special' flag.
+
+Another issue is that we cannot make sensible assumptions about flag
+use. It's not possible to assume VMA_IO_BIT means iommu because drivers
+abuse it and mlock abuses it.
+
+Special is also an overloaded term in mm. VDSO and VVAR mappings are also
+called 'special' but they're special in a... special way.
+
+Sometimes things are called special that are a subset of
+VMA_SPECIAL_FLAGS (VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT for instance when it
+comes to zapping or vm_normal_folio()).
+
+There's a specific kind of special for THP too, which considers
+PFN map, mixed map 'special' but DAX not.
+
+It's all rather a mess.
+
+This series brings some order to things by both limiting what drivers can
+do with VMA flags and switching to using predicates that describe
+behaviour, not arbitrary flags.
+
+It establishes the invariant that only kernel-owned mappings may set
+VMA_IO_BIT or clear VMA_MAYWRITE_BIT in an mmap hook, enforcing this by
+validating VMA state after every mmap and mmap_prepare hook.
+
+It updates usbmon and sg to mmap_prepare in order to do so, adding a new
+mmap action for mapping discontiguous kernel pages, and has hfi1 and the
+ALSA PCM status page map their pages eagerly instead.
+
+It also establishes the invariant that VMA_MIXEDMAP_BIT be set when mapping
+kernel memory, something that is usually the case but happens not to be for
+some users - specifically defio, cmt_speech, uprobes and the bpf arena, all
+of which are updated to do the right thing.
+
+It replaces VM_SPECIAL and arbitrary flag tests with predicates that say
+what is actually being tested:
+
+   vma_is_kernel_owned()   Does a driver or kernel code manage a VMA's
+                           life cycle?
+
+  vma_is_fixed_mapping()   Is the VMA not permitted to be expanded or
+                           merged?
+
+     vma_is_persistent()   Do bytes written to the VMA stay written, and
+                           bytes read stay the same unless userland changes
+                           them?
+
+         vma_can_merge()   Can the VMA be merged with a compatible
+                           neighbour?
+
+           vma_can_gup()   Can GUP obtain pages from the VMA, i.e. is it
+                           neither a PFN map nor memory-mapped I/O?
+
+Remaining raw VMA_IO_BIT, VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT tests
+scattered across mm are also converted to predicates where it makes sense
+to do so.
+
+And also the opportunity is taken to eliminate THP's vma_is_special_huge()
+which was an existing source of confusion.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+Lorenzo Stoakes (ARM) (39):
+      mm/vma: predicate setting mmap_prepare VMA fields on new vma alloc
+      mm/vma: introduce and use vma_[flags_]can_merge()
+      mm: consistently validate VMA state after mmap[_prepare] hooks
+      mm/vma: ensure mmap_prepare doesn't set actions on a mergeable vma
+      mm: make map_kernel_pages_[prepare,complete] internal and unexported
+      mm/vma: tidy up map kernel pages enum values
+      mm: add mmap action for discontiguous kernel page mapping
+      docs: filesystems: update mmap_prepare docs for discontig kernel pgs
+      drivers/usb/mon: update to use mmap_prepare + map kernel pages
+      infiniband: update hfi1 to use remap_vmalloc_range()
+      selinux: reject writable opens of policy file, drop mmap shared/write check
+      ALSA: pcm: use vm_insert_page() to map PCM status page
+      bpf: arena: mark arena_map_mmap() mappings VM_MIXEDMAP
+      mm/vma: add vma[_flags]_is_kernel_owned() predicates
+      mm/vma: only allow mmap to clear VMA_MAYWRITE_BIT if kernel-owned
+      mm/vma: add and use vma_[flags]_is_fixed_mapping
+      scsi: sg: convert mmap hook to mmap_prepare and rework
+      fbdev: defio: assert FBINFO_VIRTFB, drop VM_IO, add VM_MIXEDMAP
+      HSI: cmt_speech: convert mmap hook to mmap_prepare, refactor
+      mm/gup: error out early on !VMA_MAYREAD_BIT VMAs
+      uprobes: remove VM_IO, set VM_MIXEDMAP for mapped kernel pages
+      mm/mlock: clear VMA_LOCKED_MASK over mmap callback
+      mm/mlock: eliminate weird VMA_IO_BIT abuse and simplify
+      mm/vma: enforce that only kernel-owned mappings may set VMA_IO_BIT
+      mm: remove VMA_IO_BIT check in vma[_flags]_is_kernel_owned()
+      mm: remove hugetlb_inline.h
+      mm: rename is_vm_hugetlb_page() to vma_is_hugetlb()
+      mm: drop some redundant checks around hugetlb VMAs
+      mm/madvise: update is_valid_guard_vma() to use vma_can_merge()
+      mm/vma: introduce vma[_flags]_is_persistent()
+      mm/uffd: use predicates for userfaultfd checks
+      mm/madvise: use predicates for madvise(..., MADV_DOFORK)
+      mm: eliminate VMA_SPECIAL_FLAGS usage when hugetlb explicitly tested
+      mm: eliminate VMA_SPECIAL_FLAGS check in lru_gen_look_around()
+      mm: avoid use of VMA_SPECIAL_FLAGS in migrate_vma_setup()
+      mm: eliminate VM_SPECIAL, VMA_SPECIAL_FLAGS
+      fuse: dax: do not set VM_MIXEDMAP
+      mm/huge_memory: remove vma_is_special_huge()
+      mm/vma: introduce and use vma[_flags]_can_gup()
+
+ Documentation/filesystems/mmap_prepare.rst |  81 +++++++++
+ arch/arm64/kvm/mmu.c                       |   4 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c       |   6 +-
+ arch/powerpc/mm/nohash/e500_hugetlbpage.c  |   2 +-
+ arch/powerpc/mm/nohash/tlb.c               |   2 +-
+ arch/riscv/kvm/mmu.c                       |   2 +-
+ arch/riscv/mm/tlbflush.c                   |   2 +-
+ arch/s390/mm/gmap_helpers.c                |   6 +-
+ arch/sparc/mm/init_64.c                    |   2 +-
+ arch/x86/kernel/uprobes.c                  |   2 +-
+ drivers/gpu/drm/drm_gpusvm.c               |   5 +-
+ drivers/hsi/clients/cmt_speech.c           |  33 +---
+ drivers/infiniband/hw/hfi1/file_ops.c      |  79 +++------
+ drivers/scsi/sg.c                          | 115 ++++++-------
+ drivers/usb/mon/mon_bin.c                  |  82 +++++----
+ drivers/video/fbdev/core/fb_defio.c        |   6 +-
+ drivers/video/fbdev/ssd1307fb.c            |   2 +
+ fs/coredump.c                              |   6 +-
+ fs/fuse/dax.c                              |   2 +-
+ fs/hugetlbfs/inode.c                       |   2 +-
+ fs/proc/task_mmu.c                         |   8 +-
+ include/asm-generic/tlb.h                  |   4 +-
+ include/linux/hugetlb.h                    |   5 +-
+ include/linux/hugetlb_inline.h             |  28 ---
+ include/linux/mm.h                         | 266 +++++++++++++++++++++++++++--
+ include/linux/mm_types.h                   |  50 +++++-
+ include/linux/pagemap.h                    |   1 -
+ include/linux/rmap.h                       |   2 +-
+ include/linux/userfaultfd_k.h              |   1 -
+ kernel/bpf/arena.c                         |   3 +-
+ kernel/events/core.c                       |   2 +-
+ kernel/events/uprobes.c                    |   4 +-
+ kernel/sched/fair.c                        |   3 +-
+ mm/folio.c                                 |   2 +-
+ mm/gup.c                                   |  15 +-
+ mm/hmm.c                                   |   3 +-
+ mm/huge_memory.c                           |  31 ++--
+ mm/hugetlb.c                               |  14 +-
+ mm/internal.h                              |  71 ++++----
+ mm/ksm.c                                   |   4 +-
+ mm/madvise.c                               |  28 +--
+ mm/memory.c                                | 142 ++++++++++++---
+ mm/mempolicy.c                             |   5 +-
+ mm/migrate_device.c                        |  12 +-
+ mm/mlock.c                                 |  51 +++---
+ mm/mmap.c                                  |   2 +-
+ mm/mmu_gather.c                            |   2 +-
+ mm/mprotect.c                              |   5 +-
+ mm/mremap.c                                |  11 +-
+ mm/page_vma_mapped.c                       |   4 +-
+ mm/pagewalk.c                              |   2 +-
+ mm/rmap.c                                  |   4 +-
+ mm/swapfile.c                              |   2 +-
+ mm/userfaultfd.c                           |  45 +++--
+ mm/util.c                                  |  22 ++-
+ mm/vma.c                                   | 161 +++++++++++++----
+ mm/vma.h                                   |  24 ++-
+ mm/vma_internal.h                          |   1 -
+ mm/vmscan.c                                |   9 +-
+ security/selinux/selinuxfs.c               |  11 +-
+ sound/core/pcm_native.c                    |  37 ++--
+ tools/testing/vma/include/dup.h            |  60 +++++--
+ tools/testing/vma/include/stubs.h          |   2 +-
+ tools/testing/vma/tests/merge.c            |  10 +-
+ 64 files changed, 1071 insertions(+), 539 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+[PATCH v17 01/20] KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Fix a potential build error (like below, when asm/kvm_emulate.h gets
+included after the kvm/arm_psci.h) by including the missing header file
+in kvm/arm_psci.h:
+
+./include/kvm/arm_psci.h: In function ‘kvm_psci_version’:
+./include/kvm/arm_psci.h:29:13: error: implicit declaration of function
+   ‘vcpu_has_feature’; did you mean ‘cpu_have_feature’? [-Werror=implicit-function-declaration]
+   29 |         if (vcpu_has_feature(vcpu, KVM_ARM_VCPU_PSCI_0_2)) {
+	         |             ^~~~~~~~~~~~~~~~
+			       |             cpu_have_feature
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+---
+ include/kvm/arm_psci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: CCA: Add basic plumbing for Realms
+[PATCH v17 00/20] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This series is a trimmed down version of the Arm CCA KVM support, previously
+posted here [0]. Since the last version, we have tried to split the entire
+series into the following chunks, while also addressing the review comments on
+that version.
+
+ 1) Base RMM RMI support under drivers/firmware/arm_rmm -> [1]
+ 2) Linux Host support for handling GPFs - [2]
+ 3) NEW: Enlighten KVM arm64 about the different VM types and use call backs for
+   the VM type, rather than spilling the is_this_type_of_vm() everywhere. This is
+   not complete yet, but it is largely functional. Adds VCPU and Stage2 MMU related
+   callbacks with support for the existing VM types. There are other places where
+   we may be able to abstract, but those need careful performance evaluations to
+   make sure they are fit (e.g., vcpu_run)
+   Also adds classification of "Confidential" VMs (which includes Protected VM
+   and Realms), which allows us to handle common themes without having to do
+   things like :
+     if (kvm_vm_is_protected() || kvm_vm_is_realm()),
+     instead:
+     if (kvm_vm_is_confidential())
+   The S2 MMU abstraction layer is kept at the end of this series. The Realm S2
+   related implementations cannot be added meaningfully without the RMI commands.
+ 4) Bare minimal Realm VM support without the actual functionality to run a Realm.
+   This would help the maintainers to review the series in smaller chunks. This
+   doesn't depend on [1] and can be independently merged, without being "functional".
+ 5) Core implementation of the RMI driver for KVM and actual enablement of the
+    Realm support. This depends on (1), (2) and the guest-memfd-in-place
+    conversion series v12 from Ackerley. This is available here at the integration
+    branch [3]
+
+This series is comprised of (3) and (4) above.
+
+The integration branch has been tested with the following components:
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3 [4]
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git cca/kvm-v17
+
+[0] Arm CCA KVM Support v16 : https://lore.kernel.org/all/20260803134403.80630-1-steven.price@arm.com
+[1] Linux firmware RMI https://lore.kernel.org/all/20260907095942.1140734-1-suzuki.poulose@arm.com
+[2] Linux GPF Host https://lore.kernel.org/all/20260907162204.1479401-1-suzuki.poulose@arm.com
+[3] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v17/integration
+[4] https://support.arm.com/documentation/den0137/2-0bet3/
+
+Jean-Philippe Brucker (2):
+  KVM: arm64: CCA: Provide register list for unfinalized RECs
+  KVM: arm64: CCA: Provide an accurate register list
+
+Steven Price (4):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Introduce Realms
+  KVM: arm64: CCA: Support timers in realm RECs
+  KVM: arm64: CCA: WARN on injected undef exceptions
+
+Suzuki K Poulose (14):
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: CCA: Add a new mode for supporting Realm guests
+  KVM: arm64: coco:  Add a helper to check if a VM is confidential
+    compute guest
+  KVM: arm64: coco: arch_timer: Prevent timer offset configuration
+  KVM: arm64: coco: Disable Steal time accounting for coco guests
+  KVM: arm64: coco: Don't handle MMIO with no ISV
+  KVM: arm64: CCA: Add VCPU load/put for Realms
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+  KVM: arm64: Reuse kvm_stage2_unmap_range in kvm_unmap_gfn_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Abstract out memory abort handling
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ arch/arm64/include/asm/kvm_emulate.h          |  16 ++
+ arch/arm64/include/asm/kvm_host.h             |  58 +++-
+ arch/arm64/include/asm/kvm_pgtable.h          |   6 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |   2 +-
+ arch/arm64/include/asm/kvm_rmi.h              |  61 ++++
+ arch/arm64/include/asm/virt.h                 |   1 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arch_timer.c                   |  28 +-
+ arch/arm64/kvm/arm.c                          | 267 +++++++++++++++---
+ arch/arm64/kvm/guest.c                        |  16 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |   2 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   1 +
+ arch/arm64/kvm/hypercalls.c                   |   4 +-
+ arch/arm64/kvm/inject_fault.c                 |   1 +
+ arch/arm64/kvm/mmio.c                         |   4 +-
+ arch/arm64/kvm/mmu.c                          | 173 +++++++++---
+ arch/arm64/kvm/pkvm.c                         |   1 -
+ arch/arm64/kvm/pvtime.c                       |  10 +-
+ arch/arm64/kvm/rmi.c                          |  18 ++
+ arch/arm64/kvm/sys_regs.c                     |  27 +-
+ include/kvm/arm_psci.h                        |   2 +
+ 22 files changed, 581 insertions(+), 122 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Reject reserved CR8 bits in KVM_SET_SREGS
+[PATCH v1 1/2] KVM: x86: Reject reserved CR8 bits in KVM_SET_SREGS
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+kvm_is_valid_sregs() validates the incoming CR0, CR4, and efer values but
+never checks CR8.
+
+When userspace passes a CR8 value with any of the
+reserved bits [63:4] set, __set_sregs_common() forwards it to
+kvm_set_cr8(), which rejects the reserved bits and returns early. That
+return value is not checked, so the ioctl reports success while the
+requested value is silently dropped. A subsequent KVM_GET_SREGS then
+returns a CR8 different from the one userspace believed it had written.
+
+Factor the reserved-bit check out into kvm_is_valid_cr8() and use it both
+in kvm_set_cr8() and in kvm_is_valid_sregs().
+
+Fixes: 2f5bb3fe5835 ("KVM: x86: Move the bulk of register specific code from x86.c to regs.c")
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ arch/x86/kvm/regs.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: cr8 reserved bit check
+[PATCH v1 0/2] KVM: x86: cr8 reserved bit check
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+kvm_is_valid_sregs() validates the incoming CR0, CR4, and efer values on
+KVM_SET_SREGS but never checks CR8. When userspace passes a CR8 value with
+any reserved bit [63:4] set, __set_sregs_common() forwards it to
+kvm_set_cr8(), which rejects the reserved bits and returns early. That
+return value is not checked, so the ioctl reports success while the
+requested value is silently dropped, and a subsequent KVM_GET_SREGS then
+returns a CR8 different from the one userspace believed it had written.
+
+This was found by code inspection of kvm_is_valid_sregs() and confirmed
+with the selftest added in patch 2.
+
+Patch 1 factors the reserved-bit check into kvm_is_valid_cr8() and uses it
+in both kvm_set_cr8() and kvm_is_valid_sregs() so that KVM_SET_SREGS
+rejects reserved CR8 bits up front.
+
+Patch 2 extends set_sregs_test to cover CR8: it verifies that bits [3:0]
+can be set and read back, and that every reserved bit [63:4] is rejected
+by KVM_SET_SREGS.
+
+Testing
+=======
+Tested on an Intel host:
+                              Unpatched kernel    Patched kernel
+set_sregs_test CR8 case       FAIL                PASS
+KVM x86 selftests             baseline            no regressions
+kvm-unit-tests                baseline            no regressions
+
+Tharit Tangkijwanichakul (2):
+  KVM: x86: Reject reserved CR8 bits in KVM_SET_SREGS
+  KVM: selftests: Add CR8 reserved-bit checks to set_sregs_test
+
+ arch/x86/kvm/regs.c                              |  8 +++++++-
+ tools/testing/selftests/kvm/x86/set_sregs_test.c | 12 ++++++++++++
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Don't flush shadow VMCS12 to guest memory during
+[PATCH] KVM: nVMX: Don't flush shadow VMCS12 to guest memory during
+Author: Jim Mattson <jmattson@google.com>
+
+When a vCPU is destroyed while L2 is active, KVM synthesizes a nested
+VM-Exit, which flushes the cached shadow VMCS12 back to guest memory:
+
+  vmx_vcpu_free()
+  |-> nested_vmx_free_vcpu()
+      |-> vmx_leave_nested()
+          |-> nested_vmx_vmexit(vcpu, -1, 0, 0)
+              |-> nested_flush_cached_shadow_vmcs12()
+                  |-> kvm_write_guest_cached()
+                      |-> __copy_to_user(ghc->hva, ...)
+
+During process exit, do_exit() calls exit_mm() before closing file
+descriptors, so vCPU destruction runs with current->mm == NULL on a
+borrowed lazy TLB active_mm. If the borrowed address space has a writable
+mapping at ghc->hva, __copy_to_user() corrupts an unrelated task's memory.
+
+Skip the flush when KVM synthesizes a VM-exit with vm_exit_reason == -1
+(e.g. during vCPU teardown or SMM entry). In these paths, KVM forces the
+vCPU out of guest mode internally--no architectural VM-exit is delivered
+to L1.
+
+Fixes: 61ada7488ffd ("KVM: nVMX: Cache shadow vmcs12 on VMEntry and flush to memory on VMExit")
+Cc: stable@vger.kernel.org
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 29 ++++++++++++++++++-----------
+ 1 file changed, 18 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: irqchip: allocate routing entries in chunks
+[PATCH] KVM: irqchip: allocate routing entries in chunks
+Author: lirongqing <lirongqing@baidu.com>
+
+
+kvm_set_irq_routing() allocates each routing entry separately, so
+a routing table with thousands of GSIs needs thousands of small
+allocations and frees, adding significant allocator overhead.
+
+Allocate the entries in chunks instead: each chunk holds up to
+PAGE_SIZE / sizeof(struct kvm_kernel_irq_routing_entry) entries, and
+the chunk pointers are kept in the routing table so that all entries
+are freed together when the table is released.
+
+Each chunk is capped at PAGE_SIZE instead of allocating one array for
+the whole table: with nr up to KVM_MAX_IRQ_ROUTES (4096), a single array
+would be a multi-page contiguous request, which is what tends to fail
+once memory is fragmented. Page-sized chunks stay on the normal kmalloc
+path, and a failed allocation only costs one chunk. The chunk pointer
+array uses kvzalloc_objs() and can fall back to vmalloc.
+
+The last chunk is sized to the number of entries actually left, so a
+table smaller than one chunk - the common case - allocates only what it
+needs.
+
+Measured with an eBPF probe on kvm_set_irq_routing() on an Intel EMR CPU:
+when a VM has a 2000+ entry routing table, the time spent in the function
+drops from about 700us to about 300us.
+
+Signed-off-by: Li RongQing <lirongqing@baidu.com>
+---
+ include/linux/kvm_host.h |  2 ++
+ virt/kvm/irqchip.c       | 62 +++++++++++++++++++++++++++++++++++++++---------
+ 2 files changed, 53 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SEV: Document SNP direct VMSA userspace ABI
+[PATCH v2 1/8] KVM: SEV: Document SNP direct VMSA userspace ABI
+Author: Jörg Rödel <joro@8bytes.org>
+
+
+Document the VMSA launch-update page type, the vCPU-scoped state get and
+set commands, and the VM-scoped direct-VMSA capability in one place.
+
+Describe the ordering and argument requirements for enabling direct-VMSA
+mode, and contrast its VMSA allocation and measurement behavior with the
+legacy launch flow.
+
+Assisted-by: LLM
+---
+ .../virt/kvm/x86/amd-memory-encryption.rst    | 66 ++++++++++++++++++-
+ 1 file changed, 64 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: SVM: Support direct setting of VMSA for SEV-SNP guests
+[PATCH v2 0/8] KVM: SVM: Support direct setting of VMSA for SEV-SNP guests
+Author: Jörg Rödel <joro@8bytes.org>
+
+
+Hi,
+
+here is the updated version of KVM-AMD changes to allow user-space to
+directly set the boot VMSA (direct-vmsa) for an SEV-SNP virtual
+machine.
+
+The direct-vmsa support is required for stable launch measurements
+when loading the initial SEV-SNP guest image from an IGVM file.
+Without this support KVM measures a VMSA at a fixed GPA for every
+VCPU, which makes the launch measurement dependent on the number of
+VCPUs. Besides that the current KVM VMSA-allocation behavior poses
+challenges for live migration of SEV-SNP VMs. The current behavior is
+fully preserved when direct-vmsa is not used.
+
+For a longer justification have a look at this email from the v1
+thread:
+	
+	https://lore.kernel.org/kvm/aiqwjn2DVOumfr3T@8bytes.org/
+
+One of the main concerns with the previous version was the user-space
+API, which has changed significantly in v2. The API now consists of
+three parts:
+
+	- A new KVM_CAP_SNP_DIRECT_VMSA VM-level capability which can
+	  be queried and enabled from user-space. When user-space
+	  enabled the capability, KVM will no longer allocate VMSA
+	  pages when creating VCPUs. This means that the capability
+	  can only be enabled before any VCPUs are created.
+
+	- Allow VMSA pages in SNP launch updates. This was already
+	  present in the previous version, but has different semantics
+	  now. In this version all it does is adding the VMSA pages to
+	  the initial image and the launch measurement. 
+	
+	- A new per-VCPU MEM_ENC operation to get and set the VMSA and
+	  GHCB addresses of a VCPU. User-space will use this operation
+	  to set the GPA of the launch VMSA of the VCPUs, but can
+	  also query and set the addresses during runtime. 
+
+	  This operation is designed to support the requirements of
+	  future live-migration support, which needs to be able to set
+	  and get VMSA as well as GHCB addresses. Since this
+	  functionality is a superset of the operation needed for
+	  direct-vmsa support, it goes the extra mile and allows
+	  import and export of all SEV-SNP specific VCPU state.
+
+For v2 I heavily used AI (codex with gpt-5.6-sol medium) and countless
+iterations with manual review and testing. All changes are reviewed by
+me, tested with KVM selftests, and booting an SVSM (as far as it
+gets without planes support). Lockdep was enabled during testing as
+well.
+
+Please review.
+
+-Joerg
+
+Joerg Roedel (8):
+  KVM: SEV: Document SNP direct VMSA user-space ABI
+  KVM: SVM: Implement GET_AP_APIC_IDS NAE event
+  KVM: SVM: Hold SRCU while reloading guest-owned VMSAs
+  KVM: SEV: Add direct VMSA capability
+  KVM: SEV: Allow VMSA pages in SNP launch updates
+  KVM: SEV: Add SNP vCPU state get and set commands
+  KVM: selftests: Test the SNP APIC-ID-list GHCB request
+  KVM: selftests: Test SNP vCPU state and direct VMSA launch
+
+ .../virt/kvm/x86/amd-memory-encryption.rst    |  66 ++-
+ arch/x86/include/asm/kvm-x86-ops.h            |   1 +
+ arch/x86/include/asm/kvm_host.h               |   1 +
+ arch/x86/include/asm/sev-common.h             |   1 +
+ arch/x86/include/uapi/asm/kvm.h               |  13 +
+ arch/x86/include/uapi/asm/svm.h               |   1 +
+ arch/x86/kvm/svm/sev.c                        | 287 +++++++++++-
+ arch/x86/kvm/svm/svm.c                        |  23 +
+ arch/x86/kvm/svm/svm.h                        |   2 +
+ arch/x86/kvm/x86.c                            |   6 +
+ include/uapi/linux/kvm.h                      |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ tools/testing/selftests/kvm/include/x86/sev.h |  49 ++
+ .../selftests/kvm/x86/sev_snp_apic_id_test.c  | 180 ++++++++
+ .../kvm/x86/sev_snp_direct_vmsa_test.c        | 421 ++++++++++++++++++
+ 15 files changed, 1039 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/uaccess: Extend CMPXCHG user helpers to 128-bit operands
+[PATCH v4 1/2] x86/uaccess: Extend CMPXCHG user helpers to 128-bit operands
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+Extend the existing user CMPXCHG helpers to support 16-byte operands on
+x86-64, using LOCK_PREFIX "cmpxchg16b".  This mirrors the existing
+__try_cmpxchg64_user_asm() / cmpxchg8b path provided for 32-bit kernels,
+where KVM needs an atomic compare-exchange wider than the generic
+cmpxchg helper can provide.
+
+On 32-bit kernels, stub the helper to generate build failure because
+cmpxchg16b requires 64-bit GPRs and is not available.
+
+KVM uses this to atomically emulate guest cmpxchg16b on guest RAM mapped
+via userspace addresses.
+
+Signed-off-by: Sairaj Kodilkar <sarunkod@amd.com>
+---
+ arch/x86/include/asm/uaccess.h | 64 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 63 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  Add support for cmpxchg16b emulation
+[PATCH v4 0/2] Add support for cmpxchg16b emulation
+Author: Sairaj Kodilkar <sarunkod@amd.com>
+
+This series adds 128-bit compare-exchange support needed for KVM to
+emulate guest cmpxchg16b instructions.
+
+The AMD IOMMU driver updates 256-bit device table entries with two
+128-bit cmpxchg operations.  For hardware-accelerated vIOMMU, QEMU traps
+those DTE accesses to install nested page tables [1].  KVM must emulate
+guest cmpxchg16b on the trapped MMIO regions; without that, DTE access
+emulation fails.
+
+Patch 1: extends the x86 user CMPXCHG helpers with
+__try_cmpxchg128_user_asm() (cmpxchg16b on x86-64), wired into
+unsafe_try_cmpxchg_user().
+
+Patch 2: extends KVM CMPXCHG8B emulation to 16-byte operands (REX.W=1) and
+uses the new helper for atomic 16-byte compare-exchange on guest RAM via
+emulator_cmpxchg_emulated().
+
+You can find the KUT to test this series at [2].
+
+[1] https://github.com/AMDESE/qemu-iommu/blob/wip/for_iommufd_hw_queue-v8_amd_viommu_20260106/hw/i386/amd_viommu.c#L517
+[2] https://lore.kernel.org/kvm/20260706062153.346-1-sarunkod@amd.com/T/#u
+
+Changes since v3:
+https://lore.kernel.org/all/20260826070004.8100-1-sarunkod@amd.com/
+Patch1: Split the old value across RAX and RDX using "+a" and "+b" instead of
+	using "+A" [Dave]
+Patch 2: Use __c instead of ctx in cmpxchg macro [Sashiko]
+
+Changes since v2:
+https://lore.kernel.org/all/20260706063035.1139-1-sarunkod@amd.com/
+Patch 1: Trigger build failure if __try_cmpxchg128_user_asm is called on 32 bit
+	 machines [Sean]
+
+Sairaj Kodilkar (2):
+  x86/uaccess: Extend CMPXCHG user helpers to 128-bit operands
+  KVM: x86: Add support for cmpxchg16b emulation
+
+ arch/x86/include/asm/uaccess.h | 64 +++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/emulate.c         | 50 +++++++++++++++++---------
+ arch/x86/kvm/kvm_emulate.h     |  6 ++++
+ arch/x86/kvm/x86.c             |  9 ++++-
+ 4 files changed, 111 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  powerpc: fix typos in comments
+[PATCH v2 1/2] powerpc: fix typos in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Fix typos in comments, reported by scripts/checkpatch.pl using the
+misspelling list in scripts/spelling.txt.  Only touches comments, no code
+changes.
+
+Assisted-by: Cursor:claude-opus-5
+Signed-off-by: Hemanth Selam <hemanth.selam@gmail.com>
+---
+ arch/powerpc/include/asm/book3s/64/mmu-hash.h          |  8 ++++----
+ arch/powerpc/include/asm/book3s/64/radix.h             |  2 +-
+ arch/powerpc/include/asm/fsl_hcalls.h                  |  2 +-
+ arch/powerpc/include/asm/io.h                          |  2 +-
+ arch/powerpc/include/asm/machdep.h                     |  2 +-
+ arch/powerpc/include/asm/nohash/32/pte-8xx.h           |  2 +-
+ arch/powerpc/include/asm/pmac_feature.h                |  2 +-
+ arch/powerpc/include/asm/prom.h                        |  2 +-
+ arch/powerpc/include/asm/sfp-machine.h                 |  2 +-
+ arch/powerpc/include/asm/smu.h                         | 10 +++++-----
+ arch/powerpc/include/asm/task_size_64.h                |  2 +-
+ arch/powerpc/include/asm/uaccess.h                     |  2 +-
+ arch/powerpc/include/uapi/asm/bootx.h                  |  2 +-
+ arch/powerpc/kernel/eeh.c                              |  4 ++--
+ arch/powerpc/kernel/eeh_event.c                        |  2 +-
+ arch/powerpc/kernel/exceptions-64e.S                   |  2 +-
+ arch/powerpc/kernel/exceptions-64s.S                   |  4 ++--
+ arch/powerpc/kernel/fadump.c                           |  2 +-
+ arch/powerpc/kernel/irq_64.c                           |  2 +-
+ arch/powerpc/kernel/paca.c                             |  2 +-
+ arch/powerpc/kernel/pci_dn.c                           |  2 +-
+ arch/powerpc/kernel/prom.c                             |  4 ++--
+ arch/powerpc/kernel/setup_64.c                         |  2 +-
+ arch/powerpc/kernel/signal_64.c                        |  2 +-
+ arch/powerpc/kernel/smp.c                              |  2 +-
+ arch/powerpc/kernel/switch.S                           |  2 +-
+ arch/powerpc/kexec/core_64.c                           |  2 +-
+ arch/powerpc/kvm/book3s_pr.c                           |  2 +-
+ arch/powerpc/kvm/book3s_xive.c                         |  8 ++++----
+ arch/powerpc/kvm/bookehv_interrupts.S                  |  2 +-
+ arch/powerpc/lib/copyuser_power7.S                     |  4 ++--
+ arch/powerpc/lib/memcpy_power7.S                       |  4 ++--
+ arch/powerpc/lib/rheap.c                               |  2 +-
+ arch/powerpc/mm/book3s64/hash_native.c                 |  6 +++---
+ arch/powerpc/mm/book3s64/hugetlbpage.c                 |  2 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c                   |  4 ++--
+ arch/powerpc/mm/book3s64/slb.c                         |  4 ++--
+ arch/powerpc/mm/nohash/tlb.c                           |  2 +-
+ arch/powerpc/perf/imc-pmu.c                            |  2 +-
+ arch/powerpc/platforms/powermac/low_i2c.c              |  2 +-
+ arch/powerpc/platforms/powermac/pci.c                  |  2 +-
+ arch/powerpc/platforms/powermac/sleep.S                |  2 +-
+ arch/powerpc/platforms/powernv/opal-memory-errors.c    |  2 +-
+ arch/powerpc/platforms/powernv/opal.c                  |  2 +-
+ arch/powerpc/platforms/powernv/pci-ioda.c              |  2 +-
+ arch/powerpc/platforms/powernv/vas.h                   |  2 +-
+ arch/powerpc/platforms/ps3/platform.h                  |  4 ++--
+ arch/powerpc/platforms/pseries/firmware.c              |  4 ++--
+ arch/powerpc/platforms/pseries/papr_scm.c              |  4 ++--
+ arch/powerpc/xmon/ppc-opc.c                            |  4 ++--
+ arch/powerpc/xmon/ppc.h                                |  2 +-
+ drivers/tty/hvc/hvc_opal.c                             |  2 +-
+ .../testing/selftests/powerpc/tm/tm-signal-msr-resv.c  |  2 +-
+ tools/testing/selftests/powerpc/tm/tm-tar.c            |  2 +-
+ 54 files changed, 77 insertions(+), 77 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  powerpc: fix typos and repeated words in comments
+[PATCH v2 0/2] powerpc: fix typos and repeated words in comments
+Author: Hemanth Selam <hemanth.selam@gmail.com>
+
+Fix misspellings and repeated words in comments, found with
+scripts/checkpatch.pl using the misspelling list in scripts/spelling.txt.
+Comments only, no code changes.
+
+Changes since v1:
+ - dropped the drivers/net/ethernet/ibm/ibmvnic.h hunk.  Andrew Lunn
+   asked for the networking change to go to netdev rather than through
+   the powerpc tree, so it will be sent there separately.
+
+Hemanth Selam (2):
+  powerpc: fix typos in comments
+  powerpc: fix repeated words in comments
+
+ arch/powerpc/include/asm/book3s/64/mmu-hash.h          |  8 ++++----
+ arch/powerpc/include/asm/book3s/64/radix.h             |  2 +-
+ arch/powerpc/include/asm/fsl_hcalls.h                  |  2 +-
+ arch/powerpc/include/asm/io.h                          |  2 +-
+ arch/powerpc/include/asm/machdep.h                     |  2 +-
+ arch/powerpc/include/asm/nohash/32/pte-8xx.h           |  2 +-
+ arch/powerpc/include/asm/pmac_feature.h                |  2 +-
+ arch/powerpc/include/asm/prom.h                        |  2 +-
+ arch/powerpc/include/asm/sfp-machine.h                 |  2 +-
+ arch/powerpc/include/asm/smu.h                         | 10 +++++-----
+ arch/powerpc/include/asm/task_size_64.h                |  2 +-
+ arch/powerpc/include/asm/uaccess.h                     |  2 +-
+ arch/powerpc/include/uapi/asm/bootx.h                  |  2 +-
+ arch/powerpc/kernel/eeh.c                              |  4 ++--
+ arch/powerpc/kernel/eeh_event.c                        |  2 +-
+ arch/powerpc/kernel/exceptions-64e.S                   |  2 +-
+ arch/powerpc/kernel/exceptions-64s.S                   |  4 ++--
+ arch/powerpc/kernel/fadump.c                           |  2 +-
+ arch/powerpc/kernel/irq_64.c                           |  2 +-
+ arch/powerpc/kernel/paca.c                             |  4 ++--
+ arch/powerpc/kernel/pci_dn.c                           |  2 +-
+ arch/powerpc/kernel/prom.c                             |  4 ++--
+ arch/powerpc/kernel/setup_64.c                         |  2 +-
+ arch/powerpc/kernel/signal_64.c                        |  2 +-
+ arch/powerpc/kernel/smp.c                              |  2 +-
+ arch/powerpc/kernel/switch.S                           |  2 +-
+ arch/powerpc/kexec/core_64.c                           |  2 +-
+ arch/powerpc/kvm/book3s_pr.c                           |  2 +-
+ arch/powerpc/kvm/book3s_xive.c                         |  8 ++++----
+ arch/powerpc/kvm/bookehv_interrupts.S                  |  2 +-
+ arch/powerpc/lib/copyuser_power7.S                     |  4 ++--
+ arch/powerpc/lib/memcpy_power7.S                       |  4 ++--
+ arch/powerpc/lib/rheap.c                               |  2 +-
+ arch/powerpc/mm/book3s64/hash_native.c                 |  6 +++---
+ arch/powerpc/mm/book3s64/hugetlbpage.c                 |  2 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c                   |  4 ++--
+ arch/powerpc/mm/book3s64/slb.c                         |  4 ++--
+ arch/powerpc/mm/nohash/tlb.c                           |  2 +-
+ arch/powerpc/perf/imc-pmu.c                            |  2 +-
+ arch/powerpc/platforms/powermac/low_i2c.c              |  2 +-
+ arch/powerpc/platforms/powermac/pci.c                  |  2 +-
+ arch/powerpc/platforms/powermac/sleep.S                |  2 +-
+ arch/powerpc/platforms/powernv/opal-memory-errors.c    |  2 +-
+ arch/powerpc/platforms/powernv/opal.c                  |  2 +-
+ arch/powerpc/platforms/powernv/pci-ioda.c              |  2 +-
+ arch/powerpc/platforms/powernv/vas.h                   |  2 +-
+ arch/powerpc/platforms/ps3/platform.h                  |  4 ++--
+ arch/powerpc/platforms/pseries/firmware.c              |  4 ++--
+ arch/powerpc/platforms/pseries/papr_scm.c              |  4 ++--
+ arch/powerpc/sysdev/xics/xics-common.c                 |  2 +-
+ arch/powerpc/xmon/ppc-opc.c                            |  4 ++--
+ arch/powerpc/xmon/ppc.h                                |  2 +-
+ drivers/tty/hvc/hvc_opal.c                             |  2 +-
+ .../testing/selftests/powerpc/tm/tm-signal-msr-resv.c  |  2 +-
+ tools/testing/selftests/powerpc/tm/tm-tar.c            |  2 +-
+ 55 files changed, 79 insertions(+), 79 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  virtio_ccw: fix synchronize_cbs() after interrupt fallback
+[PATCH v3 1/6] virtio_ccw: fix synchronize_cbs() after interrupt fallback
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+virtio_ccw_synchronize_cbs() assumes the device uses adapter interrupts
+when vcdev->airq_info is not NULL. If registering adapter indicators
+fails, virtio_ccw_find_vqs() falls back to classic interrupts but can
+leave airq_info set.
+
+With VIRTIO_HARDEN_NOTIFICATION enabled,
+virtio_ccw_int_handler() invokes callbacks under vcdev->irq_lock.
+synchronize_cbs() instead takes the indicator area lock, so it does
+not synchronize with those callbacks.
+
+Use vcdev->is_thinint, which the fallback clears, to select the lock.
+Keep the airq_info check because is_thinint can be set before the
+first find_vqs() call, when airq_info is still NULL.
+
+Fixes: 3a232277c1ac ("virtio-ccw: implement synchronize_cbs()")
+Assisted-by: LLM
+Signed-off-by: Karl Mehltretter <kmehltretter@gmail.com>
+---
+ drivers/s390/virtio/virtio_ccw.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  virtio: fix and add callback synchronization hooks
+[PATCH v3 0/6] virtio: fix and add callback synchronization hooks
+Author: Karl Mehltretter <kmehltretter@gmail.com>
+
+This is v3 of the callback synchronization series. It is based on
+Michael S. Tsirkin's linux-next branch at f49e6cf91942 ("virtio:
+synchronize callbacks after device reset"), which already contains the
+core change and the virtio_input teardown reorder from v2.
+
+Patches 1 and 2 fix two bugs in virtio-ccw's existing
+synchronize_cbs() hook. After a fallback from adapter to classic
+interrupts it selects the wrong lock, and the classic interrupt handler
+only takes the matching lock when notification hardening is enabled.
+Patch 3 adds SRCU tracking for remoteproc callbacks, which can sleep.
+Patches 4 and 5 replace the RCU fallback with synchronization against
+the UML IRQ and the TmFIFO callback locks. The fallback already covers
+these IRQ handlers and spinlock sections. Patch 6 adds SRCU tracking
+in virtio_vdpa so callback synchronization does not depend on the
+context in which the vDPA driver invokes the callback.
+
+The UML, TmFIFO and remoteproc reset paths do not themselves prevent
+new virtqueue callbacks. UML and TmFIFO only clear a status field, and
+remoteproc does not wait for the remote side to acknowledge the reset.
+Without notification hardening or driver-specific teardown protection,
+callbacks can still start after reset. The new synchronization hooks
+do not fix that. The TmFIFO hook also does not synchronize with the
+rest of the FIFO work item outside the callback locks.
+
+The virtio_input loop change from v2 (continue instead of break, so
+events the device already completed are still delivered) and the
+event buffer leak are sent separately.
+
+Changes in v3:
+- Rebased on Michael's linux-next branch. Dropped the core change and
+  the virtio_input patch, which are there already.
+- Split the virtio-ccw fixes out of the core patch, one per bug, and
+  the transport patch into one patch per transport. The CCW and TmFIFO
+  changes are functionally unchanged from v2.
+- Patch 2: added a Fixes tag and described the existing shutdown
+  case. Removed the dependency note on the core reset change.
+- remoteproc: read the queue pointer once in rproc_vq_interrupt(), and
+  synchronize with callbacks in __rproc_virtio_del_vqs() before
+  freeing the queues (Sashiko). Place vq_srcu next to rvdevs so the
+  hunk also applies to mainline, which added attach_work after index.
+- virtio_uml: compare against UM_IRQ_ALLOC instead of a bare negative
+  check.
+- virtio_vdpa: use SRCU instead of a per-device rwlock, so the
+  callback tracking uses per-CPU counters, and cover the config
+  callback (Sashiko).
+- Rewrote the commit messages. Corrected the RCU fallback description
+  for UML, TmFIFO and the vDPA simulators. Dropped the claimed simulator
+  reset race: the simulators disable bottom halves around virtqueue
+  callbacks and serialize reset with the worker's mutex.
+
+Changes in v2:
+- Moved callback synchronization from virtio-pci into the core, as
+  Michael suggested, and added the missing synchronize_cbs() hooks.
+
+Testing: the changed objects build with W=1 without warnings, with
+clang on arm64, x86-64 and s390 and with gcc on SMP UML, and the
+patches also apply to current mainline and linux-next. The runtime
+tests from v2 were not repeated on this version: the input, rebind and
+shutdown checks on arm64 MMIO and x86 PCI covered code that is
+unchanged here, and the remoteproc and virtio_vdpa hooks have only
+been build-tested. No remoteproc, TmFIFO or s390 hardware was
+available.
+
+v2: https://lore.kernel.org/r/20260905152059.89560-1-kmehltretter@gmail.com
+v1: https://lore.kernel.org/r/20260818040433.66986-1-kmehltretter@gmail.com
+
+Karl Mehltretter (6):
+  virtio_ccw: fix synchronize_cbs() after interrupt fallback
+  virtio_ccw: always take irq_lock in the classic interrupt handler
+  remoteproc: implement synchronize_cbs() for virtio devices
+  um: virtio_uml: implement synchronize_cbs()
+  platform/mellanox: mlxbf-tmfifo: implement synchronize_cbs()
+  virtio_vdpa: implement synchronize_cbs()
+
+ arch/um/drivers/virtio_uml.c             | 10 +++++++
+ drivers/platform/mellanox/mlxbf-tmfifo.c | 15 ++++++++++
+ drivers/remoteproc/remoteproc_core.c     | 12 ++++++++
+ drivers/remoteproc/remoteproc_virtio.c   | 37 +++++++++++++++++++-----
+ drivers/s390/virtio/virtio_ccw.c         |  6 +---
+ drivers/virtio/virtio_vdpa.c             | 34 ++++++++++++++++++++--
+ include/linux/remoteproc.h               |  3 ++
+ 7 files changed, 102 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/svm: Avoid sign extension of SVM_EVTINJ_VALID in 64-bit expressions
+[PATCH] x86/svm: Avoid sign extension of SVM_EVTINJ_VALID in 64-bit expressions
+Author: Chaithanya Lagisetty <nagachaithanya9911@gmail.com>
+
+SVM_EVTINJ_VALID is defined as (1 << 31), i.e. as an int with the sign
+bit set. Whenever it is used in a 64-bit expression the int is sign
+extended, so bits 63:32 end up set as well. Two 64-bit users are
+affected.
+
+verify_exception_info() uses the macro as a mask against a 64-bit value
+when it sanity checks hypervisor supplied exception information:
+
+	u64 info = ghcb->save.sw_exit_info_2;
+	...
+	if ((info & SVM_EVTINJ_VALID) &&
+
+The mask is 0xffffffff80000000, so the check also passes when any bit of
+the error code in 63:32 is set while the valid bit itself is clear.
+
+svm_vmgexit_inject_exception() builds the value that KVM hands to an
+SEV-ES guest in GHCB SW_EXITINFO2:
+
+	u64 data = SVM_EVTINJ_VALID | SVM_EVTINJ_TYPE_EXEPT | vector;
+
+For vector == X86_TRAP_GP this yields 0xffffffff8000030d instead of
+0x000000008000030d. The field uses the EVENTINJ format, which holds the
+error code in bits 63:32, so KVM asks the guest to inject #GP with an
+error code of 0xffffffff. Linux guests only consume the error code when
+SVM_EVTINJ_VALID_ERR is set, which it is not here, so they are not
+affected in practice, but the value KVM writes is not the one it intends.
+
+Use BIT() instead, as is already done for most single bit definitions in
+this header. Every other user applies the macro to a u32, where the
+resulting bits are unchanged.
+
+Fixes: 597cfe48212a ("x86/boot/compressed/64: Setup a GHCB-based VC Exception handler")
+Fixes: c3392d0ab714 ("KVM: SVM: Provide helpers to set the error code")
+Signed-off-by: Chaithanya Lagisetty <nagachaithanya9911@gmail.com>
+---
+ arch/x86/include/asm/svm.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From aeaefe6a0 to 3b9c36766
+KVM mailing list update from aeaefe6a0 to 3b9c36766
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     41 kernel.org
+     19 arm.com
+      6 linux.dev
+      2 linaro.org
+
+Top 15 contributors (Based on Email Body)
+
+     40  "Lorenzo Stoakes (ARM)" <ljs@kernel.org>
+     15  Suzuki K Poulose <suzuki.poulose@arm.com>
+      6  Fuad Tabba <fuad.tabba@linux.dev>
+      4  Steven Price <steven.price@arm.com>
+      2  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      1  Mark Brown <broonie@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  mm/vma: predicate setting mmap_prepare VMA fields on
+[PATCH 01/39] mm/vma: predicate setting mmap_prepare VMA fields on
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+It only makes sense to manipulate VMA fields if we allocated a new VMA,
+rather than merged it.
+
+VMA merging does not compare vm_ops or vm_private_data, so a merged VMA
+keeps its own, which is also what the legacy f_op->mmap path does since it
+never touches an existing VMA. Previously set_vma_user_defined_fields()
+overwrote the merged VMA's fields with those set for the new mapping. In
+practice these are the same values, with rare exceptions such as shmem
+selecting vm_ops based on whether the file has been unlinked, so no
+user-visible change is expected.
+
+Make this dependency explicit, and additionally constify have_mmap_prepare
+while we're here.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+ mm/vma.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: make VMA flag semantics explicit, eliminate
+[PATCH 00/39] mm: make VMA flag semantics explicit, eliminate
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+The VM_SPECIAL / VMA_SPECIAL_FLAGS mask conflates several unrelated
+properties:
+
+* Is this kernel-owned, whether MMIO, kernel-allocated pages, or ordinary
+  pages a driver maps itself?
+* Can it be expanded or merged?
+* Is this a 'weird' case like mlock where migration might race and we
+  'have' to set invalid flags to notify?
+* Is it another 'weird' case where we just want to stop GUP from touching
+  it?
+
+Driver writers have often been confused about this, and who can blame them?
+
+It also interacts badly with the eternal edgecase known as hugetlb - which
+sets VMA_DONTEXPAND_BIT but doesn't also want to be treated like a
+'special' flag.
+
+Another issue is that we cannot make sensible assumptions about flag
+use. It's not possible to assume VMA_IO_BIT means iommu because drivers
+abuse it and mlock abuses it.
+
+Special is also an overloaded term in mm. VDSO and VVAR mappings are also
+called 'special' but they're special in a... special way.
+
+Sometimes things are called special that are a subset of
+VMA_SPECIAL_FLAGS (VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT for instance when it
+comes to zapping or vm_normal_folio()).
+
+There's a specific kind of special for THP too, which considers
+PFN map, mixed map 'special' but DAX not.
+
+It's all rather a mess.
+
+This series brings some order to things by both limiting what drivers can
+do with VMA flags and switching to using predicates that describe
+behaviour, not arbitrary flags.
+
+It establishes the invariant that only kernel-owned mappings may set
+VMA_IO_BIT or clear VMA_MAYWRITE_BIT in an mmap hook, enforcing this by
+validating VMA state after every mmap and mmap_prepare hook.
+
+It updates usbmon and sg to mmap_prepare in order to do so, adding a new
+mmap action for mapping discontiguous kernel pages, and has hfi1 and the
+ALSA PCM status page map their pages eagerly instead.
+
+It also establishes the invariant that VMA_MIXEDMAP_BIT be set when mapping
+kernel memory, something that is usually the case but happens not to be for
+some users - specifically defio, cmt_speech, uprobes and the bpf arena, all
+of which are updated to do the right thing.
+
+It replaces VM_SPECIAL and arbitrary flag tests with predicates that say
+what is actually being tested:
+
+   vma_is_kernel_owned()   Does a driver or kernel code manage a VMA's
+                           life cycle?
+
+  vma_is_fixed_mapping()   Is the VMA not permitted to be expanded or
+                           merged?
+
+     vma_is_persistent()   Do bytes written to the VMA stay written, and
+                           bytes read stay the same unless userland changes
+                           them?
+
+         vma_can_merge()   Can the VMA be merged with a compatible
+                           neighbour?
+
+           vma_can_gup()   Can GUP obtain pages from the VMA, i.e. is it
+                           neither a PFN map nor memory-mapped I/O?
+
+Remaining raw VMA_IO_BIT, VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT tests
+scattered across mm are also converted to predicates where it makes sense
+to do so.
+
+And also the opportunity is taken to eliminate THP's vma_is_special_huge()
+which was an existing source of confusion.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+Lorenzo Stoakes (ARM) (39):
+      mm/vma: predicate setting mmap_prepare VMA fields on new vma alloc
+      mm/vma: introduce and use vma_[flags_]can_merge()
+      mm: consistently validate VMA state after mmap[_prepare] hooks
+      mm/vma: ensure mmap_prepare doesn't set actions on a mergeable vma
+      mm: make map_kernel_pages_[prepare,complete] internal and unexported
+      mm/vma: tidy up map kernel pages enum values
+      mm: add mmap action for discontiguous kernel page mapping
+      docs: filesystems: update mmap_prepare docs for discontig kernel pgs
+      drivers/usb/mon: update to use mmap_prepare + map kernel pages
+      infiniband: update hfi1 to use remap_vmalloc_range()
+      selinux: reject writable opens of policy file, drop mmap shared/write check
+      ALSA: pcm: use vm_insert_page() to map PCM status page
+      bpf: arena: mark arena_map_mmap() mappings VM_MIXEDMAP
+      mm/vma: add vma[_flags]_is_kernel_owned() predicates
+      mm/vma: only allow mmap to clear VMA_MAYWRITE_BIT if kernel-owned
+      mm/vma: add and use vma_[flags]_is_fixed_mapping
+      scsi: sg: convert mmap hook to mmap_prepare and rework
+      fbdev: defio: assert FBINFO_VIRTFB, drop VM_IO, add VM_MIXEDMAP
+      HSI: cmt_speech: convert mmap hook to mmap_prepare, refactor
+      mm/gup: error out early on !VMA_MAYREAD_BIT VMAs
+      uprobes: remove VM_IO, set VM_MIXEDMAP for mapped kernel pages
+      mm/mlock: clear VMA_LOCKED_MASK over mmap callback
+      mm/mlock: eliminate weird VMA_IO_BIT abuse and simplify
+      mm/vma: enforce that only kernel-owned mappings may set VMA_IO_BIT
+      mm: remove VMA_IO_BIT check in vma[_flags]_is_kernel_owned()
+      mm: remove hugetlb_inline.h
+      mm: rename is_vm_hugetlb_page() to vma_is_hugetlb()
+      mm: drop some redundant checks around hugetlb VMAs
+      mm/madvise: update is_valid_guard_vma() to use vma_can_merge()
+      mm/vma: introduce vma[_flags]_is_persistent()
+      mm/uffd: use predicates for userfaultfd checks
+      mm/madvise: use predicates for madvise(..., MADV_DOFORK)
+      mm: eliminate VMA_SPECIAL_FLAGS usage when hugetlb explicitly tested
+      mm: eliminate VMA_SPECIAL_FLAGS check in lru_gen_look_around()
+      mm: avoid use of VMA_SPECIAL_FLAGS in migrate_vma_setup()
+      mm: eliminate VM_SPECIAL, VMA_SPECIAL_FLAGS
+      fuse: dax: do not set VM_MIXEDMAP
+      mm/huge_memory: remove vma_is_special_huge()
+      mm/vma: introduce and use vma[_flags]_can_gup()
+
+ Documentation/filesystems/mmap_prepare.rst |  81 +++++++++
+ arch/arm64/kvm/mmu.c                       |   4 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c       |   6 +-
+ arch/powerpc/mm/nohash/e500_hugetlbpage.c  |   2 +-
+ arch/powerpc/mm/nohash/tlb.c               |   2 +-
+ arch/riscv/kvm/mmu.c                       |   2 +-
+ arch/riscv/mm/tlbflush.c                   |   2 +-
+ arch/s390/mm/gmap_helpers.c                |   6 +-
+ arch/sparc/mm/init_64.c                    |   2 +-
+ arch/x86/kernel/uprobes.c                  |   2 +-
+ drivers/gpu/drm/drm_gpusvm.c               |   5 +-
+ drivers/hsi/clients/cmt_speech.c           |  33 +---
+ drivers/infiniband/hw/hfi1/file_ops.c      |  79 +++------
+ drivers/scsi/sg.c                          | 115 ++++++-------
+ drivers/usb/mon/mon_bin.c                  |  82 +++++----
+ drivers/video/fbdev/core/fb_defio.c        |   6 +-
+ drivers/video/fbdev/ssd1307fb.c            |   2 +
+ fs/coredump.c                              |   6 +-
+ fs/fuse/dax.c                              |   2 +-
+ fs/hugetlbfs/inode.c                       |   2 +-
+ fs/proc/task_mmu.c                         |   8 +-
+ include/asm-generic/tlb.h                  |   4 +-
+ include/linux/hugetlb.h                    |   5 +-
+ include/linux/hugetlb_inline.h             |  28 ---
+ include/linux/mm.h                         | 266 +++++++++++++++++++++++++++--
+ include/linux/mm_types.h                   |  50 +++++-
+ include/linux/pagemap.h                    |   1 -
+ include/linux/rmap.h                       |   2 +-
+ include/linux/userfaultfd_k.h              |   1 -
+ kernel/bpf/arena.c                         |   3 +-
+ kernel/events/core.c                       |   2 +-
+ kernel/events/uprobes.c                    |   4 +-
+ kernel/sched/fair.c                        |   3 +-
+ mm/folio.c                                 |   2 +-
+ mm/gup.c                                   |  15 +-
+ mm/hmm.c                                   |   3 +-
+ mm/huge_memory.c                           |  31 ++--
+ mm/hugetlb.c                               |  14 +-
+ mm/internal.h                              |  71 ++++----
+ mm/ksm.c                                   |   4 +-
+ mm/madvise.c                               |  28 +--
+ mm/memory.c                                | 142 ++++++++++++---
+ mm/mempolicy.c                             |   5 +-
+ mm/migrate_device.c                        |  12 +-
+ mm/mlock.c                                 |  51 +++---
+ mm/mmap.c                                  |   2 +-
+ mm/mmu_gather.c                            |   2 +-
+ mm/mprotect.c                              |   5 +-
+ mm/mremap.c                                |  11 +-
+ mm/page_vma_mapped.c                       |   4 +-
+ mm/pagewalk.c                              |   2 +-
+ mm/rmap.c                                  |   4 +-
+ mm/swapfile.c                              |   2 +-
+ mm/userfaultfd.c                           |  45 +++--
+ mm/util.c                                  |  22 ++-
+ mm/vma.c                                   | 161 +++++++++++++----
+ mm/vma.h                                   |  24 ++-
+ mm/vma_internal.h                          |   1 -
+ mm/vmscan.c                                |   9 +-
+ security/selinux/selinuxfs.c               |  11 +-
+ sound/core/pcm_native.c                    |  37 ++--
+ tools/testing/vma/include/dup.h            |  60 +++++--
+ tools/testing/vma/include/stubs.h          |   2 +-
+ tools/testing/vma/tests/merge.c            |  10 +-
+ 64 files changed, 1071 insertions(+), 539 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+[PATCH v17 01/20] KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Fix a potential build error (like below, when asm/kvm_emulate.h gets
+included after the kvm/arm_psci.h) by including the missing header file
+in kvm/arm_psci.h:
+
+./include/kvm/arm_psci.h: In function ‘kvm_psci_version’:
+./include/kvm/arm_psci.h:29:13: error: implicit declaration of function
+   ‘vcpu_has_feature’; did you mean ‘cpu_have_feature’? [-Werror=implicit-function-declaration]
+   29 |         if (vcpu_has_feature(vcpu, KVM_ARM_VCPU_PSCI_0_2)) {
+	         |             ^~~~~~~~~~~~~~~~
+			       |             cpu_have_feature
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+---
+ include/kvm/arm_psci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: CCA: Add basic plumbing for Realms
+[PATCH v17 00/20] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This series is a trimmed down version of the Arm CCA KVM support, previously
+posted here [0]. Since the last version, we have tried to split the entire
+series into the following chunks, while also addressing the review comments on
+that version.
+
+ 1) Base RMM RMI support under drivers/firmware/arm_rmm -> [1]
+ 2) Linux Host support for handling GPFs - [2]
+ 3) NEW: Enlighten KVM arm64 about the different VM types and use call backs for
+   the VM type, rather than spilling the is_this_type_of_vm() everywhere. This is
+   not complete yet, but it is largely functional. Adds VCPU and Stage2 MMU related
+   callbacks with support for the existing VM types. There are other places where
+   we may be able to abstract, but those need careful performance evaluations to
+   make sure they are fit (e.g., vcpu_run)
+   Also adds classification of "Confidential" VMs (which includes Protected VM
+   and Realms), which allows us to handle common themes without having to do
+   things like :
+     if (kvm_vm_is_protected() || kvm_vm_is_realm()),
+     instead:
+     if (kvm_vm_is_confidential())
+   The S2 MMU abstraction layer is kept at the end of this series. The Realm S2
+   related implementations cannot be added meaningfully without the RMI commands.
+ 4) Bare minimal Realm VM support without the actual functionality to run a Realm.
+   This would help the maintainers to review the series in smaller chunks. This
+   doesn't depend on [1] and can be independently merged, without being "functional".
+ 5) Core implementation of the RMI driver for KVM and actual enablement of the
+    Realm support. This depends on (1), (2) and the guest-memfd-in-place
+    conversion series v12 from Ackerley. This is available here at the integration
+    branch [3]
+
+This series is comprised of (3) and (4) above.
+
+The integration branch has been tested with the following components:
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3 [4]
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git cca/kvm-v17
+
+[0] Arm CCA KVM Support v16 : https://lore.kernel.org/all/20260803134403.80630-1-steven.price@arm.com
+[1] Linux firmware RMI https://lore.kernel.org/all/20260907095942.1140734-1-suzuki.poulose@arm.com
+[2] Linux GPF Host https://lore.kernel.org/all/20260907162204.1479401-1-suzuki.poulose@arm.com
+[3] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v17/integration
+[4] https://support.arm.com/documentation/den0137/2-0bet3/
+
+Jean-Philippe Brucker (2):
+  KVM: arm64: CCA: Provide register list for unfinalized RECs
+  KVM: arm64: CCA: Provide an accurate register list
+
+Steven Price (4):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Introduce Realms
+  KVM: arm64: CCA: Support timers in realm RECs
+  KVM: arm64: CCA: WARN on injected undef exceptions
+
+Suzuki K Poulose (14):
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: CCA: Add a new mode for supporting Realm guests
+  KVM: arm64: coco:  Add a helper to check if a VM is confidential
+    compute guest
+  KVM: arm64: coco: arch_timer: Prevent timer offset configuration
+  KVM: arm64: coco: Disable Steal time accounting for coco guests
+  KVM: arm64: coco: Don't handle MMIO with no ISV
+  KVM: arm64: CCA: Add VCPU load/put for Realms
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+  KVM: arm64: Reuse kvm_stage2_unmap_range in kvm_unmap_gfn_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Abstract out memory abort handling
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ arch/arm64/include/asm/kvm_emulate.h          |  16 ++
+ arch/arm64/include/asm/kvm_host.h             |  58 +++-
+ arch/arm64/include/asm/kvm_pgtable.h          |   6 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |   2 +-
+ arch/arm64/include/asm/kvm_rmi.h              |  61 ++++
+ arch/arm64/include/asm/virt.h                 |   1 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arch_timer.c                   |  28 +-
+ arch/arm64/kvm/arm.c                          | 267 +++++++++++++++---
+ arch/arm64/kvm/guest.c                        |  16 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |   2 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   1 +
+ arch/arm64/kvm/hypercalls.c                   |   4 +-
+ arch/arm64/kvm/inject_fault.c                 |   1 +
+ arch/arm64/kvm/mmio.c                         |   4 +-
+ arch/arm64/kvm/mmu.c                          | 173 +++++++++---
+ arch/arm64/kvm/pkvm.c                         |   1 -
+ arch/arm64/kvm/pvtime.c                       |  10 +-
+ arch/arm64/kvm/rmi.c                          |  18 ++
+ arch/arm64/kvm/sys_regs.c                     |  27 +-
+ include/kvm/arm_psci.h                        |   2 +
+ 22 files changed, 581 insertions(+), 122 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Transfer the hyp stack pages out of the host stage-2
+[PATCH 1/4] KVM: arm64: Transfer the hyp stack pages out of the host stage-2
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+fix_host_ownership() walks only the linear-map alias of each memblock
+region, and the per-CPU hyp stack, mapped in the private VA range for
+its guard page, has none.
+
+Walk each stack's VA range with the same walker.
+
+Fixes: 1a919b17ef012 ("KVM: arm64: Add guard pages for pKVM (protected nVHE) hypervisor stack")
+Reported-by: Hiroyuki Katsura <hk590@cam.ac.uk>
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/setup.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Fix host access to the EL2 stacks
+[PATCH 0/4] KVM: arm64: Fix host access to the EL2 stacks
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+The per-CPU EL2 stacks are initialised as host-owned after pKVM init.
+fix_host_ownership() walks only the linear-map alias of each memblock
+region, and the stacks, mapped in the private VA range for their guard
+pages, have none.
+
+Patch 1 is the fix, and it needs none of the other three. Patch 4 adds
+the check that would have caught it and would catch similar instances
+in the future: once the transfer is done, walk the private VA range and
+fail init unless every valid leaf is hyp-owned, or is hyp text mapped
+without write access.
+
+Patch 2 is a fix in its own right, but to a different bug.
+fix_host_ownership_walker() matches hyp text on its stage-1 permissions,
+and that test hasn't matched on a non-hVHE host since 7.0, so hyp text
+is donated there rather than left read-only. Nothing crashes, but the
+instruction dump on hyp panic reads a page the host can't access, so
+the Code: line comes out as question marks. It matches by physical
+address instead, which is what patch 4 needs too. Patch 3 splits the
+start of the range from the allocation cursor, with no functional
+change, so patch 4 knows where the range begins.
+
+Based on Linux 7.3-rc2 (df2908090cda3).
+
+Cheers,
+/fuad
+
+Fuad Tabba (4):
+  KVM: arm64: Transfer the hyp stack pages out of the host stage-2
+  KVM: arm64: Match hyp text by physical address in fix_host_ownership()
+  KVM: arm64: Move the private VA allocation cursor to __io_map_next
+  KVM: arm64: Check every private mapping is hyp-owned at pKVM init
+
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |  2 +
+ arch/arm64/kvm/hyp/include/nvhe/mm.h          |  1 +
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 20 +++++
+ arch/arm64/kvm/hyp/nvhe/mm.c                  | 79 ++++++++++++++++---
+ arch/arm64/kvm/hyp/nvhe/setup.c               | 16 +++-
+ 5 files changed, 108 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
