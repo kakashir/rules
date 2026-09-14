@@ -1,0 +1,874 @@
+
+On /root/mail/repo:
+From 74d12d41b to f1bfb6804
+KVM mailing list update from 74d12d41b to f1bfb6804
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      9 open-hieco.net
+      4 redhat.com
+      3 zte.com.cn
+      3 google.com
+      1 mgml.me
+      1 mails.ucas.ac.cn
+      1 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      9  Tina Zhang <zhang_wei@open-hieco.net>
+      4  Paolo Bonzini <pbonzini@redhat.com>
+      3  Wang Yechao <wang.yechao255@zte.com.cn>
+      2  David Matlack <dmatlack@google.com>
+      1  Tan Chi <tanchi25@mails.ucas.ac.cn>
+      1  Steven Price <steven.price@arm.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Kenta Akagi <k@mgml.me>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] RISC-V: KVM: Fix HSM hart status error propagation
+Author: Tan Chi <tanchi25@mails.ucas.ac.cn>
+
+kvm_sbi_hsm_vcpu_get_status() returns SBI_ERR_INVALID_PARAM when
+the requested hart does not exist. However, the HART_STATUS case
+returns from the SBI handler without storing this error in
+retdata->err_val.
+
+As a result, a guest querying the status of a non-existent hart
+observes SBI_SUCCESS instead of SBI_ERR_INVALID_PARAM.
+
+Use the common SBI error handling path for HART_STATUS after
+saving a valid hart state in retdata->out_val. This preserves
+the returned error when kvm_sbi_hsm_vcpu_get_status() fails.
+
+Fixes: bae0dfd74e01 ("RISC-V: KVM: Modify SBI extension handler to return SBI error code")
+Cc: stable@vger.kernel.org
+Assisted-by: LLM
+Signed-off-by: Tan Chi <tanchi25@mails.ucas.ac.cn>
+---
+ arch/riscv/kvm/vcpu_sbi_hsm.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 2/7] KVM: x86/mmu: Stop passing "direct" to mmu_alloc_root()
+Author: Kenta Akagi <k@mgml.me>
+
+
+commit 86938ab6925b8fe174ca6abf397e6ea9d3c054a4 upstream.
+
+The "direct" argument is vcpu->arch.mmu->root_role.direct,
+because unlike non-root page tables, it's impossible to have
+a direct root in an indirect MMU.  So just use that.
+
+Suggested-by: Lai Jiangshan <jiangshanlai@gmail.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Message-Id: <20220516232138.1783324-4-dmatlack@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 5/7] KVM: x86/mmu: pull call to drop_large_spte() into __link_shadow_page()
+Author: Kenta Akagi <k@mgml.me>
+
+
+commit 0cd8dc739833080aa0813cbd94d907a93e3a14c3 upstream.
+
+Before allocating a child shadow page table, all callers check
+whether the parent already points to a huge page and, if so, they
+drop that SPTE.  This is done by drop_large_spte().
+
+However, dropping the large SPTE is really only necessary before the
+sp is installed.  While the sp is returned by kvm_mmu_get_child_sp(),
+installing it happens later in __link_shadow_page().  Move the call
+there instead of having it in each and every caller.
+
+To ensure that the shadow page is not linked twice if it was present,
+do _not_ opportunistically make kvm_mmu_get_child_sp() idempotent:
+instead, return an error value if the shadow page already existed.
+This is a bit more verbose, but clearer than NULL.
+
+Finally, now that the drop_large_spte() name is not taken anymore,
+remove the two underscores in front of __drop_large_spte().
+
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c         | 49 +++++++++++++++++++---------------
+ arch/x86/kvm/mmu/paging_tmpl.h | 29 +++++++++-----------
+ 2 files changed, 40 insertions(+), 38 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 7/7] KVM: x86: Fix shadow paging use-after-free due to unexpected role
+Author: Kenta Akagi <k@mgml.me>
+
+
+[ Upstream commit 81ccda30b4e83d8f5cc4fd50503c44e3a33abfeb ]
+
+Commit 0cb2af2ea66ad ("KVM: x86: Fix shadow paging use-after-free due
+to unexpected GFN") fixed a shadow paging mismatch between stored and
+computed GFNs; the bug could be triggered by changing a PDE mapping from
+outside the guest, and then deleting a memslot.  The rmap_remove()
+call would miss entries created after the PDE change because the GFN
+of the leaf SPTE does not match the GFN of the struct kvm_mmu_page.
+
+A similar hole however remains if the modified PDE points to a non-leaf
+page.  In this case the gfn can be made to match, but the role does not
+match: the original large 2MB page creates a kvm_mmu_page with direct=1,
+while the new 4KB needs a kvm_mmu_page with direct=0.  However,
+kvm_mmu_get_child_sp() does not compare the role, and therefore reuses
+the page.
+
+The next step is installing a leaf (4KB) SPTE on the new path which
+records an rmap entry under the gfn resolved by the walk.  But when
+that child is zapped its parent kvm_mmu_page has direct=1 and
+kvm_mmu_page_get_gfn() computes the gfn for the 4KB page as
+sp->gfn + index instead of using sp->shadowed_translation[] (or sp->gfns[]
+in older kernels).  It therefore fails to remove the recorded entry.
+
+When the memslot is dropped the shadow page is freed but the rmap
+entry survives, as in the scenario that was already fixed.  Code that
+later walks that gfn (dirty logging, MMU notifier invalidation, and
+so on) dereferences an sptep that lies in the freed page, causing the
+use-after-free.
+
+Fixes: 2032a93d66fa ("KVM: MMU: Don't allocate gfns page for direct mmu pages")
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 4/7] KVM: x86/mmu: Always pass 0 for @quadrant when gptes are 8 bytes
+Author: Kenta Akagi <k@mgml.me>
+
+
+commit 7f49777550e55a7d6832cbb0873f48f91c175b9c upstream.
+
+The quadrant is only used when gptes are 4 bytes, but
+mmu_alloc_{direct,shadow}_roots() pass in a non-zero quadrant for PAE
+page directories regardless. Make this less confusing by only passing in
+a non-zero quadrant when it is actually necessary.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+Message-Id: <20220516232138.1783324-6-dmatlack@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 0/7] KVM: fixes for CVE-2026-46113 and related issues
+Author: Kenta Akagi <k@mgml.me>
+
+This is a backport of the CVE-2026-46113 and CVE-2026-53359 fixes to 5.15.y.
+
+The only difference from Paolo's v2 [1] is that commit ef057cbf825e ("KVM:
+x86/mmu: Ensure hugepage is in by slot before checking max mapping level") is
+not included, as it has already been backported to 5.15.y.
+
+I believe v2 was not merged two months ago because of the regression reported
+in [2], which occurs when only these patches are applied.
+
+Commit a955cad84cda ("KVM: x86/mmu: Retry page fault if root is invalidated by
+memslot update") was proposed as a fix for this regression. I have confirmed
+that applying the v2 patches triggers the WARN, and that applying a955cad84cda
+fixes it.
+
+Since a955cad84cda has already been backported to 5.15.218, it is not included
+in this series.
+
+[1] https://lore.kernel.org/all/20260626174620.1819772-1-pbonzini@redhat.com/
+[2] https://lore.kernel.org/kvm/20260630223723.83727-1-zcgao@amazon.com/ 
+
+David Matlack (2):
+  KVM: x86/mmu: Use a bool for direct
+  KVM: x86/mmu: Stop passing "direct" to mmu_alloc_root()
+
+Paolo Bonzini (4):
+  KVM: x86/mmu: Derive shadow MMU page role from parent
+  KVM: x86/mmu: Always pass 0 for @quadrant when gptes are 8 bytes
+  KVM: x86/mmu: pull call to drop_large_spte() into __link_shadow_page()
+  KVM: x86: Fix shadow paging use-after-free due to unexpected role
+
+Sean Christopherson (1):
+  KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+
+ arch/x86/kvm/mmu/mmu.c         | 174 +++++++++++++++++++++------------
+ arch/x86/kvm/mmu/paging_tmpl.h |  32 +++---
+ arch/x86/kvm/mmu/spte.h        |   5 +
+ 3 files changed, 129 insertions(+), 82 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 6/7] KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+Author: Kenta Akagi <k@mgml.me>
+
+
+commit 0cb2af2ea66ad8ff195c156ea690f11216285bdf upstream.
+
+The shadow MMU computes GFNs for direct shadow pages using sp->gfn plus
+the SPTE index. This assumption breaks for shadow paging if the guest
+page tables are modified between VM entries (similar to commit
+aad885e77496, "KVM: x86/mmu: Drop/zap existing present SPTE even
+when creating an MMIO SPTE", 2026-03-27).  The flow is as follows:
+
+- a PDE is installed for a 2MB mapping, and a page in that area is
+  accessed.  KVM creates a kvm_mmu_page consisting of 512 4KB pages;
+  the kvm_mmu_page is marked by FNAME(fetch) as direct-mapped because
+  the guest's mapping is a huge page (and thus contiguous).
+
+- the PDE mapping is changed from outside the guest.
+
+- the guest accesses another page in the same 2MB area.  KVM installs
+  a new leaf SPTE and rmap entry; the SPTE uses the "correct" GFN
+  (i.e. based on the new mapping, as changed in the previous step) but
+  that GFN is outside of the [sp->gfn, sp->gfn + 511] range; therefore
+  the rmap entry cannot be found and removed when the kvm_mmu_page
+  is zapped.
+
+- the memslot that covers the first 2MB mapping is deleted, and the
+  kvm_mmu_page for the now-invalid GPA is zapped.  However, rmap_remove()
+  only looks at the [sp->gfn, sp->gfn + 511] range established in step 1,
+  and fails to find the rmap entry that was recorded by step 3.
+
+- any operation that causes an rmap walk for the same page accessed
+  by step 3 then walks a stale rmap and dereferences a freed kvm_mmu_page.
+  This includes dirty logging or MMU notifier invalidations (e.g., from
+  MADV_DONTNEED).
+
+The underlying issue is that KVM's walking of shadow PTEs assumes that
+if a SPTE is present when KVM wants to install a non-leaf SPTE, then the
+existing kvm_mmu_page must be for the correct gfn.  Because the only way
+for the gfn to be wrong is if KVM messed up and failed to zap a SPTE...
+which shouldn't happen, but *actually* only happens in response to a
+guest write.
+
+That bug dates back literally forever, as even the first version of KVM
+assumes that the GFN matches and walks into the "wrong" shadow page.
+However, that was only an imprecision until 2032a93d66fa ("KVM: MMU:
+Don't allocate gfns page for direct mmu pages") came along.
+
+Fix it by checking for a target gfn mismatch and zapping the existing
+SPTE.  That way the old SP and rmap entries are gone, KVM installs
+the rmap in the right location, and everyone is happy.
+
+Fixes: 2032a93d66fa ("KVM: MMU: Don't allocate gfns page for direct mmu pages")
+Fixes: 6aa8b732ca01 ("kvm: userspace interface")
+Reported-by: Alexander Bulekov <bkov@amazon.com>
+Reported-by: Fred Griffoul <fgriffo@amazon.co.uk>
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Link: https://patch.msgid.link/20260503201029.106481-1-pbonzini@redhat.com/
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c  | 33 ++++++++++++++-------------------
+ arch/x86/kvm/mmu/spte.h |  5 +++++
+ 2 files changed, 19 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 1/7] KVM: x86/mmu: Use a bool for direct
+Author: Kenta Akagi <k@mgml.me>
+
+
+commit 27a59d57f073f21f029df1517c2c0a1abea5b0ce upstream.
+
+The parameter "direct" can either be true or false, and all of the
+callers pass in a bool variable or true/false literal, so just use the
+type bool.
+
+No functional change intended.
+
+Reviewed-by: Lai Jiangshan <jiangshanlai@gmail.com>
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Message-Id: <20220516232138.1783324-3-dmatlack@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.15.y v3 3/7] KVM: x86/mmu: Derive shadow MMU page role from parent
+Author: Kenta Akagi <k@mgml.me>
+
+
+commit 2e65e842c57d72e9a573ba42bc2055b7f626ea1f upstream.
+
+Instead of computing the shadow page role from scratch for every new
+page, derive most of the information from the parent shadow page.  This
+eliminates the dependency on the vCPU root role to allocate shadow page
+tables, and reduces the number of parameters to kvm_mmu_get_page().
+
+Preemptively split out the role calculation to a separate function for
+use in a following commit.
+
+Note that when calculating the MMU root role, we can take
+@role.passthrough, @role.direct, and @role.access directly from
+@vcpu->arch.mmu->root_role. Only @role.level and @role.quadrant still
+must be overridden for PAE page directories, when shadowing 32-bit
+guest page tables with PAE page tables.
+
+No functional change intended.
+
+Reviewed-by: Peter Xu <peterx@redhat.com>
+Signed-off-by: David Matlack <dmatlack@google.com>
+Message-Id: <20220516232138.1783324-5-dmatlack@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Kenta Akagi <k@mgml.me>
+---
+ arch/x86/kvm/mmu/mmu.c         | 99 ++++++++++++++++++++++------------
+ arch/x86/kvm/mmu/paging_tmpl.h |  9 ++--
+ 2 files changed, 71 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 2/2] RISC-V: KVM: Recover gstage huge page mappings during disable-dirty-log
+Author: Wang Yechao <wang.yechao255@zte.com.cn>
+
+When dirty logging is enabled, the gstage mappings are split into
+4K pages to track dirty pages. If the migration fails or is canceled,
+in order to keep the VM's performance consistent with that before
+dirty logging was enabled, the gstage huge page mappings are recoverd
+when dirty logging is disabled.
+
+With this patch, dirty_log_perf_test shows a decrease in the number of
+vCPU faults:
+
+$ perf stat -e kvm:kvm_page_fault \
+./dirty_log_perf_test -s anonymous_hugetlb_1gb -v 1 -e -b 1G
+
+Before: 1,574,460    kvm:kvm_page_fault
+After : 788,048      kvm:kvm_page_fault
+
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/include/asm/kvm_gstage.h |   4 +
+ arch/riscv/kvm/gstage.c             |  67 +++++++++++++++
+ arch/riscv/kvm/mmu.c                | 127 +++++++++++++++++++++++++++-
+ 3 files changed, 197 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 1/2] RISC-V: KVM: add tracepoint for guest page faults
+Author: Wang Yechao <wang.yechao255@zte.com.cn>
+
+Add the kvm_page_fault event tracepoint to count the number of KVM
+guest page faults.
+
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/kvm/trace.h     | 22 ++++++++++++++++++++++
+ arch/riscv/kvm/vcpu_exit.c |  2 ++
+ 2 files changed, 24 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 0/2] RISC-V: KVM: Huge page recovery during disable-dirty-log
+Author: Wang Yechao <wang.yechao255@zte.com.cn>
+
+When dirty logging is enabled, the gstage mappings are split into
+4K pages to track dirty pages. If the migration fails or is canceled,
+in order to keep the VM's performance consistent with that before
+dirty logging was enabled, we need to recover the gstage huge page mappings
+when dirty logging is disabled.
+
+With this series, dirty_log_perf_test shows a decrease in the number of
+vCPU faults:
+
+$ perf stat -e kvm:kvm_page_fault \
+/dirty_log_perf_test -s anonymous_hugetlb_1gb -v 1 -e -b 1G
+
+Before: 1,574,460    kvm:kvm_page_fault 
+After : 788,048      kvm:kvm_page_fault
+
+Changes in v4:
+ - Rebased on Linux v7.3-rc2.
+ - Squash Patch01 into Patch03.
+ - The 1G mapping recovery is performed only after all 2M leaf recover succeed.
+
+Changes in v3:
+ - Rebased on https://github.com/kvm-riscv/linux/tree/riscv_kvm_queue
+ - Add support to recover 1GB mappings for gstage.
+ - Refactor kvm_arch_commit_memory_region to be identical to arm64.
+ (sashiko AI Reviews)
+ - Scan the child page table for the first valid leaf PTE to recover.
+ - Add the memslot boundaries check when recover hugepages.
+ - Move the cond_resched_lock to the start loop iteration.
+ - The kvm_page_fault tracepoint be placed before the conditional block.
+ - Remove the fault_supports_gstage_huge_mapping check.
+ https://lore.kernel.org/linux-riscv/20260605160019772GJy5SDmWQQF7sSqvJ0JtC@zte.com.cn/
+
+Changes in v2:
+ - Rebased on Linux v7.1-rc1.
+ - Skip recovering huge pte if the first child pte is not leaf.
+ - Link to v2:
+ https://lore.kernel.org/linux-riscv/20260429173002565bdp1o7P0bvOs6yTz64yNx@zte.com.cn/
+
+ - Link to v1:
+ https://lore.kernel.org/linux-riscv/20260407171052241tmZDFGusMP_wlEsBVVtJo@zte.com.cn/
+
+Wang Yechao (2):
+  RISC-V: KVM: add tracepoint for guest page faults
+  RISC-V: KVM: Recover gstage huge page mappings during
+    disable-dirty-log
+
+ arch/riscv/include/asm/kvm_gstage.h |   4 +
+ arch/riscv/kvm/gstage.c             |  67 +++++++++++++++
+ arch/riscv/kvm/mmu.c                | 127 +++++++++++++++++++++++++++-
+ arch/riscv/kvm/trace.h              |  22 +++++
+ arch/riscv/kvm/vcpu_exit.c          |   2 +
+ 5 files changed, 221 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18] arm64: mm: Handle Granule Protection Faults (GPFs)
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+If the host attempts to access granules that have been delegated for use
+in a realm these accesses will be caught and will trigger a Granule
+Protection Fault (GPF).
+
+A fault during a page walk signals a bug in the kernel and is handled by
+oopsing the kernel. A non-page walk fault could be caused by user space
+having access to a page which has been delegated to the kernel and will
+trigger a SIGBUS to allow debugging why user space is trying to access a
+delegated page.
+
+There is work in progress to unmap the guest_memfd backed private pages from the
+linear map. Until we get that support, we could get spurious GPFs from within
+the kernel, e.g., load_unaligned_zeropad(). So, try to fix them up for now.
+
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v17:
+ * Pass untagged address to die_kernel_fault() - Sashiko
+ * Explicitly check !user_mode() for fixups - Catalin
+ * Switch to BUS_OBJERR for si_code from SI_KERNEL - Catalin
+ * Clarify the commit description about the upcoming work on
+   unmapping guest_memfd backed pages from linear map
+Changes since v16:
+ * Update the commit description to indicate why we try to fixup GPFs
+Changes since v10:
+ * Don't call arm64_notify_die() in do_gpf() but simply return 1.
+Changes since v2:
+ * Include missing "Granule Protection Fault at level -1"
+---
+ arch/arm64/mm/fault.c | 30 ++++++++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 4/8] KVM: nSVM: Propagate hardware DecodeAssist bytes to VMCB12
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+DecodeAssists provides instruction bytes for nested page faults and
+intercepted page faults caused by data accesses.  When the feature is
+exposed to L1, copy fresh hardware-provided instruction bytes from VMCB02
+to VMCB12 for these exits.
+
+Leave the VMCB12 instruction-byte state untouched when DecodeAssists is
+not exposed.  Otherwise, invalidate the state for instruction-fetch page
+faults, unrelated exits, and exits without fresh hardware bytes.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 5/8] KVM: nSVM: Fetch DecodeAssist bytes for synthesized faults
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Hardware-reflected #NPF and #PF VM-Exits can propagate instruction bytes
+from VMCB02, but KVM-synthesized exits have no hardware-provided state for
+the current exit.
+
+Add kvm_fetch_guest_virt() as a wrapper around the generic guest virtual
+memory helper that applies instruction-fetch permissions.  When a
+synthesized data #NPF or #PF has no valid VMCB02 instruction bytes, fetch
+up to 15 bytes from L2's RIP while constructing VMCB12.  Preserve the bytes
+already read if a subsequent read cannot be completed.
+
+Limit each read to the current page so that linear address boundaries can
+be checked before continuing.  Outside 64-bit mode, truncate each address
+to 32 bits and limit the window at the code-segment limit.  In 64-bit mode,
+stop at a non-canonical address.
+
+Do not attempt the fallback for SEV guests, as KVM cannot read encrypted
+guest memory directly.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 64 +++++++++++++++++++++++++++++++++++++--
+ arch/x86/kvm/x86.c        | 23 +++++++++++---
+ arch/x86/kvm/x86.h        |  3 ++
+ 3 files changed, 83 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 1/8] KVM: x86: Provide INVLPG linear address to intercept handlers
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+INVLPG's memory operand is decoded with NoAccess, and thus src_val does
+not contain the operand address.  Intercept handlers therefore cannot
+construct exit state that reports the linear address from the existing
+x86_instruction_info fields.
+
+Add get_invlpg_linear_addr() to compute the address through __linearize(),
+using the same flags as em_invlpg(), and pass the result through
+x86_instruction_info.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/emulate.c     | 18 ++++++++++++++++++
+ arch/x86/kvm/kvm_emulate.h |  1 +
+ 2 files changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 8/8] KVM: selftests: Add nested SVM DecodeAssists test
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Add a focused nested SVM selftest for DecodeAssists.  Verify that KVM
+exposes the feature to L1 and synthesizes EXITINFO for representative
+MOV CR/DR, CLTS, INTn, INVLPG, and INVLPGA intercepts.
+
+Exercise instruction bytes for hardware and synthesized #NPF/#PF exits.
+Cover a synthesized #NPF that follows a hardware #NPF in the same emulated
+instruction, an unreadable instruction tail that leaves only the cached
+opcode, and the absence of bytes for an instruction-fetch #PF.  Modify the
+MOVSB opcode while its MMIO read is pending to verify that the emulator's
+cached bytes are preserved.
+
+Inject a userspace #PF while an MMIO read is pending.  Verify that after
+MMIO completion, L1 receives instruction bytes from the current RIP,
+not the previous instruction's emulator cache.
+
+The synthesized OUTSB #NPF and userspace-injected #PF cases run by
+default.  The forced-emulation #PF and instruction-intercept cases
+require kvm.force_emulation_prefix=1.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ .../kvm/x86/svm_nested_decode_assists_test.c  | 547 ++++++++++++++++++
+ 3 files changed, 549 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 6/8] KVM: nSVM: Use emulator bytes for synthesized nested #NPF
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Preserve the bytes used by the emulator when synthesizing a data #NPF.
+Reuse the fetch cache only when the fault is the current emulator
+exception, identified by fault == &ctxt->exception.
+
+Add an emulator accessor to copy cached instruction bytes, checking
+the RIP and cache bounds.  These checks alone do not establish that
+the cache belongs to the current emulation.
+
+Write the cached bytes directly to VMCB02 and fetch any missing tail
+through the instruction-fetch helper.  If the tail cannot be read,
+report only the bytes already available.  For SEV guests, retain only
+the cached bytes because KVM cannot fetch plaintext guest instructions.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/emulate.c     | 22 ++++++++++++++++++++++
+ arch/x86/kvm/kvm_emulate.h |  3 +++
+ arch/x86/kvm/svm/nested.c  | 34 ++++++++++++++++++++++++++++++++--
+ 3 files changed, 57 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 3/8] KVM: nSVM: Track valid hardware DecodeAssist bytes
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+VMCB02 instruction bytes are valid only for the hardware VM-Exit that
+populated them.  Track whether VMCB02 contains instruction bytes for the
+data #PF or #NPF currently being reflected to L1 so that stale bytes are
+not copied to VMCB12.
+
+Invalidate VMCB02's instruction-byte state when preparing VMCB02,
+normally in response to an emulated VMRUN.  Mark the bytes as valid only
+when the current VMCB02 exit is a data #PF or #NPF.  Opcode exits and
+instruction-fetch faults are excluded by inspecting the exit state.
+
+A subsequent change will use this state when propagating hardware
+DecodeAssist instruction bytes to VMCB12.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/nested.c | 38 +++++++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/svm/svm.h    |  3 +++
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 0/8] KVM: nSVM: Enable DecodeAssists for nested guests
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+The SVM DecodeAssists feature provides decode state for selected
+VM-Exits.  KVM currently does not expose this feature to L1.  Some L1
+hypervisors may therefore treat the platform's SVM support as
+incomplete.
+
+In practice, this was observed with Hyper-V running on top of KVM.
+Hyper-V appears to require DecodeAssists before enabling nested SVM for
+its guests.  Virtualizing the feature lets users enable Hyper-V
+virtualization features inside a Windows VM when needed, e.g. to run
+QEMU/KVM in WSL.
+
+Virtualize both parts of DecodeAssists for nested SVM.  For emulated
+MOV CR/DR, INTn, INVLPG, and related intercepts, populate EXITINFO1 as
+specified by the architecture.  INVLPGA's address remains in saved guest
+rAX.  Leave EXITINFO1 unchanged when DecodeAssists is not exposed.
+
+For data #NPF and intercepted data #PF exits, propagate current hardware
+instruction bytes when available.  For an emulator-generated #NPF, keep
+the bytes used to decode the instruction and fetch any missing tail.
+Queued #PF exits, including userspace-injected exceptions, use an
+on-demand fetch from the current L2 CS:RIP.  Instruction-fetch faults
+report zero bytes, and SEV guests do not use the memory-fetch fallback.
+
+The selftest covers synthesized EXITINFO1, hardware and synthesized
+instruction bytes, and truncated fetches.  Two MMIO cases check that
+emulator-generated #NPF exits retain cached bytes after instruction
+memory changes, while userspace-injected #PF exits do not reuse an old
+emulator cache after MMIO completion.
+
+The updated selftest passed with kvm.force_emulation_prefix both disabled
+and enabled in an isolated VM using the v6 implementation.  SEV paths
+have not been tested.
+
+Changes since v5:
+- Rebase onto kvm-x86/next at the base commit listed below.
+- Reuse __linearize() for INVLPG and name the instruction-info field
+  invlpg_linear_addr.
+- Integrate EXITINFO1 generation into svm_check_intercept() instead of
+  using a separate switch.  Leave undefined EXITINFO2 fields unchanged.
+- Invalidate instruction bytes by clearing only insn_len.  Leave the
+  VMCB12 fields untouched when DecodeAssists is not exposed, and stop
+  clearing unused instruction-byte buffer tails.
+- Remove the extra argument to nested_svm_exit_handled(); opcode exits
+  are excluded by the instruction-byte applicability check.
+- Replace the synthesized-byte staging buffer with direct VMCB02
+  updates, and add an emulator accessor instead of inspecting the fetch
+  cache in nSVM.  Reuse the cache only for the current emulator exception.
+- Add the complete fallback before cache reuse so that no intermediate
+  patch depends on a later patch to fetch missing bytes.  Reuse the
+  generic guest-memory read helper with instruction-fetch permissions,
+  checking address boundaries between page-sized chunks.
+- Extend the MOVSB regression test to modify the opcode while MMIO is
+  pending, restore userspace-injected #PF coverage, and give the MMIO
+  source its own page.  Both MMIO cases run without forced emulation.
+
+Previous versions:
+v5:
+https://lore.kernel.org/r/20260824123954.315112-1-zhang_wei@open-hieco.net
+v4:
+https://lore.kernel.org/r/cover.1787116250.git.zhang_wei@open-hieco.net
+v3:
+https://lore.kernel.org/r/cover.1785411877.git.zhang_wei@open-hieco.net
+v2:
+https://lore.kernel.org/r/cover.1783999988.git.zhang_wei@open-hieco.net
+v1:
+https://lore.kernel.org/r/20260629125205.52394-1-zhang_wei@open-hieco.net
+
+Tina Zhang (8):
+  KVM: x86: Provide INVLPG linear address to intercept handlers
+  KVM: nSVM: Synthesize DecodeAssists EXITINFO for emulated intercepts
+  KVM: nSVM: Track valid hardware DecodeAssist bytes
+  KVM: nSVM: Propagate hardware DecodeAssist bytes to VMCB12
+  KVM: nSVM: Fetch DecodeAssist bytes for synthesized faults
+  KVM: nSVM: Use emulator bytes for synthesized nested #NPF
+  KVM: nSVM: Advertise DecodeAssists to L1
+  KVM: selftests: Add nested SVM DecodeAssists test
+
+ arch/x86/kvm/cpuid.c                          |   1 +
+ arch/x86/kvm/emulate.c                        |  40 ++
+ arch/x86/kvm/kvm_emulate.h                    |   4 +
+ arch/x86/kvm/svm/nested.c                     | 163 +++++-
+ arch/x86/kvm/svm/svm.c                        |  34 +-
+ arch/x86/kvm/svm/svm.h                        |   3 +
+ arch/x86/kvm/x86.c                            |  23 +-
+ arch/x86/kvm/x86.h                            |   3 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ .../kvm/x86/svm_nested_decode_assists_test.c  | 547 ++++++++++++++++++
+ 11 files changed, 814 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 7/8] KVM: nSVM: Advertise DecodeAssists to L1
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+Advertise DecodeAssists to L1 now that KVM virtualizes the
+guest-visible DecodeAssist state in VMCB12: EXITINFO1 decode data for
+MOV CR/DR, INTn, and INVLPG exits, plus instruction bytes for nested
+page faults and intercepted #PF exits.  INVLPGA's linear address remains
+available directly from the saved guest rAX, as required by the APM.
+
+Expose the feature only when supported by hardware, as KVM still relies
+on hardware DecodeAssists for VM-Exits that are reflected directly from
+L2.
+
+With DecodeAssists exposed, QEMU configurations that require the feature
+(e.g. "-cpu ...,+decodeassists,...,enforce") are no longer rejected.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/cpuid.c   | 1 +
+ arch/x86/kvm/svm/svm.c | 2 ++
+ 2 files changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 2/8] KVM: nSVM: Synthesize DecodeAssists EXITINFO for emulated intercepts
+Author: Tina Zhang <zhang_wei@open-hieco.net>
+
+When the x86 emulator encounters an instruction intercepted by L1,
+svm_check_intercept() synthesizes a nested VM-Exit without fresh hardware
+DecodeAssist state.  Populate the architectural EXITINFO1 field when
+DecodeAssists is exposed to L1.
+
+Provide the GPR number for MOV CR/DR, the interrupt vector for INTn, and
+the linear address for INVLPG.  Leave EXITINFO1 clear for CLTS, LMSW,
+SMSW, selective CR0 writes, and INVLPGA; the INVLPGA address remains in
+guest rAX.  Leave EXITINFO1 unchanged when DecodeAssists is not exposed,
+and leave unrelated intercepts unchanged.
+
+Signed-off-by: Tina Zhang <zhang_wei@open-hieco.net>
+---
+ arch/x86/kvm/svm/svm.c | 32 +++++++++++++++++++++++++++++++-
+ 1 file changed, 31 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From ee5b1870c to 121da50eb
+KVM mailing list update from ee5b1870c to 121da50eb
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      2 google.com
+      1 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  Vincent Donnefort <vdonnefort@google.com>
+      1  Steven Price <steven.price@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v1] KVM: arm64: Advertise MMFR0 TGRAN for pVMs
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+Protected VMs can support granules bigger than 4K. Advertise TGRAN16 and
+TGRAN64. TGRAN4 wasn't advertised as it is enabled by default (supported
+when 0). Add it as well for consistence.
+
+Signed-off-by: Vincent Donnefort <vdonnefort@google.com>
+---
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v1] KVM: arm64: Fix protected VMs fault on system with pages
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+Just like commit 08f97454b7fa ("KVM: arm64: Fix protected mode handling
+of pages larger than 4kB") fixed the boot of non-protected VMs on system
+larger than 4K pages, align the fault IPA down to the page-size for
+protected VMs.
+
+To paraphrase Marc, pkvm_pgtable_stage2_map() assumes the address passed
+as a parameter is aligned to the size of the intended mapping, while
+HPFAR_EL2 gives the IPA minus the bottom 12 bits, regardless of the
+system page size configuration.
+
+Add a check at the start of pkvm_pgtable_stage2_map() as we do not
+support !PAGE_ALIGNED arguments.
+
+Fixes: ea03466e806f ("KVM: arm64: Handle aborts from protected VMs")
+Signed-off-by: Vincent Donnefort <vdonnefort@google.com>
+---
+ arch/arm64/kvm/mmu.c  | 2 +-
+ arch/arm64/kvm/pkvm.c | 3 +++
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v18] arm64: mm: Handle Granule Protection Faults (GPFs)
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+If the host attempts to access granules that have been delegated for use
+in a realm these accesses will be caught and will trigger a Granule
+Protection Fault (GPF).
+
+A fault during a page walk signals a bug in the kernel and is handled by
+oopsing the kernel. A non-page walk fault could be caused by user space
+having access to a page which has been delegated to the kernel and will
+trigger a SIGBUS to allow debugging why user space is trying to access a
+delegated page.
+
+There is work in progress to unmap the guest_memfd backed private pages from the
+linear map. Until we get that support, we could get spurious GPFs from within
+the kernel, e.g., load_unaligned_zeropad(). So, try to fix them up for now.
+
+Reviewed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v17:
+ * Pass untagged address to die_kernel_fault() - Sashiko
+ * Explicitly check !user_mode() for fixups - Catalin
+ * Switch to BUS_OBJERR for si_code from SI_KERNEL - Catalin
+ * Clarify the commit description about the upcoming work on
+   unmapping guest_memfd backed pages from linear map
+Changes since v16:
+ * Update the commit description to indicate why we try to fixup GPFs
+Changes since v10:
+ * Don't call arm64_notify_die() in do_gpf() but simply return 1.
+Changes since v2:
+ * Include missing "Granule Protection Fault at level -1"
+---
+ arch/arm64/mm/fault.c | 30 ++++++++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
