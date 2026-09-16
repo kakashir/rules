@@ -1,0 +1,2049 @@
+
+On /root/mail/repo:
+From 550c7fe8d to a018f1bf3
+KVM mailing list update from 550c7fe8d to a018f1bf3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     51 kernel.org
+     22 arm.com
+     13 linux.intel.com
+      6 rbox.co
+      5 gmail.com
+      4 proton.me
+      4 linux.dev
+      4 intel.com
+      2 redhat.com
+      2 linux.ibm.com
+      2 linaro.org
+      1 suse.de
+      1 openai.com
+
+Top 15 contributors (Based on Email Body)
+
+     51  Christian Brauner <brauner@kernel.org>
+     19  Suzuki K Poulose <suzuki.poulose@arm.com>
+      6  Xu Yilun <yilun.xu@linux.intel.com>
+      6  Michal Luczaj <mhal@rbox.co>
+      6  Lu Baolu <baolu.lu@linux.intel.com>
+      4  Peter Fang <peter.fang@intel.com>
+      4  Fuad Tabba <fuad.tabba@linux.dev>
+      4  David Ballesteros <davimaba.v@proton.me>
+      3  Steven Price <steven.price@arm.com>
+      3  Jia Jia <physicalmtea@gmail.com>
+      2  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      2  Anthony Harivel <aharivel@redhat.com>
+      1  =?UTF-8?q?Carlos=20L=C3=B3pez?= <clopez@suse.de>
+      1  Ruslan Vagner <rusya92266@gmail.com>
+      1  Kyle Zeng <kylebot@openai.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86/mmu: Fix NX page unaccounting for TDP MMU pages
+[PATCH] KVM: x86/mmu: Fix NX page unaccounting for TDP MMU pages
+Author: Carlos López <clopez@suse.de>
+
+unaccount_nx_huge_page() unconditionally passes KVM_SHADOW_MMU to
+untrack_possible_nx_huge_page(), which is incorrect, particularly on
+the path from kvm_recover_nx_huge_pages(), which handles pages from
+both MMUs. Fix this by retrieving the MMU type via is_tdp_mmu_page()
+and passing it down.
+
+Fixes: 6777885605e1 ("KVM: x86/mmu: Track possible NX huge pages separately for TDP vs. Shadow MMU")
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ arch/x86/kvm/mmu/mmu.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Release memory-attribute reservations abandoned on ENOMEM
+[PATCH v4 1/3] KVM: Release memory-attribute reservations abandoned on ENOMEM
+Author: David Ballesteros <davimaba.v@proton.me>
+
+kvm_vm_set_mem_attributes() reserves an xarray entry for every GFN in the
+range before storing anything, so that the store phase cannot fail partway
+through.  When a reservation fails, the loop jumps to out_unlock and the
+reservations already made are abandoned: nothing in the call releases them.
+A later request that clears a range covering them does erase them, as the
+clear stores NULL over the reservation, but nothing obliges userspace to
+issue one and a caller exploiting this will not; absent such a call the
+entries live until kvm_destroy_vm().  An unprivileged user with /dev/kvm on
+a VM with private-memory support can therefore leak kernel memory across
+calls (a 576-byte xa_node per 64 GFNs) for the life of the VM fd.
+
+The abandoned entries are not inert.  A bare reservation is an
+XA_ZERO_ENTRY.  kvm_range_has_memory_attributes() is inconsistent about it:
+the end =3D=3D start + 1 path and the general loop treat it as absent (matc=
+hing
+kvm_get_memory_attributes(), which maps it to NULL via xa_load()), but the
+!attrs fast path calls xas_find() directly, which returns the zero entry as
+present.  Via hugepage_has_attrs(), that makes
+kvm_arch_post_set_memory_attributes() mark a straddling head/tail hugepage
+"mixed" for a range whose attributes are in fact uniform, so KVM stops
+using a hugepage there until a later request re-covers it.
+
+Release the reservations this call made on the failure path.  xa_release()
+erases an entry only while it is still a reservation, so value entries that
+predate this call are left untouched; it takes no gfp and cannot fail.
+Only [start, i) is walked, i being the index whose reservation failed (no
+entry was created at or beyond it).
+
+Runtime-verified on v6.18.48 (isolated sw-protected VM, no KASAN, no fault
+injection; the reservations are left behind by real memcg pressure via
+clone(CLONE_VM), not by fault injection).  Unpatched, a failed request
+retains on the order of 450000 xa_nodes (~250 MiB), and with one of them
+inside a 2 MiB region a clear of the region's head page leaves pages_2m
+unchanged (the reservation is invisible to xa_load), a clear of two pages
+drops pages_2m by one and raises pages_4k by 512 (the hugepage is
+degraded), and a clear covering the whole 2 MiB restores it.  With this
+patch the same run retains under 2000 nodes -- three orders of magnitude
+less, at the level of run-to-run noise -- and pages_2m stays at 16 across
+all three clears: the reservations are released, so the hugepage is never
+degraded.  Both arms used the same kernel config and the same test binary.
+The bug reproduces with XA_FLAGS_ACCOUNT applied (patch 3/3), i.e.
+accounting alone does not fix it.
+
+Found by an AI-assisted security audit.
+
+Fixes: 5a475554db1e ("KVM: Introduce per-page memory attributes")
+Cc: stable@vger.kernel.org
+Assisted-by: Claude-Code:claude-opus-5
+Signed-off-by: David Ballesteros <davimaba.v@proton.me>
+---
+ virt/kvm/kvm_main.c | 24 +++++++++++++++++++++++-
+ 1 file changed, 23 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Fix and account mem_attr_array reservations abandoned on ENOMEM
+[PATCH v4 0/3] KVM: Fix and account mem_attr_array reservations abandoned on ENOMEM
+Author: David Ballesteros <davimaba.v@proton.me>
+
+Three small fixes to KVM's per-page memory attributes: release the xarray
+reservations that KVM_SET_MEMORY_ATTRIBUTES abandons when it fails partway
+through (1/3), make kvm_range_has_memory_attributes() agree with itself
+about what such a reservation means (2/3), and charge the xa_nodes to the
+caller's memcg as the code already intended (3/3).
+
+  1/3  Release the reservations abandoned on ENOMEM.  This is a plain bug:
+       xa_reserve() materializes entries GFN-by-GFN before the store phase,
+       and on failure the loop bails without releasing what it reserved.  A
+       later clear covering them does erase them, but nothing obliges
+       userspace to issue one; absent that, the reclaim path is
+       kvm_destroy_vm().  The retained entries are not inert -- an
+       abandoned reservation is an XA_ZERO_ENTRY, which
+       kvm_range_has_memory_attributes()'s !attrs fast path counts as
+       present (raw xas_find()) while kvm_get_memory_attributes() treats
+       it as absent, so a straddling hugepage over such an entry is marked
+       mixed and KVM stops using a hugepage for a range whose attributes
+       are uniform.  xa_release() erases only entries still reserved,
+       leaving pre-existing value entries untouched.
+
+  2/3  Make kvm_range_has_memory_attributes() consistent about
+       reservations.  The reader side of the same bug: the !attrs fast
+       path treats an XA_ZERO_ENTRY as present via raw xas_find(), while
+       the single-GFN path and the general loop treat it as absent
+       (matching xa_load()).  Make the fast path skip reservations too, so
+       all three paths agree.  A consistency fix, not a fix for a reachable
+       bug: every caller holds slots_lock, so with 1/3 applied no caller
+       can observe a reservation.  Depends on 1/3, which must land first --
+       today a clear over a range of pure reservations erases them as a
+       side effect of not taking the idempotency early-out, and this patch
+       removes that cleanup.  Only 1/3 carries Cc: stable.
+
+  3/3  Account the nodes to the caller's memcg (XA_FLAGS_ACCOUNT), so the
+       growth is attributed and cgroup-limited tenants are contained.
+       Unchanged in substance from v1's 2/2.  Not tagged for stable, since
+       it changes observable behaviour (see its changelog).
+
+Order: 1/3 (leak) and 2/3 (reader) are the two sides of the correctness
+bug; 3/3 (accounting) comes last because it makes ENOMEM reachable from a
+cgroup-local condition, so the leak must be fixed before the path that
+makes it easy to hit.
+
+No hard per-VM bound is proposed here.  v1..v3 carried one (a constant,
+KVM_MEM_ATTR_MAX_GFNS =3D 2^25 GFNs); it does not work, and that is now
+measured: a legitimate 256 GiB confidential guest materializes 2^26
+attribute entries in a single ioctl -- 2x that cap (~585 MiB of xa_nodes,
+one 576-byte node per 64 GFNs); a 1 TiB guest needs 2^28.  No constant is
+both large enough not to break real TDX/SNP guests and small enough to
+bound the host.  The bound therefore moves to a separate RFC that lays out
+the problem, including the memslot-coverage and range-representation
+alternatives, rather than shipping a number that breaks a supported
+configuration.
+
+Measured (isolated sw-protected VM on v6.18.48, build-id verified, no
+KASAN; the reservations are left behind by real memcg pressure via
+clone(CLONE_VM), not by fault injection):
+
+  - hugepage effect (motivating 1/3 and 2/3): with a reservation left
+    inside a 2 MiB region, KVM_GET_STATS_FD shows pages_2m unchanged
+    after a 4 KiB clear (the reservation is invisible to xa_load),
+    pages_2m 16->15 and pages_4k 0->512 after an 8 KiB clear (one
+    hugepage degraded), and pages_2m back to 16 after a 2 MiB clear
+    (repaired).  Reproduced with the accounting flag applied, i.e.
+    accounting alone does not fix it.
+  - the same measurement re-run on a kernel carrying this series: the
+    failed request retains three orders of magnitude fewer xa_nodes and
+    pages_2m stays at 16 across all three clears, i.e. the reservations are
+    released and the hugepage is never degraded.  Same kernel config and
+    same test binary in both arms; kernel identity checked against
+    /sys/kernel/notes.
+  - 3/3, containment: without the flag a process in a 256 MiB cgroup
+    grows 512 MiB of radix_tree_node slab with memory.current flat
+    (memcg inert); with the flag the memcg OOM killer selects the
+    attacker in its own slice (CONSTRAINT_MEMCG), host untouched.
+
+Not verified: the TDX/SNP hardware paths (no hardware); the
+software-protected path is verified end-to-end.
+
+The report and series are intentionally public: the finding is AI-assisted,
+which Documentation/process/security-bugs.rst says must be treated as
+public.  security@kernel.org was Cc'd on the earlier revisions and is
+dropped here since the thread is public and archived.  A reproducer exists
+and was used for the measurements above; per the same document it is not
+attached, and is available to maintainers on request.
+
+---
+Revision history, for reviewers who followed the earlier postings:
+
+v1..v3 all bounded materialization with the constant above and iterated on
+the mechanism around it, which carried its own defects across revisions (a
+clear-path bound bypass in v1, an O(array) rescan under slots_lock, a
+phantom-budget exhaustion).  v4 drops that mechanism entirely and keeps the
+two correctness fixes that were hiding underneath it, plus the accounting
+one-liner.
+
+Two errata in the earlier thread: the 2/2 of v3 went out with a
+"[PATCH v2 2/2]" subject by mistake (its Message-ID and threading were v3),
+and the "Proposed fix" section of the v2/v3 cover letters had gone stale --
+it still described the per-mutating-ioctl rescan of v1 and, in v3,
+contradicted that revision's own "charge exactly with xa_cmpxchg"
+changelog.
+
+v3: https://lore.kernel.org/r/20260911221302.53013-1-davimaba.v@proton.me
+v2: https://lore.kernel.org/r/20260911203238.30088-1-davimaba.v@proton.me
+v1: https://lore.kernel.org/r/20260911184819.101123-1-davimaba.v@proton.me
+
+ virt/kvm/kvm_main.c | 39 ++++++++++++++++++++++++++++++----------
+ 1 file changed, 35 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: protected VM: Handle set_one_reg CNTVCT_EL0/CNTPCT_EL0
+[PATCH v18 01/23] KVM: arm64: protected VM: Handle set_one_reg CNTVCT_EL0/CNTPCT_EL0
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Protected VMs doesn't allow setting offsets for virtual and phyiscal
+counters, as the offset is always fixed to 0. The VM ioclt is filtered
+out based on the cap. However we don't prevent the userspace from trying
+to write to the CNTVCT/CNTPCT registers. This would lead to KVM triggering
+a WARN() in timer_set_offset() as the vm_offset pointer is set to NULL.
+
+Fix this by always "fixing" the timer offsets to 0 and marking that the
+timer offset is set in the kvm->arch.flags at pKVM init time. The
+userspace cannot use the KVM_ARM_SET_COUNTER_OFFSET, as it is blocked for a
+protected VM.
+
+A userspace writing to the SYS_CNT*CT would observe success, without
+any real effect. This was chosen over preventing the writes to these
+registers and returning -EPERM.
+
+With that, we always have a valid vm_offset pointer, remove the checks for
+vm_offset == NULL.
+
+Reported by Sashiko here
+https://lore.kernel.org/all/20260908164641.416911F00A3A@smtp.kernel.org
+
+Fixes: f7d05ee84a6a ("KVM: arm64: Prevent host from managing timer offsets for protected VMs")
+Suggested-by: Marc Zyngier <maz@krenel.org>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arch_timer.c    | 15 +++++----------
+ arch/arm64/kvm/arm.c           | 15 +++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/pkvm.c | 26 +++++++++++++-------------
+ include/kvm/arm_arch_timer.h   |  3 +--
+ 4 files changed, 34 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: CCA: Add basic plumbing for Realms
+[PATCH v18 00/23] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This series is a trimmed down version of the Arm CCA KVM support, previously
+posted here [0]. Like in the v17, we have tried to split the entire series
+into the following chunks.
+
+ 1) Base RMM RMI support under drivers/firmware/arm_rmm -> [1]
+ 2) Linux Host support for handling GPFs - [2]
+ 3) NEW: Enlighten KVM arm64 about the different VM types and use call
+    backs for the VM type, rather than spilling the is_this_type_of_vm()
+    everywhere. Adds VCPU and Stage2 MMU related callbacks with support
+    for the existing VM types. There are other places where we may be
+    able to abstract, but those need careful performance evaluations
+    to make sure they are fit (e.g., vcpu_run)
+
+   Later in the series, we generalise the predicate "kvm_vm_is_protected()"
+   to cover all  "Confidential" VMs (which includes Protected VM and Realms),
+   which allows us to handle common themes without having to do things like :
+     if (kvm_vm_is_protected() || kvm_vm_is_realm()),
+     instead:
+     if (kvm_vm_is_confidential())
+   Also replaces the code with precise check for a given VM type to
+   avoiding combination of if (). e.g,, kvm_vm_is_unprotected_pkvm(kvm).
+   The checks under arch/arm64/kvm/{nvhe,pkvm} still retain the vm_is_protected()
+   check as pVMs are the only possible protected VMs there.
+   
+ 4) Bare minimal Realm VM support without the actual functionality to
+    run a Realm. This would help the maintainers to review the series in
+    smaller chunks. This doesn't depend on [1] and can be independently
+    merged, without being "functional".
+    This series includes vcpu operations and the s2 vm operations, which
+    do need the RMI driver backend to be meaningful. But the KVM handler
+    is in the right shape. The remaining changes would be added once the
+    RMI firmware library lands.
+ 5) Core implementation of the RMI driver for KVM and actual enablement of the
+    Realm support. This depends on (1), (2) and the guest-memfd-in-place
+    conversion series v12 from Ackerley. This is available here at the integration
+    branch [3]
+
+This series is comprised of (3) and (4) above.
+
+The integration branch has been tested with the following components:
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3 [4]
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git cca/kvm-v18
+
+[0] Arm CCA KVM Support v16 : https://lore.kernel.org/all/20260803134403.80630-1-steven.price@arm.com
+[1] Linux firmware RMI https://lore.kernel.org/all/20260912083611.2513845-1-suzuki.poulose@arm.com
+[2] Linux GPF Host https://lore.kernel.org/all/20260913070459.2547407-1-suzuki.poulose@arm.com
+[3] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v18/integration
+[4] https://support.arm.com/documentation/den0137/2-0bet3/
+
+Changes since v17:
+https://lore.kernel.org/all/20260908162223.1683432-1-suzuki.poulose@arm.com 
+
+ - Add a patch to fix pKVM handling of SYS_CNTVCT/CNTPCT to override the counter
+   offset (Patch1)
+ - Restrict Realms to VGIC v3 only - New patch
+ - Add kvm_vm_is_unprotected() to replace is_protected_kvm_enabled() &&
+   !kvm_vm_is_protected() - New patch
+ - Use macro to initialize the per-flavor vcpu, s2_vm ops
+ - Add a wrapper to initialise vcpu and s2_vm ops with a BUILD_BUG_ON()
+   for the array size checks against VM flavour types
+ - Drop forward decalaration of the vcpu, s2_vm operations that spoiled the
+   fun ;-)
+ - Remove irrelevant comment about the order of timer loading for !VHE
+ - Use the explicti kvm_call_hyp_nvhe for pKVM specific ops
+ - Don't call nvhe_vcpu_put from pkvm_vcpu_put, open code them
+ - Drop cpu argument for vcpu_load() callback. We set the cpu
+   before the callbacks are invoked
+ - Drop kvm_vm_is_confidential(), instead widen the scope of kvm_vm_is_protected()
+   to cover pVMs and Realms. Add an explicit helper kvm_vm_is_protected_pkvm()
+   for the cases where we need to check for a "pVM on pKVM"
+ - Add kvm_vm_hyp_is_pkvm() for checking if the VM is running on pKVM.
+   covers both unprotected and pvms. But really uses is_protected_kvm_enabled()
+   under the hood
+ - Add kvm_vm_hyp_is_distrusting() to cover pKVM guests (both protected and
+   unprotected) and Realms. Use this for preventing the vgic v2 mapping into
+   Stage2 for a guest
+ - Drop superfluous !kvm check from kvm_vm_ioctl_enable_cap() - Sashiko
+ - Drop KVM_CAP_CREATE_IRQCHIP, as we don't support VGIC_V2 for Realms
+ - Filter out the vm_ioctls that are based on blocked cap.
+ - Repurpose the pkvm plumbing for filtering the caps and ioctl to generic
+   and plumb the Realm support in
+ - s/PKVM/pKVM for the comments
+ - Drop type argument for pkvm_init_host_vm and also drop protected variable,
+   now that we have the vm_flavor to check.
+ - Use kvm_vm_hyp_is_pkvm() to replace is_protected_kvm_enabled() with valid
+   kvm instance
+ - CCA: Merge the GET/SET REG handling patches into a single patch
+ - CCA: Reword the commit description for SVE VL access handling
+ - Reordered the patches to group the Realm realted to changes to the rear end
+
+Jean-Philippe Brucker (2):
+  KVM: arm64: CCA: Expose SVE VL register before VCPU finalization
+  KVM: arm64: CCA: Control user register access for Realms
+
+Steven Price (3):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Support timers in realm RECs
+  KVM: arm64: CCA: WARN on injected undef exceptions
+
+Suzuki K Poulose (18):
+  KVM: arm64: protected VM: Handle set_one_reg CNTVCT_EL0/CNTPCT_EL0
+  KVM: arm64: Disable Steal time accounting for protected guests
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: Reuse kvm_stage2_unmap_range in kvm_unmap_gfn_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Abstract out memory abort handling
+  KVM: arm64: Use kvm_vm_is_unprotected() for !kvm_vm_is_protected()
+  KVM: arm64: Widen the scope of "protected" VMs
+  KVM: arm64: Add a helper for VMs running on hyp that don't trust the
+    host
+  KVM: arm64: CCA: Add a new mode for supporting Realm guests
+  KVM: arm64: CCA: Add VCPU load/put for Realms
+  KVM: arm64: CCA: Add bare minimal S2 operations for Realm
+  KVM: arm64: CCA: Introduce Realms
+  KVM: arm64: CCA: Mandate VGIC_V3 for Realms
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ arch/arm64/include/asm/kvm_emulate.h          |  16 +
+ arch/arm64/include/asm/kvm_host.h             |  63 +++-
+ arch/arm64/include/asm/kvm_pgtable.h          |   6 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |  25 +-
+ arch/arm64/include/asm/kvm_rmi.h              |  61 ++++
+ arch/arm64/include/asm/virt.h                 |   1 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arch_timer.c                   |  37 +-
+ arch/arm64/kvm/arm.c                          | 330 +++++++++++++++---
+ arch/arm64/kvm/guest.c                        |  73 +++-
+ arch/arm64/kvm/handle_exit.c                  |   2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |  28 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   1 +
+ arch/arm64/kvm/hypercalls.c                   |   4 +-
+ arch/arm64/kvm/inject_fault.c                 |   1 +
+ arch/arm64/kvm/mmu.c                          | 210 ++++++++---
+ arch/arm64/kvm/pkvm.c                         |   6 +-
+ arch/arm64/kvm/pvtime.c                       |  14 +-
+ arch/arm64/kvm/rmi.c                          |  18 +
+ arch/arm64/kvm/sys_regs.c                     |  29 +-
+ arch/arm64/kvm/vgic/vgic-init.c               |   3 +
+ include/kvm/arm_arch_timer.h                  |   3 +-
+ include/kvm/arm_psci.h                        |   2 +
+ 24 files changed, 758 insertions(+), 180 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/uv: Rework page allocation for guest variable storage area
+[PATCH] s390/uv: Rework page allocation for guest variable storage area
+Author: Heiko Carstens <hca@linux.ibm.com>
+
+Alexander Gordeev reported that the allocation of pages of the
+guest variable storage area via the uv_alloc_range_cb() callback
+of apply_to_page_range() will cause problems as soon as s390 fully
+supports lazy mmu mode.
+
+Problem is that uv_alloc_range_cb() allocates pages with GFP_KERNEL while
+preemption would be disabled. This would result in reports like this:
+
+ BUG: sleeping function called from invalid context at ./include/linux/sched/mm.h:322
+ in_atomic(): 1, irqs_disabled(): 0, non_block: 0, pid: 6092, name: qemu-kvm
+ preempt_count: 1, expected: 0
+...
+ Call Trace:
+  dump_stack_lvl+0xae/0x108
+  __might_resched+0x1de/0x2f0
+  prepare_alloc_pages+0x1ba/0x220
+  __alloc_frozen_pages_noprof+0xc6/0x390
+  alloc_pages_mpol+0xe6/0x220
+  alloc_frozen_pages_noprof+0x5c/0x80
+  alloc_pages_noprof+0x22/0x80
+  uv_alloc_range_cb+0x30/0x300
+  apply_to_pte_range+0x11a/0x3b0
+  apply_to_pmd_range+0x13a/0x250
+  __apply_to_page_range+0x232/0x4d0
+  apply_to_page_range+0x28/0x40
+  uv_alloc_stor_var+0x5e/0x90
+  kvm_s390_pv_alloc_vm+0x118/0x1e0 [kvm]
+  kvm_s390_pv_init_vm+0x84/0x2e0 [kvm]
+  kvm_s390_handle_pv+0x502/0xf70 [kvm]
+  kvm_arch_vm_ioctl+0x234/0xdd0 [kvm]
+  kvm_vm_ioctl+0x33a/0x890 [kvm]
+  __s390x_sys_ioctl+0xfa/0x130
+  __do_syscall+0x1fc/0x700
+  system_call+0x72/0x90
+
+Preallocate the pages and make use of vm_area_map_pages() to address this
+potential future bug.
+
+Reported-by: Alexander Gordeev <agordeev@linux.ibm.com>
+Closes: https://lore.kernel.org/all/e9449c63-b8d2-4ed9-a184-7dcab3e8dfce-agordeev@linux.ibm.com
+Signed-off-by: Heiko Carstens <hca@linux.ibm.com>
+---
+
+Notes:
+    This is untested, and only based on the report from Alexander.
+
+ arch/s390/kernel/uv.c | 41 +++++++++++++++++++++++------------------
+ 1 file changed, 23 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost/vsock: Fix socket state constant
+[PATCH net v2 1/5] vhost/vsock: Fix socket state constant
+Author: Michal Luczaj <mhal@rbox.co>
+
+Refactor under Fixes missed one: SS_UNCONNECTED (1) -> TCP_CLOSE (7).
+Until now, sk->sk_state = 1 stood for TCP_ESTABLISHED.
+
+Fixes: 3b4477d2dcf2 ("VSOCK: use TCP state constants for sk_state")
+Signed-off-by: Michal Luczaj <mhal@rbox.co>
+---
+ drivers/vhost/vsock.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vsock: Fix connect() races
+[PATCH net v2 0/5] vsock: Fix connect() races
+Author: Michal Luczaj <mhal@rbox.co>
+
+Handle racy socket changes in connect(). Plus related tweaks.
+
+---
+Changes in v2:
+- CC: drop bouncing addresses
+- Add more related fixes
+- Handle ENOBUFS (Bobby)
+- Consume sk_err (Stefano)
+- Link to v1: https://patch.msgid.link/20260909-vsock-connect-reset-closing-v1-1-50298b9ccfbf@rbox.co
+
+---
+Michal Luczaj (5):
+      vhost/vsock: Fix socket state constant
+      vsock/virtio: Streamline socket reset on transport/PM event
+      vsock: Enforce no-transport invariant for TCP_LISTEN sockets
+      vsock: Do not reset a TCP_CLOSING socket
+      vsock: Handle sudden TCP_CLOSE during connect
+
+ drivers/vhost/vsock.c            |  2 +-
+ net/vmw_vsock/af_vsock.c         | 32 ++++++++++++++++++--------------
+ net/vmw_vsock/virtio_transport.c |  3 +++
+ 3 files changed, 22 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  cpuidle: add per-CPU latency_limit_ns sysfs attribute
+[PATCH 1/1] cpuidle: add per-CPU latency_limit_ns sysfs attribute
+Author: Anthony Harivel <aharivel@redhat.com>
+
+Add a per-CPU sysfs attribute at:
+  /sys/devices/system/cpu/cpuN/cpuidle/latency_limit_ns
+
+This allows privileged userspace to set a governor-respected upper
+bound on the exit latency for idle state selection on a given CPU.
+When set (non-zero), cpuidle_governor_latency_req() returns the
+minimum of the existing PM QoS constraints and latency_limit_ns,
+so all governors (menu, TEO, haltpoll) automatically respect it
+without per-governor modifications.
+
+Use case: cloud operators running mixed workloads can cap idle
+depth on CPUs pinned to latency-sensitive VMs while allowing other
+CPUs to enter deep C-states for energy savings. The interface is
+latency-based (nanoseconds) rather than C-state-index-based, making
+it portable across Intel/AMD/ARM without uarch-specific tuning.
+
+Signed-off-by: Anthony Harivel <aharivel@redhat.com>
+---
+ drivers/cpuidle/governor.c | 10 +++++++++-
+ drivers/cpuidle/sysfs.c    | 36 ++++++++++++++++++++++++++++++++++++
+ include/linux/cpuidle.h    |  1 +
+ 3 files changed, 46 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+Exist: [PATCH 1/1] cpuidle: add per-CPU latency_limit_ns sysfs attribute
+ Skip: [PATCH RFC 0/1] cpuidle: add per-CPU latency_limit_ns sysfs attribute
+New:  KVM: fix comment typo in kvm_host.h
+[PATCH] KVM: fix comment typo in kvm_host.h
+Author: Ruslan Vagner <rusya92266@gmail.com>
+
+Fix the spelling in comments. No functional change.
+
+Signed-off-by: Ruslan Vagner <rusya92266@gmail.com>
+---
+ include/linux/kvm_host.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  file: install files on syscall exit
+[PATCH RFC POC 01/50] file: install files on syscall exit
+Author: Christian Brauner <brauner@kernel.org>
+
+So we've spoken about this idea quite a few times over the years that
+we could reserve fds and files on a task and then install or a clean
+them up on syscall success or error and get rid of most of the
+complicated cleanup dance that we have.
+
+My original approach to this had been to implement FD_PREPARE() based on
+cleanup guards and use scopes to make this happen. The other idea was
+what I'm illustrating here. It is overall equally robust and makes the
+install fd and file pattern work even if it there's a ton of cleanup or
+setup work happening in the middle. This is particular evident in the
+conversions of various dma/drm code later in the series.
+
+So this lets the syscall path do the install. fd_prepare() allocates a
+descriptor like get_unused_fd_flags() does and records it in a slot on
+the task. fd_stage() attaches the file to that slot and returns the
+number.
+
+When the syscall returns success the exit path installs every staged
+file. When it returns an error it drops the descriptors and the files.
+
+So a caller reserves, hands the number to userspace whenever it wants,
+creates the file, stages it and returns errors without unwinding
+anything.
+
+fd_prepare() returns the slot itself, as a const pointer. The
+preexisting fd_prepare_fd() and fd_prepare_file() give access to the fd
+and file.
+
+get_unused_fd_flags() and fd_install() don't change. A descriptor is
+only reserved where a caller asks for it. And open(), dup() and all
+other syscalls that maximize speed simply use FD_ADD().
+
+The task keeps two slots inline. For SCM_RIGHTS and multi-descriptor
+ioctls a spill array is added. It stick with the task.
+
+Reservations belong to the thread and the syscall that made them. A
+child of fork() starts without any. A thread can't unshare its
+fdtagble with outstanding reservations. Kernel threads never return to
+userspace so nothing would commit. Anything left at exit is a bug and
+gets warned about and dropped.
+
+Signed-off-by: Christian Brauner (Amutable) <brauner@kernel.org>
+---
+ fs/file.c             | 203 +++++++++++++++++++++++++++++++++++++++++++++++++-
+ include/linux/file.h  |  37 +++++++--
+ include/linux/sched.h |  21 ++++++
+ kernel/exit.c         |   1 +
+ kernel/fork.c         |   1 +
+ 5 files changed, 256 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  file: handle files on syscall exit
+[PATCH RFC POC 00/50] file: handle files on syscall exit
+Author: Christian Brauner <brauner@kernel.org>
+
+Hey,
+
+The idea in this series is old-ish and really never let go of me and so
+I wanted to at least dump it onto the list once even if it's just for
+illustrative purposes.
+
+I still had parts of an implementation laying around that I started
+montsh ago alongside FD_PREPARE()/FD_ADD(). I sat down and finished it.
+
+We've spoken about this idea a few times over the years that we could
+reserve fds and files on a task and then install or a clean them up on
+syscall success or error and get rid of most of the complicated cleanup
+dance that we have in a lot of code. In particular drm. It last came up
+during the Rust file descriptor reservation discussion quite some time
+ago.
+
+TL;DR, this lets arch code handle fd install and cleanup. fd_prepare()
+allocates a descriptor like get_unused_fd_flags() does and records it in
+a slot on the task. fd_stage() attaches the file to that slot and
+returns the number.
+
+When the syscall returns success the exit path installs every staged
+file. When it returns an error it drops the descriptors and the files.
+
+So a caller reserves, hands the number to userspace whenever it wants,
+creates the file, stages it and returns errors without unwinding
+anything.
+
+fd_prepare() returns the slot itself, as a const pointer. The
+preexisting fd_prepare_fd() and fd_prepare_file() give access to the fd
+and file.
+
+get_unused_fd_flags() and fd_install() don't change. A descriptor is
+only reserved where a caller asks for it. And open(), dup() and all
+other syscalls that maximize speed simply use FD_ADD().
+
+The task keeps two slots inline. For SCM_RIGHTS and multi-descriptor
+ioctls a spill array is added. It stick with the task.
+
+Reservations belong to the thread and the syscall that made them. A
+child of fork() starts without any. A thread can't unshare its fdtagble
+with outstanding reservations. Kernel threads never return to userspace
+so nothing would commit. Anything left at exit is a bug and gets warned
+about and dropped.
+
+Christian
+
+Signed-off-by: Christian Brauner (Amutable) <brauner@kernel.org>
+---
+Christian Brauner (50):
+      file: install files on syscall exit
+      entry: commit fds on syscall exit
+      alpha: commit fds on syscall exit
+      ARC: commit fds on syscall exit
+      ARM: commit fds on syscall exit
+      arm64: commit fds on syscall exit
+      csky: commit fds on syscall exit
+      hexagon: commit fds on syscall exit
+      m68k: commit fds on syscall exit
+      microblaze: commit fds on syscall exit
+      MIPS: commit fds on syscall exit
+      nios2: commit fds on syscall exit
+      openrisc: commit fds on syscall exit
+      parisc: commit fds on syscall exit
+      sh: commit fds on syscall exit
+      sparc: commit fds on syscall exit
+      um: commit fds on syscall exit
+      xtensa: commit fds on syscall exit
+      file: require the syscall exit hook from every architecture
+      file: warn when the descriptor table is unshared with slots
+      io_uring: commit fds per request
+      net: install SCM_RIGHTS descriptors when recvmsg() returns
+      file: open-code receive_fd()'s immediate install
+      file: make FD_ADD() a standalone immediate install
+      file: reimplement FD_PREPARE() on the deferred fd_prepare() path
+      dma-buf: stop unwinding sync file descriptors by hand
+      drm/amdkfd: stop collecting CRIU dma-buf descriptors for a final install
+      drm/msm: install the out-fence descriptor when the ioctl returns
+      drm/virtio: install the out-fence descriptor when the ioctl returns
+      drm/vmwgfx: install the out-fence descriptor when the ioctl returns
+      vfio: install the migration data descriptor when the ioctl returns
+      liveupdate: install the session descriptors when the ioctl returns
+      io_uring/zcrx: install the exported descriptor when the request returns
+      sctp: install the peeloff descriptor when the syscall returns
+      ALSA: compress: install the task descriptors when the ioctl returns
+      nitro_enclaves: install the enclave descriptor when the ioctl returns
+      tpm: vtpm_proxy: install the server descriptor when the ioctl returns
+      perf: stop putting the event descriptor back on failure
+      seccomp: stop putting the listener descriptor back on failure
+      KVM: stop putting descriptors back on failure
+      KVM: guest_memfd: stop putting the descriptor back on failure
+      drm: stop unwinding descriptors by hand
+      drm/amdgpu: stop unwinding the fence descriptor by hand
+      drm/etnaviv: install the out-fence descriptor when the ioctl returns
+      accel/habanalabs: stop putting the dma-buf descriptor back on failure
+      xen/gntdev-dmabuf: stop putting the descriptor back on failure
+      iio: buffer: install the buffer descriptor when the ioctl returns
+      misc: fastrpc: install the dma-buf descriptor when the ioctl returns
+      iommufd: stop putting descriptors back on failure
+      Drivers: hv: mshv: stop putting descriptors back on failure
+
+ arch/alpha/include/asm/thread_info.h         |   2 +
+ arch/alpha/kernel/entry.S                    |  24 ++-
+ arch/alpha/kernel/ptrace.c                   |   3 +
+ arch/arc/include/asm/thread_info.h           |   2 +
+ arch/arc/kernel/entry.S                      |   5 +
+ arch/arc/kernel/ptrace.c                     |   4 +
+ arch/arm/include/asm/thread_info.h           |   2 +
+ arch/arm/kernel/entry-common.S               |   2 +
+ arch/arm/kernel/ptrace.c                     |   4 +
+ arch/arm64/include/asm/thread_info.h         |   4 +-
+ arch/arm64/kernel/ptrace.c                   |   4 +
+ arch/csky/include/asm/thread_info.h          |   2 +
+ arch/csky/kernel/entry.S                     |   9 +
+ arch/csky/kernel/ptrace.c                    |   4 +
+ arch/hexagon/include/asm/thread_info.h       |   2 +
+ arch/hexagon/kernel/traps.c                  |   4 +
+ arch/m68k/68000/entry.S                      |  10 ++
+ arch/m68k/coldfire/entry.S                   |  12 ++
+ arch/m68k/include/asm/thread_info.h          |   2 +
+ arch/m68k/kernel/entry.S                     |   2 +
+ arch/m68k/kernel/ptrace.c                    |   3 +
+ arch/microblaze/include/asm/thread_info.h    |   5 +-
+ arch/microblaze/kernel/ptrace.c              |   4 +
+ arch/mips/include/asm/thread_info.h          |   5 +-
+ arch/mips/kernel/ptrace.c                    |   4 +
+ arch/nios2/include/asm/thread_info.h         |   2 +
+ arch/nios2/kernel/entry.S                    |   5 +
+ arch/nios2/kernel/ptrace.c                   |   3 +
+ arch/openrisc/include/asm/thread_info.h      |   5 +-
+ arch/openrisc/kernel/entry.S                 |   5 +-
+ arch/openrisc/kernel/ptrace.c                |   4 +
+ arch/parisc/include/asm/thread_info.h        |   2 +
+ arch/parisc/kernel/entry.S                   |  12 ++
+ arch/parisc/kernel/ptrace.c                  |   4 +
+ arch/powerpc/platforms/cell/spufs/inode.c    |  12 +-
+ arch/sh/include/asm/thread_info.h            |  10 +-
+ arch/sh/kernel/entry-common.S                |   8 +-
+ arch/sh/kernel/ptrace_32.c                   |   4 +
+ arch/sparc/include/asm/thread_info_32.h      |   2 +
+ arch/sparc/include/asm/thread_info_64.h      |   9 +-
+ arch/sparc/kernel/entry.S                    |   2 +-
+ arch/sparc/kernel/ptrace_32.c                |   4 +
+ arch/sparc/kernel/ptrace_64.c                |   4 +
+ arch/sparc/kernel/syscalls.S                 |   4 +-
+ arch/um/include/asm/thread_info.h            |   2 +
+ arch/um/kernel/ptrace.c                      |   4 +
+ arch/xtensa/include/asm/thread_info.h        |   2 +
+ arch/xtensa/kernel/entry.S                   |   5 +
+ arch/xtensa/kernel/ptrace.c                  |   4 +
+ drivers/accel/habanalabs/common/memory.c     |  13 +-
+ drivers/char/tpm/tpm_vtpm_proxy.c            |  30 +---
+ drivers/dma-buf/dma-buf.c                    |  33 ++--
+ drivers/dma-buf/sw_sync.c                    |  40 ++---
+ drivers/dma-buf/sync_file.c                  |  52 ++----
+ drivers/gpio/gpiolib-cdev.c                  |  18 +-
+ drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c       |  16 +-
+ drivers/gpu/drm/amd/amdkfd/kfd_chardev.c     |  67 ++------
+ drivers/gpu/drm/drm_lease.c                  |  20 +--
+ drivers/gpu/drm/drm_prime.c                  |  13 +-
+ drivers/gpu/drm/drm_syncobj.c                |  44 ++---
+ drivers/gpu/drm/etnaviv/etnaviv_gem_submit.c |  14 +-
+ drivers/gpu/drm/msm/msm_gem_submit.c         |  22 +--
+ drivers/gpu/drm/msm/msm_gem_vma.c            |  22 +--
+ drivers/gpu/drm/msm/msm_perfcntr.c           |   6 +-
+ drivers/gpu/drm/virtio/virtgpu_submit.c      |  32 ++--
+ drivers/gpu/drm/vmwgfx/vmwgfx_execbuf.c      |  29 ++--
+ drivers/hv/mshv_root_main.c                  |  27 +--
+ drivers/hv/mshv_vtl_main.c                   |  20 +--
+ drivers/iio/industrialio-buffer.c            |  26 +--
+ drivers/iommu/iommufd/eventq.c               |  39 ++---
+ drivers/media/mc/mc-request.c                |   6 +-
+ drivers/misc/fastrpc.c                       |  19 +--
+ drivers/misc/ntsync.c                        |   6 +-
+ drivers/vfio/vfio_main.c                     |  25 +--
+ drivers/virt/nitro_enclaves/ne_misc_dev.c    |  33 ++--
+ drivers/xen/gntdev-dmabuf.c                  |  14 +-
+ fs/eventfd.c                                 |   6 +-
+ fs/eventpoll.c                               |   6 +-
+ fs/exec.c                                    |   3 +
+ fs/file.c                                    | 245 +++++++++++++++++++++++++--
+ fs/namespace.c                               |  12 +-
+ fs/nsfs.c                                    |   6 +-
+ fs/xfs/xfs_handle.c                          |   6 +-
+ include/linux/entry-common.h                 |   8 +-
+ include/linux/file.h                         | 160 +++++------------
+ include/linux/sched.h                        |  21 +++
+ include/linux/thread_info.h                  |   2 +
+ io_uring/io_uring.c                          |  27 +++
+ io_uring/mock_file.c                         |   5 +-
+ io_uring/zcrx.c                              |  25 +--
+ kernel/bpf/bpf_iter.c                        |   6 +-
+ kernel/bpf/token.c                           |   6 +-
+ kernel/events/core.c                         |  31 ++--
+ kernel/exit.c                                |   1 +
+ kernel/fork.c                                |   3 +
+ kernel/liveupdate/luo_core.c                 |  48 ++----
+ kernel/liveupdate/luo_session.c              |  24 +--
+ kernel/seccomp.c                             |  13 +-
+ mm/userfaultfd.c                             |   6 +-
+ net/core/scm.c                               |  13 +-
+ net/handshake/netlink.c                      |  20 ++-
+ net/kcm/kcmsock.c                            |   5 +-
+ net/sctp/socket.c                            |  78 ++++-----
+ sound/core/compress_offload.c                |  24 ++-
+ virt/kvm/guest_memfd.c                       |  20 +--
+ virt/kvm/kvm_main.c                          |  65 +++----
+ 106 files changed, 962 insertions(+), 861 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/virt/tdx: Move TDH.SYS.CONFIG operations into a wrapper
+[PATCH v2 1/5] x86/virt/tdx: Move TDH.SYS.CONFIG operations into a wrapper
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+In Linux, SEAMCALL wrappers are introduced to avoid broad SEAMCALL
+access by exposing only a selection of SEAMCALL leafs, but also to
+abstract the SEAMCALL register ABIs. The latter improves readability and
+reuse for SEAMCALL leafs that are called multiple times.
+
+Some SEAMCALL leafs are not explicitly wrapped because the level of TDX
+ABI details needed to perform the call is low enough to flow well with
+the calling code.
+
+For some of the currently unwrapped SEAMCALL leafs, TDX architecture
+adjusts the ABI and adds SEAMCALL version selection for backward
+compatibility. Future kernel will need to support the changes. This will
+leak more ABI details into the surrounding caller code and decrease
+readability of the other logic. To keep the ABI details contained, move
+the SEAMCALL leafs that will need version selection into wrappers.
+
+The cleanest separation would be to have kernel data types for the
+SEAMCALL wrapper arguments, and have them marshaled into SEAMCALL leaf
+ABI types (often u64s) inside the wrapper. This works for many SEAMCALL
+leafs but becomes cumbersome when the register ABI type is a physical
+address which points to a buffer for an in-memory ABI. If the SEAMCALL
+wrapper only accepts kernel data types, it may need duplicate buffer
+allocation and copies to match the in-memory ABI. Another solution is
+to define a named helper structure that mirrors the in-memory ABI,
+populate it in a separate flow, then pass it to the SEAMCALL wrapper.
+struct seamldr_params is an existing example of this pattern.
+
+TDH.SYS.CONFIG requires a list of TDMR information in the form of a PA
+array. The PA array is the in-memory ABI. Create a structure for the PA
+array, use it as the argument when creating the wrapper for
+TDH.SYS.CONFIG.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+Reviewed-by: Nikolay Borisov <nik.borisov@suse.com>
+---
+v2:
+ - Remove TDH.SYS.UPDATE wrapper (Dave & Rick)
+ - Talk about the handling of in-memory ABIs for SEAMCALL wrappers
+   (Rick)
+ - Refactor the entire changelog according to Rick's suggestion (Rick)
+ - Add code comment for struct tdmr_info_pa_array (AI nitpicker)
+ - Use kernel data type for nr_tdmr_pa parameter (AI nitpicker)
+
+v1:
+ - This patch is split out from the last series (Rick)
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 34 +++++++++++++++++++++++++++-------
+ 1 file changed, 27 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Enable TDX module extensions
+[PATCH v2 0/5] Enable TDX module extensions
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+Hi,
+
+This is the first respin of the TDX module extensions series. Thank you
+all for the design discussion and architectural review. Hope the design
+could be settled and some more RBs got in this version.
+
+Dave please feel free to ignore. Kiryl, Rick and TDX developers, please
+help take a look.
+
+== Changes ==
+
+A major change is that the add-on feature re-configuration and
+extensions re-initialization operations during runtime update have been
+dropped. IOW, the update flow is left untouched. This stems from the
+architectural discussion that the basic update flow should start with a
+simple functional requirement - just restore everything (for example,
+the add-on features re-enabling, TDH.EXT.INIT) that was configured
+during boot, no extra input from the host is needed. Do improvement
+later if any new requirement arise.
+
+The extensions consume tens of megabytes memory that will never be
+returned to the host. How to consume this amount of memory forever is an
+open question though v1 uses alloc_contig_pages() for memory
+de-fragmentation. Kiryl implied fragmentation is an important concern.
+He answered that de-fragmentation is to prevent 2M pageblocks from being
+partially occupied. alloc_contig_pages() can be more than needed but
+should be good enough when we do it once during the boot time. In
+patch 4, keep the alloc_contig_pages() but add a code comment for
+clarification.
+
+Dave asked why pass the addon_features0 around as a function parameter,
+it can always be return from the global, static
+get_tdx_addon_features0() helper. Yilun admitted this is redundant. In
+patch 2, change to call the helper a second time where the value is
+needed.
+
+Rick pointed out that in patch 1, the changelog said we introduced a
+kernel data type for TDMR info PA array argument but the code is still
+setting TDX ABI data type (u64) for PAs. He suggested justifying that
+this is to avoid duplicating allocations and copies in SEAMCALL
+wrappers. Yilun noted this is a general in-memory ABI pattern which
+exists in several places in TDX. Add the statement of in-memory ABI
+handling in the changelog.
+
+Other changes:
+  - Patch 2: Drop the changelog section explaining why add-on feature
+    enabling is needed in this series, as it is a generally understood
+    pattern (Rick)
+
+  - Patch 2: Add a note in the changelog that Dynamic PAMT is not
+    enabled via the new bitmap argument of TDH.SYS.CONFIG (Rick)
+
+  - Patch 4: Add code comments for hpa_list container page allocation
+    (Kiryl)
+
+  - Patch 4: s/PFN array/HPA array in changelog (Kiryl)
+
+  - Patch 4: State the alternative memory adding solution and why we
+    don't use it in changelog (Rick)
+
+v1: https://lore.kernel.org/all/20260821032920.256225-1-yilun.xu@linux.intel.com/
+
+Quoting v2: https://lore.kernel.org/lkml/20260618081355.3253581-1-yilun.xu@linux.intel.com/
+
+Quoting v1: https://lore.kernel.org/all/20260522034128.3144354-1-yilun.xu@linux.intel.com/
+
+== Overview ==
+
+To date, SEAMCALL execution must either complete quickly to avoid
+stalling the host, or yield quickly at pre-defined interrupt
+checkpoints. This is acceptable for the existing SEAMCALL leafs,
+which perform simple, bounded operations.
+
+However, some new features such as attestation and TD migration require
+higher level security protocols inside the TDX module, which cannot fit
+within that constraint. TDX solves this by making those operations
+inherently preemptible and resumable like OS tasks. TDX provides a
+separate SEAMCALL execution environment - the TDX module extensions -
+for those operations.
+
+This capability allows for higher-level SEAMCALL ABI design - like
+"create a DICE-based attestation quote". Several new features, such as
+DICE-based attestation, TDISP and TD migration, use SEAMCALL leafs
+backed by the TDX module extensions.
+
+The TDX module extensions need memory for their execution environment
+to serve these SEAMCALL leafs, so they need extra setup steps during TDX
+module initialization. The bulk of this series implements these setup
+steps.
+
+At runtime, the host invokes these SEAMCALL leafs just as normal ones -
+if interrupted, simply re-invoke the leaf to resume.
+
+For more information on TDX module extensions, please refer to [1].
+
+[1] https://lore.kernel.org/lkml/20260618081355.3253581-1-yilun.xu@linux.intel.com/
+
+== Branch stack ==
+
+This is based on v7.3-rc1. You can find the full branch stack at [2].
+The DICE part is in the full branch as an example for extensions. But it
+does not include the other DICE feedbacks.
+
+The full branch contains:
+
+  Dependency:  Patch 1:   SEAMCALL version patch [3] which is WIP on
+			  community review.
+  This series: Patch 2~7: This series, including this cover-letter.
+  Use case:    Patch 8~N: The old DICE part as an example.
+
+[2] https://github.com/intel-staging/tdx/tree/tdx-module-ext
+[3] https://lore.kernel.org/all/20260910104347.625378-1-yilun.xu@linux.intel.com/
+
+
+Xu Yilun (5):
+  x86/virt/tdx: Move TDH.SYS.CONFIG operations into a wrapper
+  x86/virt/tdx: Configure add-on features on TDX module init
+  x86/virt/tdx: Detect if the extensions initialization is required
+  x86/virt/tdx: Add extra memory to TDX module for the extensions
+  x86/virt/tdx: Make TDX module initialize the extensions
+
+ arch/x86/include/asm/tdx.h                  |   1 +
+ arch/x86/include/asm/tdx_global_metadata.h  |   6 +
+ arch/x86/virt/vmx/tdx/tdx.h                 |   2 +
+ arch/x86/virt/vmx/tdx/tdx.c                 | 230 +++++++++++++++++++-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c |  20 ++
+ 5 files changed, 252 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost-scsi: preserve event ordering
+[PATCH 1/2] vhost-scsi: preserve event ordering
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+vhost_scsi_send_evt() uses llist_add(), so pending events are LIFO.
+vhost_scsi_complete_events() walks the detached list directly.
+This can deliver a later hotplug or hotunplug event before an earlier
+one.
+
+Reverse the detached list before processing it.
+This keeps delivery in enqueue order.
+
+Fixes: a6c9af87363c ("tcm_vhost: Add hotplug/hotunplug support")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ drivers/vhost/scsi.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vhost-scsi: preserve event ordering and fix fallback deadlock
+[PATCH 0/2] vhost-scsi: preserve event ordering and fix fallback deadlock
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+The vhost-scsi event list is populated with llist_add(), but completion
+walks the detached list without reversing it.
+
+Trigger: concurrent hotplug (ln -s). Each event is inserted at the
+head of the pending list. Multiple events must already be stacked on
+the llist before the vhost worker runs
+vhost_scsi_complete_events(false). The whole list is then detached
+and walked directly, so later-enqueued events are delivered to the
+guest first.
+
+Queued hotplug and hotunplug events can therefore be delivered in
+reverse order.  Fix that ordering first, then fix the fallback path
+that can relock the event virtqueue mutex while already holding it.
+
+Patch 2 is based on patch 1 because both changes update the event
+completion path. The first patch is otherwise independent of the
+fallback deadlock.
+
+Sashiko AI flagged this while reviewing
+the vhost-scsi event queue fix.
+This is a pre-existing self-deadlock. It was reproduced in a
+follow-up test.
+
+Trigger: vq->worker == NULL. vhost_vq_work_queue() then returns false,
+and a subsequent vhost_scsi_do_plug() call deadlocks. I do not know what
+normal condition gets us here; the normal vhost-scsi worker detach/reset
+paths do not reach this code. The only reproduction I could come up with
+was killing the vhost-scsi worker. This still looks like a low-probability
+condition.
+
+Jia Jia (2):
+  vhost-scsi: preserve event ordering
+  vhost-scsi: do not relock event vq mutex on send_evt fallback
+
+ drivers/vhost/scsi.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/tdx: Add helper to query maximum TD Quote size
+[PATCH v4 1/4] x86/tdx: Add helper to query maximum TD Quote size
+Author: Peter Fang <peter.fang@intel.com>
+
+TDX attestation report ("Quote") sizes can grow with newer cryptographic
+schemes, so guests can no longer rely on a fixed-size buffer for the
+Quote.
+
+Newer TDX modules report the maximum Quote size via the
+TDCS_QUOTE_MAX_SIZE metadata field [1]. Add a helper to query the size
+instead of exposing tdg_vm_rd() directly, as it can read arbitrary
+metadata fields.
+
+The reported size covers every Quote type the platform can produce,
+including SGX-based Quotes. A runtime TDX module update should not
+change the size. So if a Quote does not fit, it is a TDX module bug.
+
+Thanks to Xu Yilun for suggesting this in an off-list discussion.
+
+[1] "Intel TDX Module ABI Definitions", August 2026
+
+Signed-off-by: Peter Fang <peter.fang@intel.com>
+Reviewed-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Kuppuswamy Sathyanarayanan <sathyanarayanan.kuppuswamy@linux.intel.com>
+Reviewed-by: Binbin Wu <binbin.wu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v4:
+ - Update the TDCS_QUOTE_MAX_SIZE encoding to 0x9010000200000007. [1]
+ - Provide documentation for the metadata field. [Rick, Kiryl]
+ - Document that the reported size covers every Quote type. [Xiaoyao]
+ - Document that a module update does not change the reported size.
+   [Tony]
+ - Add Tony's Reviewed-by.
+v3:
+ - No code changes. Add Binbin's Reviewed-by.
+v2:
+ - Keep the explicit (u32) cast to document the metadata field width.
+   [Binbin]
+ - Note that Xu Yilun's suggestion was made in an off-list discussion.
+   [Sathya]
+ - Drop the Assisted-by tags, as the code was not written by AI.
+---
+ arch/x86/coco/tdx/tdx.c           | 24 ++++++++++++++++++++++++
+ arch/x86/include/asm/shared/tdx.h |  1 +
+ arch/x86/include/asm/tdx.h        |  2 ++
+ 3 files changed, 27 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  tdx-guest: Make Quote buffer size dynamic
+[PATCH v4 0/4] tdx-guest: Make Quote buffer size dynamic
+Author: Peter Fang <peter.fang@intel.com>
+
+Hi,
+
+This is v4 of the series to make the TDX guest driver's Quote buffer
+size dynamic. The only functional change since v3 is an updated
+TDCS_QUOTE_MAX_SIZE encoding. The rest is documentation, changelogs, and
+stronger page alignment for the Quote buffer size. It also collected RB
+tags from several reviewers. Dave, Kiryl and Rick your review would be
+much appreciated.
+
+Newer TDX modules have an ABI that tells the guest how big a Quote can
+get. The Quote buffer no longer has to be a fixed size. So effectively:
+
+  s/FIXED_BUF_SIZE/queried_buf_size/
+
+...in the TDX guest driver.
+
+Terminology
+===========
+
+A "TD Quote" is an attestation structure signed with a platform key. It
+contains information about a TDX guest and the platform it's running on.
+
+The "Quote buffer" in the TDX guest driver is a memory buffer shared
+between the TDX guest and the host VMM to retrieve TD Quotes. It has a
+header defined in the GHCI spec [1].
+
+Device Identifier Composition Engine ("DICE") provides a framework for
+layering attestation evidence. This replaces the SGX model of contacting
+an Intel server to obtain a certificate.
+
+Problem
+=======
+
+The fixed-size Quote buffer approach is not sustainable. As
+cryptographic algorithms evolve, TD Quote sizes also grow. A previous
+commit [2] increased the guest driver's fixed-size Quote buffer to
+128KB to accommodate DICE Quotes, but it may still be insufficient when
+those Quotes use post-quantum cryptography (PQC). PQC certificate chains
+are roughly 10x-15x larger than conventional ones, which can increase
+Quote sizes significantly.
+
+What's in this series
+=====================
+
+To avoid changing the driver whenever the Quote buffer becomes too
+small, newer TDX modules report their maximum Quote size via a metadata
+field. The guest driver uses this value for its Quote buffer when
+available. Older TDX modules continue to use the 128KB buffer.
+
+Patches 2 and 3 refactor the existing fixed buffer handling. Patch 4
+then makes the buffer size dynamic.
+
+The "outblob" file in configfs-tsm no longer has a fixed maximum size.
+The limit can now come from this new TDX module ABI.
+
+Patch 1/4: Add a helper to read the QUOTE_MAX_SIZE metadata field.
+Patch 2/4: Calculate the Quote buffer size with struct_size_t().
+Patch 3/4: Store the Quote buffer size in a variable instead of a
+           constant.
+Patch 4/4: Allocate the Quote buffer using the queried size, when
+           available.
+
+AI use
+======
+
+I used Claude:claude-opus-5 to help edit this cover letter and the
+changelogs, and to collect the review feedback on lore. The series also
+underwent AI code review (Claude:claude-opus-4-7), but its comments were
+limited to style suggestions and existing issues. Sashiko's __GFP_NOWARN
+suggestion was adopted in v2, but it was dropped in v3.
+
+v3: https://lore.kernel.org/all/20260729122939.1340412-1-peter.fang@intel.com/
+
+Changes in v4:
+ - Update the TDCS_QUOTE_MAX_SIZE encoding to 0x9010000200000007.
+ - Provide documentation for the metadata field. [Rick, Kiryl]
+ - Document the reported size's properties. [Xiaoyao, Tony]
+ - Page align quote_data_len unconditionally. [Xiaoyao]
+ - Collect Reviewed-by tags. [Sathya, Tony, Xiaoyao, Binbin]
+
+v2: https://lore.kernel.org/all/20260717214349.4075994-1-peter.fang@intel.com/
+
+Changes in v3:
+ - Split the v2 "Allocate Quote buffer dynamically" patch to do the
+   refactoring first, then make the buffer size dynamic. [Dave]
+ - Improve patterns for readability. [Dave]
+ - Drop __GFP_NOWARN so an allocation failure warns. [Dave, Rick, Kiryl]
+ - Add Binbin's Reviewed-by to patch 1.
+ - Drop the Reviewed-by tags (Kiryl, Binbin) as the patch was reworked.
+
+v1: https://lore.kernel.org/all/20260612110853.3188196-1-peter.fang@intel.com/
+
+Changes in v2:
+ - Collect Reviewed-by tags. [Kiryl, Xiaoyao, Binbin, Sathya]
+ - Keep the explicit (u32) cast in tdx_get_max_quote_size(). [Binbin]
+ - Calculate the Quote buffer size with struct_size_t(). [Kiryl, Binbin]
+ - Add __GFP_NOWARN to the allocation since its size comes from the
+   host. [sashiko]
+ - Rename quote_data_size to quote_data_len. [Sathya]
+ - Drop the Assisted-by tags, as AI was not used to write the code.
+
+[1] Guest Hypervisor Communication Interface (GHCI) Specification,
+    Version 1.5, Section "TDG.VP.VMCALL<GetQuote>"
+[2] 43185067c6fd ("configfs-tsm-report: tdx_guest: Increase Quote buffer
+    size to 128KB")
+
+Kuppuswamy Sathyanarayanan (1):
+  virt: tdx-guest: Allocate Quote buffer dynamically
+
+Peter Fang (3):
+  x86/tdx: Add helper to query maximum TD Quote size
+  virt: tdx-guest: Calculate the Quote buffer size safely
+  virt: tdx-guest: Use a variable to store the Quote buffer size
+
+ arch/x86/coco/tdx/tdx.c                 | 24 +++++++++++
+ arch/x86/include/asm/shared/tdx.h       |  1 +
+ arch/x86/include/asm/tdx.h              |  2 +
+ drivers/virt/coco/tdx-guest/tdx-guest.c | 53 +++++++++++++++++++------
+ 4 files changed, 67 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Fix comments that refer to the non-existent VCPU_RUN ioctl
+[PATCH 1/3] KVM: Fix comments that refer to the non-existent VCPU_RUN ioctl
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Neither the VCPU_RUN in kvm_main.c nor the VCPU RUN in kvm_host.h names
+an ioctl that exists. The one that enters the guest is KVM_RUN, so refer
+to it by that name.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ include/linux/kvm_host.h | 2 +-
+ virt/kvm/kvm_main.c      | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Replace VCPU_RUN with KVM_RUN in comments and docs
+[PATCH 0/3] KVM: Replace VCPU_RUN with KVM_RUN in comments and docs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+This one has been bugging me for a while. Five comments and doc lines
+name a VCPU_RUN ioctl (KVM_VCPU_RUN in book3s_hv.c, VCPU RUN in
+kvm_host.h). The ioctl that enters the guest is KVM_RUN.
+
+The patches are independent and split by tree, one each for generic
+KVM, KVM/arm64 and Book3S HV, so each can go through its own
+maintainer. Nothing else in the tree refers to the ioctl by a wrong
+name.
+
+Based on Linux 7.3-rc3 (fd73f4a665989).
+
+Cheers,
+/fuad
+
+Fuad Tabba (3):
+  KVM: Fix comments that refer to the non-existent VCPU_RUN ioctl
+  KVM: arm64: Fix references to the non-existent VCPU_RUN ioctl
+  KVM: PPC: Book3S HV: Fix comment naming a non-existent KVM_VCPU_RUN
+    ioctl
+
+ Documentation/virt/kvm/arm/pkvm.rst | 2 +-
+ arch/arm64/kvm/arm.c                | 2 +-
+ arch/powerpc/kvm/book3s_hv.c        | 2 +-
+ include/linux/kvm_host.h            | 2 +-
+ virt/kvm/kvm_main.c                 | 2 +-
+ 5 files changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86/virt/tdx: Add SEAMCALL wrappers for IOMMU setup/clear
+[PATCH 1/5] x86/virt/tdx: Add SEAMCALL wrappers for IOMMU setup/clear
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Add SEAMCALL wrappers for TDH.IOMMU.SETUP and TDH.IOMMU.CLEAR.
+
+TDH.IOMMU.SETUP transitions an IOMMU and related I/O stack into Secure
+TDX Mode. During this transition, the TDX module validates and protects
+relevant I/O resources from further untrusted host access, providing the
+trusted foundation required before enabling TEE-IO security protocols
+(e.g. SPDM/IDE).
+
+TDH.IOMMU.CLEAR performs the reverse operation and tears down the Secure
+TDX Mode state for the target IOMMU.
+
+tdh_iommu_setup() takes the IOMMU register base and a host-allocated
+parameter page for TDX-module metadata, and returns a unique
+tdx_iommu_id for subsequent operations.
+
+tdh_iommu_clear() takes tdx_iommu_id to tear down the Secure TDX Mode
+state and return the IOMMU to normal operation.
+
+The caller is responsible for allocating the required pages and
+populating the parameter page in the ABI-defined format.
+
+See Intel TDX Connect ABI Specification [1], Section 3.2
+(TDX Connect Host-Side (SEAMCALL) Interface Functions).
+
+Thanks to Yilun for the initial draft.
+
+[1] https://cdrdv2.intel.com/v1/dl/getContent/858625
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ arch/x86/include/asm/tdx.h  |  2 ++
+ arch/x86/virt/vmx/tdx/tdx.h |  2 ++
+ arch/x86/virt/vmx/tdx/tdx.c | 56 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 60 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  iommu/vt-d: Introduce trusted DMA initialization support
+[PATCH 0/5] iommu/vt-d: Introduce trusted DMA initialization support
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Hi,
+
+This series adds Intel VT-d trusted extension support to the host Intel
+IOMMU driver as groundwork for TEE I/O trusted DMA (e.g. TDX Connect).
+
+The trusted extension introduces a parallel, extension-specific path for
+trusted DMA assets used by confidential device assignment. Existing VT-d
+functionality remains unchanged for regular host DMA paths.
+
+From the TDX Connect architecture perspective, VT-d is enhanced with:
+
+  1) Trusted DMA translation root table
+     - A second root-table address register, restricted to SEAM SAI.
+     - Programmed by the TDX module with the root of TDX-managed DMA
+       translation tables for TD-assigned devices.
+
+  2) Trusted invalidation queue
+     - A second invalidation-queue address register plus dedicated
+       head/tail registers, also restricted to SEAM SAI.
+
+  3) IOTLB / DID isolation
+     - When TDX Connect is enabled, VT-d restricts VMM DID usage and
+       reserves the DID MSB namespace bit for TDX-module use.
+
+This posting focuses on VT-d-side enablement only: it enables those
+extension-defined resources and control points while preserving existing
+host VT-d behavior for non-trusted flows. Higher-layer integration
+(TDX guest/device flows) will be posted separately.
+
+The trusted IOMMU extensions establish an architecture where only
+TEE-I/O DMA requests can access TD private memory, and only the TDX
+module can configure TEE-I/O access-control permissions. The host
+allocates memory for data structures used by the TDX module to 
+manage trusted DMA, then requests the TDX module (via SEAMCALL) to
+enable the extension in each IOMMU. 
+
+Non-TEE-I/O DMA requests are unaffected and continue to be managed 
+by the host through existing IOMMU interfaces.
+
+Patch Breakdown:
+
+- Patch 1: Implements low-level SEAMCALL wrappers (TDH.IOMMU.SETUP/CLEAR)
+  to interface with the TDX module.
+- Patch 2: Parses platform global metadata fields to calculate required
+  IOMMU metadata page requirements.
+- Patch 3: Introduces the core driver entry points.
+- Patch 4: Implements the metadata page allocation and SEAMCALL
+  sequences required to configure and release IOMMU units in trusted
+  mode.
+- Patch 5: Restricts the domain ID (DID) space allocated to the host by
+  reserving the MSB for exclusive use by the TDX module.
+
+ABI History:
+
+TDH.IOMMU.CLEAR previously required the host to provide, as input, the
+parameter page used for TDH.IOMMU.SETUP. This ABI has changed to remove
+that requirement. Because this ABI change is not yet public, it may
+cause confusion when referring to the ABI specification.
+
+Reference:
+
+Implementation details follow the interfaces and behavior defined in the
+TDX Connect Application Binary Interface (ABI) Reference Specification
+and Intel TDX Connect Architecture Specification:
+
+Link: https://cdrdv2.intel.com/v1/dl/getContent/858625 # [1]
+Link: https://www.intel.com/content/www/us/en/content-details/862706/intel-tdx-connect-architecture-specification.html # [2]
+
+This is part of the effort to implement the TDX PCIe Link Encryption
+feature, which includes the following components:
+
+[ ] TDX module extensions initialization, posted in [3]
+[X] Introduce trusted DMA initialization support
+[ ] SEAMCALL helpers for TDX PCIe Link Encryption
+[ ] PCIe Link Encryption Establishment via TDX platform services
+
+A full preview of these dependencies and follow-up changes is avaiable
+at [4].
+
+Link: https://lore.kernel.org/r/20260618081355.3253581-1-yilun.xu@linux.intel.com # [3]
+Link: https://github.com/intel-staging/tdx/tree/tdisp_phase1 # [4]
+
+Please review. Any feedback is highly appreciated.
+
+Thanks,
+Baolu
+
+Lu Baolu (5):
+  x86/virt/tdx: Add SEAMCALL wrappers for IOMMU setup/clear
+  x86/virt/tdx: Read global metadata for trusted IOMMU
+  iommu/vt-d: Add interfaces for trusted DMA initialization
+  iommu/vt-d: Add helpers to set up and tear down TDX extensions
+  iommu/vt-d: Reserve MSB of domain ID space for TDX module
+
+ drivers/iommu/intel/Kconfig                 |  14 ++
+ drivers/iommu/intel/Makefile                |   1 +
+ arch/x86/include/asm/tdx.h                  |   3 +
+ arch/x86/include/asm/tdx_global_metadata.h  |   5 +
+ arch/x86/virt/vmx/tdx/tdx.h                 |   2 +
+ drivers/iommu/intel/iommu.h                 |  24 ++
+ include/linux/dmar.h                        |  12 +
+ arch/x86/virt/vmx/tdx/tdx.c                 |  56 +++++
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c |  20 ++
+ drivers/iommu/intel/dmar.c                  |   3 +
+ drivers/iommu/intel/iommu.c                 |  11 +
+ drivers/iommu/intel/tdxc.c                  | 248 ++++++++++++++++++++
+ 12 files changed, 399 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: PPC: Book3S HV: Avoid triggering an extra interrupt for a vCPU
+[PATCH] KVM: PPC: Book3S HV: Avoid triggering an extra interrupt for a vCPU
+Author: Gautam Menghani <gautam@linux.ibm.com>
+
+A huge number of spurious interrupts can be seen immediately after a KVM
+on PowerNV guest boots up in XIVE mode.
+
+$ cat /proc/interrupts  | grep SPU
+SPU:     223705     192439     273526     147623   Spurious interrupts
+
+This bug was introduced by commit ecd10702baae5 ("KVM: PPC: Book3S HV:
+Handle pending exceptions on guest entry with MSR_EE"). The root cause
+is that when there is an interrupt pending for a vCPU
+(xive_interrupt_pending() returns true) and MSR_EE is disabled for the
+vCPU, LPCR_MER ends up getting set for the VCPU. When the vCPU starts
+running, the XIVE hardware presents the pending interrupt to the vCPU
+(since the KVM guest has native XIVE support) and then a second spurious
+interrupt gets presented to the vCPU due to the LPCR_MER bit being set.
+
+Fix this behaviour by not queuing up any extra interrupts with LPCR_MER
+if there is an interrupt already pending in the case of KVM on PowerNV.
+This reduces the number of spurious interrupts drastically.
+
+Fixes: ecd10702baae5 ("KVM: PPC: Book3S HV: Handle pending exceptions on guest entry with MSR_EE")
+Cc: stable@vger.kernel.org #6.8+
+Reported-by: Timothy Pearson <tpearson@raptorengineering.com>
+Closes: https://lore.kernel.org/linuxppc-dev/582904882.11159.1786719390349.JavaMail.zimbra@raptorengineeringinc.com
+Signed-off-by: Gautam Menghani <gautam@linux.ibm.com>
+---
+ arch/powerpc/kvm/book3s_hv.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 6359f3f1f to 087ec35e1
+KVM mailing list update from 6359f3f1f to 087ec35e1
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     29 arm.com
+     15 linux.dev
+      2 linaro.org
+      2 google.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     19  Suzuki K Poulose <suzuki.poulose@arm.com>
+     15  Fuad Tabba <fuad.tabba@linux.dev>
+      7  Wei-Lin Chang <weilin.chang@arm.com>
+      3  Steven Price <steven.price@arm.com>
+      2  Vincent Donnefort <vdonnefort@google.com>
+      2  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      1  Marc Zyngier <maz@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: protected VM: Handle set_one_reg CNTVCT_EL0/CNTPCT_EL0
+[PATCH v18 01/23] KVM: arm64: protected VM: Handle set_one_reg CNTVCT_EL0/CNTPCT_EL0
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Protected VMs doesn't allow setting offsets for virtual and phyiscal
+counters, as the offset is always fixed to 0. The VM ioclt is filtered
+out based on the cap. However we don't prevent the userspace from trying
+to write to the CNTVCT/CNTPCT registers. This would lead to KVM triggering
+a WARN() in timer_set_offset() as the vm_offset pointer is set to NULL.
+
+Fix this by always "fixing" the timer offsets to 0 and marking that the
+timer offset is set in the kvm->arch.flags at pKVM init time. The
+userspace cannot use the KVM_ARM_SET_COUNTER_OFFSET, as it is blocked for a
+protected VM.
+
+A userspace writing to the SYS_CNT*CT would observe success, without
+any real effect. This was chosen over preventing the writes to these
+registers and returning -EPERM.
+
+With that, we always have a valid vm_offset pointer, remove the checks for
+vm_offset == NULL.
+
+Reported by Sashiko here
+https://lore.kernel.org/all/20260908164641.416911F00A3A@smtp.kernel.org
+
+Fixes: f7d05ee84a6a ("KVM: arm64: Prevent host from managing timer offsets for protected VMs")
+Suggested-by: Marc Zyngier <maz@krenel.org>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arch_timer.c    | 15 +++++----------
+ arch/arm64/kvm/arm.c           | 15 +++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/pkvm.c | 26 +++++++++++++-------------
+ include/kvm/arm_arch_timer.h   |  3 +--
+ 4 files changed, 34 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: CCA: Add basic plumbing for Realms
+[PATCH v18 00/23] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This series is a trimmed down version of the Arm CCA KVM support, previously
+posted here [0]. Like in the v17, we have tried to split the entire series
+into the following chunks.
+
+ 1) Base RMM RMI support under drivers/firmware/arm_rmm -> [1]
+ 2) Linux Host support for handling GPFs - [2]
+ 3) NEW: Enlighten KVM arm64 about the different VM types and use call
+    backs for the VM type, rather than spilling the is_this_type_of_vm()
+    everywhere. Adds VCPU and Stage2 MMU related callbacks with support
+    for the existing VM types. There are other places where we may be
+    able to abstract, but those need careful performance evaluations
+    to make sure they are fit (e.g., vcpu_run)
+
+   Later in the series, we generalise the predicate "kvm_vm_is_protected()"
+   to cover all  "Confidential" VMs (which includes Protected VM and Realms),
+   which allows us to handle common themes without having to do things like :
+     if (kvm_vm_is_protected() || kvm_vm_is_realm()),
+     instead:
+     if (kvm_vm_is_confidential())
+   Also replaces the code with precise check for a given VM type to
+   avoiding combination of if (). e.g,, kvm_vm_is_unprotected_pkvm(kvm).
+   The checks under arch/arm64/kvm/{nvhe,pkvm} still retain the vm_is_protected()
+   check as pVMs are the only possible protected VMs there.
+   
+ 4) Bare minimal Realm VM support without the actual functionality to
+    run a Realm. This would help the maintainers to review the series in
+    smaller chunks. This doesn't depend on [1] and can be independently
+    merged, without being "functional".
+    This series includes vcpu operations and the s2 vm operations, which
+    do need the RMI driver backend to be meaningful. But the KVM handler
+    is in the right shape. The remaining changes would be added once the
+    RMI firmware library lands.
+ 5) Core implementation of the RMI driver for KVM and actual enablement of the
+    Realm support. This depends on (1), (2) and the guest-memfd-in-place
+    conversion series v12 from Ackerley. This is available here at the integration
+    branch [3]
+
+This series is comprised of (3) and (4) above.
+
+The integration branch has been tested with the following components:
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3 [4]
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git cca/kvm-v18
+
+[0] Arm CCA KVM Support v16 : https://lore.kernel.org/all/20260803134403.80630-1-steven.price@arm.com
+[1] Linux firmware RMI https://lore.kernel.org/all/20260912083611.2513845-1-suzuki.poulose@arm.com
+[2] Linux GPF Host https://lore.kernel.org/all/20260913070459.2547407-1-suzuki.poulose@arm.com
+[3] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v18/integration
+[4] https://support.arm.com/documentation/den0137/2-0bet3/
+
+Changes since v17:
+https://lore.kernel.org/all/20260908162223.1683432-1-suzuki.poulose@arm.com 
+
+ - Add a patch to fix pKVM handling of SYS_CNTVCT/CNTPCT to override the counter
+   offset (Patch1)
+ - Restrict Realms to VGIC v3 only - New patch
+ - Add kvm_vm_is_unprotected() to replace is_protected_kvm_enabled() &&
+   !kvm_vm_is_protected() - New patch
+ - Use macro to initialize the per-flavor vcpu, s2_vm ops
+ - Add a wrapper to initialise vcpu and s2_vm ops with a BUILD_BUG_ON()
+   for the array size checks against VM flavour types
+ - Drop forward decalaration of the vcpu, s2_vm operations that spoiled the
+   fun ;-)
+ - Remove irrelevant comment about the order of timer loading for !VHE
+ - Use the explicti kvm_call_hyp_nvhe for pKVM specific ops
+ - Don't call nvhe_vcpu_put from pkvm_vcpu_put, open code them
+ - Drop cpu argument for vcpu_load() callback. We set the cpu
+   before the callbacks are invoked
+ - Drop kvm_vm_is_confidential(), instead widen the scope of kvm_vm_is_protected()
+   to cover pVMs and Realms. Add an explicit helper kvm_vm_is_protected_pkvm()
+   for the cases where we need to check for a "pVM on pKVM"
+ - Add kvm_vm_hyp_is_pkvm() for checking if the VM is running on pKVM.
+   covers both unprotected and pvms. But really uses is_protected_kvm_enabled()
+   under the hood
+ - Add kvm_vm_hyp_is_distrusting() to cover pKVM guests (both protected and
+   unprotected) and Realms. Use this for preventing the vgic v2 mapping into
+   Stage2 for a guest
+ - Drop superfluous !kvm check from kvm_vm_ioctl_enable_cap() - Sashiko
+ - Drop KVM_CAP_CREATE_IRQCHIP, as we don't support VGIC_V2 for Realms
+ - Filter out the vm_ioctls that are based on blocked cap.
+ - Repurpose the pkvm plumbing for filtering the caps and ioctl to generic
+   and plumb the Realm support in
+ - s/PKVM/pKVM for the comments
+ - Drop type argument for pkvm_init_host_vm and also drop protected variable,
+   now that we have the vm_flavor to check.
+ - Use kvm_vm_hyp_is_pkvm() to replace is_protected_kvm_enabled() with valid
+   kvm instance
+ - CCA: Merge the GET/SET REG handling patches into a single patch
+ - CCA: Reword the commit description for SVE VL access handling
+ - Reordered the patches to group the Realm realted to changes to the rear end
+
+Jean-Philippe Brucker (2):
+  KVM: arm64: CCA: Expose SVE VL register before VCPU finalization
+  KVM: arm64: CCA: Control user register access for Realms
+
+Steven Price (3):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Support timers in realm RECs
+  KVM: arm64: CCA: WARN on injected undef exceptions
+
+Suzuki K Poulose (18):
+  KVM: arm64: protected VM: Handle set_one_reg CNTVCT_EL0/CNTPCT_EL0
+  KVM: arm64: Disable Steal time accounting for protected guests
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: Reuse kvm_stage2_unmap_range in kvm_unmap_gfn_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Abstract out memory abort handling
+  KVM: arm64: Use kvm_vm_is_unprotected() for !kvm_vm_is_protected()
+  KVM: arm64: Widen the scope of "protected" VMs
+  KVM: arm64: Add a helper for VMs running on hyp that don't trust the
+    host
+  KVM: arm64: CCA: Add a new mode for supporting Realm guests
+  KVM: arm64: CCA: Add VCPU load/put for Realms
+  KVM: arm64: CCA: Add bare minimal S2 operations for Realm
+  KVM: arm64: CCA: Introduce Realms
+  KVM: arm64: CCA: Mandate VGIC_V3 for Realms
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ arch/arm64/include/asm/kvm_emulate.h          |  16 +
+ arch/arm64/include/asm/kvm_host.h             |  63 +++-
+ arch/arm64/include/asm/kvm_pgtable.h          |   6 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |  25 +-
+ arch/arm64/include/asm/kvm_rmi.h              |  61 ++++
+ arch/arm64/include/asm/virt.h                 |   1 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arch_timer.c                   |  37 +-
+ arch/arm64/kvm/arm.c                          | 330 +++++++++++++++---
+ arch/arm64/kvm/guest.c                        |  73 +++-
+ arch/arm64/kvm/handle_exit.c                  |   2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |  28 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   1 +
+ arch/arm64/kvm/hypercalls.c                   |   4 +-
+ arch/arm64/kvm/inject_fault.c                 |   1 +
+ arch/arm64/kvm/mmu.c                          | 210 ++++++++---
+ arch/arm64/kvm/pkvm.c                         |   6 +-
+ arch/arm64/kvm/pvtime.c                       |  14 +-
+ arch/arm64/kvm/rmi.c                          |  18 +
+ arch/arm64/kvm/sys_regs.c                     |  29 +-
+ arch/arm64/kvm/vgic/vgic-init.c               |   3 +
+ include/kvm/arm_arch_timer.h                  |   3 +-
+ include/kvm/arm_psci.h                        |   2 +
+ 24 files changed, 758 insertions(+), 180 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Use a variable for the canonical IPA in kvm_s2_fault_map()
+[PATCH v6 1/7] KVM: arm64: Use a variable for the canonical IPA in kvm_s2_fault_map()
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Create a variable to store the canonical IPA, instead of calculating it
+when needed. This will be useful when we need to use the canonical IPA
+for guest stage-2 tracking later.
+
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Implement nested stage-2 reverse map
+[PATCH v6 0/7] KVM: arm64: nv: Implement nested stage-2 reverse map
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Hi,
+
+This is v6 of optimizing the shadow s2 mmu unmapping during MMU
+notifiers.
+
+This version fixes a few issues, and adds Marc's space optimization
+for kvm_guest_s2_mapping [1]. Please see the changelog for the details.
+
+Tested by booting L3, and running in-kernel targetted tests described
+in [2]. v5 got some tested-by's from Itaru and Wang (thanks), I didn't
+carry them over since some bugs fixed in v6 are non-obvious. Some
+retest would be much appreciated!
+
+Series based on v7.3-rc3 + Marc's nested mmu lifecycle fixes [3].
+
+* Changes from v5 [4]:
+
+  - Align the addresses down to the mapping size when recording the
+    guest s2 mappings. s2fd->fault_ipa isn't necessarily PAGE_SIZE aligned.
+
+  - Record guest s2 mappings even when page table maps return -EAGAIN.
+    kvm_pgtable_stage2_map() can create mappings while returning -EAGAIN.
+    For example, a 2M block map (A) could race with a 4K page map (B):
+    1. (A) maps the 2M block in kvm_pgtable_visitor_cb()
+    2. (B) breaks that block into a table and maps 4K
+    3. (A) reloads and finds the table after kvm_pgtable_visitor_cb(),
+       then descends into it.
+    4. (A) maps some 4K, but before it finishes reads entry mapped by (B).
+    5. (A) returns -EAGAIN although it had mapped a few pages.
+    In this case, we don't know what subrange is mapped, just track the whole
+    requested mapping range.
+
+  - Don't remove tracked mappings from the interval trees if they only
+    partially overlap the removal range. Because of the previous bullet point
+    we can have a 4K shadow mapping tracked as a 2M range in the interval
+    trees. It would be wrong to remove the 2M range when a guest TLBI doesn't
+    touch the 4K mapped.
+
+  - Check mmu->pgt during mmu unmap notifier, as it could race against
+    MMU teardown.
+
+  - Make guest_s2_tracking_destroy() canonical mmu only. We simply don't
+    need to detach the nodes from the nested mmus' trees. Freeing them
+    during canonical mmu's teardown is enough.
+
+Thanks!
+
+[1]: https://lore.kernel.org/kvmarm/86h5jv7qrd.wl-maz@kernel.org/
+[2]: https://lore.kernel.org/kvmarm/gerjpm62a2gszzggc6vuai22bf3prfquvfsp7ueumps7vz2ev3@odlmovaklg2b/
+[3]: https://lore.kernel.org/kvmarm/20260911162203.1919330-1-maz@kernel.org/
+[4]: https://lore.kernel.org/kvmarm/20260810205038.118843-1-weilin.chang@arm.com/
+
+Marc Zyngier (1):
+  KVM: arm64: nv: Drop kvm_s2_mmu pointer from kvm_guest_s2_mapping
+
+Wei-Lin Chang (6):
+  KVM: arm64: Use a variable for the canonical IPA in kvm_s2_fault_map()
+  KVM: arm64: nv: Introduce guest stage-2 tracking structures
+  KVM: arm64: nv: Track guest stage-2 mapping creation
+  KVM: arm64: nv: Track guest stage-2 mapping removal
+  KVM: arm64: nv: Avoid full shadow stage-2 unmap
+  KVM: arm64: Refactor kvm_unmap_gfn_range() with common variables
+
+ arch/arm64/include/asm/kvm_host.h   |  31 +++++-
+ arch/arm64/include/asm/kvm_nested.h |   7 ++
+ arch/arm64/kvm/mmu.c                | 109 +++++++++++++++++++---
+ arch/arm64/kvm/nested.c             | 140 +++++++++++++++++++++++++++-
+ 4 files changed, 269 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Reject the GICv5 CPU interface hypercalls under pKVM
+[PATCH 1/7] KVM: arm64: Reject the GICv5 CPU interface hypercalls under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+__vgic_v5_save_apr() and __vgic_v5_restore_vmcr_apr() remain callable
+once pKVM has finalised. pKVM never registers a GICv5 vgic, so neither
+has a valid caller in protected mode, and on a GICv3 machine both reach
+a register that is UNDEFINED at EL2 and panic the hypervisor.
+
+Move both into the band the dispatcher rejects once pKVM has finalised.
+
+Fixes: af325e87af5da ("KVM: arm64: gic-v5: Add vgic-v5 save/restore hyp interface")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_asm.h   | 4 ++--
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 4 ++--
+ 2 files changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: pKVM host hypercall and GICv5 CPU interface fixes
+[PATCH 0/7] KVM: arm64: pKVM host hypercall and GICv5 CPU interface fixes
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+This series consolidates three postings, which it supersedes:
+  - The stage-2 MMU pointer hypercall rejection [1]: patch 2, reworked
+    to move the hypercalls out of the always-available band instead of
+    guarding each handler, and covering __kvm_flush_vm_context() too
+    (Marc). __kvm_flush_cpu_context() stays in the set, which the
+    sketch on the thread left out.
+  - The GICv5 CPU interface series [2]: its hypercall patch reworked
+    the same way, as patch 1, and its other three as patches 3, 6 and
+    7, with 3's comment and 7's message trimmed and 6 unchanged.
+    Sascha's Reviewed-by on the reworked patch isn't carried, the code
+    having changed.
+  - The __kvm_adjust_pc() host pointer fixes [3]: patches 4 and 5,
+    with Vincent's and Joey's nits taken and their Reviewed-by
+    collected. (thanks!)
+
+Under pKVM, EL2 still trusts the host at the hypercall boundary in a
+few places: hypercalls the host has no use for in protected mode stay
+callable, the __kvm_adjust_pc() hypercall it does use takes a host
+vCPU nothing pins or validates, and the vgic model EL2 copies out of
+the host's struct kvm goes unchecked.
+
+Patches 1 and 2 move the GICv5 CPU interface save/restore and the
+stage-2 flushes into the band the dispatcher rejects once pKVM has
+finalised. Patch 3 validates the vgic model EL2 copies from the host.
+Patches 4 and 5 fix two host pointers dereferenced unvalidated on the
+__kvm_adjust_pc() path, the vCPU's VM and the vCPU itself: either
+panics the hypervisor if unmapped, and the VM read leaks a bit of hyp
+memory through PSR_TCO on MTE hardware. Both carry Cc: stable. The
+pKVM core series [4] carries the same two fixes as its patches 2 and
+3, in the form posted before Vincent's nits, so that it applies as
+is. Patches 6 and 7 are the rest of [2]: the EL1 side of the GICv5
+access on nVHE, and a comment fix.
+
+Patch 2 carries no Fixes: tag, no in-tree host path reaching those
+hypercalls under pKVM; patch 1 keeps the one it was posted with.
+
+The GICv5 residency and VDPEND hypercalls queued for 7.4 carry the
+per-handler check the superseded GICv5 patch used, and can move the
+same way.
+
+Superseded postings:
+  - 20260914174521.832575-1-fuad.tabba@linux.dev
+  - 20260817103228.1203140-1-fuad.tabba@linux.dev (and its v1,
+    20260806100256.371164-1-fuad.tabba@linux.dev)
+  - 20260915070418.3209779-1-fuad.tabba@linux.dev (and its v1,
+    20260914065136.3418404-1-fuad.tabba@linux.dev)
+
+Based on v7.3-rc3 (fd73f4a665989). On kvmarm/next, patches 1 and 2
+conflict with the new GICv5 hypercall IDs and patch 5 with the typed
+hypercall handlers.
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260914174521.832575-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/20260817103228.1203140-1-fuad.tabba@linux.dev/
+[3] https://lore.kernel.org/all/20260915070418.3209779-1-fuad.tabba@linux.dev/
+[4] https://lore.kernel.org/all/20260914113338.159227-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (7):
+  KVM: arm64: Reject the GICv5 CPU interface hypercalls under pKVM
+  KVM: arm64: Reject the stage-2 flush hypercalls under pKVM
+  KVM: arm64: Validate the host-provided vgic model in pKVM
+  KVM: arm64: Validate the host vCPU's VM before reading it under pKVM
+  KVM: arm64: Pin the host vCPU before adjusting its PC under pKVM
+  KVM: arm64: vgic: Do not access the GICv5 CPU interface from EL1
+  KVM: arm64: Fix stale VGICv3 comments in the nVHE world switch
+
+ arch/arm64/include/asm/kvm_asm.h           | 16 ++++----
+ arch/arm64/kvm/hyp/exception.c             |  5 ++-
+ arch/arm64/kvm/hyp/include/hyp/adjust_pc.h | 28 +++++++++++++
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h     |  2 +
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c         | 36 +++++++++++++----
+ arch/arm64/kvm/hyp/nvhe/pkvm.c             | 47 +++++++++++++++++++++-
+ arch/arm64/kvm/hyp/nvhe/switch.c           |  4 +-
+ arch/arm64/kvm/vgic/vgic.c                 | 12 ++++--
+ 8 files changed, 125 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Fix comments that refer to the non-existent VCPU_RUN ioctl
+[PATCH 1/3] KVM: Fix comments that refer to the non-existent VCPU_RUN ioctl
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Neither the VCPU_RUN in kvm_main.c nor the VCPU RUN in kvm_host.h names
+an ioctl that exists. The one that enters the guest is KVM_RUN, so refer
+to it by that name.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ include/linux/kvm_host.h | 2 +-
+ virt/kvm/kvm_main.c      | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Replace VCPU_RUN with KVM_RUN in comments and docs
+[PATCH 0/3] KVM: Replace VCPU_RUN with KVM_RUN in comments and docs
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+This one has been bugging me for a while. Five comments and doc lines
+name a VCPU_RUN ioctl (KVM_VCPU_RUN in book3s_hv.c, VCPU RUN in
+kvm_host.h). The ioctl that enters the guest is KVM_RUN.
+
+The patches are independent and split by tree, one each for generic
+KVM, KVM/arm64 and Book3S HV, so each can go through its own
+maintainer. Nothing else in the tree refers to the ioctl by a wrong
+name.
+
+Based on Linux 7.3-rc3 (fd73f4a665989).
+
+Cheers,
+/fuad
+
+Fuad Tabba (3):
+  KVM: Fix comments that refer to the non-existent VCPU_RUN ioctl
+  KVM: arm64: Fix references to the non-existent VCPU_RUN ioctl
+  KVM: PPC: Book3S HV: Fix comment naming a non-existent KVM_VCPU_RUN
+    ioctl
+
+ Documentation/virt/kvm/arm/pkvm.rst | 2 +-
+ arch/arm64/kvm/arm.c                | 2 +-
+ arch/powerpc/kvm/book3s_hv.c        | 2 +-
+ include/linux/kvm_host.h            | 2 +-
+ virt/kvm/kvm_main.c                 | 2 +-
+ 5 files changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Validate the host vCPU's VM before reading it under pKVM
+[PATCH v2 1/2] KVM: arm64: Validate the host vCPU's VM before reading it under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+On an MTE-capable host under pKVM, enter_exception64() reads the VM's
+MTE flag through vcpu->kvm, which for a host vCPU is a host-writable
+pointer nothing validates. The host can point it at any address in the
+hyp linear map and read back bit 1 of that word through PSR_TCO in the
+vCPU's CPSR, or panic the hypervisor with an unmapped one.
+
+Get the VM through a get/put pair around the read: a loaded vCPU's is
+the hyp VM, an unloaded host vCPU's is read once and pinned, and a
+pointer the host never shared leaves TCO clear.
+
+Fixes: ea7fc1bb1cd1b ("KVM: arm64: Introduce MTE VM feature")
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20260914070536.877D91F000FF@smtp.kernel.org/
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/exception.c             |  5 ++-
+ arch/arm64/kvm/hyp/include/hyp/adjust_pc.h | 18 ++++++++++
+ arch/arm64/kvm/hyp/nvhe/pkvm.c             | 39 ++++++++++++++++++++++
+ 3 files changed, 61 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Validate host pointers in __kvm_adjust_pc() under pKVM
+[PATCH v2 0/2] KVM: arm64: Validate host pointers in __kvm_adjust_pc() under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - New patch 1: enter_exception64() reads the VM's MTE flag through a
+    host-writable vcpu->kvm that nothing validates. It goes first,
+    since pinning the vCPU alone leaves that read on an unmapped VM.
+    (sashiko)
+  - Dropped the VM pin the fix carried in v1, patch 1 validating that
+    read at its site.
+
+Two host pointers reach EL2 unvalidated on the __kvm_adjust_pc() path
+under pKVM, and this series fixes both. The host vCPU isn't mapped at
+EL2 until its first KVM_RUN pins it, and KVM_SET_VCPU_EVENTS with
+ext_dabt_pending reaches the hypercall before that. The vcpu->kvm the
+exception entry reads the MTE flag from is host-writable, and nothing
+checks it. Either one panics the hypervisor, and on MTE-capable
+hardware the flag read leaks one bit of hyp memory the host chose,
+through PSR_TCO.
+
+These are patches 2 and 3 of the pKVM core series [2], which carries
+them so that it applies as is. They're respun here so they can be
+applied on their own.
+
+Based on v7.3-rc3 (fd73f4a665989).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260914065136.3418404-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/20260914113338.159227-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (2):
+  KVM: arm64: Validate the host vCPU's VM before reading it under pKVM
+  KVM: arm64: Pin the host vCPU before adjusting its PC under pKVM
+
+ arch/arm64/kvm/hyp/exception.c             |  5 ++-
+ arch/arm64/kvm/hyp/include/hyp/adjust_pc.h | 18 ++++++++++
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c         | 19 ++++++++++-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c             | 39 ++++++++++++++++++++++
+ 4 files changed, 79 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
