@@ -1,0 +1,4532 @@
+
+On /root/mail/repo:
+From a018f1bf3 to 72280b460
+KVM mailing list update from a018f1bf3 to 72280b460
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     39 nvidia.com
+     26 amd.com
+      6 linux.ibm.com
+      2 suse.de
+      1 intel.com
+      1 gmail.com
+      1 broadcom.com
+      1 amazon.de
+
+Top 15 contributors (Based on Email Body)
+
+     28  Manish Honap <mhonap@nvidia.com>
+     14  Alexey Kardashevskiy <aik@amd.com>
+     12  Ashish Kalra <ashish.kalra@amd.com>
+     11  Jason Gunthorpe <jgg@nvidia.com>
+      5  Omar Elghoul <oelghoul@linux.ibm.com>
+      2  =?UTF-8?q?Carlos=20L=C3=B3pez?= <clopez@suse.de>
+      1  Zack Rusin <zack.rusin@broadcom.com>
+      1  Luka Absandze <absandze@amazon.de>
+      1  Gautam Menghani <gautam@linux.ibm.com>
+      1  Dan Williams <dan.j.williams@intel.com>
+      1  Bui Nguyen Nhu Quynh <kaylovefoss@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v6 02/10] net/mlx5: Move HW constant groups from device.h/cq.h to mlx5_ifc.h
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Generally the IFC file should contain enums for the fields it
+defines. Move the ones in device.h that are relevant to the VFIO
+selftests over to the IFC file:
+
+  wqe_ctrl_seg_bits.opcode: all MLX5_OPCODE_* WQE opcodes
+  wqe_ctrl_seg_bits.ce: new MLX5_WQE_CE_* completion/event modes
+  cqe64_bits.opcode: all MLX5_CQE_* CQE opcode values
+  eqe_bits.event_type: enum mlx5_event (all event types)
+  cmd_out_bits.status: all MLX5_CMD_STAT_* status codes
+  query_hca_cap_in_bits.op_mod: enum mlx5_cap_mode
+
+Tidy MLX5_PCI_CMD_XPORT which is an alias of
+MLX5_CMD_QUEUE_ENTRY_TYPE_PCIE_CMD_IF_TRANSPORT.
+
+No functional change. All existing users of device.h and cq.h
+continue to see these constants through the include chain.
+
+Assisted-by: Claude:claude-opus-4.6
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ include/linux/mlx5/cq.h       |  10 ---
+ include/linux/mlx5/device.h   | 114 +------------------------------
+ include/linux/mlx5/mlx5_ifc.h | 123 ++++++++++++++++++++++++++++++++++
+ 3 files changed, 124 insertions(+), 123 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 08/10] vfio: selftests: Add mlx5 driver - HW init and command interface
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Add an mlx5 ConnectX selftest driver that programs VFs and PFs
+through the command interface. Create the driver skeleton with
+probe(), the command interface, HCA boot sequence, and all resource
+allocation up through ALLOC_PD + CREATE_MKEY.
+
+The driver implements vfio_pci_driver_ops (probe/init/remove) and
+registers with the VFIO selftest framework.  It matches the same
+mlx5 ConnectX device IDs that the kernel matches.
+
+init() brings the HCA to a running state:
+  - Command interface setup (two-slot: regular + async pages)
+  - ENABLE_HCA -> SET_ISSI -> QUERY/MANAGE_PAGES -> SET_HCA_CAP ->
+    INIT_HCA
+  - EQ creation (CMD + PAGE_REQUEST events for PF support)
+  - ALLOC_PD, CREATE_MKEY (PA-mode, covers all IOVAs)
+  - Force-loopback capability check
+
+remove() tears down in reverse order through TEARDOWN_HCA and
+DISABLE_HCA, including async pages slot drain and FW page reclaim.
+
+The driver region (~18MB) holds all HW-visible DMA buffers (command
+queue, mailboxes, EQ, FW pages) overlaid as a single struct on
+device->driver.region.vaddr.
+
+Data path ops (memcpy_start/memcpy_wait) are left as stubs for the
+next patch.
+
+Assisted-by: Claude:claude-opus-4.6
+Acked-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/mlx5/mlx5.c    | 1414 +++++++++++++++++
+ .../selftests/vfio/lib/drivers/mlx5/mlx5_hw.h |  108 ++
+ .../vfio/lib/drivers/mlx5/mlx5_ifc.h          |    1 +
+ .../vfio/lib/drivers/mlx5/mlx5_ifc_fpga.h     |    1 +
+ .../vfio/lib/drivers/mlx5/mlx5_ifc_macros.h   |    1 +
+ tools/testing/selftests/vfio/lib/libvfio.mk   |    1 +
+ .../selftests/vfio/lib/vfio_pci_driver.c      |    2 +
+ 7 files changed, 1528 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 10/10] vfio: selftests: mlx5 driver - add send_msi support
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Wire an MSI-X vector to a dedicated EQ so the mlx5 driver supports
+send_msi().
+
+Each EQ can be linked to an MSI-X vector, and the CQ can be set up
+to deliver an event to the EQ. Thus, when everything is armed, an
+RDMA WRITE posted to the QP generates a CQE, which generates an
+EQE, which generates an MSI-X.
+
+To keep things simple this just re-uses all the existing QPs and
+CQs, so they generate single MSIs during memcpy.
+
+send_msi() drains any accumulated MSI EQ events from prior memcpy
+completions, posts a small signaled RDMA Write, then polls the CQ to
+consume the resulting CQE (avoiding stale completions on subsequent
+test cycles).
+
+Assisted-by: Claude:claude-opus-4.6
+Acked-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/mlx5/mlx5.c    | 165 +++++++++++++++++-
+ .../selftests/vfio/lib/drivers/mlx5/mlx5_hw.h |   6 +
+ 2 files changed, 168 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 09/10] vfio: selftests: Add mlx5 driver - data path and memcpy ops
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Complete the mlx5 driver by adding CQ/QP creation, QP state
+transitions, WQE posting, CQ polling, and the
+memcpy_start/memcpy_wait callbacks. After this patch the driver is
+functional for DMA tests.
+
+The data path implements RDMA Write self-loopback via an RC QP with
+force-loopback.  WQEs are posted to a 16-entry send queue with an
+NC doorbell, and completions are polled from a 16-entry CQ.
+
+Assisted-by: Claude:claude-opus-4.6
+Acked-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ .../selftests/vfio/lib/drivers/mlx5/mlx5.c    | 359 +++++++++++++++++-
+ 1 file changed, 357 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 05/10] selftests: Add additional kernel functions to tools/include/
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+These are needed by the VFIO mlx5 selftest in the following patches,
+which includes some headers from mlx5 and also needs a few more
+MMIO-related features.
+
+- DECLARE_FLEX_ARRAY in new tools/include/linux/stddef.h (wraps
+  existing __DECLARE_FLEX_ARRAY from uapi/linux/stddef.h)
+
+- dma_wmb/dma_rmb barriers: x86 uses compiler barrier
+  (DMA-coherent), arm64 uses dmb oshst/oshld (outer-shareable for
+  device visibility), generic fallback uses wmb/rmb
+
+- ioread32be/iowrite32be in tools/include/asm-generic/io.h for
+  big-endian MMIO register access
+
+Assisted-by: Claude:claude-opus-4.6
+Reviewed-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ tools/arch/arm64/include/asm/barrier.h |  4 ++++
+ tools/arch/x86/include/asm/barrier.h   |  5 +++++
+ tools/include/asm-generic/io.h         | 28 ++++++++++++++++++++++++++
+ tools/include/asm/barrier.h            |  8 ++++++++
+ tools/include/linux/stddef.h           | 10 +++++++++
+ 5 files changed, 55 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 03/10] net/mlx5: Extract MLX5_SET/GET macros into mlx5_ifc_macros.h
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Extract the entire MLX5_SET/GET macro family and their internal
+helpers from device.h into a new lightweight header
+(include/linux/mlx5/mlx5_ifc_macros.h).  device.h cannot be
+included by the VFIO selftest because it pulls in rdma/ib_verbs.h;
+the macros themselves depend only on endian helpers, BUILD_BUG_ON,
+and basic C types.
+
+The moved macros include the internal helpers (__mlx5_nullp through
+__mlx5_st_sz_bits), all size/address macros (MLX5_ST_SZ_BYTES,
+MLX5_BYTE_OFF, MLX5_ADDR_OF, etc.), the 32-bit accessors (MLX5_SET,
+MLX5_GET, MLX5_SET_TO_ONES, MLX5_ARRAY_SET, MLX5_GET_PR), the
+64-bit accessors (MLX5_SET64, MLX5_GET64, MLX5_ARRAY_SET64,
+MLX5_GET64_PR), the 16-bit accessors (MLX5_GET16, MLX5_SET16), and
+the big-endian getters (MLX5_GET64_BE, MLX5_GET_BE).
+
+device.h includes the new header so existing kernel code is
+unchanged.
+
+Assisted-by: Claude:claude-opus-4.6
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ include/linux/mlx5/device.h          | 117 +----------------------
+ include/linux/mlx5/mlx5_ifc_macros.h | 133 +++++++++++++++++++++++++++
+ 2 files changed, 134 insertions(+), 116 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 01/10] net/mlx5: Add IFC structures for CQE and WQE
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Building the WQE and CQE using the IFC system is easier than with a
+C layout struct. Add definitions for their layout. Structs for:
+
+  - wqe_ctrl_seg_bits (16B): WQE control segment
+  - wqe_raddr_seg_bits (16B): RDMA remote address segment
+  - wqe_data_seg_bits (16B): data segment
+  - cqe64_bits (64B): 64-byte CQE with error syndrome union
+
+The VFIO mlx5 selftest will use these.
+
+Assisted-by: Claude:claude-opus-4.6
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ include/linux/mlx5/mlx5_ifc.h | 55 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 55 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 00/10] mlx5 support for VFIO self test
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Add an mlx5 driver to VFIO self test. This is largely a remix of the
+existing VFIO mlx5 driver in rdma-core. It uses an RDMA loopback QP
+to issue RDMA WRITE operations which effectively perform memory
+copies using DMA. Since mlx5 has a stable programming ABI this
+should work on devices from CX5 to current HW. The device FW must
+support the QP loopback configuration.
+
+Also support send_msi by arming completion events of the RDMA WRITE
+to trigger MSI delivery.
+
+mlx5 device startup is very complex and most of this code is just
+booting the device, with a smaller amount for operating the QP.
+
+This entire series was coded by Claude Code in about 4 days. It
+used about 4.5M output tokens, 30 individual sessions and 5600 lines
+of AI-generated .md files. I spent an annoying amount of time
+de-slopping and cleaning its work product to make it presentable.
+However, previous VFIO drivers have taken on the order of 1-2
+months to write, so getting one in a week is pretty remarkable.
+
+For those interested, the flow I used was broadly a prompt sequence
+sort of like:
+
+ - Hey Claude, go look at the falcon series, VFIO self test, the
+   mlx5 driver, rdma-core and some PDF documentation and make a
+   plan to put mlx5 under the selftest.
+ - Write an rdma-core application using the built-in VFIO provider
+   that can do the required memcpy operations that vfio selftests
+   wants.
+   (This resulted in a 1k loc C file that compiled and ran the
+    first time but had a few bugs related to device programming
+    that the AI resolved.)
+ - Replace the rdma-core components with open-coded versions to
+   create a fully stand-alone program that does the DMA memcpy.
+ - Review and audit the thing.
+ [Pause and de-slop it]
+ - Make it work on a PF too (this is surprisingly hard!).
+ [Move to a kernel tree and copy all the .md files and .c program
+  it made]
+ - Hey Claude, look at all this stuff and make a broad plan to
+   actually build a VFIO self test.
+ - Here is my 1 sentence advice on what each patch should look
+   like, make a detailed plan to make a patch for every one.
+ [Pause and polish the patch plans]
+ - Execute plan X then commit it [pause and de-slop each patch,
+   repeat].
+ [Review and final polish]
+
+v6:
+ - Rebase on v7.3-rc3
+ - Correct some minor sashiko remarks
+v5: https://patch.msgid.link/r/0-v5-4cacb99249f6+1b4-mlx5st_jgg@nvidia.com
+ - Rebase on v7.3-rc1
+ - Adjust how region_size is computed to min it to getpagesize()
+v4: https://patch.msgid.link/r/0-v4-021df3fb5a3f+98e-mlx5st_jgg@nvidia.com
+ - Rebase on vfio next, update igb and falcon
+ - Move rounding to iova_allocator_alloc()
+ - Remove arm barrier changes
+v3: https://patch.msgid.link/r/0-v3-76f117ad04f1+28a90-mlx5st_jgg@nvidia.com
+ - Move max into vfio_pci_driver_probe()
+ - Rebase on v7.2-rc3
+v2: https://patch.msgid.link/r/0-v2-72e9640932fd+2c64-mlx5st_jgg@nvidia.com
+ - Rebase on v7.1-rc3, drop falcon patches
+ - dev_dbg checks the format string even in non debug builds
+ - Sort includes
+ - Adjust comments/commit messageas
+ - Use linux/pci_ids.h
+ - Compute the driver.max_memcpy_size the same as mlx5 kernel driver, it
+   should be GBs now on most devices
+ - Put region_size into all drivers instead of allowing 0
+v1: https://patch.msgid.link/r/0-v1-dc5fa250ca1d+3213-mlx5st_jgg@nvidia.com
+-
+Jason Gunthorpe (10):
+  net/mlx5: Add IFC structures for CQE and WQE
+  net/mlx5: Move HW constant groups from device.h/cq.h to mlx5_ifc.h
+  net/mlx5: Extract MLX5_SET/GET macros into mlx5_ifc_macros.h
+  net/mlx5: Add ONCE and MMIO accessor variants to mlx5_ifc_macros.h
+  selftests: Add additional kernel functions to tools/include/
+  vfio: selftests: Allow drivers to specify required region size
+  vfio: selftests: Add dev_dbg
+  vfio: selftests: Add mlx5 driver - HW init and command interface
+  vfio: selftests: Add mlx5 driver - data path and memcpy ops
+  vfio: selftests: mlx5 driver - add send_msi support
+
+ include/linux/mlx5/cq.h                       |   10 -
+ include/linux/mlx5/device.h                   |  231 +-
+ include/linux/mlx5/mlx5_ifc.h                 |  178 ++
+ include/linux/mlx5/mlx5_ifc_macros.h          |  185 ++
+ tools/arch/arm64/include/asm/barrier.h        |    4 +
+ tools/arch/x86/include/asm/barrier.h          |    5 +
+ tools/include/asm-generic/io.h                |   28 +
+ tools/include/asm/barrier.h                   |    8 +
+ tools/include/linux/stddef.h                  |   10 +
+ .../selftests/vfio/lib/drivers/dsa/dsa.c      |    1 +
+ .../selftests/vfio/lib/drivers/igb/igb.c      |    1 +
+ .../selftests/vfio/lib/drivers/ioat/ioat.c    |    1 +
+ .../selftests/vfio/lib/drivers/mlx5/mlx5.c    | 1928 +++++++++++++++++
+ .../selftests/vfio/lib/drivers/mlx5/mlx5_hw.h |  114 +
+ .../vfio/lib/drivers/mlx5/mlx5_ifc.h          |    1 +
+ .../vfio/lib/drivers/mlx5/mlx5_ifc_fpga.h     |    1 +
+ .../vfio/lib/drivers/mlx5/mlx5_ifc_macros.h   |    1 +
+ .../vfio/lib/drivers/nv_falcon/nv_falcon.c    |    1 +
+ .../lib/include/libvfio/vfio_pci_device.h     |   11 +
+ .../lib/include/libvfio/vfio_pci_driver.h     |    6 +
+ .../selftests/vfio/lib/iova_allocator.c       |    7 +-
+ tools/testing/selftests/vfio/lib/libvfio.mk   |    1 +
+ .../selftests/vfio/lib/vfio_pci_driver.c      |    6 +
+ .../selftests/vfio/vfio_pci_driver_test.c     |    3 +-
+ 24 files changed, 2501 insertions(+), 241 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 06/10] vfio: selftests: Allow drivers to specify required region size
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Add a region_size field to struct vfio_pci_driver_ops so drivers can
+declare how much DMA-mapped region they need. The mlx5 driver will need
+~18MB for firmware pages. Existing drivers pass in the sizeof their state
+struct. Since drivers all use only their declared state we can use the
+value directly and remove the SZ_2M hard coding.
+
+Assisted-by: Claude:claude-opus-4.6
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ tools/testing/selftests/vfio/lib/drivers/dsa/dsa.c         | 1 +
+ tools/testing/selftests/vfio/lib/drivers/igb/igb.c         | 1 +
+ tools/testing/selftests/vfio/lib/drivers/ioat/ioat.c       | 1 +
+ .../selftests/vfio/lib/drivers/nv_falcon/nv_falcon.c       | 1 +
+ .../selftests/vfio/lib/include/libvfio/vfio_pci_driver.h   | 6 ++++++
+ tools/testing/selftests/vfio/lib/iova_allocator.c          | 7 ++++++-
+ tools/testing/selftests/vfio/lib/vfio_pci_driver.c         | 4 ++++
+ tools/testing/selftests/vfio/vfio_pci_driver_test.c        | 3 ++-
+ 8 files changed, 22 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 07/10] vfio: selftests: Add dev_dbg
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Enable it with a #define DEBUG at the top of the file. Allows leaving
+behind debugging prints that are useful in case future changes are
+required.
+
+Assisted-by: Claude:claude-opus-4.6
+Reviewed-by: David Matlack <dmatlack@google.com>
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ .../vfio/lib/include/libvfio/vfio_pci_device.h        | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 04/10] net/mlx5: Add ONCE and MMIO accessor variants to mlx5_ifc_macros.h
+Author: Jason Gunthorpe <jgg@nvidia.com>
+
+Add MLX5_GET_ONCE / MLX5_SET_ONCE which include READ_ONCE/WRITE_ONCE
+semantics for touching ownership bits that hardware may read or write
+at any time. The kernel driver doesn't use the IFC struct for these
+ownership bits, but the VFIO driver will and needs these helpers.
+
+Add MLX5_GET_MMIO / MLX5_SET_MMIO for accessing the init seg using
+the IFC offsets. They embed a readl/writel using the IFC struct to
+generate the addressing.
+
+Add MLX5_ARRAY_GET64(), the missing counterpart to
+MLX5_ARRAY_SET64().
+
+Assisted-by: Claude:claude-opus-4.6
+Signed-off-by: Jason Gunthorpe <jgg@nvidia.com>
+---
+ include/linux/mlx5/mlx5_ifc_macros.h | 52 ++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v16 5/5] x86/sev: Re-enable RMP optimizations on SNP guest shutdown
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+The RMPOPT table is a per-CPU table which indicates whether 1GB regions
+of physical memory are entirely hypervisor-owned.
+
+When performing host memory accesses in hypervisor mode as well as
+non-SNP guest mode, the processor may consult the RMPOPT table to
+potentially skip an RMP access and improve performance.
+
+Normal guest events disable RMP optimizations: pages are converted from
+shared to private as SNP guests are launched, and large pages are split
+and collapsed during guest operation -- both disable the RMPOPT
+optimizations for the affected 1GB regions.
+
+When guests are torn down, their pages are converted back to shared, so
+those regions may become eligible for RMPOPT optimization again. Without
+some intervention, all RMP optimizations would eventually be lost, so
+re-optimize all of physical memory on SNP guest teardown by calling
+snp_enable_rmpopt().
+
+snp_enable_rmpopt() performs the re-optimization after a delay, using
+mod_delayed_work() so that the delay timer is reset on each call. This
+batches multiple guest terminations into a single pass: the
+re-optimization runs 10 seconds after the *last* termination rather than
+after the first. mod_delayed_work() also re-queues work that is already
+in-flight, so a re-scan request during an active scan is not silently
+dropped.
+
+Guest teardown is currently the only event that returns guest memory to
+hypervisor ownership: SNP guests do not support ballooning or memory
+hotplug, so pages freed during a guest's lifetime remain guest-owned.
+It is therefore the only point at which memory becomes eligible for RMP
+re-optimization, which is why re-optimization is driven by guest
+teardown rather than by a periodic scan.
+
+Reviewed-by: Ackerley Tng <ackerleytng@google.com>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Reviewed-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+Changes in v15:
+- Call snp_enable_rmpopt() on guest teardown instead of a separate
+  snp_rmpopt_all_physmem(); the delayed re-optimization now lives in
+  snp_enable_rmpopt().
+ arch/x86/kvm/svm/sev.c  | 2 ++
+ arch/x86/virt/svm/sev.c | 2 +-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v16 4/5] x86/sev: Perform RMP optimizations asynchronously
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+When SNP is enabled, all writes to memory are checked to ensure memory
+integrity. This imposes performance overhead on the whole system.
+
+RMPOPT is a new instruction that minimizes the performance overhead of
+RMP checks on the hypervisor and on non-SNP guests by allowing RMP
+checks to be skipped for 1GB regions of memory that are known not to
+contain any SNP guest memory.
+
+Add support for performing RMP optimizations asynchronously using a
+dedicated per-CPU workqueue. The workqueue is allocated from an initcall,
+and snp_enable_rmpopt() queues the optimization pass.
+
+Shortly after SNP initialization, run an optimization pass over all
+physical memory (up to 2TB of system RAM, starting from the lowest
+physical memory address aligned down to a 1GB boundary), skipping RMP
+checks for 1GB regions that do not contain SNP guest memory (excluding
+preassigned pages such as the RMP table and firmware pages).
+
+As SNP guests are launched, RMPUPDATE assigns their private pages to
+guest-owned state; when such a page falls within an optimized 1GB
+region, the hardware clears that region's RMPOPT optimization and RMP
+checks resume there to protect the guest memory.
+
+Since launching SNP guests clears these optimizations, perform them
+again asynchronously using the dedicated workqueue.
+
+Suggested-by: Thomas Lendacky <thomas.lendacky@amd.com>
+Suggested-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+Changes in v15:
+- Move the workqueue allocation and the (fixed) optimization range
+  computation to an initcall; snp_enable_rmpopt() now only programs the
+  RMPOPT_BASE MSRs and queues the optimization pass.
+- Gate rmpopt_capable() on a static rmpopt_enabled bool set when the
+  workqueue is allocated, instead of an if (rmpopt_wq) check, and drop
+  rmpopt_wq_mutex.
+- Queue both the initial and the teardown pass with mod_delayed_work().
+ arch/x86/virt/svm/sev.c | 99 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 95 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v16 3/5] x86/sev: Initialize RMPOPT configuration MSRs
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+The new RMPOPT instruction helps manage per-CPU RMP optimization
+structures inside the CPU. It takes a 1GB-aligned physical address
+and either returns the status of the optimizations or tries to enable
+the optimizations.
+
+Per-CPU RMPOPT tables support at most 2 TB of addressable memory for
+RMP optimizations.
+
+Initialize the per-CPU RMPOPT table base to the starting physical
+address. This enables RMP optimization for up to 2 TB of system RAM on
+all CPUs.
+
+Add snp_enable_rmpopt() to program RMPOPT once SNP is enabled and
+initialized.
+
+Suggested-by: Thomas Lendacky <thomas.lendacky@amd.com>
+Suggested-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+Changes in v16:
+- Clear X86_FEATURE_RMPOPT when segmented RMP is enabled but its probe
+  fails, so the initcall does not set up RMPOPT for a system that will not
+  bring up SNP.
+- Program the RMPOPT_BASE MSRs (with wrmsrq_on_cpu()) only when RMPOPT_EN is
+  not already set on the local CPU, so guest teardown skips reprogramming
+  instead of reprogramming the MSRs on every teardown.
+
+Changes in v15:
+- Rename snp_setup_rmpopt() to snp_enable_rmpopt().
+- Program each core's RMPOPT_BASE only when it is not already set.
+ arch/x86/include/asm/msr-index.h |  3 ++
+ arch/x86/include/asm/sev.h       |  2 +
+ arch/x86/virt/svm/sev.c          | 66 +++++++++++++++++++++++++++++---
+ drivers/crypto/ccp/sev-dev.c     |  2 +
+ 4 files changed, 68 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v16 2/5] x86/sev: Disable CPU hotplug while SNP is active
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+While SNP is active, every memory write is checked against the RMP to
+protect SNP guest memory.  A core performs these RMP checks only once
+SNP has been initialized via SNP_INIT and the SNP-enable bit in SYSCFG is
+set on that core; the firmware requires the SNP-enable bit to be set on
+every present CPU before SNP initialization.
+
+A core that is not SNP-enabled and not SNP-initialized performs no RMP
+checks at all, so there is no valid configuration with SNP active and any
+CPU exempt from RMP checks.
+
+The firmware determines which CPUs are present from the processor and the
+BIOS/UEFI configuration (e.g. SMT disabled in the BIOS) and enumerates
+them at SNP init; it is not aware of the OS bringing CPUs online or
+offline afterwards.
+
+SNP_INIT fails unless SnpEn is set on all CPUs, so a CPU that is offline
+when SNP_INIT is issued, does not have SnpEn set, SNP_INIT fails, and
+there can be no SNP guest memory.  OS CPU hotplug can thus diverge from
+the firmware's expectations and break SNP.
+
+Tie CPU hotplug to the SNP-enable bit: disable it in snp_prepare() before
+SNP is enabled, and re-enable it in snp_shutdown() once the firmware has
+disabled SNP.
+
+If snp_prepare() fails before enabling SNP it re-enables hotplug itself;
+once SNP is enabled hotplug stays disabled, including across a failed
+SNP_INIT and across the legacy SNP_SHUTDOWN_EX path, both of which leave
+SNP enabled.
+
+A kexec target that boots with SNP already enabled, disables hotplug once
+in snp_rmptable_init(), since snp_prepare() bails when SNP is already
+enabled.
+
+With CPU hotplug now disabled while SNP is active, the online CPU mask is
+stable, so the cpus_read_lock() previously taken in snp_prepare() to
+iterate it is redundant.  Drop cpus_read_lock()/cpus_read_unlock() here.
+
+Suggested-by: Thomas Lendacky <thomas.lendacky@amd.com>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ arch/x86/virt/svm/sev.c | 36 ++++++++++++++++++++++++++----------
+ 1 file changed, 26 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v16 1/5] x86/cpufeatures: Add X86_FEATURE_RMPOPT feature flag
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+Add a flag indicating whether RMPOPT instruction is supported.
+
+RMPOPT is a new instruction that reduces the performance overhead of RMP
+checks for the hypervisor and non-SNP guests by allowing those checks to be
+skipped when 1-GB memory regions are known to contain no SEV-SNP guest memory.
+
+For more information on the RMPOPT instruction, see the AMD64 RMPOPT
+technical documentation.
+
+  [ bp: Zap respective tools/ change. ]
+
+Suggested-by: Borislav Petkov (AMD) <bp@alien8.de>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+Reviewed-by: Dave Hansen <dave.hansen@linux.intel.com>
+Reviewed-by: Ackerley Tng <ackerleytng@google.com>
+Link: https://patch.msgid.link/39e9ee269a572c516a3f4e937bfe12d00697d5e6.1782841284.git.ashish.kalra@amd.com
+---
+ arch/x86/include/asm/cpufeatures.h | 2 +-
+ arch/x86/kernel/cpu/scattered.c    | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v16 0/5] Add RMPOPT support.
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+In the SEV-SNP architecture, hypervisor and non-SNP guests are subject
+to RMP checks on writes to provide integrity of SEV-SNP guest memory.
+
+The RMPOPT architecture enables optimizations whereby the RMP checks
+can be skipped if 1GB regions of memory are known to not contain any
+SNP guest memory.
+
+RMPOPT is a new instruction designed to minimize the performance
+overhead of RMP checks for the hypervisor and non-SNP guests.
+
+RMPOPT instruction currently supports two functions. In case of the
+verify and report status function the CPU will read the RMP contents,
+verify the entire 1GB region starting at the provided SPA is HV-owned.
+For the entire 1GB region it checks that all RMP entries in this region
+are HV-owned (i.e, not in assigned state) and then accordingly updates
+the RMPOPT table to indicate if optimization has been enabled and
+provide indication to software if the optimization was successful.
+
+In case of report status function, the CPU returns the optimization
+status for the 1GB region.
+
+The RMPOPT table is managed by a combination of software and hardware.
+Software uses the RMPOPT instruction to set bits in the table,
+indicating that regions of memory are entirely HV-owned.  Hardware
+automatically clears bits in the RMPOPT table when RMP contents are
+changed during RMPUPDATE instruction.
+
+For more information on the RMPOPT instruction, see the AMD64 RMPOPT
+technical documentation.
+
+As SNP is enabled by default the hypervisor and non-SNP guests are
+subject to RMP write checks to provide integrity of SNP guest memory.
+
+This patch-series adds support to enable RMP optimizations for up to
+2TB of system RAM across the system and allow RMPUPDATE to disable
+those optimizations as SNP guests are launched.
+
+Support for RAM larger than 2 TB will be added in follow-on series.
+
+This series also adds support to disable CPU hotplug while SNP is
+active, as the SEV firmware enumerates CPUs at SNP initialization and is
+not aware of the OS bringing CPUs online or offline afterwards.  This
+also keeps the set of CPUs stable for the asynchronous RMPOPT scan, so
+the per-core RMPOPT_BASE MSRs programmed during setup remain valid.
+
+This series also introduces support to re-enable RMP optimizations
+during SNP guest termination, after guest pages have been converted
+back to shared.
+
+RMP optimizations are performed asynchronously by queuing work on a
+dedicated workqueue after a 10 second delay.
+
+Delaying work allows batching of multiple SNP guest terminations.
+
+Once 1GB hugetlb guest_memfd support is merged, support for
+re-enabling RMPOPT optimizations during 1GB page cleanup will be added
+in follow-on series.
+
+v16:
+- 3/5 (Initialize RMPOPT MSRs): clear X86_FEATURE_RMPOPT when segmented RMP
+  is enabled but its probe fails, so the initcall does not set up RMPOPT for
+  a system that will not bring up SNP.  Program the RMPOPT_BASE MSRs only when
+  RMPOPT_EN is not already set on the local CPU, so guest teardown skips
+  reprogramming rather than reprogramming the MSRs on every teardown.
+
+  Review feedback from Sashiko AI.
+
+v15:
+- 3/5 (Initialize RMPOPT MSRs): rename snp_setup_rmpopt() to
+  snp_enable_rmpopt(); program each core's RMPOPT_BASE only when it is not
+  already set.
+- 4/5 (async RMPOPT): split setup from enable -- an initcall allocates the
+  workqueue and computes the (fixed) optimization range once, and
+  snp_enable_rmpopt() programs the RMPOPT_BASE MSRs and queues the
+  optimization pass.  Gate rmpopt_capable() on a static rmpopt_enabled bool
+  instead of an if (rmpopt_wq) check and drop rmpopt_wq_mutex.  Queue both
+  the initial and the teardown pass with mod_delayed_work().
+- 5/5 (Re-enable on guest shutdown): call snp_enable_rmpopt() on guest
+  teardown instead of a separate snp_rmpopt_all_physmem().
+
+  This is a full resend rather than a 4/5-5/5 reply because patch 3 changed
+  as part of the setup/enable split.
+
+  Review feedback from Borislav Petkov.
+
+v14:
+- 3/5 (Initialize RMPOPT MSRs): remove rmpopt_disable() and the RMPOPT_BASE
+  teardown from this patch.  RMPOPT is now set up once and not torn down, so the
+  RMPOPT_BASE MSRs are left in place on shutdown; the (now minimal) disable path
+  moves to 4/5.
+- 4/5 (async RMPOPT): rework the setup/teardown -- initialize once and do not
+  tear it down.  rmpopt_disable() now only cancels the pending re-optimization
+  pass.  Use a dedicated per-CPU workqueue (WQ_PERCPU) and drop the
+  migrate_disable()/migrate_enable() around the local warm-up scan.  Add a
+  binutils-version comment above the RMPOPT .byte encoding and trim redundant
+  comments and the 2 TB pr_info().  Reword the subject to "Perform RMP
+  optimizations asynchronously".
+- 5/5 (Re-enable on guest shutdown): move the call-site comment onto the
+  snp_rmpopt_all_physmem() definition and simplify the RMPOPT_WORK_TIMEOUT
+  comment.
+- Correct the Suggested-by/Reviewed-by tags across the series.
+
+  Review feedback from Borislav Petkov.
+
+v13:
+- 3/5 (Initialize RMPOPT MSRs): use cpu_primary_thread_mask directly instead of
+  building a local rmpopt_cpumask -- all primary threads are online while SNP is
+  active, so the two are equivalent.  Rename snp_cleanup_rmpopt() to
+  rmpopt_disable().
+- 4/5 (async RMPOPT): drop the leader/follower bookkeeping.  Warm the RMP scan
+  cache once, then fan the RMPOPT out to cpu_primary_thread_mask; re-running
+  RMPOPT on the warm-up CPU is a cache hit, so the separate follower cpumask and
+  the cpumask_andnot() are no longer needed.  Rename rmpopt_work_handler() to
+  do_rmpopt_work() and drop the now-unused this_cpu.
+- Add Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com> to the series.
+
+  Review feedback from Borislav Petkov.
+
+v12:
+- Merged the former "Add interface to re-enable RMP optimizations" and
+  "KVM: SEV: Perform RMP optimizations on SNP guest shutdown" patches into a
+  single patch (now 5/5), since the interface has no user without the KVM
+  caller.  The series is now 5 patches.
+- 2/5 (Disable CPU hotplug): drop a stray reference to later patches from the
+  commit message and trim the snp_prepare() comment.  Move cpu_hotplug_enable()
+  to the end of snp_shutdown(), after clear_rmp() and the mfd_reconfigure() IPI,
+  so no all-CPU operation runs after hotplug is re-enabled.
+- 3/5 (Initialize RMPOPT MSRs): restructure snp_probe_rmptable_info() so the
+  contiguous probe (which clears X86_FEATURE_RMPOPT) is the common fall-through,
+  also covering X86_FEATURE_SEGMENTED_RMP advertised but disabled by firmware.
+  Move snp_setup_rmpopt() to the end of __sev_snp_init_locked().  Give
+  snp_cleanup_rmpopt() its own short comment in snp_shutdown().
+- 4/5 (async RMPOPT): document the optimization trigger points in the commit
+  message.  Rename enum rmpopt_function to rmpopt_op_type.  Merge __rmpopt() into
+  rmpopt() and replace rmpopt_smp() with a new rmpopt_scan_range() that loops as
+  the on_each_cpu() callback, so the follower scan issues one IPI per core rather
+  than one per 1GB.  Use u64 for physical addresses.  Allocate the follower
+  cpumask once at setup.  Document rmpopt_wq as the setup sentinel.  Move the
+  RMPOPT_WORK_TIMEOUT define to the guest-shutdown patch (its only user) as
+  (10 * MSEC_PER_SEC).  Remove a spammy pr_info() and reword comments.
+- 5/5 (Re-enable RMP optimizations on SNP guest shutdown): document why
+  re-optimization is driven by guest teardown (the only event that returns
+  guest memory to hypervisor ownership); reword the commit message
+  (s/clear/disable/ for optimizations, drop "Conversely").
+
+  Review feedback from Borislav Petkov.
+
+v11:
+- Reordered so "Disable CPU hotplug while SNP is active" (2/6) precedes
+  "Initialize RMPOPT configuration MSRs" (3/6): the RMPOPT setup/cleanup code is
+  then introduced with CPU hotplug already disabled and never takes
+  cpus_read_lock().
+- 1/6 (cpufeatures): drop the tools/arch/x86/include/asm/cpufeatures.h change and
+  adopt the commit message as applied by Boris.
+- 2/6 (Disable CPU hotplug): reword the commit message.  Drop the redundant
+  cpus_read_lock()/cpus_read_unlock() in snp_prepare() in this same patch -- with
+  hotplug disabled the online CPU mask is stable, so the read lock is not needed
+  and hotplug handling has no hole when bisecting.
+- 3/6 (Initialize RMPOPT MSRs): replace the rmpopt_capable bool with a small
+  helper local to arch/x86/virt/svm/sev.c --
+  cpu_feature_enabled(X86_FEATURE_RMPOPT) && cc_platform_has(CC_ATTR_HOST_SEV_SNP)
+  -- clearing X86_FEATURE_RMPOPT for a contiguous (non-segmented) RMP in
+  snp_probe_rmptable_info() (runs at BSP init, before alternatives).  Rename
+  rmpopt_cleanup() to snp_cleanup_rmpopt() to match snp_setup_rmpopt().  Both are
+  introduced without cpus_read_lock() (hotplug is already disabled by 2/6).
+  Simplify the RMPOPT_BASE comments.  Drop the now-unused <asm/sev.h> include from
+  core.c.
+- 4/6 (async RMPOPT): the follower scan is likewise introduced without
+  cpus_read_lock().  Drop the cond_resched() calls (nops on x86).  On
+  re-initialization after a legacy SNP shutdown, re-queue the optimization pass
+  instead of skipping it.  pr_warn() on cpumask allocation failure.
+
+  Review feedback from Borislav Petkov and K Prateek Nayak.
+
+v10:
+- Rework the CPU-hotplug patch (3/6): disable CPU hotplug in
+  snp_prepare(), before SnpEn is set, instead of late in
+  __sev_snp_init_locked(), so no CPU can come online without SnpEn during
+  SNP initialization (per upstream review).  Tie hotplug to SnpEn: it
+  stays disabled while SnpEn is set -- including across a failed SNP_INIT
+  and across the legacy SNP_SHUTDOWN_EX path -- and is re-enabled only
+  once the firmware clears SnpEn on the x86_snp_shutdown path.  Drop the
+  separate idempotent flag: snp_prepare() re-enables hotplug on its own
+  early failure, and a kexec target that boots with SnpEn already set
+  disables hotplug once in snp_rmptable_init().  Reword the commit log and
+  comments accordingly.
+- Emit a pr_warn() in rmpopt_work_handler() (4/6) when the follower
+  cpumask allocation fails, instead of silently skipping the optimization
+  pass.
+
+  Sashiko AI upstream review identified several of the above issues.
+
+v9:
+- Rename rmpopt_configured to rmpopt_capable.
+- Make rmpopt_cpumask a cpumask_var_t (allocated/freed at setup/cleanup)
+  instead of a static cpumask_t.
+- Drop the v8 WARN_ON_ONCE() on the RMPOPT_BASE writes; use a plain
+  wrmsrq_on_cpu(), matching the SNP MSR-write convention in this file.
+- Disable CPU hotplug with cpu_hotplug_disable()/cpu_hotplug_enable()
+  (per tglx); re-enable only on the full x86_snp_shutdown path.
+- Simplify rmpopt_work_handler() to a single leader-then-followers path:
+  with CPU hotplug disabled while SNP is active and snp_prepare()
+  requiring all CPUs online when RMPOPT_BASE is programmed, every core is
+  always programmed, so the explicit-leader fallback is now unreachable.
+  Drop it along with the v8 work_on_cpu()/rmpopt_leader_fn() helper.
+- Drop the debugfs interface (was patch 7/7) and its report-only
+  plumbing; observability will be revisited after this series is merged.
+- Restrict snp_rmpopt_all_physmem()'s export to the kvm-amd module.
+- Use scoped_guard(cpus_read_lock) for the per-CPU MSR and follower
+  loops.
+
+  Sashiko AI upstream review identified several of the above issues.
+
+v8:
+- Add a new patch to disable CPU hotplug while SNP is active, keeping
+  the CPU set stable for the RMPOPT work handler.
+- Drop the setup_clear_cpu_cap(X86_FEATURE_RMPOPT) calls; the
+  rmpopt_configured bool is the runtime guard.
+- WARN_ON_ONCE() on the RMPOPT_BASE MSR writes that previously ignored
+  their return value.
+- Simplify rmpopt_work_handler() by removing the explicit-leader
+  fallback: with CPU hotplug disabled while SNP is active and
+  snp_prepare() requiring all CPUs online when RMPOPT_BASE is programmed,
+  every core is always programmed, so the running CPU can always be the
+  leader.  This drops the smp_call_function_single() fallback (and with
+  it the AB-BA deadlock and IRQ-latency concerns) and collapses the
+  leader selection into a single leader-then-followers path.
+- Use mod_delayed_work() in snp_rmpopt_all_physmem() so the batching
+  delay tracks the last SNP guest termination.
+
+  Sashiko AI code review identified several of the above issues.
+
+v7:
+- Sync tools/arch/x86/include/asm/cpufeatures.h to mirror the kernel
+  header for X86_FEATURE_RMPOPT.
+- Fix commit title to use X86_FEATURE_RMPOPT to match the code
+  (was X86_FEATURE_AMD_RMPOPT).
+- Add static bool rmpopt_configured, set only when segmented RMP setup
+  succeeds in setup_rmptable().  Check rmpopt_configured alongside
+  cpu_feature_enabled(X86_FEATURE_RMPOPT) in snp_setup_rmpopt() and
+  snp_rmpopt_all_physmem(), because setup_clear_cpu_cap() is unreliable
+  after alternatives are patched.  Add snp_clear_rmpopt_configured()
+  called from amd_cc_platform_clear() when CC_ATTR_HOST_SEV_SNP is
+  cleared.  Do not use __ro_after_init on rmpopt_configured since the
+  writer snp_clear_rmpopt_configured() is not __init.
+- Add cond_resched() to all three leader loops in rmpopt_work_handler()
+  to prevent soft lockups on systems with up to 2TB of RAM.
+- Add comment above __rmpopt() documenting the RMPOPT instruction
+  encoding (F2 0F 01 FC) and register interface (RAX = system physical
+  address input, RCX = operation type input, RFLAGS.CF = output).
+  Note: RMPOPT does not modify RAX unlike PVALIDATE/RMPUPDATE, so
+  the existing "a" (input-only) constraint is correct.
+
+  Sashiko AI code review identified several of the above issues.
+
+v6:
+- Drop wrmsrq_on_cpus() helper; use for_each_cpu() with wrmsrq_on_cpu()
+  instead, as RMPOPT_BASE MSR programming is not performance-critical.
+- Rewrite rmpopt_work_handler() leader selection to use a local
+  follower_mask copy instead of modifying the global rmpopt_cpumask.
+  This eliminates the current_cpu_cleared tracking and the restore at
+  the end, and removes the need for synchronization comments about
+  transient cpumask inconsistency.
+- Add three-way leader selection in rmpopt_work_handler():
+  1. Current CPU is a primary thread in cpumask: run leader locally.
+  2. Current CPU is a sibling thread whose primary is in cpumask:
+     run leader locally (RMPOPT_BASE MSR is per-core), remove the
+     primary from followers via cpumask_andnot(topology_sibling_cpumask).
+  3. Current CPU's core has no RMPOPT_BASE MSR programmed: pick an
+     explicit leader via cpumask_first() + smp_call_function_single()
+     to avoid #UD, with cpus_read_lock() around the IPI loop.
+- Add WARN_ON_ONCE guard for empty cpumask in the explicit leader
+  fallback path, with migrate_enable() before goto out.
+- Add .llseek = seq_lseek to rmpopt_table_fops for consistency with
+  other seq_file-based debugfs files and to support tools like "less".
+- Change debugfs file permissions from 0444 to 0400 to restrict access
+  to root only.
+- Add comment in rmpopt_table_seq_show() explaining why cpu_online_mask
+  is safe: RMPOPT_BASE MSR is per-core and snp_prepare() ensures all
+  CPUs are online when the MSR is programmed.
+
+  Sashiko AI code review identified several of the above issues.
+
+v5:
+- Introduce rmpopt_cleanup() to tear down workqueue, debugfs, cpumask,
+  and MSR state, called from snp_shutdown().
+- Introduce rmpopt_wq_mutex to serialize snp_setup_rmpopt(),
+  snp_rmpopt_all_physmem(), and rmpopt_cleanup().
+- Introduce rmpopt_show_mutex to serialize debugfs reporting of
+  rmpopt_report_cpumask.
+- Move snp_rmpopt_all_physmem() call after SNP DECOMMISSION during
+  guest shutdown.
+- Use migrate_disable()/migrate_enable() for CPU pinning in the
+  rmpopt_work_handler() leader loop to maintain CPU affinity without
+  disabling preemption for the entire RMPOPT scan.
+- Add cpus_read_lock()/cpus_read_unlock() around the follower
+  on_each_cpu_mask() loop in rmpopt_work_handler().
+- Guard snp_setup_rmpopt() against re-initialization when
+  SNP_SHUTDOWN_EX with x86_snp_shutdown=0 skips rmpopt_cleanup()
+  but clears snp_initialized, preventing workqueue and resource
+  leaks on repeated init/shutdown cycles.
+- Replace setup_clear_cpu_cap() with pr_err() on alloc_workqueue()
+  failure in snp_setup_rmpopt(), as setup_clear_cpu_cap() cannot be
+  used after alternatives are patched; callers check rmpopt_wq != NULL
+  as the runtime guard instead.
+- Add pr_info() when RMPOPT coverage is capped at 2TB.
+- Add comments noting CPU hotplug is not supported with SNP enabled
+  and only online primary threads are covered by rmpopt_cpumask.
+- Add comment in setup_rmptable() noting Segmented RMP must be
+  enabled to enable RMPOPT.
+- Simplify cpumask setup loop to set if primary thread rather than
+  skip if not primary.
+- Improve grammar and clarity in snp_setup_rmpopt() comments.
+- Added Reviewed-by's.
+
+  Sashiko AI code review identified several of the above issues.
+
+v4:
+- Add new wrmsrq_on_cpus() helper to write same u64 value to a
+  per-CPU MSR across a cpumask without per-cpu struct allocation
+  overhead.
+- Rename configure_and_enable_rmpopt() to snp_setup_rmpopt().
+- Use wrmsrq_on_cpus() instead of wrmsrq_on_cpu() loop for
+  programming RMPOPT_BASE MSRs.
+- Add setup_clear_cpu_cap(X86_FEATURE_RMPOPT) if segmented RMP
+  setup fails or workqueue allocation fails.
+- Add X86_FEATURE_RMPOPT feature clear logic in amd_cc_platform_clear()
+  for CC_ATTR_HOST_SEV_SNP.
+- All of the above allow checking for only X86_FEATURE_RMPOPT for both
+  RMPOPT setup/enable and RMP re-optimizations.
+- Rename snp_perform_rmp_optimization() to snp_rmpopt_all_physmem().
+- Split rmpopt() into rmpopt() and rmpopt_smp() for SMP callback use.
+- Introduce separate rmpopt_report_cpumask for debugfs reporting,
+  distinct from rmpopt_cpumask used for primary thread tracking.
+- Remove snp_perform_rmp_optimization() call from __sev_snp_init_locked()
+  and instead setup and enable RMPOPT after SNP is enabled and
+  initialized.
+
+v3:
+- Drop all RMPOPT kthread support and introduce adding custom and
+  dedicated workqueue to schedule delayed and asynchronous RMPOPT work.
+- Drop the guest_memfd inode cleanup interface and add support to
+  re-enable RMP optimizations during guest shutdown using the
+  asynchronous and delayed workqueue interface.
+- Introduce new __rmpopt() helper and rmpopt() and
+  rmpopt_report_status() wrappers on top which use rax and rcx
+  parameters to closely match RMPOPT specs.
+- Use new optimized RMPOPT loop to issue RMPOPT instructions on all
+  system RAM upto 2TB and all CPUs, by optimizing each range on one CPU
+  first, then let other CPUs execute RMPOPT in parallel so they can skip
+  most work as the range has already been optimized.
+- Also add support for running the optimized RMPOPT loop only on
+  one thread per core.
+- Replace all PUD_SIZE references with SZ_1G to conform to 1GB regions
+  as specified by RMPOPT specifications and not be dependent on PUD_SIZE
+  which makes the RMPOPT patch-set independent of x86 page table sizes.
+- Use wrmsrq_on_cpu() to program the RMPOPT_BASE MSR registers on
+  all CPUs that removes all ugly casting to use on_each_cpu_mask().
+- Fix inline commits and patch commit messages
+
+
+v2:
+- Drop all NUMA and Socket configuration and enablement support and
+  enable RMPOPT support for up to 2TB of system RAM.
+- Drop get_cpumask_of_primary_threads() and enable per-core RMPOPT
+  base MSRs and issue RMPOPT instruction on all CPUs.
+- Drop the configfs interface to manually re-enable RMP optimizations.
+- Add new guest_memfd cleanup interface to automatically re-enable
+  RMP optimizations during guest shutdown.
+- Include references to the public RMPOPT documentation.
+- Move debugfs directory for RMPOPT under architecuture specific
+  parent directory.
+
+Ashish Kalra (5):
+  x86/cpufeatures: Add X86_FEATURE_RMPOPT feature flag
+  x86/sev: Disable CPU hotplug while SNP is active
+  x86/sev: Initialize RMPOPT configuration MSRs
+  x86/sev: Perform RMP optimizations asynchronously
+  x86/sev: Re-enable RMP optimizations on SNP guest shutdown
+
+ arch/x86/include/asm/cpufeatures.h |   2 +-
+ arch/x86/include/asm/msr-index.h   |   3 +
+ arch/x86/include/asm/sev.h         |   2 +
+ arch/x86/kernel/cpu/scattered.c    |   1 +
+ arch/x86/kvm/svm/sev.c             |   2 +
+ arch/x86/virt/svm/sev.c            | 193 ++++++++++++++++++++++++++---
+ drivers/crypto/ccp/sev-dev.c       |   2 +
+ 7 files changed, 189 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 4/4] vfio-pci/zdev: Add VFIO FMB device features
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce new VFIO features for zPCI devices to provide FMB passthrough to
+userspace.
+
+Allow the user to enable or disable the FMB using the SET-only feature
+VFIO_DEVICE_FEATURE_ZPCI_FMB_ENABLE. Likewise allow the user to read the
+latest FMB using the GET-only feature VFIO_DEVICE_FEATURE_ZPCI_FMB_READ
+in the case when the FMB is enabled.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c |  4 +++
+ drivers/vfio/pci/vfio_pci_priv.h | 18 ++++++++++
+ drivers/vfio/pci/vfio_pci_zdev.c | 60 ++++++++++++++++++++++++++++++++
+ include/uapi/linux/vfio.h        | 29 +++++++++++++++
+ 4 files changed, 111 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 1/4] s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Ensure that fmb_lock is held by pcibios_enable_device() and
+pcibios_disable_device() when calling zpci_fmb_enable_device() or
+zpci_fmb_disable_device(), respectively. Additionally, assert that the
+fmb_lock is held within the latter two functions to prevent future race
+conditions regarding new callers.
+
+Fixes: af0a8a8453f7 ("s390/pci: implement pcibios_add_device")
+Fixes: 944239c59e93 ("s390/pci: implement pcibios_release_device")
+Cc: stable@vger.kernel.org
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Niklas Schnelle <schnelle@linux.ibm.com>
+---
+ arch/s390/pci/pci.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 3/4] s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce a fence over enabling or disabling FMB via debugfs when the zPCI
+device is associated with a KVM. This will prevent processes on the host
+from tampering with the FMB while the guest is still using it, which may
+cause partial counter resets and inconsistent reads which have no parallel
+in the architecture.
+
+For VFIO devices that are not associated with a KVM (i.e., for userspace
+drivers other than QEMU), this fence does not take effect.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ arch/s390/pci/pci_debug.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v6 0/4] vfio-pci/zdev: Improved zPCI Function Measurement Support
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Hi,
+
+This patch series improves support for function measurement for zPCI
+passthrough devices on s390.
+
+Changelog
+=========
+v5 -> v6:
+* Patch 2/4:
+  - Rework the FMB re-enablement code to reuse the same buffer again
+  - Make the FMB buffer persistent once allocated for as long as the
+    device's lifetime to accommodate an architectural quirk
+* Patch 4/4:
+  - Update the liveness check to use the new FMB enabled bool
+
+v4 -> v5:
+* Typo in the cover letter
+* Swap the ordering of patches 3/4 and 4/4 to ease merging (i.e., to
+  ensure the three s390 patches are ordered before the VFIO patch)
+* Patch 2/4:
+  - Drop the refactor of zpci_fmb_enable_device() and the separation of
+    zpci_fmb_clear_iommu_ctrs() and zpci_fmb_do_enable()
+  - Allocate a new buffer in zpci_fmb_reenable_device() rather than
+    reusing the same buffer to avoid firmware edge cases
+
+* Patch 3/4 (previously 4/4):
+  - Avoid reading from userspace while holding kzdev_lock unnecessarily
+
+* Patch 4/4 (previously 3/4):
+  - Drop allowing usercopy of the FMB when initializing the kmem_cache
+  - Avoid copying to userspace while holding fmb_lock unnecessarily
+    - Restore the FMB bounce buffer to achieve this one
+  - Clarify uAPI documentation and ensure it accurately describes the
+    behavior of the VFIO features
+
+v3 -> v4:
+* Patch 2/4:
+  - Replace mutex_lock/unlock in zpci_reenable_device() with a guard
+
+* Patch 3/4:
+  - Allow usercopy of the FMB when initializing its kmem_cache
+  - Move the guard in vfio_pci_zdev_feature_fmb_enable() lower to only
+    protect the FMB
+  - Ensure vfio_pci_zdev_feature_fmb_enable() fails on double-enable for
+    consistency with the documentation
+  - Eliminate the bounce buffer in vfio_pci_zdev_feature_fmb_read()
+  - Replace the void pointer with __aligned_u64 in the FMB read uAPI
+    structure
+
+v2 -> v3:
+* Patch 1/4 (new patch):
+  - Fix race conditions in pcibios_enable/disable_device() with regard to
+    the FMB enable/disable
+  - Assert that fmb_lock is held within zpci_fmb_enable_device() and
+    zpci_fmb_disable_device()
+
+* Patch 2/4 (previously 1/3):
+  - Move the FMB enable logic into a static function zpci_fmb_do_enable()
+    to reduce code duplication between zpci_fmb_enable_device() and
+    zpci_fmb_reenable_device()
+  - Reword commit message to use the imperative voice more consistently
+
+* Patch 3/4 (previously 2/3):
+  - Split the previous VFIO feature into a SET-only and a GET-only feature
+    for enabling/disabling and reading the FMB respectively
+  - Remove FMB definitions from the VFIO uAPI and instead treat it as an
+    opaque structure
+
+* Patch 4/4 (previously 3/3):
+  - Clarify goto label name to reduce misunderstandings
+
+v1 -> v2:
+* Patch 1/3:
+  - Address a possible race condition in zpci_reenable_device() caused by
+    calling zpci_fmb_reenable_device() without holding fmb_lock
+  - Assert that fmb_lock is held within zpci_fmb_reenable_device()
+
+* Patch 3/3:
+  - Address a possible race condition in pci_perf_seq_write() caused by
+    consuming zdev->kzdev without holding kzdev_lock
+
+Motivation
+==========
+The firmware on s390x machines allows for tracking a variety of statistics
+relating to zPCI devices in a function measurement block (FMB). However,
+the kernel currently lacks a structured mechanism of sharing this
+information with userspace, beyond /sys/kernel/debug/pci/ID/statistics.
+This can lead to shortcomings when running a guest on KVM with PCI
+passthrough devices, as QEMU is unable to provide an accurate FMB snapshot
+to the guest.
+
+Proposal
+========
+We propose adding a new VFIO device feature to zPCI passthrough devices,
+allowing userspace programs to read the latest FMB snapshot as it is
+written by the firmware. We ensure that function measurement enablement is
+preserved across device resets on the host. Furthermore, we guard against
+host tampering with the FMB via sysfs when the zPCI device is in
+passthrough to protect the VM's state.
+
+I'd appreciate some feedback on these patches.
+
+Thanks in advance.
+
+Omar Elghoul (4):
+  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+  s390/pci: Reuse FMB buffer and preserve state in device re-enablement
+  s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+  vfio-pci/zdev: Add VFIO FMB device features
+
+ arch/s390/include/asm/pci.h      |  2 +
+ arch/s390/pci/pci.c              | 83 +++++++++++++++++++++++++-------
+ arch/s390/pci/pci_debug.c        | 11 ++++-
+ drivers/vfio/pci/vfio_pci_core.c |  4 ++
+ drivers/vfio/pci/vfio_pci_priv.h | 18 +++++++
+ drivers/vfio/pci/vfio_pci_zdev.c | 60 +++++++++++++++++++++++
+ include/uapi/linux/vfio.h        | 29 +++++++++++
+ 7 files changed, 189 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v6 2/4] s390/pci: Reuse FMB buffer and preserve state in device re-enablement
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce the function zpci_fmb_reenable_device() that checks the state
+of function measurement and ensures it is enabled. Reset the counters to
+zero, disable, and re-enable the FMB if it was already enabled. Call
+this function from zpci_reenable_device().
+
+Don't free the FMB buffer during disabling and reuse it when re-enabling
+measurement. Instead, free the buffer upon device teardown, allowing the
+same buffer to be reused in the enable path and add the bit fmb_enabled
+to struct zpci_dev. Audit the only consumer of zdev->fmb and update it
+to reflect the change in semantics.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ arch/s390/include/asm/pci.h |  2 +
+ arch/s390/pci/pci.c         | 75 ++++++++++++++++++++++++++++---------
+ arch/s390/pci/pci_debug.c   |  2 +-
+ 3 files changed, 61 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v15 5/5] x86/sev: Re-enable RMP optimizations on SNP guest shutdown
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+The RMPOPT table is a per-CPU table which indicates whether 1GB regions
+of physical memory are entirely hypervisor-owned.
+
+When performing host memory accesses in hypervisor mode as well as
+non-SNP guest mode, the processor may consult the RMPOPT table to
+potentially skip an RMP access and improve performance.
+
+Normal guest events disable RMP optimizations: pages are converted from
+shared to private as SNP guests are launched, and large pages are split
+and collapsed during guest operation -- both disable the RMPOPT
+optimizations for the affected 1GB regions.
+
+When guests are torn down, their pages are converted back to shared, so
+those regions may become eligible for RMPOPT optimization again. Without
+some intervention, all RMP optimizations would eventually be lost, so
+re-optimize all of physical memory on SNP guest teardown by calling
+snp_enable_rmpopt().
+
+snp_enable_rmpopt() performs the re-optimization after a delay, using
+mod_delayed_work() so that the delay timer is reset on each call. This
+batches multiple guest terminations into a single pass: the
+re-optimization runs 10 seconds after the *last* termination rather than
+after the first. mod_delayed_work() also re-queues work that is already
+in-flight, so a re-scan request during an active scan is not silently
+dropped.
+
+Guest teardown is currently the only event that returns guest memory to
+hypervisor ownership: SNP guests do not support ballooning or memory
+hotplug, so pages freed during a guest's lifetime remain guest-owned.
+It is therefore the only point at which memory becomes eligible for RMP
+re-optimization, which is why re-optimization is driven by guest
+teardown rather than by a periodic scan.
+
+Reviewed-by: Ackerley Tng <ackerleytng@google.com>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Reviewed-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+Changes in v15:
+- Call snp_enable_rmpopt() on guest teardown instead of a separate
+  snp_rmpopt_all_physmem(); the delayed re-optimization now lives in
+  snp_enable_rmpopt().
+ arch/x86/kvm/svm/sev.c  | 2 ++
+ arch/x86/virt/svm/sev.c | 2 +-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v15 4/5] x86/sev: Perform RMP optimizations asynchronously
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+When SNP is enabled, all writes to memory are checked to ensure memory
+integrity. This imposes performance overhead on the whole system.
+
+RMPOPT is a new instruction that minimizes the performance overhead of
+RMP checks on the hypervisor and on non-SNP guests by allowing RMP
+checks to be skipped for 1GB regions of memory that are known not to
+contain any SNP guest memory.
+
+Add support for performing RMP optimizations asynchronously using a
+dedicated per-CPU workqueue. The workqueue is allocated from an initcall,
+and snp_enable_rmpopt() queues the optimization pass.
+
+Shortly after SNP initialization, run an optimization pass over all
+physical memory (up to 2TB of system RAM, starting from the lowest
+physical memory address aligned down to a 1GB boundary), skipping RMP
+checks for 1GB regions that do not contain SNP guest memory (excluding
+preassigned pages such as the RMP table and firmware pages).
+
+As SNP guests are launched, RMPUPDATE assigns their private pages to
+guest-owned state; when such a page falls within an optimized 1GB
+region, the hardware clears that region's RMPOPT optimization and RMP
+checks resume there to protect the guest memory.
+
+Since launching SNP guests clears these optimizations, perform them
+again asynchronously using the dedicated workqueue.
+
+Suggested-by: Thomas Lendacky <thomas.lendacky@amd.com>
+Suggested-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+Changes in v15:
+- Move the workqueue allocation and the (fixed) optimization range
+  computation to an initcall; snp_enable_rmpopt() now only programs the
+  RMPOPT_BASE MSRs and queues the optimization pass.
+- Gate rmpopt_capable() on a static rmpopt_enabled bool set when the
+  workqueue is allocated, instead of an if (rmpopt_wq) check, and drop
+  rmpopt_wq_mutex.
+- Queue both the initial and the teardown pass with mod_delayed_work().
+ arch/x86/virt/svm/sev.c | 99 +++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 95 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v15 3/5] x86/sev: Initialize RMPOPT configuration MSRs
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+The new RMPOPT instruction helps manage per-CPU RMP optimization
+structures inside the CPU. It takes a 1GB-aligned physical address
+and either returns the status of the optimizations or tries to enable
+the optimizations.
+
+Per-CPU RMPOPT tables support at most 2 TB of addressable memory for
+RMP optimizations.
+
+Initialize the per-CPU RMPOPT table base to the starting physical
+address. This enables RMP optimization for up to 2 TB of system RAM on
+all CPUs.
+
+Add snp_enable_rmpopt() to program RMPOPT once SNP is enabled and
+initialized.
+
+Suggested-by: Thomas Lendacky <thomas.lendacky@amd.com>
+Suggested-by: Dave Hansen <dave.hansen@linux.intel.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+Changes in v15:
+- Rename snp_setup_rmpopt() to snp_enable_rmpopt().
+- Program each core's RMPOPT_BASE only when it is not already set.
+ arch/x86/include/asm/msr-index.h |  3 ++
+ arch/x86/include/asm/sev.h       |  2 ++
+ arch/x86/virt/svm/sev.c          | 54 +++++++++++++++++++++++++++++---
+ drivers/crypto/ccp/sev-dev.c     |  2 ++
+ 4 files changed, 56 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v15 2/5] x86/sev: Disable CPU hotplug while SNP is active
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+While SNP is active, every memory write is checked against the RMP to
+protect SNP guest memory.  A core performs these RMP checks only once
+SNP has been initialized via SNP_INIT and the SNP-enable bit in SYSCFG is
+set on that core; the firmware requires the SNP-enable bit to be set on
+every present CPU before SNP initialization.
+
+A core that is not SNP-enabled and not SNP-initialized performs no RMP
+checks at all, so there is no valid configuration with SNP active and any
+CPU exempt from RMP checks.
+
+The firmware determines which CPUs are present from the processor and the
+BIOS/UEFI configuration (e.g. SMT disabled in the BIOS) and enumerates
+them at SNP init; it is not aware of the OS bringing CPUs online or
+offline afterwards.
+
+SNP_INIT fails unless SnpEn is set on all CPUs, so a CPU that is offline
+when SNP_INIT is issued, does not have SnpEn set, SNP_INIT fails, and
+there can be no SNP guest memory.  OS CPU hotplug can thus diverge from
+the firmware's expectations and break SNP.
+
+Tie CPU hotplug to the SNP-enable bit: disable it in snp_prepare() before
+SNP is enabled, and re-enable it in snp_shutdown() once the firmware has
+disabled SNP.
+
+If snp_prepare() fails before enabling SNP it re-enables hotplug itself;
+once SNP is enabled hotplug stays disabled, including across a failed
+SNP_INIT and across the legacy SNP_SHUTDOWN_EX path, both of which leave
+SNP enabled.
+
+A kexec target that boots with SNP already enabled, disables hotplug once
+in snp_rmptable_init(), since snp_prepare() bails when SNP is already
+enabled.
+
+With CPU hotplug now disabled while SNP is active, the online CPU mask is
+stable, so the cpus_read_lock() previously taken in snp_prepare() to
+iterate it is redundant.  Drop cpus_read_lock()/cpus_read_unlock() here.
+
+Suggested-by: Thomas Lendacky <thomas.lendacky@amd.com>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+---
+ arch/x86/virt/svm/sev.c | 36 ++++++++++++++++++++++++++----------
+ 1 file changed, 26 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v15 1/5] x86/cpufeatures: Add X86_FEATURE_RMPOPT feature flag
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+Add a flag indicating whether RMPOPT instruction is supported.
+
+RMPOPT is a new instruction that reduces the performance overhead of RMP
+checks for the hypervisor and non-SNP guests by allowing those checks to be
+skipped when 1-GB memory regions are known to contain no SEV-SNP guest memory.
+
+For more information on the RMPOPT instruction, see the AMD64 RMPOPT
+technical documentation.
+
+  [ bp: Zap respective tools/ change. ]
+
+Suggested-by: Borislav Petkov (AMD) <bp@alien8.de>
+Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com>
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+Signed-off-by: Borislav Petkov (AMD) <bp@alien8.de>
+Reviewed-by: Dave Hansen <dave.hansen@linux.intel.com>
+Reviewed-by: Ackerley Tng <ackerleytng@google.com>
+Link: https://patch.msgid.link/39e9ee269a572c516a3f4e937bfe12d00697d5e6.1782841284.git.ashish.kalra@amd.com
+---
+ arch/x86/include/asm/cpufeatures.h | 2 +-
+ arch/x86/kernel/cpu/scattered.c    | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v15 0/5] Add RMPOPT support.
+Author: Ashish Kalra <Ashish.Kalra@amd.com>
+
+
+In the SEV-SNP architecture, hypervisor and non-SNP guests are subject
+to RMP checks on writes to provide integrity of SEV-SNP guest memory.
+
+The RMPOPT architecture enables optimizations whereby the RMP checks
+can be skipped if 1GB regions of memory are known to not contain any
+SNP guest memory.
+
+RMPOPT is a new instruction designed to minimize the performance
+overhead of RMP checks for the hypervisor and non-SNP guests.
+
+RMPOPT instruction currently supports two functions. In case of the
+verify and report status function the CPU will read the RMP contents,
+verify the entire 1GB region starting at the provided SPA is HV-owned.
+For the entire 1GB region it checks that all RMP entries in this region
+are HV-owned (i.e, not in assigned state) and then accordingly updates
+the RMPOPT table to indicate if optimization has been enabled and
+provide indication to software if the optimization was successful.
+
+In case of report status function, the CPU returns the optimization
+status for the 1GB region.
+
+The RMPOPT table is managed by a combination of software and hardware.
+Software uses the RMPOPT instruction to set bits in the table,
+indicating that regions of memory are entirely HV-owned.  Hardware
+automatically clears bits in the RMPOPT table when RMP contents are
+changed during RMPUPDATE instruction.
+
+For more information on the RMPOPT instruction, see the AMD64 RMPOPT
+technical documentation.
+
+As SNP is enabled by default the hypervisor and non-SNP guests are
+subject to RMP write checks to provide integrity of SNP guest memory.
+
+This patch-series adds support to enable RMP optimizations for up to
+2TB of system RAM across the system and allow RMPUPDATE to disable
+those optimizations as SNP guests are launched.
+
+Support for RAM larger than 2 TB will be added in follow-on series.
+
+This series also adds support to disable CPU hotplug while SNP is
+active, as the SEV firmware enumerates CPUs at SNP initialization and is
+not aware of the OS bringing CPUs online or offline afterwards.  This
+also keeps the set of CPUs stable for the asynchronous RMPOPT scan, so
+the per-core RMPOPT_BASE MSRs programmed during setup remain valid.
+
+This series also introduces support to re-enable RMP optimizations
+during SNP guest termination, after guest pages have been converted
+back to shared.
+
+RMP optimizations are performed asynchronously by queuing work on a
+dedicated workqueue after a 10 second delay.
+
+Delaying work allows batching of multiple SNP guest terminations.
+
+Once 1GB hugetlb guest_memfd support is merged, support for
+re-enabling RMPOPT optimizations during 1GB page cleanup will be added
+in follow-on series.
+
+v15:
+- 3/5 (Initialize RMPOPT MSRs): rename snp_setup_rmpopt() to
+  snp_enable_rmpopt(); program each core's RMPOPT_BASE only when it is not
+  already set.
+- 4/5 (async RMPOPT): split setup from enable -- an initcall allocates the
+  workqueue and computes the (fixed) optimization range once, and
+  snp_enable_rmpopt() programs the RMPOPT_BASE MSRs and queues the
+  optimization pass.  Gate rmpopt_capable() on a static rmpopt_enabled bool
+  instead of an if (rmpopt_wq) check and drop rmpopt_wq_mutex.  Queue both
+  the initial and the teardown pass with mod_delayed_work().
+- 5/5 (Re-enable on guest shutdown): call snp_enable_rmpopt() on guest
+  teardown instead of a separate snp_rmpopt_all_physmem().
+
+  This is a full resend rather than a 4/5-5/5 reply because patch 3 changed
+  as part of the setup/enable split.
+
+  Review feedback from Borislav Petkov.
+
+v14:
+- 3/5 (Initialize RMPOPT MSRs): remove rmpopt_disable() and the RMPOPT_BASE
+  teardown from this patch.  RMPOPT is now set up once and not torn down, so the
+  RMPOPT_BASE MSRs are left in place on shutdown; the (now minimal) disable path
+  moves to 4/5.
+- 4/5 (async RMPOPT): rework the setup/teardown -- initialize once and do not
+  tear it down.  rmpopt_disable() now only cancels the pending re-optimization
+  pass.  Use a dedicated per-CPU workqueue (WQ_PERCPU) and drop the
+  migrate_disable()/migrate_enable() around the local warm-up scan.  Add a
+  binutils-version comment above the RMPOPT .byte encoding and trim redundant
+  comments and the 2 TB pr_info().  Reword the subject to "Perform RMP
+  optimizations asynchronously".
+- 5/5 (Re-enable on guest shutdown): move the call-site comment onto the
+  snp_rmpopt_all_physmem() definition and simplify the RMPOPT_WORK_TIMEOUT
+  comment.
+- Correct the Suggested-by/Reviewed-by tags across the series.
+
+  Review feedback from Borislav Petkov.
+
+v13:
+- 3/5 (Initialize RMPOPT MSRs): use cpu_primary_thread_mask directly instead of
+  building a local rmpopt_cpumask -- all primary threads are online while SNP is
+  active, so the two are equivalent.  Rename snp_cleanup_rmpopt() to
+  rmpopt_disable().
+- 4/5 (async RMPOPT): drop the leader/follower bookkeeping.  Warm the RMP scan
+  cache once, then fan the RMPOPT out to cpu_primary_thread_mask; re-running
+  RMPOPT on the warm-up CPU is a cache hit, so the separate follower cpumask and
+  the cpumask_andnot() are no longer needed.  Rename rmpopt_work_handler() to
+  do_rmpopt_work() and drop the now-unused this_cpu.
+- Add Reviewed-by: Tom Lendacky <thomas.lendacky@amd.com> to the series.
+
+  Review feedback from Borislav Petkov.
+
+v12:
+- Merged the former "Add interface to re-enable RMP optimizations" and
+  "KVM: SEV: Perform RMP optimizations on SNP guest shutdown" patches into a
+  single patch (now 5/5), since the interface has no user without the KVM
+  caller.  The series is now 5 patches.
+- 2/5 (Disable CPU hotplug): drop a stray reference to later patches from the
+  commit message and trim the snp_prepare() comment.  Move cpu_hotplug_enable()
+  to the end of snp_shutdown(), after clear_rmp() and the mfd_reconfigure() IPI,
+  so no all-CPU operation runs after hotplug is re-enabled.
+- 3/5 (Initialize RMPOPT MSRs): restructure snp_probe_rmptable_info() so the
+  contiguous probe (which clears X86_FEATURE_RMPOPT) is the common fall-through,
+  also covering X86_FEATURE_SEGMENTED_RMP advertised but disabled by firmware.
+  Move snp_setup_rmpopt() to the end of __sev_snp_init_locked().  Give
+  snp_cleanup_rmpopt() its own short comment in snp_shutdown().
+- 4/5 (async RMPOPT): document the optimization trigger points in the commit
+  message.  Rename enum rmpopt_function to rmpopt_op_type.  Merge __rmpopt() into
+  rmpopt() and replace rmpopt_smp() with a new rmpopt_scan_range() that loops as
+  the on_each_cpu() callback, so the follower scan issues one IPI per core rather
+  than one per 1GB.  Use u64 for physical addresses.  Allocate the follower
+  cpumask once at setup.  Document rmpopt_wq as the setup sentinel.  Move the
+  RMPOPT_WORK_TIMEOUT define to the guest-shutdown patch (its only user) as
+  (10 * MSEC_PER_SEC).  Remove a spammy pr_info() and reword comments.
+- 5/5 (Re-enable RMP optimizations on SNP guest shutdown): document why
+  re-optimization is driven by guest teardown (the only event that returns
+  guest memory to hypervisor ownership); reword the commit message
+  (s/clear/disable/ for optimizations, drop "Conversely").
+
+  Review feedback from Borislav Petkov.
+
+v11:
+- Reordered so "Disable CPU hotplug while SNP is active" (2/6) precedes
+  "Initialize RMPOPT configuration MSRs" (3/6): the RMPOPT setup/cleanup code is
+  then introduced with CPU hotplug already disabled and never takes
+  cpus_read_lock().
+- 1/6 (cpufeatures): drop the tools/arch/x86/include/asm/cpufeatures.h change and
+  adopt the commit message as applied by Boris.
+- 2/6 (Disable CPU hotplug): reword the commit message.  Drop the redundant
+  cpus_read_lock()/cpus_read_unlock() in snp_prepare() in this same patch -- with
+  hotplug disabled the online CPU mask is stable, so the read lock is not needed
+  and hotplug handling has no hole when bisecting.
+- 3/6 (Initialize RMPOPT MSRs): replace the rmpopt_capable bool with a small
+  helper local to arch/x86/virt/svm/sev.c --
+  cpu_feature_enabled(X86_FEATURE_RMPOPT) && cc_platform_has(CC_ATTR_HOST_SEV_SNP)
+  -- clearing X86_FEATURE_RMPOPT for a contiguous (non-segmented) RMP in
+  snp_probe_rmptable_info() (runs at BSP init, before alternatives).  Rename
+  rmpopt_cleanup() to snp_cleanup_rmpopt() to match snp_setup_rmpopt().  Both are
+  introduced without cpus_read_lock() (hotplug is already disabled by 2/6).
+  Simplify the RMPOPT_BASE comments.  Drop the now-unused <asm/sev.h> include from
+  core.c.
+- 4/6 (async RMPOPT): the follower scan is likewise introduced without
+  cpus_read_lock().  Drop the cond_resched() calls (nops on x86).  On
+  re-initialization after a legacy SNP shutdown, re-queue the optimization pass
+  instead of skipping it.  pr_warn() on cpumask allocation failure.
+
+  Review feedback from Borislav Petkov and K Prateek Nayak.
+
+v10:
+- Rework the CPU-hotplug patch (3/6): disable CPU hotplug in
+  snp_prepare(), before SnpEn is set, instead of late in
+  __sev_snp_init_locked(), so no CPU can come online without SnpEn during
+  SNP initialization (per upstream review).  Tie hotplug to SnpEn: it
+  stays disabled while SnpEn is set -- including across a failed SNP_INIT
+  and across the legacy SNP_SHUTDOWN_EX path -- and is re-enabled only
+  once the firmware clears SnpEn on the x86_snp_shutdown path.  Drop the
+  separate idempotent flag: snp_prepare() re-enables hotplug on its own
+  early failure, and a kexec target that boots with SnpEn already set
+  disables hotplug once in snp_rmptable_init().  Reword the commit log and
+  comments accordingly.
+- Emit a pr_warn() in rmpopt_work_handler() (4/6) when the follower
+  cpumask allocation fails, instead of silently skipping the optimization
+  pass.
+
+  Sashiko AI upstream review identified several of the above issues.
+
+v9:
+- Rename rmpopt_configured to rmpopt_capable.
+- Make rmpopt_cpumask a cpumask_var_t (allocated/freed at setup/cleanup)
+  instead of a static cpumask_t.
+- Drop the v8 WARN_ON_ONCE() on the RMPOPT_BASE writes; use a plain
+  wrmsrq_on_cpu(), matching the SNP MSR-write convention in this file.
+- Disable CPU hotplug with cpu_hotplug_disable()/cpu_hotplug_enable()
+  (per tglx); re-enable only on the full x86_snp_shutdown path.
+- Simplify rmpopt_work_handler() to a single leader-then-followers path:
+  with CPU hotplug disabled while SNP is active and snp_prepare()
+  requiring all CPUs online when RMPOPT_BASE is programmed, every core is
+  always programmed, so the explicit-leader fallback is now unreachable.
+  Drop it along with the v8 work_on_cpu()/rmpopt_leader_fn() helper.
+- Drop the debugfs interface (was patch 7/7) and its report-only
+  plumbing; observability will be revisited after this series is merged.
+- Restrict snp_rmpopt_all_physmem()'s export to the kvm-amd module.
+- Use scoped_guard(cpus_read_lock) for the per-CPU MSR and follower
+  loops.
+
+  Sashiko AI upstream review identified several of the above issues.
+
+v8:
+- Add a new patch to disable CPU hotplug while SNP is active, keeping
+  the CPU set stable for the RMPOPT work handler.
+- Drop the setup_clear_cpu_cap(X86_FEATURE_RMPOPT) calls; the
+  rmpopt_configured bool is the runtime guard.
+- WARN_ON_ONCE() on the RMPOPT_BASE MSR writes that previously ignored
+  their return value.
+- Simplify rmpopt_work_handler() by removing the explicit-leader
+  fallback: with CPU hotplug disabled while SNP is active and
+  snp_prepare() requiring all CPUs online when RMPOPT_BASE is programmed,
+  every core is always programmed, so the running CPU can always be the
+  leader.  This drops the smp_call_function_single() fallback (and with
+  it the AB-BA deadlock and IRQ-latency concerns) and collapses the
+  leader selection into a single leader-then-followers path.
+- Use mod_delayed_work() in snp_rmpopt_all_physmem() so the batching
+  delay tracks the last SNP guest termination.
+
+  Sashiko AI code review identified several of the above issues.
+
+v7:
+- Sync tools/arch/x86/include/asm/cpufeatures.h to mirror the kernel
+  header for X86_FEATURE_RMPOPT.
+- Fix commit title to use X86_FEATURE_RMPOPT to match the code
+  (was X86_FEATURE_AMD_RMPOPT).
+- Add static bool rmpopt_configured, set only when segmented RMP setup
+  succeeds in setup_rmptable().  Check rmpopt_configured alongside
+  cpu_feature_enabled(X86_FEATURE_RMPOPT) in snp_setup_rmpopt() and
+  snp_rmpopt_all_physmem(), because setup_clear_cpu_cap() is unreliable
+  after alternatives are patched.  Add snp_clear_rmpopt_configured()
+  called from amd_cc_platform_clear() when CC_ATTR_HOST_SEV_SNP is
+  cleared.  Do not use __ro_after_init on rmpopt_configured since the
+  writer snp_clear_rmpopt_configured() is not __init.
+- Add cond_resched() to all three leader loops in rmpopt_work_handler()
+  to prevent soft lockups on systems with up to 2TB of RAM.
+- Add comment above __rmpopt() documenting the RMPOPT instruction
+  encoding (F2 0F 01 FC) and register interface (RAX = system physical
+  address input, RCX = operation type input, RFLAGS.CF = output).
+  Note: RMPOPT does not modify RAX unlike PVALIDATE/RMPUPDATE, so
+  the existing "a" (input-only) constraint is correct.
+
+  Sashiko AI code review identified several of the above issues.
+
+v6:
+- Drop wrmsrq_on_cpus() helper; use for_each_cpu() with wrmsrq_on_cpu()
+  instead, as RMPOPT_BASE MSR programming is not performance-critical.
+- Rewrite rmpopt_work_handler() leader selection to use a local
+  follower_mask copy instead of modifying the global rmpopt_cpumask.
+  This eliminates the current_cpu_cleared tracking and the restore at
+  the end, and removes the need for synchronization comments about
+  transient cpumask inconsistency.
+- Add three-way leader selection in rmpopt_work_handler():
+  1. Current CPU is a primary thread in cpumask: run leader locally.
+  2. Current CPU is a sibling thread whose primary is in cpumask:
+     run leader locally (RMPOPT_BASE MSR is per-core), remove the
+     primary from followers via cpumask_andnot(topology_sibling_cpumask).
+  3. Current CPU's core has no RMPOPT_BASE MSR programmed: pick an
+     explicit leader via cpumask_first() + smp_call_function_single()
+     to avoid #UD, with cpus_read_lock() around the IPI loop.
+- Add WARN_ON_ONCE guard for empty cpumask in the explicit leader
+  fallback path, with migrate_enable() before goto out.
+- Add .llseek = seq_lseek to rmpopt_table_fops for consistency with
+  other seq_file-based debugfs files and to support tools like "less".
+- Change debugfs file permissions from 0444 to 0400 to restrict access
+  to root only.
+- Add comment in rmpopt_table_seq_show() explaining why cpu_online_mask
+  is safe: RMPOPT_BASE MSR is per-core and snp_prepare() ensures all
+  CPUs are online when the MSR is programmed.
+
+  Sashiko AI code review identified several of the above issues.
+
+v5:
+- Introduce rmpopt_cleanup() to tear down workqueue, debugfs, cpumask,
+  and MSR state, called from snp_shutdown().
+- Introduce rmpopt_wq_mutex to serialize snp_setup_rmpopt(),
+  snp_rmpopt_all_physmem(), and rmpopt_cleanup().
+- Introduce rmpopt_show_mutex to serialize debugfs reporting of
+  rmpopt_report_cpumask.
+- Move snp_rmpopt_all_physmem() call after SNP DECOMMISSION during
+  guest shutdown.
+- Use migrate_disable()/migrate_enable() for CPU pinning in the
+  rmpopt_work_handler() leader loop to maintain CPU affinity without
+  disabling preemption for the entire RMPOPT scan.
+- Add cpus_read_lock()/cpus_read_unlock() around the follower
+  on_each_cpu_mask() loop in rmpopt_work_handler().
+- Guard snp_setup_rmpopt() against re-initialization when
+  SNP_SHUTDOWN_EX with x86_snp_shutdown=0 skips rmpopt_cleanup()
+  but clears snp_initialized, preventing workqueue and resource
+  leaks on repeated init/shutdown cycles.
+- Replace setup_clear_cpu_cap() with pr_err() on alloc_workqueue()
+  failure in snp_setup_rmpopt(), as setup_clear_cpu_cap() cannot be
+  used after alternatives are patched; callers check rmpopt_wq != NULL
+  as the runtime guard instead.
+- Add pr_info() when RMPOPT coverage is capped at 2TB.
+- Add comments noting CPU hotplug is not supported with SNP enabled
+  and only online primary threads are covered by rmpopt_cpumask.
+- Add comment in setup_rmptable() noting Segmented RMP must be
+  enabled to enable RMPOPT.
+- Simplify cpumask setup loop to set if primary thread rather than
+  skip if not primary.
+- Improve grammar and clarity in snp_setup_rmpopt() comments.
+- Added Reviewed-by's.
+
+  Sashiko AI code review identified several of the above issues.
+
+v4:
+- Add new wrmsrq_on_cpus() helper to write same u64 value to a
+  per-CPU MSR across a cpumask without per-cpu struct allocation
+  overhead.
+- Rename configure_and_enable_rmpopt() to snp_setup_rmpopt().
+- Use wrmsrq_on_cpus() instead of wrmsrq_on_cpu() loop for
+  programming RMPOPT_BASE MSRs.
+- Add setup_clear_cpu_cap(X86_FEATURE_RMPOPT) if segmented RMP
+  setup fails or workqueue allocation fails.
+- Add X86_FEATURE_RMPOPT feature clear logic in amd_cc_platform_clear()
+  for CC_ATTR_HOST_SEV_SNP.
+- All of the above allow checking for only X86_FEATURE_RMPOPT for both
+  RMPOPT setup/enable and RMP re-optimizations.
+- Rename snp_perform_rmp_optimization() to snp_rmpopt_all_physmem().
+- Split rmpopt() into rmpopt() and rmpopt_smp() for SMP callback use.
+- Introduce separate rmpopt_report_cpumask for debugfs reporting,
+  distinct from rmpopt_cpumask used for primary thread tracking.
+- Remove snp_perform_rmp_optimization() call from __sev_snp_init_locked()
+  and instead setup and enable RMPOPT after SNP is enabled and
+  initialized.
+
+v3:
+- Drop all RMPOPT kthread support and introduce adding custom and
+  dedicated workqueue to schedule delayed and asynchronous RMPOPT work.
+- Drop the guest_memfd inode cleanup interface and add support to
+  re-enable RMP optimizations during guest shutdown using the
+  asynchronous and delayed workqueue interface.
+- Introduce new __rmpopt() helper and rmpopt() and
+  rmpopt_report_status() wrappers on top which use rax and rcx
+  parameters to closely match RMPOPT specs.
+- Use new optimized RMPOPT loop to issue RMPOPT instructions on all
+  system RAM upto 2TB and all CPUs, by optimizing each range on one CPU
+  first, then let other CPUs execute RMPOPT in parallel so they can skip
+  most work as the range has already been optimized.
+- Also add support for running the optimized RMPOPT loop only on
+  one thread per core.
+- Replace all PUD_SIZE references with SZ_1G to conform to 1GB regions
+  as specified by RMPOPT specifications and not be dependent on PUD_SIZE
+  which makes the RMPOPT patch-set independent of x86 page table sizes.
+- Use wrmsrq_on_cpu() to program the RMPOPT_BASE MSR registers on
+  all CPUs that removes all ugly casting to use on_each_cpu_mask().
+- Fix inline commits and patch commit messages
+
+
+v2:
+- Drop all NUMA and Socket configuration and enablement support and
+  enable RMPOPT support for up to 2TB of system RAM.
+- Drop get_cpumask_of_primary_threads() and enable per-core RMPOPT
+  base MSRs and issue RMPOPT instruction on all CPUs.
+- Drop the configfs interface to manually re-enable RMP optimizations.
+- Add new guest_memfd cleanup interface to automatically re-enable
+  RMP optimizations during guest shutdown.
+- Include references to the public RMPOPT documentation.
+- Move debugfs directory for RMPOPT under architecuture specific
+  parent directory.
+
+Ashish Kalra (5):
+  x86/cpufeatures: Add X86_FEATURE_RMPOPT feature flag
+  x86/sev: Disable CPU hotplug while SNP is active
+  x86/sev: Initialize RMPOPT configuration MSRs
+  x86/sev: Perform RMP optimizations asynchronously
+  x86/sev: Re-enable RMP optimizations on SNP guest shutdown
+
+ arch/x86/include/asm/cpufeatures.h |   2 +-
+ arch/x86/include/asm/msr-index.h   |   3 +
+ arch/x86/include/asm/sev.h         |   2 +
+ arch/x86/kernel/cpu/scattered.c    |   1 +
+ arch/x86/kvm/svm/sev.c             |   2 +
+ arch/x86/virt/svm/sev.c            | 181 ++++++++++++++++++++++++++---
+ drivers/crypto/ccp/sev-dev.c       |   2 +
+ 7 files changed, 177 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 27/27] selftests/vfio: Add CXL Type-2 passthrough tests
+Author: mhonap <mhonap@nvidia.com>
+
+
+Exercise the vfio-cxl contract on a bound Type-2 device: the CXL
+device-info flag and the two vendor-type regions, the HDM memory mmap
+(including a 2 MB huge fault) and its survival across a Memory Space
+toggle, the read-only trapped decoder region against the live
+host-committed decoder, and the guest's DVSEC reset doorbell and manual
+HDM discovery.
+
+Map the HDM memory the way a VMM does: export it as a dma-buf with
+VFIO_DEVICE_FEATURE_DMA_BUF and map the fd into the IOAS with
+IOMMU_IOAS_MAP_FILE. The struct-page-less range cannot be pinned through a
+userspace VA, so the by-fd path is the one that works. Skip when the
+kernel has no CXL dma-buf exporter, so the test becomes a real pass once
+that support is present.
+
+Add a partial-mmap path to the vfio selftest library so the trapped
+component BAR maps its sparse ranges, and an __iommu_map_file() helper for
+the dma-buf mapping.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ MAINTAINERS                                   |   1 +
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../vfio/lib/include/libvfio/iommu.h          |   3 +
+ tools/testing/selftests/vfio/lib/iommu.c      |  29 +
+ .../selftests/vfio/lib/vfio_pci_device.c      |  57 +-
+ .../selftests/vfio/vfio_cxl_type2_test.c      | 780 ++++++++++++++++++
+ 6 files changed, 868 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 26/27] Documentation: vfio-pci: Document CXL Type-2 device passthrough
+Author: mhonap <mhonap@nvidia.com>
+
+
+Describe the vfio-cxl provider module:
+- Address model,
+- Two regions,
+- Live decoder region and the guest commit,
+- DVSEC virtualization,
+- The dma-buf export for iommufd stage-2 mapping,
+- The reset contract
+
+so the supported topology and the kernel/VMM split are on record.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ Documentation/driver-api/index.rst        |   1 +
+ Documentation/driver-api/vfio-pci-cxl.rst | 188 ++++++++++++++++++++++
+ MAINTAINERS                               |   1 +
+ 3 files changed, 190 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 24/27] vfio/cxl: Export the HDM memory region as a dma-buf
+Author: mhonap <mhonap@nvidia.com>
+
+
+A Type-2 accelerator issues ATS-translated DMA to addresses inside its
+own HDM window, so that coherent host range must be present in the
+guest's IOAS (the iommufd IOAS backing the nested SMMU stage-2). iommufd
+maps a struct-page-less range only by fd, via IOMMU_IOAS_MAP_FILE over a
+dma-buf; a userspace-VA IOMMU_IOAS_MAP of the HDM mmap is rejected
+because the VMA is VM_IO | VM_PFNMAP. Without a dma-buf the range could
+only be mapped through an out-of-tree PFNMAP work-around.
+
+vfio-pci already exports BAR memory as a P2P dma-buf, but the exporter
+is BAR-only: vfio_pci_core_feature_dma_buf() rejects any region index at
+or above the ROM index, and vfio_pci_core_get_dmabuf_phys() resolves the
+physical range from a PCI BAR. The HDM memory region is a dynamic
+device-specific region, not a BAR.
+
+Let a device-specific region reach the device's get_dmabuf_phys(): a
+region index at or above VFIO_PCI_NUM_REGIONS skips the BAR-resource
+check and is validated by the driver instead, bounded to the regions
+that exist. Install a CXL-aware get_dmabuf_phys() in the vfio-cxl
+provider that returns cxl->hpa_range for the HDM memory region and
+delegates real BARs to the core, keeping the BAR path unchanged and the
+core free of CXL knowledge.
+
+The HDM window is coherent host memory with no p2pdma provider of its
+own, so borrow BAR 0's, matching nvgrace-gpu's handling of its non-BAR
+device memory. The iommufd importer does not consume the provider; the
+scatterlist map path (real peer DMA) is left to a follow-up once
+upstream grows a negotiated interconnect for coherent CXL memory.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 60 ++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_dmabuf.c   | 27 +++++++++++--
+ 2 files changed, 83 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 25/27] vfio/cxl: Run the CXL reset at the vfio reset points
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL Type-2 function must not take an FLR: it resets the coherent
+CXL.mem state and corrupts the HDM decoder. The PCI core already reflects
+this, ordering cxl_reset ahead of flr in pci_reset_fn_methods[], so a
+function reset of a CXL device runs the DVSEC reset sequence rather than
+FLR.
+
+Route the vfio function-reset points (VFIO_DEVICE_RESET and the
+virtualized PCIe/AF FLR writes) through a CXL reset op that runs
+cxl_reset_dvsec_sequence(). The sequence resets the function, always
+clearing device memory, and restores the HDM decoder and PCI config
+state, so it is a complete replacement for pci_try_reset_function() on a
+CXL device. The op runs under memory_lock and not the PCI device lock, so
+cxl_reset_dvsec_sequence() can take the device lock itself.
+
+Clear hdm_valid for the duration of the reset so a fault cannot insert a
+PFN into a decoder that is being torn down, and restore it once the
+sequence has put the decoder back.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 41 +++++++++++++++
+ drivers/vfio/pci/vfio_pci_config.c   | 49 +++++++++++++++---
+ drivers/vfio/pci/vfio_pci_core.c     | 77 +++++++++++++++++++++++-----
+ drivers/vfio/pci/vfio_pci_priv.h     |  1 +
+ include/linux/vfio_pci_core.h        |  4 ++
+ 5 files changed, 152 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 23/27] vfio/cxl: Describe the CXL device and decoder geometry to userspace
+Author: mhonap <mhonap@nvidia.com>
+
+
+Advertise the assignment with a device-info flag so a VMM can tell a CXL
+Type-2 device apart from a plain vfio-pci one. On the trapped decoder
+register region, add a capability carrying the BAR and offset of the HDM
+decoder block so the VMM can place the trapped window where the guest
+expects to find it and size the guest's fixed memory window.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 16 ++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c     |  3 +++
+ include/uapi/linux/vfio.h            | 18 ++++++++++++++++++
+ 3 files changed, 37 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 21/27] vfio/cxl: Exclude the HDM decoder registers from direct BAR access
+Author: mhonap <mhonap@nvidia.com>
+
+
+The HDM decoder register block lives in the component BAR that vfio-pci
+owns. The guest reads the decoder only through the trapped, read-only
+decoder region; it must not reach the physical registers through the BAR
+directly, and a host read of the range through a kernel mapping could
+abort as a fatal host SError.
+
+Add the block to the generic excluded-range list with
+VFIO_PCI_EXCLUDE_MMAP | VFIO_PCI_EXCLUDE_READ | VFIO_PCI_EXCLUDE_WRITE
+similar to the MSI-X exclusion.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 20/27] vfio/cxl: Expose the HDM decoder registers read-only to the guest
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL Type-2 guest reads the HDM decoder registers to learn the HDM
+region it was handed. Those registers live in the component BAR that
+vfio-pci owns.
+
+Map the decoder block at bind: its location comes from the pdev->hdm
+enumeration cache, and vfio-pci owns the BAR, so map it without
+claiming the block and expose it as a second, read-only region under
+VFIO_REGION_TYPE_PCI_VENDOR_TYPE with the CXL vendor id, registered per
+open like the HDM memory region.
+
+Serve reads live from the mapped block and absorb writes without
+forwarding them to hardware.
+
+Registering a second region is the first point at which an open-time
+failure must unwind an already-registered region, so add
+vfio_pci_core_unregister_dev_region() to drop the most recently
+registered region, and use it to unwind the HDM memory region if the
+decoder region fails to register.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 81 +++++++++++++++++++++++++++-
+ include/uapi/linux/vfio.h            |  2 +
+ 2 files changed, 82 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 22/27] vfio/cxl: Clear the HDM access gate after a hot reset
+Author: mhonap <mhonap@nvidia.com>
+
+
+The HDM memory fault inserts a PFN only when the decoder is in a
+known-good state (cxl->hdm_valid), so the host CPU never faults the
+coherent range into a disabled decoder.
+
+VFIO_DEVICE_PCI_HOT_RESET drives a plain secondary bus reset rather than
+the CXL reset sequence, so nothing restores the decoder in the
+reset_done handler. A secondary bus reset only reaches a CXL endpoint
+when the upstream port has SBR unmasked (CXL r3.1 sec 8.1.5.2); in that
+case the reset decommits the decoder, so clear cxl->hdm_valid to keep a
+later fault from inserting a PFN into a dead decoder.
+
+A subsequent VFIO_DEVICE_RESET runs the CXL reset sequence and restores
+it, and a masked SBR is a no-op that leaves the decoder intact.
+
+vfio_cxl_sbr_unmasked() mirrors the cxl_sbr_masked() check the PCI core
+uses (drivers/pci/pci.c) for its own CXL bus reset.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 38 ++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 17/27] vfio/cxl: Own the whole component register BAR
+Author: mhonap <mhonap@nvidia.com>
+
+
+devm_cxl_probe_mem() maps the component registers through the CXL core,
+which by default claims each HDM and RAS sub-block. That collides with
+the full-BAR request vfio-pci-core makes when the guest opens the device.
+
+After the component registers are discovered, declare the containing BAR
+owned with cxl_reg_map_add_owned_resource(). The core then ioremaps the
+sub-blocks without requesting them, so vfio-pci-core owns the whole BAR
+and the requests do not collide.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 19/27] vfio/cxl: Contain HDM memory errors with memory_failure()
+Author: mhonap <mhonap@nvidia.com>
+
+
+The HDM memory region is mmap-able, so an fd holder can fault its
+struct-page-less device memory in from the host CPU. A memory error on
+that range cannot be routed through the normal struct-page path and
+would otherwise escalate to a fatal host SError.
+
+Register the range with memory_failure() via
+register_pfn_address_space() so such an error is instead contained to
+unmapping the range and delivering a SIGBUS to the fd holder. Provide a
+pfn-to-vma-offset callback so memory_failure() can map a poisoned pfn
+back to the file offset of each user mapping and unmap it; the region is
+a single linear range at hpa_range.start, so recover the offset the same
+way the fault handler derived the pfn.
+
+register_pfn_address_space() returns -EOPNOTSUPP when
+CONFIG_MEMORY_FAILURE is off, in which case expose the region without
+containment.  Unregister the range on close.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 76 ++++++++++++++++++++++++++++
+ 1 file changed, 76 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 18/27] vfio/cxl: Expose the HDM memory region to the guest
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL Type-2 guest maps the device HDM memory to use its coherent
+CXL.mem. The HDM memory is a host physical range with no struct page,
+so the guest and KVM need a write-back mapping of it.
+
+Register the range as an mmap-able region under
+VFIO_REGION_TYPE_PCI_VENDOR_TYPE with the CXL vendor id rather than a
+bespoke region type, per open because vfio_pci_core_disable() tears
+down all dynamic regions on close.
+
+Own the resolved host physical range exclusively (IORESOURCE_EXCLUSIVE)
+so nothing, /dev/mem included, can map a conflicting cacheable alias
+that would fault the host once the range is mapped write-back.  There
+is no devm form of the exclusive request, so pair it with a devm
+release action.
+
+vfio_pci_zap_bars() only unmaps the fixed PCI BAR range, so revoke
+mmap-capable device-specific regions there too.  Otherwise a
+Memory-Space disable, a D3 transition, or a reset would leave the guest
+a live mapping into quiesced device memory; the fault handler re-gates
+on device state before it inserts a pfn again.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 186 +++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c     |  37 ++++++
+ include/linux/vfio_pci_core.h        |   1 +
+ include/uapi/linux/vfio.h            |   4 +
+ 4 files changed, 228 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 16/27] vfio/cxl: Create the CXL memdev and set media ready at bind
+Author: mhonap <mhonap@nvidia.com>
+
+
+At bind, build the CXL memory device for the passed-through Type-2
+accelerator so it joins the CXL topology and its HDM region resolves to a
+host physical range. A Type-2 device has no mailbox, so there is no
+media-ready register to poll: set media ready directly once the component
+registers validate (mirroring drivers/net/ethernet/sfc/efx_cxl.c)
+
+As per current vfio-cxl support, reject a device with:
+- more than one HDM decoder
+- interleaving enabled
+- whose reset the host cannot service
+
+The CXL-core allocations are grouped with devres so a failed bind unwinds
+them: init failure falls back to plain vfio-pci with the device still
+bound, so devm would otherwise hold them until unbind.
+
+A low-power transition would reset the CXL Type-2 function and lose
+its CXL.mem contents, so keep it in D0 while it is assigned.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 118 +++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c     |  16 ++++
+ 2 files changed, 134 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 14/27] vfio/pci: Provide an opt-out for the CXL Type-2 extensions
+Author: mhonap <mhonap@nvidia.com>
+
+
+Let an admin or a variant driver keep the CXL Type-2 extensions out of
+the path and drive the device as plain vfio-pci. Add a
+vfio_pci.disable_cxl module parameter, and let a variant driver set
+vdev->disable_cxl in its own init callback for per-device control. The
+parameter is built only when the CXL provider is configured.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci.c   | 13 +++++++++++++
+ include/linux/vfio_pci_core.h |  1 +
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 15/27] vfio/cxl: Add the vfio-cxl provider module skeleton
+Author: mhonap <mhonap@nvidia.com>
+
+
+Add the vfio-cxl module that vfio-pci-core loads on demand for a CXL
+Type-2 device, registering its callbacks at module_init.
+
+vfio-cxl is a feature of vfio-pci-core rather than a variant driver, so
+its Kconfig sources above the variant drivers and its objects link right
+after vfio-pci-core while still being loaded on demand through the
+vfio-cxl MODULE_ALIAS.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ MAINTAINERS                          |  7 ++++
+ drivers/vfio/pci/Kconfig             |  2 +
+ drivers/vfio/pci/Makefile            |  2 +
+ drivers/vfio/pci/cxl/Kconfig         | 11 +++++
+ drivers/vfio/pci/cxl/Makefile        |  3 ++
+ drivers/vfio/pci/cxl/vfio_cxl_core.c | 61 ++++++++++++++++++++++++++++
+ 6 files changed, 86 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 13/27] vfio/pci: Bracket PCI resets with the CXL reset hooks
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL Type-2 device must quiesce its coherent link before any reset and
+restore its HDM decoder state afterward, or a reset can leave the device
+mastering the bus over decoders that are no longer valid. This has to
+happen around every reset the PCI core drives for the device, not only
+the ones VFIO issues directly.
+
+Add reset_prepare and reset_done to the CXL ops and register the matching
+pci_error_handlers callbacks.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 18 ++++++++++++++++++
+ include/linux/vfio_pci_core.h    |  2 ++
+ 2 files changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 12/27] vfio/pci: Call the CXL open and close hooks around device use
+Author: mhonap <mhonap@nvidia.com>
+
+
+Volatile CXL register state must be sampled from live hardware when the
+guest opens the device, not at bind, because a low-power transition
+between bind and open can leave the bind-time values stale.
+
+Add open and close to the CXL ops and call them from the common enable
+and close paths. A failed open unwinds the enable in reverse order:
+unmap the BARs, drop the excluded ranges, then free the virtual config.
+
+Factor the BAR unmap out of vfio_pci_core_disable() into a helper so the
+enable failure path and the disable path share it.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 40 +++++++++++++++++++++++++-------
+ include/linux/vfio_pci_core.h    |  2 ++
+ 2 files changed, 33 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 11/27] vfio/pci: Virtualize the CXL DVSEC in vfio_pci_config.c
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL Type-2 device is reprogrammable through its CXL DVSEC: a guest could
+set Config Lock, toggle CXL.cache and CXL.mem enable, or rewrite the HDM
+range registers that govern host memory decode. Virtualize the DVSEC so
+the guest sees a shadow it cannot use to reprogram the hardware.
+
+Build a per-device cxl_perm permission map, modeled on msi_perm, when the
+device is bound through the CXL provider (e.g. vfio-cxl). The whole CXL
+DVSEC is served from the vconfig shadow; only Control and Control2 are
+guest programmable, while Capability, Status, Lock and the Range registers
+keep their firmware snapshot. A vendor DVSEC on the same device is
+unaffected: the map is selected only for the CXL DVSEC offset.
+
+Control2 carries the CXL reset and cache write-back-invalidate initiate
+bits as self-clearing doorbells. vfio never forwards them to hardware, so
+a custom writefn synthesizes their completion in the shadow: the initiate
+bit self-clears and the matching Status2 bit (Cache Invalid or Reset Done)
+is set, so a guest following the spec reset sequence
+(INIT_CACHE_WBI, poll Cache Invalid, INIT_CXL_RST, poll Reset Done)
+progresses instead of timing out. The host performs the real cache
+write-back and reset at the vfio reset points.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_config.c | 132 ++++++++++++++++++++++++++++-
+ include/linux/vfio_pci_core.h      |   3 +
+ 2 files changed, 133 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 08/27] vfio/pci: Fall back to plain vfio-pci when CXL init fails
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL Type-2 device is also a valid plain vfio-pci device. If the
+vfio-cxl provider cannot bring it up as Type-2, failing the bind would
+regress a device that previously worked as plain vfio-pci.
+
+Make a non-deferred CXL init failure non-fatal: log it, drop the provider
+reference, leave cxl_ops NULL, and continue driving the device as plain
+vfio-pci. The -EPROBE_DEFER path added earlier still retries rather than
+falling back.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 10/27] vfio/pci: Migrate MSI-X exclusion onto the generic excluded-range list
+Author: mhonap <mhonap@nvidia.com>
+
+
+The MSI-X table is virtualized in vfio_pci_bar_rw() by an open-coded
+x_start/x_end window that fills reads with -1 and drops writes. Now that
+a generic excluded-range list expresses the same fill/drop behavior,
+register the MSI-X table as a read and write excluded range instead of
+special-casing it in the read/write path.
+
+Add the range when the MSI-X capability is parsed in
+vfio_pci_core_enable() and clear the list in vfio_pci_core_disable()
+alongside the config teardown. The read/write path now relies solely on
+vfio_pci_bar_find_exclusion(), so MSI-X and a provider's (e.g. vfio-cxl)
+trapped registers share one mechanism.
+
+No behavioral change: an access to the MSI-X table still reads -1 and
+drops writes.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 19 +++++++++++
+ drivers/vfio/pci/vfio_pci_rdwr.c | 56 ++++++++++++++++++++++++--------
+ 2 files changed, 62 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 07/27] vfio/pci: Honor -EPROBE_DEFER from CXL provider probe
+Author: mhonap <mhonap@nvidia.com>
+
+
+The CXL provider .init() can return -EPROBE_DEFER when the device is not
+ready yet, for example when its CXL port has not enumerated. Handle that
+return separately from other init failures and propagate it, so the bind
+is retried later.
+
+This keeps the deferred path distinct from the general failure path that
+a following patch makes non-fatal: an -EPROBE_DEFER must retry, not fall
+back to plain vfio-pci.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 09/27] vfio/pci: Add a generic excluded-range list
+Author: mhonap <mhonap@nvidia.com>
+
+
+The MSI-X table is virtualized in vfio_pci_bar_rw() by an open-coded
+x_start/x_end window that fills reads with -1 and drops writes. Now that
+a generic excluded-range list expresses the same fill/drop behavior,
+register the MSI-X table as a read and write excluded range instead of
+special-casing it in the read/write path.
+
+Add the range when the MSI-X capability is parsed in
+vfio_pci_core_enable() and clear the list in vfio_pci_core_disable()
+alongside the config teardown. The read/write path now relies solely on
+vfio_pci_bar_find_exclusion(), so MSI-X and a provider's (e.g. vfio-cxl)
+trapped registers share one mechanism.
+
+No functional change.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 209 +++++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_priv.h |   9 ++
+ drivers/vfio/pci/vfio_pci_rdwr.c |   8 ++
+ include/linux/vfio_pci_core.h    |  14 +++
+ 4 files changed, 240 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 05/27] vfio/pci: Add the CXL provider ops registration interface
+Author: mhonap <mhonap@nvidia.com>
+
+
+vfio-pci-core must stay free of any CXL header dependency, so CXL Type-2
+handling lives in a separate vfio-cxl module that plugs in a set of
+callbacks.
+
+Add the registration interface:
+- vfio-cxl registers a single struct vfio_cxl_ops at module_init
+- vfio-pci-core stores it under an rwsem.
+
+A second registration is refused with -EBUSY.
+
+The owner field will be used to pin vfio-cxl for the lifetime of each
+bound CXL device.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 24 ++++++++++++++++++++++++
+ include/linux/vfio_pci_core.h    | 10 ++++++++++
+ 2 files changed, 34 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 06/27] vfio/pci: Detect CXL devices and load the CXL provider on demand
+Author: mhonap <mhonap@nvidia.com>
+
+
+A CXL device needs the vfio-cxl callbacks, but pulling vfio-cxl and the
+CXL core in unconditionally would bloat every vfio-pci setup. Detect a
+CXL Type-2 device at bind and request_module("vfio-cxl") only then, then
+hand the device to the registered ops.
+
+Each bound CXL device pins the provider through
+vfio_pci_get_cxl_ops() (try_module_get) and drops it with
+vfio_pci_put_cxl_ops() at release, so vfio-cxl can unload once no CXL
+device is bound.
+
+If the provider is absent the device is driven as plain vfio-pci. A
+built-in provider whose initcall has not run yet is waited for with
+-EPROBE_DEFER; the deferred-probe machinery will retry the bind once the
+provider registers.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 84 ++++++++++++++++++++++++++++++++
+ include/linux/vfio_pci_core.h    |  3 ++
+ 2 files changed, 87 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 04/27] cxl: Add cxl_reset_dvsec_sequence() for vfio-pci
+Author: mhonap <mhonap@nvidia.com>
+
+
+vfio-pci needs to run a CXL reset on a passed-through Type-2 device
+without the host-memory handling in cxl_reset_function(): the memory
+behind the decoder belongs to the guest, so the HDM range collection and
+host CPU cache flush that the host path performs must be skipped.
+
+Add cxl_reset_dvsec_sequence(), which runs the DVSEC reset under the
+device lock and restores HDM state through
+cxl_restore_state_after_pci_reset(), and cxl_reset_capable() to gate it on
+a function-scoped reset. Both are exported to the vfio-cxl module so
+vfio-pci core does not import the CXL namespace.
+
+CXL Reset always clears memory, so there is no caller Memory Clear choice.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/cxl/core/resource.c | 53 +++++++++++++++++++++++++++++++++++++
+ include/cxl/cxl.h           | 12 +++++++++
+ 2 files changed, 65 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v5 03/27] cxl: Move component register defines to uapi/cxl/cxl_regs.h
+Author: mhonap <mhonap@nvidia.com>
+
+
+The CXL component and HDM decoder register layout is spec-defined and is
+needed by a userspace consumer that cannot include the private
+drivers/cxl/cxl.h
+
+The vfio-cxl selftest
+(tools/testing/selftests/vfio/vfio_cxl_type2_test.c) builds against
+installed uapi headers only. Move those defines to a new uapi header, the
+way PCI register offsets live in uapi pci_regs.h, and include it from
+drivers/cxl/cxl.h so existing in-kernel users are unchanged.
+
+No functional change; the GENMASK and BIT forms are written as plain
+values as a uapi header requirement.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ MAINTAINERS                 |  1 +
+ drivers/cxl/cxl.h           | 47 +-------------------------------
+ include/uapi/cxl/cxl_regs.h | 53 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 55 insertions(+), 46 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 02/27] cxl/regs: Let a BAR-owning driver own the component register block
+Author: mhonap <mhonap@nvidia.com>
+
+
+cxl_map_component_regs() claims each mapped sub-block with
+devm_request_mem_region(). A driver that already requested the whole
+component register BAR, such as vfio-cxl, would then collide with that
+claim and fail to map the HDM decoder and RAS blocks.
+
+Add cxl_reg_map_add_owned_resource() so such a driver records the
+resource it already owns on the register map, and skip the sub-block
+request when the block falls within an owned resource.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/cxl/core/regs.c | 17 +++++++++++++++--
+ include/cxl/cxl.h       |  2 ++
+ include/cxl/pci.h       |  3 +++
+ 3 files changed, 20 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 00/27] vfio/pci: Add CXL Type-2 device passthrough support
+Author: mhonap <mhonap@nvidia.com>
+
+
+This series adds VFIO passthrough for CXL Type-2 accelerators. The guest
+drives its own virtual HDM decoder and can reset the device. The host
+owns the physical decoder and the host physical address the memory lands
+at. The guest only picks a guest physical address. This series targets a
+single, non-interleaved, firmware-committed endpoint decoder.
+
+
+Base and dependencies
+---------------------
+
+  Base: Linux 7.3-rc1 (cee9395acd80), plus the cxl-reset dependency:
+  - CXL reset core from Srirangan's cxl_reset series (v12) [1], which
+    caches the endpoint decoder settings in pdev->hdm and keeps the HDM
+    decoder and reset helpers in drivers/cxl/core.
+  - This series adds a function-scoped reset entry
+    (cxl_reset_dvsec_sequence) on top and drives it at the vfio reset
+    points.
+  - Prerequisite commits from Alejandro's type-2 device support and
+    Dan's devm_cxl_probe_mem are already upstreamed in this kernel
+    release and those series are not listed as dependencies now.
+
+
+Changes since v4
+----------------
+
+v4 [2] introduced the vfio-cxl provider: the register emulation lives in
+a separate module that vfio-pci-core loads on demand, and cxl-core keeps
+only the reset entry and a few enabling helpers. v5 keeps that model and
+folds the v4 review, reshaping the region and reset handling. The patch
+count is unchanged at 27; several patches were split, a few were dropped,
+and the composition changed.
+
+Structural
+  - The v4 "expose the HDM memory and trap the decoder registers" patch is
+    split into three: the mmap-able HDM memory region, memory-failure
+    containment for that struct-page-less range, and the read-only
+    decoder-register region.
+  - "Guard HDM access on device state" is split into two: excluding the
+    decoder block from the direct BAR, and clearing the HDM access gate
+    after a secondary bus reset.
+  - The decoder register block is read live; the static decoder snapshot
+    and its refresh-after-reset patch are gone.
+  - The CXL DVSEC is virtualized through the config-space permission hooks
+    in vfio_pci_config.c; the separate DVSEC-shadow patch is gone.
+  - The cxl-core media-readiness patch is dropped; a mailbox-less Type-2
+    memdev sets media ready in the provider at bind (mirrors efx_cxl).
+  - The cxl-core register-map rework is split into request/ioremap helpers
+    plus an owned-resource record, replacing the v4 bar_owned flag.
+  - The v4 resource.c include/export patch is dropped; the include ships in
+    the cxl_reset base and the disputed re-export no longer exists.
+
+Behavioral
+  - The HDM decoder registers are served by live reads with guest writes
+    absorbed; the host committed and locked the physical decoder, so the
+    guest never drives it.
+  - fd read/write of the HDM memory region is serviced by a device-state
+    guarded write-back copy (Memory-Space enabled, decoder known-good, and
+    media ready) and refused only while that gate is closed, rather than
+    unconditionally.
+  - The coherent CXL.mem range is exported as a dma-buf and mapped into the
+    guest IOAS with IOMMU_IOAS_MAP_FILE, replacing the out-of-tree PFNMAP
+    workaround v4 needed for device-side ATS.
+  - Reset is wired through the pci_error_handlers .reset_prepare and
+    .reset_done callbacks and the CXL reset method rather than open-coded;
+    a bus hot reset no longer rejects sibling functions.
+  - The excluded-range facility is generic (a list of bar/start/size/flags)
+    and the existing MSI-X exclusion is migrated onto it.
+
+
+Reviewer feedback addressed
+---------------------------
+
+The v4 [2] thread has the full discussion; this is where each objection
+landed.
+
+Alex Williamson
+  - A generic excluded-range list replaces the CXL one-off; MSI-X is
+    migrated onto it; an intersecting host read fills -1 and a write is
+    dropped rather than erroring.
+  - The component-register block is exposed as a live read-only view, not a
+    static shadow; the refresh-after-reset patch is eliminated.
+  - The HDM memory fd read/write is device-state guarded rather than a bare
+    -EIO.
+  - Error containment and the decoder-register region are their own patches.
+  - Reset uses .reset_prepare/.reset_done; the multifunction/sibling
+    hot-reset rejection is dropped; the VM-centric framing is removed.
+  - CXL init failure is non-fatal and falls back to plain vfio-pci;
+    disable_cxl is a convenience opt-out, not the failure path.
+  - The DVSEC virtualization lives in vfio_pci_config.c as an ecap perm map;
+    the config path takes no CXL module dependency.
+  - Both regions use VFIO_REGION_TYPE_PCI_VENDOR_TYPE with the CXL vendor id.
+  - Kconfig/Makefile ordering fixed; the .open_device/.close_device hook
+    names are kept to mirror vfio_device_ops; the bind-time rejects log
+    consistently.
+
+Dave Jiang
+  - Component-register ownership uses the owned-resource API, not a
+    bar_owned flag.
+  - Media readiness is set in the provider at bind (efx_cxl precedent); the
+    cxl-core media-readiness change is dropped.
+  - The component register defines live in uapi/cxl/cxl_regs.h and the
+    message names the selftest as the consumer.
+  - The cheap topology rejects are grouped before the range computation.
+
+Jonathan Cameron
+  - The v4 resource.c include/export patch is gone: the include arrives with
+    the cxl_reset base and the re-export it objected to no longer exists.
+
+Shuai Xue
+  - The selftest maps the HDM range through the dma-buf + IOMMU_IOAS_MAP_FILE
+    path instead of failing a VA-based IOAS map.
+  - The guest cache write-back-invalidate doorbell completes in the shadow;
+    the host runs the real WBI inside the reset sequence.
+
+
+Patch order
+-----------
+
+The patches are ordered so the tree builds at every commit and each change
+sits next to the code it depends on. Five groups:
+
+  Part 1  CXL core (patches 1-4)
+    - Split the BAR block request and ioremap helpers, and let a BAR-owning
+      driver own the component register block, so the HDM/RAS sub-blocks are
+      left unclaimed for vfio-cxl.
+    - Move the component register defines to include/uapi/cxl/cxl_regs.h so a
+      VMM (and the selftest) can consume them.
+    - Add the function-scoped cxl_reset_dvsec_sequence() for vfio-pci.
+
+  Part 2  vfio-pci-core enabling (patches 5-14)
+    - The CXL provider ops registration interface, on-demand provider load,
+      -EPROBE_DEFER handling for the built-in case, and the non-fatal
+      fallback to plain vfio-pci when CXL init fails.
+    - A generic excluded-range list and the MSI-X migration onto it.
+    - The CXL DVSEC virtualization in config space, the open/close hooks, the
+      reset brackets, and the disable_cxl opt-out.
+
+  Part 3  vfio-cxl provider and HDM regions (patches 15-24)
+    - The vfio-cxl module, the CXL memdev created at bind, and ownership of
+      the whole component BAR.
+    - The mmap-able HDM memory region, memory-failure containment for it, and
+      the read-only decoder-register region.
+    - Excluding the decoder block from the direct BAR, the hot-reset access
+      gate, the device/decoder geometry cap, and the dma-buf export.
+
+  Part 4  vfio-cxl reset (patch 25)
+    - Run the CXL DVSEC reset at every vfio reset point.
+
+  Part 5  Documentation and selftests (patches 26-27)
+
+
+Subsystem boundary
+------------------
+
+vfio-pci-core does not implement CXL registers. vfio-cxl is a separate
+module that registers a struct vfio_cxl_ops at init. vfio-pci-core loads it
+on demand for a CXL device (request_module plus pcie_is_cxl) and pins it
+per bound device. If a modular provider is missing or fails to load, the
+device is driven as plain vfio-pci. The bind only defers for the built-in
+initcall-order case, where request_module cannot help.
+
+The core exposes only the primitives that have to live in core (memory_lock,
+mapping revoke, dma-buf quiesce, and the BAR sub-range exclusion). The
+CXL-specific work stays behind the ops.
+
+
+Memory ownership
+----------------
+
+The host resolves the host physical address once, at bind, through
+devm_cxl_probe_mem(). The memdev is owned for the bind lifetime and torn
+down at unbind. The HPA range is claimed IORESOURCE_EXCLUSIVE so no
+mismatched cacheable alias can form, including one mapped through /dev/mem.
+
+The guest programs a guest physical address into a trapped virtual decoder
+and polls a shadow for commit. It never reaches the physical decoder
+registers: those are served only through the live-read trap and are
+excluded from the direct BAR mapping, so the guest cannot move the host
+physical window.
+
+
+HDM region access
+-----------------
+
+The HDM region carries the coherent device memory. A VMM mmaps it and maps
+it into the guest through stage-2; that is the primary access path. The
+region advertises READ and WRITE so a VMM can derive an accessible (non
+PROT_NONE) mmap protection. fd read/write is serviced by a write-back copy
+gated on the same device state as the fault path, and refused while that
+gate is closed.
+
+The fault path inserts the pfn only while the decoder is in a known-good
+restored state, the device has PCI Memory-Space enabled, and the media is
+ready, so a host access cannot reach a revoked or disabled decoder. The
+fault inserts the HPA pfn at the largest aligned order, including 2 MB PMDs.
+The struct-page-less range is registered with the memory-failure machinery
+so a memory error is contained to unmapping the range and a SIGBUS rather
+than a host SError.
+
+
+DMA and iommufd
+---------------
+
+A Type-2 accelerator issues ATS-translated DMA to addresses inside its own
+HDM window, so that range must be present in the guest IOAS. The HDM range
+is struct-page-less coherent memory that a userspace-VA IOMMU_IOAS_MAP
+cannot pin, so the HDM memory region is exportable as a dma-buf:
+VFIO_DEVICE_FEATURE_DMA_BUF returns an fd that iommufd maps with
+IOMMU_IOAS_MAP_FILE, without a VA or a page pin. The dma-buf is revoked
+whenever the mapping is torn down, so a stale stage-2 mapping cannot outlive
+the HDM window.
+
+
+Reset
+-----
+
+A CXL Type-2 device is reset through its DVSEC sequence at every path that
+can reset it, not through an FLR (an FLR would corrupt CXL.mem). The reset
+runs at every vfio reset point through one shared helper: VM enable and
+close, the VFIO_DEVICE_RESET ioctl, a config-space FLR, and a guest write of
+Initiate_CXL_Reset in the CXL DVSEC. Under memory_lock, with the HDM mapping
+and the dma-buf revoked, the host runs cxl_reset_dvsec_sequence(), which
+always clears device memory on the v12 base and restores and re-samples the
+firmware-committed decoder. The guest's cache write-back-invalidate doorbell
+completes in the shadow and the real invalidate runs inside that sequence;
+the reset outcome comes back through DVSEC STATUS2 for the guest to poll.
+
+A CXL port masks Secondary Bus Reset by default, so a
+VFIO_DEVICE_PCI_HOT_RESET does not reach the endpoint and the HDM state is
+untouched; a hot reset no longer rejects sibling functions. If the port has
+SBR unmasked the reset can decommit the decoder without restoring it, so the
+reset_done handler gates HDM access; a later VFIO_DEVICE_RESET runs the CXL
+reset sequence and restores it.
+
+A bound CXL Type-2 device is kept out of idle D3. Powering a Type-2 function
+down and back up reinitializes it and discards its coherent memory, which
+only the accelerator's own driver re-initializes, so vfio-cxl sets
+disable_idle_d3 to keep the device in D0 while it is bound.
+
+
+Validation
+----------
+
+  - Each patch builds (drivers/cxl and drivers/vfio) and passes
+    scripts/checkpatch.pl --codespell --strict with no errors, warnings, or
+    checks.
+  - The series applies in sequence on the stated base and dependencies.
+  - The coherent CXL.mem range is mapped into the guest IOAS through the
+    in-series dma-buf export (IOMMU_IOAS_MAP_FILE); the out-of-tree PFNMAP
+    workaround v4 required for device-side ATS is no longer needed.
+  - A selftest, tools/testing/selftests/vfio/vfio_cxl_type2_test.c,
+    exercises region discovery, the sparse mmap, the huge-page fault, the
+    dma-buf IOAS map, the live decoder reads, aligned/range access rejects,
+    the commit/lock FSM, the DVSEC virtualization, and a real device reset.
+  - Built and functionally tested against a CXL Type-2 device: guest boot,
+    decoder commit and mapping, and guest-triggered CXL reset.
+
+
+Follow-on UAPI
+--------------
+
+- The trapped component-register region spans the whole HDM decoder block,
+  so a multi-decoder device needs no new region or cap: a VMM reads the
+  decoder count and each committed base from every decoder in the block.
+- The COMP_REGS geometry cap keeps a reserved field as a versioning anchor.
+- Further trapped surfaces such as CXL RAS are planned as new CXL region
+  subtypes rather than by extending this cap.
+- The single committed, non-interleaved decoder is a bind-time policy in one
+  place, not an ABI assumption, so multi-decoder and switched topologies
+  relax only there.
+
+
+Deferred
+--------
+
+  - Topology reach. Switched, multi-decoder, and interleaved decoders stay
+    rejected at bind.
+  - Non firmware-committed decoder support.
+
+
+AI assistance disclosure
+------------------------
+
+This series was developed with substantial AI assistance (Anthropic Claude,
+via the Claude Code CLI), used for design exploration and trade-off
+analysis, multi-agent regression and adversarial review against the v4
+feedback, and drafting the selftests and the documentation. Following
+Documentation/process/coding-assistants.rst, each patch carries an
+Assisted-by: LLM tag. Build, checkpatch, and on-hardware functional
+testing were done by me, not the assistant. I have reviewed every change
+and take full DCO responsibility for the series.
+
+
+References
+----------
+
+[1] [PATCH v12 00/12] PCI/CXL: Add CXL reset support for Type 2 devices
+https://lore.kernel.org/linux-cxl/20260910070808.1444264-1-smadhavan@nvidia.com/
+
+[2] [PATCH v4 00/27] vfio/pci: Add CXL Type-2 device passthrough support
+https://lore.kernel.org/linux-cxl/20260813093631.2288172-1-mhonap@nvidia.com
+
+
+Manish Honap (27):
+  cxl/regs: Split the BAR block request and ioremap helpers
+  cxl/regs: Let a BAR-owning driver own the component register block
+  cxl: Move component register defines to uapi/cxl/cxl_regs.h
+  cxl: Add cxl_reset_dvsec_sequence() for vfio-pci
+  vfio/pci: Add the CXL provider ops registration interface
+  vfio/pci: Detect CXL devices and load the CXL provider on demand
+  vfio/pci: Honor -EPROBE_DEFER from CXL provider probe
+  vfio/pci: Fall back to plain vfio-pci when CXL init fails
+  vfio/pci: Add a generic excluded-range list
+  vfio/pci: Migrate MSI-X exclusion onto the generic excluded-range list
+  vfio/pci: Virtualize the CXL DVSEC in vfio_pci_config.c
+  vfio/pci: Call the CXL open and close hooks around device use
+  vfio/pci: Bracket PCI resets with the CXL reset hooks
+  vfio/pci: Provide an opt-out for the CXL Type-2 extensions
+  vfio/cxl: Add the vfio-cxl provider module skeleton
+  vfio/cxl: Create the CXL memdev and set media ready at bind
+  vfio/cxl: Own the whole component register BAR
+  vfio/cxl: Expose the HDM memory region to the guest
+  vfio/cxl: Contain HDM memory errors with memory_failure()
+  vfio/cxl: Expose the HDM decoder registers read-only to the guest
+  vfio/cxl: Exclude the HDM decoder registers from direct BAR access
+  vfio/cxl: Clear the HDM access gate after a hot reset
+  vfio/cxl: Describe the CXL device and decoder geometry to userspace
+  vfio/cxl: Export the HDM memory region as a dma-buf
+  vfio/cxl: Run the CXL reset at the vfio reset points
+  Documentation: vfio-pci: Document CXL Type-2 device passthrough
+  selftests/vfio: Add CXL Type-2 passthrough tests
+
+ Documentation/driver-api/index.rst            |   1 +
+ Documentation/driver-api/vfio-pci-cxl.rst     | 188 +++++
+ MAINTAINERS                                   |  10 +
+ drivers/cxl/core/regs.c                       |  35 +-
+ drivers/cxl/core/resource.c                   |  53 ++
+ drivers/cxl/cxl.h                             |  47 +-
+ drivers/vfio/pci/Kconfig                      |   2 +
+ drivers/vfio/pci/Makefile                     |   2 +
+ drivers/vfio/pci/cxl/Kconfig                  |  11 +
+ drivers/vfio/pci/cxl/Makefile                 |   3 +
+ drivers/vfio/pci/cxl/vfio_cxl_core.c          | 704 ++++++++++++++++
+ drivers/vfio/pci/vfio_pci.c                   |  13 +
+ drivers/vfio/pci/vfio_pci_config.c            | 177 +++-
+ drivers/vfio/pci/vfio_pci_core.c              | 544 +++++++++++-
+ drivers/vfio/pci/vfio_pci_dmabuf.c            |  27 +-
+ drivers/vfio/pci/vfio_pci_priv.h              |  10 +
+ drivers/vfio/pci/vfio_pci_rdwr.c              |  50 +-
+ include/cxl/cxl.h                             |  14 +
+ include/cxl/pci.h                             |   3 +
+ include/linux/vfio_pci_core.h                 |  40 +
+ include/uapi/cxl/cxl_regs.h                   |  53 ++
+ include/uapi/linux/vfio.h                     |  24 +
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../vfio/lib/include/libvfio/iommu.h          |   3 +
+ tools/testing/selftests/vfio/lib/iommu.c      |  29 +
+ .../selftests/vfio/lib/vfio_pci_device.c      |  57 +-
+ .../selftests/vfio/vfio_cxl_type2_test.c      | 780 ++++++++++++++++++
+ 27 files changed, 2789 insertions(+), 92 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5 01/27] cxl/regs: Split the BAR block request and ioremap helpers
+Author: mhonap <mhonap@nvidia.com>
+
+
+devm_cxl_iomap_block() claims a register block with
+devm_request_mem_region() and then maps it with devm_ioremap().
+
+A driver that already owns the parent BAR needs to skip the sub-block
+request while still mapping it, so the request and the map must be
+callable independently.
+
+Split them into devm_cxl_request_block() and devm_cxl_ioremap_block().
+devm_cxl_iomap_block() keeps calling both in turn, so there is no
+functional change.
+
+Assisted-by: LLM
+Signed-off-by: Manish Honap <mhonap@nvidia.com>
+---
+ drivers/cxl/core/regs.c | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3] KVM: x86/mmu: Fix NX page unaccounting for TDP MMU pages
+Author: Carlos López <clopez@suse.de>
+
+unaccount_nx_huge_page() unconditionally passes KVM_SHADOW_MMU to
+untrack_possible_nx_huge_page(), which is incorrect, particularly on
+the path from kvm_recover_nx_huge_pages(), which handles pages from
+both MMUs.
+
+Fix this by passing down the MMU type from the callers. Note that
+__kvm_mmu_prepare_zap_page() is only used for shadow MMU pages.
+
+Fixes: 6777885605e1 ("KVM: x86/mmu: Track possible NX huge pages separately for TDP vs. Shadow MMU")
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+v3:
+  * Pass down the MMU type down from callers (Sean).
+v2:
+  * Use a helper to retrieve the MMU type to avoid referencing KVM_TDP_MMU for
+    32 bit builds (Sashiko).
+ arch/x86/kvm/mmu/mmu.c | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: PPC: Fix callback check in kvmppc_gsm_refresh_info
+Author: Bui Nguyen Nhu Quynh <kaylovefoss@gmail.com>
+
+The kvmppc_gsm_refresh_info() function incorrectly checks for the
+presence of the fill_info callback instead of refresh_info.
+
+This can lead to:
+- NULL pointer dereference if refresh_info is NULL but fill_info is present
+- EINVAL return if refresh_info is present but fill_info is NULL
+
+Fix this by checking the correct callback.
+
+Fixes: 6ccbbc33f06ad ("KVM: PPC: Add helper library for Guest State Buffers")
+Signed-off-by: Bui Nguyen Nhu Quynh <kaylovefoss@gmail.com>
+---
+v2:
+- Resend; v1 was mangled by the mail client. No code changes.
+
+ arch/powerpc/kvm/guest-state-buffer.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] perf/x86/amd: Reject AMD Merge event as a countable event
+Author: Luka Absandze <absandze@amazon.de>
+
+AMD event select 0xFFF (Merge) is the hardware control encoding used by
+Large Increment per Cycle (LIPC) pairs.  When written into an odd
+counter's PerfCtl it turns that counter into the upper 16 bits of a
+64-bit merged accumulator; any subsequent arming write (-(2^47-1)) is
+silently truncated to its low 16 bits, while hwc->prev_count retains the
+full value.
+
+This is particularly problematic with a KVM guest, which will program
+the Merge encoding into its own odd vPMC as a normal part of scheduling
+a LIPC event.  KVM intercepts that write and faithfully forwards it to
+the host as a raw event carrying the Merge encoding, where it is
+accepted as an ordinary countable event. Once a counter's PerfCtl holds
+the Merge encoding, every later user of that counter gets a first delta
+inflated by 2^47
+
+Reject Merge (AMD_MERGE_EVENT) in amd_core_hw_config() so it cannot be
+submitted as a user-visible event.  The pair mechanism programs it
+itself via x86_pmu.perf_ctr_pair_en; nothing else should do so.
+
+Fixes: 5738891229a2 ("perf/x86/amd: Add support for Large Increment per Cycle Events")
+Reported-by: Yao Zhou <yaoz@meta.com>
+Signed-off-by: Luka Absandze <absandze@amazon.de>
+---
+ arch/x86/events/amd/core.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 17/17] x86/sev: Flush IOMMU TLB for trusted devices
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+IOMMU performs RMP checks when SNP is enabled, the results are
+cached along with the IOMMU translations. When a VM lowers permission
+of a mapped page (moves to a lower VMPL level or from read+write to
+read-only or private to shared), the cached RMP check results require
+invalidation.
+
+At the moment the only way to invalidate IOMMU cache is the RMPUPDATE
+instruction which flushes all IOMMU TLBs. It is a host privileged
+instruction so a VM needs a way to ensure the host has done it.
+Note that the guest's RMPADJUST/PVALIDATE do not flush IOMMU TLBs.
+
+The host implements a new "IOMMU TLB Flush" VMGEXIT code which is
+advertised via bit#11 in the GHCB Hypervisor capabilities.
+
+Use RMPUPDATE in the following way:
+- allocate a page per VCPU (to allow lockless flushing);
+- When invalidation is needed, copy two patterns (A and B) to the page;
+- invalidate the page so the host can make it shared;
+- use new GHCB call to request RMPUPDATE on the host;
+- the host makes the page shared;
+- the host clears pattern A;
+- the host makes the page private again;
+- the host returns to the guest;
+- check if pattern A has changed and pattern B has not;
+- if the above failed, panic().
+
+The patterns are located far enough to not hit the same cache line to
+work with the cipher text hiding feature.
+
+The host can choose to not execute the request, WARN_ON if this
+is the case. Further patches will attempt to handle this in other way.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ arch/x86/include/asm/sev-common.h |  2 +
+ arch/x86/include/uapi/asm/svm.h   |  3 +
+ arch/x86/coco/sev/core.c          | 92 ++++++++++++++++++++
+ 3 files changed, 97 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 16/17] x86/sev: Enable secure MMIO (phase2)
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+In order to enable secure MMIO, RMP needs to be updated. Unlike RAM
+(where PVALIDATE validate the RMP entry), MMIO RMP entries require
+assistance from the PSP.
+
+Add TDI_INFO TIO guest request command. Request the TDI interface report
+from the PSP. Use the report to validate MMIO ranges reported as non-NonTEE
+(i.e. encrypted). The TSM subsystem notifies the PCI subsystem to
+automatically map validated MMIO ranges as encrypted.
+
+Since for MMIO the TSM driver needs TDISP report, add shared memory buffers
+for receiving the device evidence. Use DMA SWIOTLB for these buffers,
+explicitly, by forcing 32bit DMA mask.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ include/uapi/linux/sev-guest.h     |  12 +
+ drivers/virt/coco/sev-guest/core.c |   3 +-
+ drivers/virt/coco/sev-guest/tio.c  | 394 +++++++++++++++++++-
+ 3 files changed, 400 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 15/17] x86/sev: Implement guest TSM driver for SEV-TIO (phase2, DMA)
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+Add the guest-side PCI TSM backend for AMD SEV-TIO, wiring the generic
+pci_tsm framework to GHCB TIO operations and PSP guest requests.
+
+Register pci_tsm_ops from sev-guest on probe when TIO GHCB support is
+present (gated by the tsm_enable module parameter).
+lock() binds a TDI, constructs a devsec TSM object and transitions to
+CONFIG_LOCKED; accept() transitions the TDI to RUN and programs the SDTE
+with vTOM and guest access permissions; unlock() invalidates the SDTE,
+unbinds the TDI, quiesces DMA and transitions to CONFIG_UNLOCKED.
+
+Introduce tio.c with TIO guest-request handling (TIO_MSG_SDTE_WRITE_REQ
+and related message layouts) and set cc_shared_dma_offset from the
+configurable tsm_vtom so shared DMA addresses are translated for the
+hypervisor.  Extend asm/sev.h with TIO message types and TDISP SPDM
+algorithm constants.
+
+Build tio.o when PCI_TSM is enabled and select PCI_TSM from SEV_GUEST
+Kconfig.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ drivers/virt/coco/sev-guest/Kconfig     |   1 +
+ drivers/virt/coco/sev-guest/Makefile    |   3 +
+ arch/x86/include/asm/sev.h              |   8 +
+ drivers/virt/coco/sev-guest/sev-guest.h |   4 +
+ drivers/virt/coco/sev-guest/core.c      |  14 +
+ drivers/virt/coco/sev-guest/tio.c       | 347 ++++++++++++++++++++
+ 6 files changed, 377 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 14/17] x86/sev: Add GHCB calls for SEV-TIO
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+SEV-TIO is a PSP protocol allowing PCI pass through of trusted devices
+(TDI == TEE Device Interface) to an SNP VM. The VMM advertises
+the support via HV_FEATURES and implements new calls:
+
+1) TDI operation: the host executes on the guest behalf:
+- TDI bind/unbind to/from the SNP VM in the PSP;
+- TDI start/stop which translates to TDISP interface start/stop.
+
+2) TIO guest request for an encrypted communication channel between
+the SNP VM and the PSP, it follows the existing Extended Guest Request
+pattern to read device evidence:
+- get TDI status;
+- validate MMIO ranges (a variant of the PVALIDATE instruction for
+  MMIO RMPs);
+- configure sDTE (a secure IOMMU descriptor).
+
+Extend snp_req_data to pass more parameters.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ arch/x86/include/asm/sev-common.h |  1 +
+ arch/x86/include/asm/sev.h        |  5 +++
+ arch/x86/include/uapi/asm/svm.h   | 40 +++++++++++++++++++
+ arch/x86/coco/sev/core.c          | 42 ++++++++++++++++++++
+ 4 files changed, 88 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 13/17] x86/sev: Pass HV features to sev-guest device via platform data
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+The SEV HV advertises supported options via GHCB, the guest stores
+bitmask in the SEV core.
+
+The sev-guest device is a user visible platform device (/dev/sev-guest)
+which provides the interface to communicate with the HV via GHCB.
+It may choose to limit the functionality depending on what is available.
+The first user is going to be SEV-TIO which is going to trigger creation
+of "tsm" folders in the PCI sysfs but only if GHCB advertised such
+support.
+
+This should cause no behavioural change.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ arch/x86/coco/sev/core.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 12/17] coco/sev-guest: Allow multiple source files in the driver
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+Prepare for SEV-TIO support as it is going to equal or bigger
+than the existing sev_guest.c which is already 700 lines and
+keeps growing.
+
+No behavioural change expected.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ drivers/virt/coco/sev-guest/Makefile                |  2 +-
+ drivers/virt/coco/sev-guest/sev-guest.h             | 16 ++++++++++++++++
+ drivers/virt/coco/sev-guest/{sev-guest.c => core.c} | 10 ++--------
+ 3 files changed, 19 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 10/17] x86, dma: Allow accepted devices to map private memory
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+
+With the arrival of "accepted" devices, devices that have been enabled to
+DMA to private encrypted memory, coherent DMA allocation no longer requires
+page conversion. Update force_dma_unencrypted() to skip accepted devices.
+
+Cc: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: Andy Lutomirski <luto@kernel.org>
+Cc: Peter Zijlstra <peterz@infradead.org>
+Cc: Thomas Gleixner <tglx@kernel.org>
+Cc: Ingo Molnar <mingo@redhat.com>
+Cc: Borislav Petkov <bp@alien8.de>
+Cc: x86@kernel.org
+Cc: "H. Peter Anvin" <hpa@zytor.com>
+Signed-off-by: Dan Williams <dan.j.williams@intel.com>
+[aik: re-added device_cc_accepted()]
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ arch/x86/mm/mem_encrypt.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 09/17] dma/swiotlb: Force shared DMA for allocatios from SWIOTLB
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+SWIOTLB allocations are always decrypted but the DMA layer is unaware
+of those and will miss to adjust the DMA handle.
+
+Force __DMA_ATTR_ALLOC_CC_SHARED if SWIOTLB is used for memory allocations.
+
+This will be exploited by AMD SEV guest vTOM feature where DMA handles
+of shared memory have some high bit set (not to be confused with the
+Cbit).
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ kernel/dma/direct.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 08/17] x86/dma: Add ARCH_HAS_PHYS_TO_DMA
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+Confidential VMs work with both trusted and legacy (untrusted devices).
+The trusted devices allow DMA to/from encrypted guest memory while legacy
+devices have to use SWIOTLB or share pages for DMA.
+
+In case of P2P between trusted and legacy devices, the trusted device has
+to perform DMA with T=1 (a PCIe IDE TLP bit saying "encrypt") but the target
+may be shared.
+
+One way of allowing the above on AMD SEV is using IOMMU sDTE vTOM feature
+which is a bus address:
+- below that address all accesses target private guest memory;
+- above - shared memory.
+
+Effectively this adds some high bit in a DMA handle to mark "shared" (on
+AMD).
+
+Copy the generic phys_to_dma / dma_to_phys helpers from
+include/linux/dma-direct.h into arch/x86/include/asm/dma-direct.h and
+select ARCH_HAS_PHYS_TO_DMA for x86.
+
+The x86 implementation is the same as the generic code for
+__phys_to_dma, dma_range_map handling, and SME encryption, with two
+additions for confidential devices:
+ - cc_shared_dma_offset and cc_private_dma_offset in dev_archdata
+ - when TDI is accepted is true, phys_to_dma() adds the shared or
+   private offset (selected by DMA_ATTR_CC_SHARED), and dma_to_phys()
+   subtracts it on the way back
+
+phys_to_dma() also gains an attrs argument so dma_capable() and swiotlb can
+pass mapping attributes through. Update the call sites accordingly.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+
+DMA_ATTR_CC_SHARED or __DMA_ATTR_ALLOC_CC_SHARED?
+---
+ arch/x86/Kconfig                  |  1 +
+ arch/x86/include/asm/device.h     |  2 +
+ arch/x86/include/asm/dma-direct.h | 77 ++++++++++++++++++++
+ include/linux/dma-direct.h        |  2 +-
+ drivers/xen/swiotlb-xen.c         |  2 +-
+ kernel/dma/swiotlb.c              |  2 +-
+ 6 files changed, 83 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 07/17] x86/dma: Revert "x86: Remove unnecessary architecture-specific <asm/device.h>"
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+The trusted guest device DMA setup is going to distinguish
+encrypted and decrypted memory and dev_archdata is a logical place for
+it.
+
+This reverts commit c256d2a8adf2f5670ca262979c451ec4c1108e38.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ arch/x86/include/asm/device.h | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 06/17] x86/io/tsm: Allow mixed ioremap for shared+private BARs
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+A TDISP device advertises private MMIO ranges via a TDI report.
+Upon transitioning to RUN, accesses to those must be made with
+the encrypted bit set in a PTE.
+
+A device can allow private access to a part of a BAR, for example,
+MSIX BAR (when MSIX config is not locked or MSIX is emulated by the HV).
+
+The existing __ioremap_caller() fails if not every single page has
+the same protection in PTE and this breaks device drivers (usually
+TDISP-unaware) calling pci_iomap() and such.
+
+Adjust __ioremap_caller() to map such MMIO BAR in chunks.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ include/linux/io.h     |  8 +++
+ include/linux/ioport.h |  3 +
+ arch/x86/mm/ioremap.c  |  2 +-
+ kernel/resource.c      | 63 ++++++++++++++++++++
+ mm/ioremap.c           |  2 +-
+ 5 files changed, 76 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 04/17] crypto/ccp/tsm: Use TSM API for DOE
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+Compared to the currently used pci_doe(), the pci_tsm_doe_transfer() helper
+performs a few more sanity checks, use that helper now.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ drivers/crypto/ccp/sev-dev-tsm.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 02/17] pci/tsm: Fix stale comment about TDI report range start
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+The PCIe spec r6 and later defines the MMIO range start in 4K units which
+was not the intention. The upcoming change makes it a byte address.
+The structure is already fixed to match the new definition but the comment
+is stale, fix it.
+
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+ drivers/pci/tsm/core.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 01/17] pci/dma/tsm: Call disable DMA bus hook on cleanup
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+Since XXXX ("PCI, device core: Add private memory access for DEVICE_TRUST_TCB")
+the TSM subsystem relies on the PCI subsystem to ask the TSM to enable
+DMA.
+
+That misses teardown path to disable DMA, add it now.
+
+Fixes: XXXX ("PCI, device core: Add private memory access for DEVICE_TRUST_TCB")
+Signed-off-by: Alexey Kardashevskiy <aik@amd.com>
+---
+
+Squash into "PCI, device core: Add private memory access for
+DEVICE_TRUST_TCB"?
+---
+ drivers/pci/pci-driver.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH kernel 00/17] PCI/TSM: coco/sev-guest: Implement SEV-TIO PCIe TDISP (phase2)
+Author: Alexey Kardashevskiy <aik@amd.com>
+
+
+Here are some patches to continue enabling SEV-TIO on AMD.
+
+SEV-TIO allows guests to establish trust in a device that supports TEE
+Device Interface Security Protocol (TDISP, defined in PCIe r6.0+) and
+then interact with the device via private memory.
+
+In order to streamline upstreaming process, a common TSM infrastructure
+is being developed in collaboration with Intel+ARM+RiscV. There is
+Documentation/driver-api/pci/tsm.rst with proposed phases:
+1. IDE: encrypt PCI, host only
+2. TDISP in guest: lock + accept flow, interface report <= WE ARE HERE
+3. Enable on host: secure MMIO + DMA, KVM changes
+4. Device attestation: certificates, measurements
+
+
+Acronyms:
+TEE - Trusted Execution Environments, a concept of managing trust between the host and devices
+TSM - TEE Security Manager (TSM), an entity which ensures security on the host
+PSP - AMD platform secure processor (also "ASP", "AMD-SP"), acts as TSM on AMD.
+SEV TIO - the TIO protocol implemented by the PSP and used by the host, extension to SEV-SNP
+GHCB - guest/host communication block - a protocol for guest-to-host communication via a shared page
+TDISP - TEE Device Interface Security Protocol (PCIe).
+
+
+
+Flow:
+- Boot guest OS, load sev-guest.ko which registers itself as a TSM
+- PCI TSM creates sysfs nodes under "tsm" subdirectory in for all
+  TDISP-capable devices
+- lock the device via:
+	echo tsm0 > "/sys/bus/pci/devices/0000:01:00.0/tsm/lock"
+- accept the device via:
+	echo 1 > "/sys/bus/pci/devices/0000:01:00.0/tsm/accept"
+- load the device driver:
+	- DMA to encrypted memory should work right away
+	- Reported TEE MMIO regions will be mapped as encrypted
+
+
+Patches 01/17..05/17 are fixes and can go in sooner.
+Patches 06/17..17/17 are the minimum required by the VM to get encrypted MMIO and DMA.
+
+Doing "io_tlb_default_mem.for_alloc = true" in swiotlb_init_remap() enabled T=1 DMA
+to shared guest memory.
+
+
+The previous conversation is here:
+https://lore.kernel.org/r/20260225053806.3311234-1-aik@amd.com
+
+This is based on the last Dan's patch series rebased on top of
+v7.3-rc2 with the DMA SWIOTLB fixes from Aneesh.
+
+The whole tree is here: https://github.com/AMDESE/linux-kvm/commits/tsm-next/
+The host support is here: https://github.com/AMDESE/linux-kvm/commits/tsm
+Some raw QEMU sketch is here: https://github.com/AMDESE/qemu/commits/tsm-next
+
+Please comment. Thanks.
+
+
+The SEV TIO spec:
+https://www.amd.com/content/dam/amd/en/documents/epyc-technical-docs/specifications/58271.pdf
+
+
+
+Alexey Kardashevskiy (16):
+  pci/dma/tsm: Call disable DMA bus hook on cleanup
+  pci/tsm: Fix stale comment about TDI report range start
+  tsm/core: Store range_id in pci_tsm_mmio_entry
+  crypto/ccp/tsm: Use TSM API for DOE
+  tsm-core: Register nevertheless
+  x86/io/tsm: Allow mixed ioremap for shared+private BARs
+  x86/dma: Revert "x86: Remove unnecessary architecture-specific
+    <asm/device.h>"
+  x86/dma: Add ARCH_HAS_PHYS_TO_DMA
+  dma/swiotlb: Force shared DMA for allocatios from SWIOTLB
+  tsm/core: Add TDI status
+  coco/sev-guest: Allow multiple source files in the driver
+  x86/sev: Pass HV features to sev-guest device via platform data
+  x86/sev: Add GHCB calls for SEV-TIO
+  x86/sev: Implement guest TSM driver for SEV-TIO (phase2, DMA)
+  x86/sev: Enable secure MMIO (phase2)
+  x86/sev: Flush IOMMU TLB for trusted devices
+
+Dan Williams (1):
+  x86, dma: Allow accepted devices to map private memory
+
+ arch/x86/Kconfig                                    |   1 +
+ drivers/virt/coco/sev-guest/Kconfig                 |   1 +
+ drivers/virt/coco/sev-guest/Makefile                |   5 +-
+ arch/x86/include/asm/device.h                       |  13 +
+ arch/x86/include/asm/dma-direct.h                   |  77 +++
+ arch/x86/include/asm/sev-common.h                   |   3 +
+ arch/x86/include/asm/sev.h                          |  13 +
+ arch/x86/include/uapi/asm/svm.h                     |  43 ++
+ drivers/virt/coco/sev-guest/sev-guest.h             |  20 +
+ include/linux/dma-direct.h                          |   2 +-
+ include/linux/io.h                                  |   8 +
+ include/linux/ioport.h                              |   3 +
+ include/linux/pci-tsm.h                             |  71 ++
+ include/uapi/linux/sev-guest.h                      |  12 +
+ arch/x86/coco/sev/core.c                            | 148 +++-
+ arch/x86/mm/ioremap.c                               |   2 +-
+ arch/x86/mm/mem_encrypt.c                           |   5 +-
+ drivers/crypto/ccp/sev-dev-tsm.c                    |   5 +-
+ drivers/pci/pci-driver.c                            |   3 +
+ drivers/pci/tsm/core.c                              |   3 +-
+ drivers/virt/coco/sev-guest/{sev-guest.c => core.c} |  25 +-
+ drivers/virt/coco/sev-guest/tio.c                   | 725 ++++++++++++++++++++
+ drivers/virt/coco/tsm-core.c                        |  16 +-
+ drivers/xen/swiotlb-xen.c                           |   2 +-
+ kernel/dma/direct.c                                 |   3 +-
+ kernel/dma/swiotlb.c                                |   2 +-
+ kernel/resource.c                                   |  63 ++
+ mm/ioremap.c                                        |   2 +-
+ 28 files changed, 1249 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: PPC: Book3S HV: Free the queue pages in error path
+Author: Gautam Menghani <gautam@linux.ibm.com>
+
+If the xive_native_configure_queue() call fails, the qpage allocated is
+not freed, which results in wasted memory. Fix this by freeing the qpage
+in the error path.
+
+Fixes: 5af50993850a ("KVM: PPC: Book3S HV: Native usage of the XIVE interrupt controller")
+Signed-off-by: Gautam Menghani <gautam@linux.ibm.com>
+---
+ arch/powerpc/kvm/book3s_xive.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: x86/mmu: Fix NX page unaccounting for TDP MMU pages
+Author: Carlos López <clopez@suse.de>
+
+unaccount_nx_huge_page() unconditionally passes KVM_SHADOW_MMU to
+untrack_possible_nx_huge_page(), which is incorrect, particularly on
+the path from kvm_recover_nx_huge_pages(), which handles pages from
+both MMUs.
+
+Fix this by adding a helper to retrieve the MMU type of a page and use
+it to pass the correct variant down.
+
+Fixes: 6777885605e1 ("KVM: x86/mmu: Track possible NX huge pages separately for TDP vs. Shadow MMU")
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+v2:
+  * Use a helper to retrieve the MMU type to avoid referencing KVM_TDP_MMU for
+    32 bit builds (Sashiko).
+ arch/x86/kvm/mmu/mmu.c     |  2 +-
+ arch/x86/kvm/mmu/tdp_mmu.h | 11 +++++++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v1 1/2] percpu: Use X86_MEM_ENCRYPT for decrypted per-CPU data
+Author: Zack Rusin <zack.rusin@broadcom.com>
+
+Decrypted per-CPU data is gated by AMD_MEM_ENCRYPT. With
+INTEL_TDX_GUEST=y and AMD_MEM_ENCRYPT=n it falls back to ordinary
+per-CPU storage, so converting a variable to shared memory can expose
+unrelated data on the same page.
+
+Gate the declarations and linker section on X86_MEM_ENCRYPT, which both
+AMD_MEM_ENCRYPT and INTEL_TDX_GUEST select. Existing AMD configurations
+are unchanged.
+
+Keep the decrypted subsection page-aligned at both ends. The per-CPU
+template and each allocated per-CPU unit are also page-aligned, so page
+conversion cannot expose ordinary per-CPU data. TDX-only configurations
+may need additional space for this alignment and isolation.
+
+Signed-off-by: Zack Rusin <zack.rusin@broadcom.com>
+---
+ include/asm-generic/vmlinux.lds.h | 2 +-
+ include/linux/percpu-defs.h       | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 087ec35e1 to 0b3b149eb
+KVM mailing list update from 087ec35e1 to 0b3b149eb
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     26 redhat.com
+      3 arm.com
+      1 nutanix.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+     23  Eric Auger <eric.auger@redhat.com>
+      3  Wei-Lin Chang <weilin.chang@arm.com>
+      3  Cornelia Huck <cohuck@redhat.com>
+      1  Shaju Abraham <shaju.abraham@nutanix.com>
+      1  Linus Walleij <linusw@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v3 2/2] KVM: arm64: ptdump: Fix shadow ptdump sleep-in-atomic-context problem
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Previously we exposed shadow page tables by creating a debugfs ptdump
+file whenever a nested mmu instance gets bound to a new context, and
+deleting the debugfs file whose context was getting unbound.
+
+This turned out to be buggy, as the instance<->context binding process
+is done with the mmu_lock held, and debugfs creation/deletion can sleep.
+
+Change the approach and create a shadow ptdump file for each nested mmu
+instead during kvm_vcpu_init_nested(), in a sleepable context. The files
+will be named nested_mmu<index>, and reading it will return the nested
+context's VTTBR, VTCR, and s2 enabled or not before dumping the shadow
+page tables, given the nested mmu is valid.
+
+Fixes: 19e15dc73f0f ("KVM: arm64: nv: Expose shadow page tables in debugfs")
+Reported-by: Itaru Kitayama <itaru.kitayama@fujitsu.com>
+Closes: https://lore.kernel.org/kvmarm/aiuF0KSvvv-ZozI1@sm-arm-grace07/
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/include/asm/kvm_host.h |  4 ----
+ arch/arm64/include/asm/kvm_mmu.h  |  6 ++----
+ arch/arm64/kvm/nested.c           |  9 ++++-----
+ arch/arm64/kvm/ptdump.c           | 32 +++++++++++++++----------------
+ 4 files changed, 21 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/2] KVM: arm64: ptdump: Check the page tables aren't freed when accessing
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+An open debugfs file keeps the KVM structure alive, but does not prevent
+mmu notifier release from freeing the stage-2 page tables when the VMM’s
+address space is torn down. Therefore page tables belonging to the mmus
+could have been freed when a thread opens or reads the ptdump files.
+Take the mmu_lock and check mmu->pgt is still alive before accessing the
+page tables.
+
+Also for the ipa_range file and stage2_levels file, switch from keeping
+the pointer to the page tables to keeping the pointer to the mmu.
+
+Fixes: 7c4f73548ed1 ("KVM: arm64: Register ptdump with debugfs on guest creation")
+Reported-by: Sashiko AI <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/kvmarm/20260623144054.B91D21F000E9@smtp.kernel.org/
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/ptdump.c | 43 +++++++++++++++++++++++++++++++----------
+ 1 file changed, 33 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/2] KVM: arm64: ptdump: Shadow ptdump fixes
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Hi,
+
+This is v3 of fixing the sleep-in-atomic problem of the shadow ptdump.
+The approach taken this time is simply creating a file for each nested
+mmu.
+
+The ptdump files are created alongside the nested mmus in
+kvm_vcpu_init_nested(), in a sleepable context, and removed when the VM
+is destroyed (kvm_destroy_vm_debugfs(), before the nested mmus are freed
+in kvm_destroy_nested()). This allows us to store the kvm_s2_mmu pointers
+in the ptdump code, after Marc's nested mmu lifecycle fixes [1].
+
+For the shadow ptdump, for valid nested mmus the first line will show
+the nested context's VTTBR and VTCR values, and whether s2 is enabled or
+not. The ptdump then follows.
+
+The first patch fixes mmu->pgt accesses after the VM MMU teardown in
+ptdump.c, the second patch switches from per nested context ptdumps to
+per nested mmu ptdumps.
+
+Tested with CONFIG_PROVE_LOCKING, CONFIG_DEBUG_ATOMIC_SLEEP, and
+CONFIG_KASAN.
+
+Series based on kvmarm/fixes.
+
+* Changes from v2 [2]:
+
+  - Changed from creating a file that contains all nested mmus to
+    creating one file for each nested mmu.
+
+Thanks!
+
+[1]: https://lore.kernel.org/kvmarm/20260911162203.1919330-1-maz@kernel.org/
+[2]: https://lore.kernel.org/kvmarm/20260630121005.1130996-1-weilin.chang@arm.com/
+
+Wei-Lin Chang (2):
+  KVM: arm64: ptdump: Check the page tables aren't freed when accessing
+  KVM: arm64: ptdump: Fix shadow ptdump sleep-in-atomic-context problem
+
+ arch/arm64/include/asm/kvm_host.h |  4 --
+ arch/arm64/include/asm/kvm_mmu.h  |  6 +--
+ arch/arm64/kvm/nested.c           |  9 ++--
+ arch/arm64/kvm/ptdump.c           | 75 ++++++++++++++++++++-----------
+ 4 files changed, 54 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 26/26] arm/cpu-features: document ID reg properties
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Add some documentation for how individual ID registers can be
+configured with the host cpu model.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+---
+ docs/system/arm/cpu-features.rst | 100 ++++++++++++++++++++++++++++---
+ 1 file changed, 92 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 25/26] arm-qmp-cmds: introspection for ID register props
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Enhance the current host model query-cpu-model-expansion with the
+capability to return SYSREG_* options and also test possible
+values.
+
+If no SYSREG prop is set, query-cpu-model-expansion returns the
+default host values for all SYSREG properties. They are extracted
+from a scratch vcpu featuring all the KVM advertised capabilities.
+
+Here is a qmp-shell example:
+
+(QEMU) query-cpu-model-expansion type=full model={"name":"host"}
+{"return": {"model": {"name": "host", "props": {"SYSREG_ID_AA64PFR0_EL1_EL3": 1,
+"SYSREG_ID_AA64ISAR2_EL1_CLRBHB": 0, "SYSREG_CTR_EL0_L1Ip": 3,
+"SYSREG_MIDR_EL1_PartNum": 3407, "SYSREG_CTR_EL0_DminLine": 4,
+"SYSREG_ID_AA64MMFR0_EL1_PARange": 5, "SYSREG_ID_AA64MMFR1_EL1_ECBHB": 0
+../..
+
+It becomes also possible to test new SYSREG property values.
+
+With Full expansion of the host model, the SYSREG props are tested
+against a scratch vcpu. With static expansion, no check is performed
+against KVM but only against qemu code (the value does not exceed the
+field size and if the field is associated to enum values, the set
+value belongs to the list of arch enum values.
+
+Examples
+(QEMU) query-cpu-model-expansion type=full model={"name":"host","props":{"SYSREG_ID_AA64ISAR0_EL1_DP":0x13}}
+{"error": {"class": "GenericError", "desc": "idreg SYSREG_ID_AA64ISAR0_EL1_DP set value (0x13) exceeds length of field (4)!"}}
+
+(QEMU) query-cpu-model-expansion type=full model={"name":"host","props":{"SYSREG_ID_AA64ISAR0_EL1_DP":0x2}}
+{"error": {"class": "GenericError", "desc": "idreg SYSREG_ID_AA64ISAR0_EL1_DP set value (0x2) does not match any arch valid enum value!"}}
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+v8 -> v9:
+- fix the leak reported by Khushit
+- implement static mode for host
+
+v7 -> v8:
+- do not check if the prop exists (this is checked elsewhere with a
+  different error message)
+- clarify that examples given in the commit msg are based on qmp-shell
+
+v5 -> v6:
+- add the write capability
+---
+ target/arm/arm-qmp-cmds.c | 107 ++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 104 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 24/26] target/arm/kvm: Introduce kvm_arm_create_init_scratch_vcpu()
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce kvm_arm_create_init_scratch_vcpu() that allows to create
+and initialize a scratch vcpu from cpu settings. We want to use
+this in arm-qmp-cmds code as well as kvm_arm_destroy_scratch_host_vcpu
+so export them.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm_arm.h  | 11 +++++++++++
+ target/arm/kvm-stub.c | 10 ++++++++++
+ target/arm/kvm.c      | 14 ++++++++++++++
+ 3 files changed, 35 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 23/26] target/arm/kvm: Introduce kvm_arm_vcpu_prepare_init_features helper
+Author: Eric Auger <eric.auger@redhat.com>
+
+Factorize the code that initializes the kvm init features from the
+cpu settings in a helper. Use it kvm_arch_init_vcpu(). Soon it will
+be used by another function.
+
+The only change in the code relates to the check of kvm_state. The
+future caller won't have the VM created when calling the helper and
+for this caller it is OK ignoring PSCI version setting.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c | 36 ++++++++++++++++++++++--------------
+ 1 file changed, 22 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 22/26] target/arm/kvm: Add an error handle to kvm_arm_create_scratch_host_vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+This allows to report a precise error message if any error occurs.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm_arm.h |  3 ++-
+ target/arm/kvm.c     | 15 ++++++++++++---
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 21/26] target/arm/kvm: add helper to test SYSREG props against a scratch vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+Add kvm_idreg_write_scratch_vcpu helper that will be used
+by qmp_query_cpu_model_expansion code to test SYSREG settings
+against a scratch vcpu. Indeed when the expansion code is called
+the actual vcpu has not been initialized so we use a scratch vcpu.
+This latter has been initialized with features taken from
+legacy compositive options (EL2, SVE, ...). So the trial is
+very close to the final setup.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm_arm.h    |  4 ++++
+ target/arm/kvm-stub.c   |  7 ++++++
+ target/arm/kvm.c        | 51 +++++++++++++++++++++++++++++++++++++++++
+ target/arm/trace-events |  1 +
+ 4 files changed, 63 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 20/26] target/arm/kvm: Ignore and trace unexpected writable reserved fields
+Author: Eric Auger <eric.auger@redhat.com>
+
+KVM currently reports some bits as writable whereas they are
+RES0 or RAZ. The code easily allows to do some sanity checking
+for such inconsistencies. Let's add a trace event when this is
+encountered and skip the field
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+v8 -> v9
+- fix bug reported by Shameer (map &= ~MAKE_64BIT_MASK(lower,
+  field->length);)
+---
+ target/arm/kvm.c        | 10 ++++++++++
+ target/arm/trace-events |  1 +
+ 2 files changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 19/26] target/arm/cpu-idregs.h.inc: Generate reserved fields
+Author: Eric Auger <eric.auger@redhat.com>
+
+Extract reserved fields: RES0, RES1, RAZ, ...
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v7 -> v8:
+- fix WithShifts issue
+---
+ target/arm/cpu-idregs.h.inc                   | 62 ++++++++++++++
+ .../update-aarch64-cpu-sysreg-properties.py   | 83 +++++++++++++++----
+ 2 files changed, 131 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 18/26] target/arm/cpu: Expose writable ID reg field properties on the kvm host vcpu model
+Author: Eric Auger <eric.auger@redhat.com>
+
+If the host supports KVM_CAP_ARM_SUPPORTED_REG_MASK_RANGES and
+KVM_ARM_GET_REG_WRITABLE_MASKS ioctl successfully retrieved the mask
+of writable fields for all ID regs, expose uint64 SYSREG properties
+for all the writable ID reg fields exposed by the host kernel which
+can be matched in target/arm/cpu-idregs.h.inc.
+
+Properties are named  SYSREG_<REG>_<FIELD> with REG and FIELD
+being those used ARCHMRS Registers.json.
+
+When such properties are set, they override the default field value
+retrieved from the host and reinjected into KVM. Then the actual value
+being applied at KVM depends on the register, ie. it can be sanitized.
+In case the field value is rejected by KVM, the vpcu init fails.
+
+Anyway there is a first attempt to write back this value into KVM.
+
+Then legacy CPU options (virtualization, secure, ...) can still
+override the previous value. So low level IDREG field properties
+apply before the legacy ones.
+
+An example of invocation is:
+-cpu host,SYSREG_ID_AA64MMFR0_EL1_ECV=0x0
+which sets ECV field of ID_AA64MMFR0_EL1 to 0 (enhanced counter
+virtualization).
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Reviewed-by: Sebastian Ott <sebott@redhat.com>
+
+---
+v5 -> v6:
+- do not check writable_map anymore
+
+v4 -> v5:
+- get rid of ret local variable, dynamically allocate and free writable_map
+  here
+---
+ target/arm/cpu64.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 17/26] target/arm/kvm: Add consistency checking for SYSREG props
+Author: Eric Auger <eric.auger@redhat.com>
+
+Since legacy composite options (such as SVE, virtualization, ...)
+and new SYSREG props coexist, add some basic consistency checks.
+
+Those checks are performed both in kvm_arch_init_vcpu() before
+applying the SYSREG props at the end of the initialization chain.
+
+Some ID reg fields corresponding to legacy composite option scope
+are not writable. In that case we just check that the field has
+not become writable.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c | 105 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 105 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 16/26] target/arm/kvm: Apply SYSREG props to the final vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+SYSREG prop settings were recorded in a hashtable but they
+are not yet injected on guest. Iterate over all set fields and
+apply the new value through KVM_SET_ONE_REG. The new field
+value overrides the current observable vcpu register value.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c        | 65 +++++++++++++++++++++++++++++++++++++++++
+ target/arm/trace-events |  1 +
+ 2 files changed, 66 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 15/26] target/arm/kvm: Pass an Error handle to kvm_arch_init_vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+The 2 callers of kvm_arch_init_vcpu(), namely kvm_rebind_vcpus()
+and kvm_init_vcpu() are passed an Error handle. So it is a pity
+not using it in kvm_arch_init_vcpu(). Also some functions called
+within kvm_arch_init_vcpu() could get benefit from it, especially
+on ARM. This will happen in subsequent patches.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ include/system/kvm.h       |  2 +-
+ accel/kvm/kvm-all.c        | 15 +++++++--------
+ target/arm/kvm.c           | 14 +++++++++-----
+ target/i386/kvm/kvm.c      | 22 ++++++++++++----------
+ target/loongarch/kvm/kvm.c | 24 ++++++++----------------
+ target/ppc/kvm.c           |  6 +++---
+ target/riscv/kvm/kvm-cpu.c |  3 ++-
+ target/s390x/kvm/kvm.c     |  2 +-
+ 8 files changed, 43 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 14/26] target/arm/kvm: Implement SYSREG property setter and getter
+Author: Eric Auger <eric.auger@redhat.com>
+
+When the setter is called, the final vcpu is not created yet.
+Applying the override on vcpu.isar initialized with the max scratch
+vcpu would not be correct because the final vcpu may have some features
+turned off (for instance virtualization) while the scratch vcpu
+features it. So we need to postpone the actual override until the
+final vcpu has been initialized.
+
+In terms of input value validation what can be done now is checking
+against field length and arch enum value if any.
+
+If this succeeds, the field value is added in the hash table to be
+written later on once the final vcpu has been created
+
+With regards to the getter, if the sysreg prop was set, we return the
+set value, otherwise, we return the value in cpu->isar.idregs[].
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu.h |  2 ++
+ target/arm/cpu.c |  5 ++--
+ target/arm/kvm.c | 65 ++++++++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 68 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 13/26] target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+Author: Eric Auger <eric.auger@redhat.com>
+
+This helper decode the ID reg writable mask, matches it against
+ID reg fields defined in target/arm/cpu-idregs.h.inc and
+for each writable named field, generates a uint64 property.
+
+REVIDR_EL1 and AIDR_EL1 are writable but they do not expose any
+field. They will be handled separately.
+
+The setter and getter are not yet implemented
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+v7 -> v8
+- scratch the '!' in the error_setg
+- addapt to the removal of struct ArmIdRegArchVal
+
+v5 -> v6
+- for enum values, check against value value when setting the prop
+- do not check writable_map flag anymore
+
+v4 -> v5:
+- free prop_name
+- check cpu->writable_map as a preamble in kvm_arm_expose_idreg_properties
+---
+ target/arm/kvm_arm.h    | 10 +++++
+ target/arm/kvm.c        | 93 +++++++++++++++++++++++++++++++++++++++++
+ target/arm/trace-events |  4 ++
+ 3 files changed, 107 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 12/26] arm/kvm: Initialize isar.idregs[] with all writable host ID regs
+Author: Eric Auger <eric.auger@redhat.com>
+
+kvm_arm_get_host_cpu_features() already retrieves the values of some
+host id registers to analyze the available vcpu features.
+
+Eventually we want to be able to allow the user to change the value
+of writable ID reg fields. So we need to store the initial value of all
+writable ID regs into isar.idregs[].
+
+Introduce a new get_host_cpu_idregs() helper that populates isar.idregs[]
+and call it from kvm_arm_get_host_cpu_features.
+
+This patch has no impact on cpreg values. isar.idregs[] is only
+used as a temporary storage for register values to be updated in place
+later.  Also it does not handle the writeback of isar.idregs[] into cpreg
+value list after user update. This will be handled separately.
+
+Note the host values are retrieved from the scratch vcpu initialized with
+all the available capabilities exposed by KVM, independently on the
+final choice made by the suer.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+v8 -> v9:
+- improve the commit msg. Only initialize in this patch and move the
+  write back to cpreg value list in a different patch.
+- Do not hack CLIDR here. The correct way to fix that temporarily is to
+  do that in the machine instead.
+
+v7 -> v8
+- fix indent and added Khushit's R-b
+
+v6 -> v7
+- remove vcpu from prototypes (Khushit)
+
+v5 -> v6
+- do not check writable_map anymore
+---
+ target/arm/kvm.c        | 43 ++++++++++++++++++++++++++++++++++++++++-
+ target/arm/trace-events |  2 ++
+ 2 files changed, 44 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 11/26] hw/arm/virt: Make sure virt_get_caches() keeps on reading CLIDR_EL1 as 0
+Author: Eric Auger <eric.auger@redhat.com>
+
+In KVM mode, virt_get_caches() currently gets a zero value for the
+CLIDR_EL1 register. This is due to the fact CLIDR is never read from
+host. This is a bug.
+
+Soon we will initialize all writable isar.idreg[] from host and this
+includes CLIDR_EL1. However we cannot directly fix the initialization,
+first because it would change the way the guest is exposed caches in
+DT/ACPI descriptions and because some host values would be rejected
+by the current QEMU code, expecially in the case host has a unified
+L1 cache which is currently not supported and triggers the following
+errod: "Unified type is not implemented at level 1" error.
+
+So this issue will be fixed separately.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ hw/arm/virt.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 10/26] target/arm/kvm: Retrieve writable ID reg map
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Add an helper to retrieve the writable id reg bitmask.
+
+then retrieve the writable_map array and dispatch it in the writable_map
+fields of arm64_id_regs[] elements.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+v7 -> v8
+- added kvm_enabled()
+
+v5 -> v6
+- use arm64_id_regs[].writable_map
+- squashed 2 commits (helper + user)
+- removed stub
+---
+ target/arm/kvm.c | 61 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 09/26] target/arm/cpu_idregs: generate tables for Arm64 ID registers and fields
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Include cpu-idregs.h.inc multiple times with different definitions for the
+X-macros. This will generate tables for all Arm64 ID registers and their
+fields. Additionally, initialize the tables with all architecturally defined
+values. These tables will be consumed by the property layer in future
+patches.
+
+Note:
+This triggers a minot checkpatch error but I prefer to keep the coma in
+the macro.
+ERROR: Macros with complex values should be enclosed in parenthesis
++#define IDREG_FIELD_ARCH_VAL(v) (v),
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+v7 -> v8
+Adaptation after removal of struct ArmIdRegArchVal
+
+v5 -> v6
+- restored support of enum values
+---
+ target/arm/cpu-idregs.c | 96 +++++++++++++++++++++++++++++++++++++++++
+ target/arm/meson.build  |  1 +
+ 2 files changed, 97 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 08/26] target/arm/cpu-idregs.h.inc: Generate enum values
+Author: Eric Auger <eric.auger@redhat.com>
+
+Modify the python script so that enum values are also
+extracted from Registers.json.
+
+If enum values are found, the field and its enum values are
+defined within IDREG_FIELD_START/END. Each enum value is
+defined with IDREG_FIELD_ARCH_VAL() macro.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+v7 -> v8:
+Properly handle ValueRange
+---
+ target/arm/cpu-idregs.h.inc                   | 2657 ++++++++++++++---
+ .../update-aarch64-cpu-sysreg-properties.py   |   86 +-
+ 2 files changed, 2332 insertions(+), 411 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 07/26] target/arm/cpu-idregs.h.inc: generate with script
+Author: Eric Auger <eric.auger@redhat.com>
+
+Generate ID reg definitions with the scripts/update-aarch64-cpu-sysreg-properties.py
+based on AARCHMRS_OPENSOURCE_A_profile_FAT-2026-03 Registers.json
+
+Each register and fields are described with this pattern:
+
+IDREG_START(REG)
+IDREG_FIELD(REG, FIELD, SHIFT, LENGTH)
+...
+IDREG_END(REG)
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Suggested-by: Khushit Shah <khushit.shah@nutanix.com>
+Suggested-by: Shaju Abraham <shaju.abraham@nutanix.com>
+---
+ target/arm/cpu-idregs.h.inc | 607 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 607 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 06/26] scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and automates the generation of system register properties definitions.
+
+generates target/arm/cpu-idregs.h.inc containing definitions for
+feature ID registers.
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v5 -> v6
+- add ident
+---
+ .../update-aarch64-cpu-sysreg-properties.py   | 166 ++++++++++++++++++
+ 1 file changed, 166 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 05/26] scripts: Introduce scripts/aarch64_sysreg_helpers module
+Author: Eric Auger <eric.auger@redhat.com>
+
+We plan to reuse get_opcode() and extract_idregs_from_registers_json()
+functions in another script. So let's move them into a module
+
+No functional change intended.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Reviewed-by: Khushit Shah <khushit.shah@nutanix.com>
+---
+ scripts/aarch64_sysreg_helpers.py            | 121 +++++++++++++++++++
+ scripts/update-aarch64-cpu-sysregs-header.py |  97 +--------------
+ 2 files changed, 122 insertions(+), 96 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 04/26] arm/cpu: Add infra to handle generated ID register definitions
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce an infrastructure to store the definition of all ID regs:
+This include their name, index and array of named fields.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+
+---
+v7 -> v8:
+- remove typedef struct ArmIdRegArchVal
+
+v5 -> v6:
+- add ArmIdRegArchVal
+---
+ target/arm/cpu-idregs.h | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 03/26] target/arm/cpu-sysregs.h.inc: Update with automatic generation
+Author: Eric Auger <eric.auger@redhat.com>
+
+Generated definitions with scripts/update-aarch64-cpu-sysregs-header.py
+based on "AARCHMRS containing the JSON files for Arm A-profile
+architecture (2026-03)" Registers.json file.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Reviewed-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ target/arm/cpu-sysregs.h.inc | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 02/26] target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+Author: Eric Auger <eric.auger@redhat.com>
+
+Sort by register name alphabetical order. This will allow to
+easily diff with the future content, automatically generated.
+
+No functional change intended.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Reviewed-by: Shameer Kolothum <skolothumtho@nvidia.com>
+Reviewed-by: Khushit Shah <khushit.shah@nutanix.com>
+
+---
+v5 -> v6:
+- v5 version conflicted because ID_AA64FPFR0_EL1 has been
+  added
+
+v4 -> v5:
+- remove spurious CCSIDR definition
+---
+ target/arm/cpu-sysregs.h.inc | 44 ++++++++++++++++++------------------
+ 1 file changed, 22 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 01/26] scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and outputs the list of ID regs in target/arm/cpu-sysregs.h.inc
+under the form of DEF(<name>, <op0>, <op1>, <crn>, <crm>, <op2>).
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+[CH: note correct op1 range, don't skip CCSIDR]
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Message-ID: <20251208163751.611186-2-eric.auger@redhat.com>
+---
+ scripts/update-aarch64-cpu-sysregs-header.py | 146 +++++++++++++++++++
+ 1 file changed, 146 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 00/26] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields.
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+
+The end goal is to get more flexibility when migrating guests
+between different host hardware.
+
+QEMU retrieves the writable ID fields from KVM UAPI and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file. It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction.
+
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+SYSREG properties are applied at the end of the initialization
+chain, after legacy composite options (sve, pauth, ...). They
+do not substitute to them because legacy options do more than
+just changing the value of ID registers. They may also interact
+with KVM to init the vcpu with specific features or set some
+VM capabilities. SYSREG properties just affect the corresponding
+ID register field. Some checks are performed to make sure their
+value is not inconsistent with legacy composite options.
+
+The list of SYSREG properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion. They return the current
+value for the corresponding field. The qmp command also allows to
+test  setting new values. In static mode, they are tested at qemu
+level only, against field length, arch enum values if any and
+consistency with legacy composite options. With full expansion,
+the values are tested against KVM using a scratch vcpu initialized
+with the right legacy composite property values.
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v9
+
+History:
+--------
+v8 -> v9:
+- Eventually turned this series into non RFC series as main
+  blockers have been removed I think
+- Changed the way SYSREG props are applied, first stored into
+  a hashkey and applied at the very end of the init chain, after
+  legacy composite options. This fixes the issue with NV.
+- Also we are running the expansion code on a scratch vcpu mode
+  that should be similar to the final one, initialized with the
+  right composite options.
+- Introduced the static support for expansion. In static mode,
+  we don't run checks against the scratch vcpu
+- Added consistency checks between legacy composite options and
+  SYSREG props
+- Addressed the 2 bugs reported by Khushit & Shameer (scrach vcpu
+  leak in expansion code and RES field handling)
+- pass errp to kvm_arch_init_vcpu()
+- introduced kvm_arm_vcpu_prepare_init_features
+
+Cornelia Huck (3):
+  target/arm/kvm: Retrieve writable ID reg map
+  arm-qmp-cmds: introspection for ID register props
+  arm/cpu-features: document ID reg properties
+
+Eric Auger (22):
+  scripts: introduce scripts/update-aarch64-cpu-sysregs-header.py
+  target/arm/cpu-sysregs.h.inc: Sort by name alphabetical order
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  scripts: Introduce scripts/aarch64_sysreg_helpers module
+  scripts: Introduce scripts/update-aarch64-cpu-sysreg-properties.py
+  target/arm/cpu-idregs.h.inc: generate with script
+  target/arm/cpu-idregs.h.inc: Generate enum values
+  hw/arm/virt: Make sure virt_get_caches() keeps on reading CLIDR_EL1 as
+    0
+  arm/kvm: Initialize isar.idregs[] with all writable host ID regs
+  target/arm/kvm: Introduce kvm_arm_expose_idreg_properties
+  target/arm/kvm: Implement SYSREG property setter and getter
+  target/arm/kvm: Pass an Error handle to kvm_arch_init_vcpu
+  target/arm/kvm: Apply SYSREG props to the final vcpu
+  target/arm/kvm: Add consistency checking for SYSREG props
+  target/arm/cpu: Expose writable ID reg field properties on the kvm
+    host vcpu model
+  target/arm/cpu-idregs.h.inc: Generate reserved fields
+  target/arm/kvm: Ignore and trace unexpected writable reserved fields
+  target/arm/kvm: add helper to test SYSREG props against a scratch vcpu
+  target/arm/kvm: Add an error handle to
+    kvm_arm_create_scratch_host_vcpu
+  target/arm/kvm: Introduce kvm_arm_vcpu_prepare_init_features helper
+  target/arm/kvm: Introduce kvm_arm_create_init_scratch_vcpu()
+
+Shaju Abraham (1):
+  target/arm/cpu_idregs: generate tables for Arm64 ID registers and
+    fields
+
+ docs/system/arm/cpu-features.rst              |  100 +-
+ include/system/kvm.h                          |    2 +-
+ target/arm/cpu-idregs.h                       |   36 +
+ target/arm/cpu.h                              |    2 +
+ target/arm/kvm_arm.h                          |   28 +-
+ target/arm/cpu-idregs.h.inc                   | 2512 +++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |   55 +-
+ accel/kvm/kvm-all.c                           |   15 +-
+ hw/arm/virt.c                                 |    4 +
+ target/arm/arm-qmp-cmds.c                     |  107 +-
+ target/arm/cpu-idregs.c                       |   96 +
+ target/arm/cpu.c                              |    5 +-
+ target/arm/cpu64.c                            |    5 +
+ target/arm/kvm-stub.c                         |   17 +
+ target/arm/kvm.c                              |  560 +++-
+ target/i386/kvm/kvm.c                         |   22 +-
+ target/loongarch/kvm/kvm.c                    |   24 +-
+ target/ppc/kvm.c                              |    6 +-
+ target/riscv/kvm/kvm-cpu.c                    |    3 +-
+ target/s390x/kvm/kvm.c                        |    2 +-
+ scripts/aarch64_sysreg_helpers.py             |  121 +
+ .../update-aarch64-cpu-sysreg-properties.py   |  299 ++
+ scripts/update-aarch64-cpu-sysregs-header.py  |   51 +
+ target/arm/meson.build                        |    1 +
+ target/arm/trace-events                       |    9 +
+ 25 files changed, 3987 insertions(+), 95 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] arm64: clear_page[s] using memset
+Author: Linus Walleij <linusw@kernel.org>
+
+There is no need to try to second-guess the compiler when
+clearing memory. Just call memset() like everyone else.
+
+Since memset() already has an architecture-local MOPS
+optimization, we do not need to do anything else to preserve
+the MOPS optimization.
+
+While at it, implement the shorthand for directly calling
+the new prototype clear_pages() for larger page chunks.
+
+No performance regressions can be seen, the fastpath
+benchmarks differences are in the noise.
+
+Usama Anjum tested next-20260821 with one warm-up and three repeats
+in four sessions, for a total of 12 measured runs. The commands were:
+
+  perf bench mem memset -k 1GB -f default -s 16GB
+  perf bench mem mmap -p 1GB -f demand -s 32GB -l 5
+  perf bench mem mmap -p 4KB -f demand -s 32GB -l 5
+
+The results were:
+
+aws-m7g.metal:
+  Benchmark    Base bytes/sec   Change with patch
+  memset 1GB   63932542232.12                1.92%
+  mmap 1GB     63272579168.03               -0.57%
+  mmap 4KB     49692830849.48               -1.11%
+
+cesw-aarch64-ampereone-1s-a192-32x:
+  Benchmark    Base bytes/sec   Change with patch
+  memset 1GB   33895562998.71                0.25%
+  mmap 1GB     34338454210.17                1.16%
+  mmap 4KB     25687107580.90               -0.85%
+
+Assisted-by: LLM
+Suggested-by: Will Deacon <will@kernel.org>
+Tested-by: Usama Anjum <usama.anjum@arm.com>
+Link: https://lore.kernel.org/linux-arm-kernel/20260303-aarch64-clear-pages-v1-1-ad0c3ee9a555@kernel.org/
+Link: https://lore.kernel.org/linux-arm-kernel/67ab6c51-4511-46ab-931b-a4323551147a@arm.com/
+Signed-off-by: Linus Walleij <linusw@kernel.org>
+---
+Changes in v2:
+- Rebased on v7.3-rc1
+- Include Usama Anjum's performance results and Tested-by tag.
+- Link to v1: https://lore.kernel.org/r/20260306-aarch64-clear-pages-c-v1-1-77c1bb0f1c21@kernel.org
+---
+ arch/arm64/include/asm/page.h    | 13 +++++++++-
+ arch/arm64/kernel/image-vars.h   |  1 -
+ arch/arm64/kvm/hyp/nvhe/Makefile |  2 +-
+ arch/arm64/lib/Makefile          |  2 +-
+ arch/arm64/lib/clear_page.S      | 53 ----------------------------------------
+ 5 files changed, 14 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
