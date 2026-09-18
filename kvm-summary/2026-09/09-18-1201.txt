@@ -1,0 +1,2107 @@
+
+On /root/mail/repo:
+From 72280b460 to c332a2351
+KVM mailing list update from 72280b460 to c332a2351
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     51 kernel.org
+      8 linux.dev
+      8 arm.com
+      5 linux.intel.com
+      5 google.com
+      3 gmail.com
+      2 linux.ibm.com
+      2 intel.com
+      2 eswincomputing.com
+      1 suse.com
+      1 redhat.com
+      1 openai.com
+      1 nvidia.com
+      1 isec.pl
+      1 huawei.com
+
+Top 15 contributors (Based on Email Body)
+
+     41  "Lorenzo Stoakes (ARM)" <ljs@kernel.org>
+     10  "Aneesh Kumar K.V (Arm)" <aneesh.kumar@kernel.org>
+      8  Alexandru Elisei <alexandru.elisei@arm.com>
+      5  Binbin Wu <binbin.wu@linux.intel.com>
+      4  "Zenghui Yu (Huawei)" <zenghui.yu@linux.dev>
+      4  Fuad Tabba <fuad.tabba@linux.dev>
+      3  Lisa Wang <wyihan@google.com>
+      2  Yuchao Zhang <ndaugoing@gmail.com>
+      2  Xiaofeng Yuan <yuanxiaofeng@eswincomputing.com>
+      2  Jun Miao <jun.miao@intel.com>
+      1  =?UTF-8?q?Bart=C5=82omiej=20Dmitruk?= <bartlomiej.dmitruk@isec.pl>
+      1  Shameer Kolothum <shameerali.kolothum.thodi@huawei.com>
+      1  Quentin Perret <qperret@google.com>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+      1  Nikolay Borisov <nik.borisov@suse.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: vgic: Do not remove in-flight LPIs from AP list on disable
+[PATCH 1/1] KVM: arm64: vgic: Do not remove in-flight LPIs from AP list on disable
+Author: zjamg <ndaugoing@gmail.com>
+
+
+By code inspection, a race condition and potential Use-After-Free/crash
+exists between remote LPI disabling and local LR folding when EOImode==0.
+
+Commit 6da5e537f5af ("KVM: arm64: vgic: Pick EOIcount deactivations from
+AP-list tail") introduced tracking the last interrupt placed in a List
+Register in per-CPU host data (*host_data_ptr(last_lr_irq)) and traverses
+the remaining ap_list via list_for_each_entry_continue() in
+vgic_v3_fold_lr_state().
+
+However, an interrupt loaded into an LR can be an LPI. While vCPU-B is
+running the guest, another vCPU-A can write to vCPU-B's redistributor
+GICR_CTLR to clear EnableLPIs, which dispatches vgic_flush_pending_lpis().
+
+vgic_flush_pending_lpis() unconditionally removes all LPIs from ap_list
+without checking whether the interrupt is currently in an LR
+(irq->on_lr):
+- It calls list_del(&irq->ap_list), setting ap_list.next to LIST_POISON1,
+  and drops the AP-list reference.
+- If the LPI is unmapped or its translation cache was invalidated, the
+  vgic_irq refcount drops to zero and the object is freed via RCU.
+- Meanwhile, vCPU-B's per-CPU *host_data_ptr(last_lr_irq) cannot be
+  cleared by remote vCPUs and is left dangling.
+
+When vCPU-B subsequently exits the guest:
+1. vgic_v3_fold_lr_state() resumes using the unlinked last_lr_irq.
+2. list_for_each_entry_continue() unconditionally evaluates
+   list_next_entry(irq, ap_list) during loop initialization, accessing
+   LIST_POISON1 (or freed memory).
+3. If eoicount > 0, it attempts guard(raw_spinlock)(&irq->irq_lock) on
+   the poisoned address, leading to an immediate host kernel panic.
+
+Fix this by:
+1. In vgic_flush_pending_lpis(), do not remove LPIs that are currently
+   in-flight in an LR (irq->on_lr == true). They will be naturally pruned
+   by the owning vCPU's vgic_prune_ap_list() after LR folding.
+2. In vgic_fold_state(), clear *host_data_ptr(last_lr_irq) after folding
+   so that no stale pointer survives past guest execution.
+3. In vgic_v3_fold_lr_state() and vgic_v2_fold_lr_state(), bail out
+   immediately if eoicount is zero, avoiding unnecessary list_next_entry()
+   evaluation.
+
+Note: this closes the primary race (the last_lr_irq node itself is no
+longer unlinkable while in-flight), but the fold traversal can still
+race with a remote flush unlinking a subsequent non-LR node in the
+ap_list tail. Fully closing that window needs the fold side to take
+references before dropping locks (in the spirit of the prune-side fix
+in commit 7258770e5814 ("KVM: arm64: vgic: Handle race between
+interrupt affinity change and LPI disabling")) and is left as a
+follow-up.
+
+Fixes: 6da5e537f5af ("KVM: arm64: vgic: Pick EOIcount deactivations from AP-list tail")
+Cc: stable@vger.kernel.org
+Signed-off-by: Yuchao Zhang <ndaugoing@gmail.com>
+---
+ arch/arm64/kvm/vgic/vgic-v2.c |  3 +++
+ arch/arm64/kvm/vgic/vgic-v3.c |  3 +++
+ arch/arm64/kvm/vgic/vgic.c    | 10 +++++++---
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: fix UAF/crash on remote LPI disable
+[PATCH 0/1] KVM: arm64: vgic: fix UAF/crash on remote LPI disable
+Author: zjamg <ndaugoing@gmail.com>
+
+
+Hi Marc, Oliver, and KVM/arm64 maintainers,
+
+By code inspection of commit 6da5e537f5af ("KVM: arm64: vgic: Pick EOIcount
+deactivations from AP-list tail"), a race condition exists when a remote
+vCPU disables LPIs while the target vCPU has an in-flight LPI in a List
+Register (LR).
+
+Specifically:
+- vgic_flush_pending_lpis() unconditionally unlinks all LPIs from ap_list
+  without checking whether the interrupt is in an LR (irq->on_lr).
+- If the LPI in the LR happened to be the last one populated, the per-CPU
+  pointer *host_data_ptr(last_lr_irq) on the target vCPU is left dangling.
+- When the target vCPU exits guest mode, vgic_v3_fold_lr_state() starts
+  traversing ap_list via list_for_each_entry_continue() from this unlinked,
+  poisoned (or freed) last_lr_irq, leading to UAF or an immediate panic
+  when locking irq->irq_lock.
+
+Solution & Scope:
+This patch prevents unlinking LPIs that are currently on an LR in
+vgic_flush_pending_lpis(), ensures *host_data_ptr(last_lr_irq) is cleared
+after folding, and skips the ap_list walk when eoicount is zero.
+
+Note: this closes the primary race (the last_lr_irq node itself is no
+longer unlinkable while in-flight), but the fold traversal can still
+race with a remote flush unlinking a subsequent non-LR node in the
+ap_list tail. Fully closing that window needs the fold side to take
+references before dropping locks (in the spirit of the prune-side fix
+in commit 7258770e5814 ("KVM: arm64: vgic: Handle race between
+interrupt affinity change and LPI disabling")) and is left as a
+follow-up.
+
+Any feedback is greatly appreciated.
+
+Thanks,
+Yuchao Zhang
+
+Yuchao Zhang (1):
+  KVM: arm64: vgic: Do not remove in-flight LPIs from AP list on disable
+
+ arch/arm64/kvm/vgic/vgic-v2.c |  3 +++
+ arch/arm64/kvm/vgic/vgic-v3.c |  3 +++
+ arch/arm64/kvm/vgic/vgic.c    | 10 +++++++---
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: Fix MF_DELAYED handling on memory failure
+[PATCH v6 0/5] mm: Fix MF_DELAYED handling on memory failure
+Author: Lisa Wang <wyihan@google.com>
+
+Here's a sixth revision to fix MF_DELAYED handling on memory failure.
+
+This patch series addresses an issue in the memory failure handling path
+where MF_DELAYED is incorrectly treated as an error. This issue was
+discovered while testing memory failure handling for guest_memfd.
+
+The proposed solution involves -
+1. Clarifying the definition of MF_DELAYED to mean that memory failure
+   handling is only partially completed, and that the metadata for the
+   memory that failed (as in struct page/folio) is still referenced.
+2. Updating shmem=E2=80=99s handling to align with the clarified definition=
+.
+3. Updating how the result of .error_remove_folio() is interpreted.
+
+Changes from v5:
+Add comment-style fallthrough in the memory-failure test, as suggested
+by Ackerley and David
+
++ RFC v5: https://lore.kernel.org/all/20260823-memory-failure-mf-delayed-fi=
+x-v5-0-d97a5703e45a@google.com/
+
+Signed-off-by: Lisa Wang <wyihan@google.com>
+---
+Lisa Wang (5):
+      mm: memory_failure: Clarify the MF_DELAYED definition
+      mm: memory_failure: Allow truncate_error_folio to return MF_DELAYED
+      mm: shmem: Update shmem handler to the MF_DELAYED definition
+      mm: memory_failure: Generalize extra_pins handling to all MF_DELAYED =
+cases
+      mm: selftests: Add shmem into memory failure test
+
+ mm/memory-failure.c                         |  29 ++++---
+ mm/shmem.c                                  |   2 +-
+ tools/testing/selftests/mm/memory-failure.c | 114 ++++++++++++++++++++++++=
++++-
+ 3 files changed, 126 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Drop the unsigned >= 0 assertions in test_write/test_read
+[PATCH] KVM: selftests: Drop the unsigned >= 0 assertions in test_write/test_read
+Author: Gokul K <gokul02k@gmail.com>
+
+test_write() and test_read() both open with
+
+	TEST_ASSERT(count >= 0, "Unexpected count, count: %li", count);
+
+but @count is a size_t, so the condition is always true and the assertion
+can never fire. Building the selftests with -Wextra says so:
+
+  lib/io.c:51:27: warning: comparison of unsigned expression in '>= 0'
+                  is always true [-Wtype-limits]
+  lib/io.c:128:27: warning: comparison of unsigned expression in '>= 0'
+                  is always true [-Wtype-limits]
+
+@count has been a size_t since these helpers were added in commit
+6089ae0bd5e1 ("kvm: selftests: add sync_regs_test"), so this has never
+guarded anything; nothing regressed and there is no behavioural change.
+
+Note also that the message the assertion would have printed is wrong: %li
+takes a long, not a size_t. That has gone unnoticed precisely because the
+assertion is unreachable, which is a fair summary of the value it adds.
+
+Delete both. The comment above each one is about a count of zero being
+legitimate, which remains true and is worth keeping.
+
+Signed-off-by: Gokul K <gokul02k@gmail.com>
+---
+ tools/testing/selftests/kvm/lib/io.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm/vma: fix mmap_prepare file handling, remove
+[PATCH v3 01/40] mm/vma: fix mmap_prepare file handling, remove
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+The map->file_doesnt_need_get flag is confusing and the existing
+implementation has holes.
+
+Drivers are permitted to change the owning file of a mapping. If they do
+so, they are required to take a reference on that file.
+
+The mmap() operation which ultimately invokes __mmap_region() is guaranteed
+to drop the refcount for the original file the mapping was made under, but
+this is not true for the replaced file.
+
+This has been addressed so far by tracking map->file_doesnt_need_get, which
+is rather poorly named and unfortunately fails to correctly track whether
+or not an additional put were needed in a number of cases.
+
+Make life easier by removing this flag, and instead drop the reference for
+both mmap_prepare and the deprecated mmap callback in a new function
+put_map().
+
+Track whether this needs to be done by aligning mmap_state with
+vm_area_desc and store the original file in the map->file field, keeping
+the updated file in map->vm_file.
+
+In order to have the same behaviour for both types of hooks, only drop the
+reference __mmap_new_file_vma() itself took in its error path, deferring
+the replaced file's reference to put_map().
+
+To make this work correctly, map->vm_file has to be updated before any
+error handling, so update __mmap_new_file_vma() and call_mmap_prepare() to
+set this field first.
+
+Also when mmap_prepare() changes the file and is then merged, the reference
+count also must be decremented, so update the logic to call put_map() in
+this case too.
+
+Also update __compat_vma_mmap() to manually perform this step for stacked
+file systems using the compatibility layer, and update
+compat_set_vma_from_desc() to replace vma_set_file() with a correct
+refcount/file update.
+
+No in-tree driver is impacted by the incorrect implementation of this
+currently (no driver that does this is mergeable for one), so this does not
+need to be a fix.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+ mm/internal.h |  1 +
+ mm/util.c     |  5 +++-
+ mm/vma.c      | 83 +++++++++++++++++++++++++++++++++++------------------------
+ mm/vma.h      |  6 +++--
+ 4 files changed, 59 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: make VMA flag semantics explicit, eliminate
+[PATCH v3 00/40] mm: make VMA flag semantics explicit, eliminate
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+The VM_SPECIAL / VMA_SPECIAL_FLAGS mask conflates several unrelated
+properties:
+
+* Is this kernel-owned, whether MMIO, kernel-allocated pages, or ordinary
+  pages a driver maps itself?
+* Can it be expanded or merged?
+* Is this a 'weird' case like mlock where migration might race and we
+  'have' to set invalid flags to notify?
+* Is it another 'weird' case where we just want to stop GUP from touching
+  it?
+
+Driver writers have often been confused about this, and who can blame them?
+
+It also interacts badly with the eternal edgecase known as hugetlb - which
+sets VMA_DONTEXPAND_BIT but doesn't also want to be treated like a
+'special' flag.
+
+Another issue is that we cannot make sensible assumptions about flag
+use. It's not possible to assume VMA_IO_BIT means iommu because drivers
+abuse it and mlock abuses it.
+
+Special is also an overloaded term in mm. VDSO and VVAR mappings are also
+called 'special' but they're special in a... special way.
+
+Sometimes things are called special that are a subset of
+VMA_SPECIAL_FLAGS (VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT for instance when it
+comes to zapping or vm_normal_folio()).
+
+There's a specific kind of special for THP too, which considers
+PFN map, mixed map 'special' but DAX not.
+
+It's all rather a mess.
+
+This series brings some order to things by both limiting what drivers can
+do with VMA flags and switching to using predicates that describe
+behaviour, not arbitrary flags.
+
+It establishes the invariant that only kernel-owned mappings may set
+VMA_IO_BIT or clear VMA_MAYWRITE_BIT in an mmap hook, enforcing this by
+validating VMA state after every mmap and mmap_prepare hook.
+
+It updates usbmon and sg to mmap_prepare in order to do so, adding a new
+mmap action for mapping discontiguous kernel pages, and has hfi1 and the
+ALSA PCM status page map their pages eagerly instead.
+
+It also establishes the invariant that VMA_MIXEDMAP_BIT be set when mapping
+kernel memory, something that is usually the case but happens not to be for
+some users - specifically defio, cmt_speech, uprobes and the bpf arena, all
+of which are updated to do the right thing.
+
+It replaces VM_SPECIAL and arbitrary flag tests with predicates that say
+what is actually being tested:
+
+   vma_is_kernel_owned()   Does a driver or kernel code manage a VMA's
+                           life cycle?
+
+  vma_is_fixed_mapping()   Is the VMA not permitted to be expanded or
+                           merged?
+
+     vma_is_persistent()   Do bytes written to the VMA stay written, and
+                           bytes read stay the same unless userland changes
+                           them?
+
+         vma_can_merge()   Can the VMA be merged with a compatible
+                           neighbour?
+
+           vma_can_gup()   Can GUP obtain pages from the VMA, i.e. is it
+                           neither a PFN map nor memory-mapped I/O?
+
+Remaining raw VMA_IO_BIT, VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT tests
+scattered across mm are also converted to predicates where it makes sense
+to do so.
+
+And also the opportunity is taken to eliminate THP's vma_is_special_huge()
+which was an existing source of confusion.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+v3:
+* Fixed up bug in patch 1 as reported by Mike - have to delay setting
+  map->vma_flags until after action prepare, though map->vm_file needs to
+  be set before for correct reference count management.
+* Updated 4/40 to add a symmetric vm_end check as well as vm_start in case
+  of a dangerously insane driver, as per Sashiko.
+* Updated 8/40 to check if a driver did something REALLY stupid like having
+  a NULL discontig_kernel_page_ops ptr, as per Sashiko.
+* Updated 15/40 to trivially synchronise userland test comments.
+* Updated 17/40 to correctly duplicate code to the userland VMA tests as
+  per Sashiko.
+
+v2:
+* Rebased on mm-unstable.
+* Introduced new patch to fix various mmap_prepare and file interactions
+  that weren't quite right as per Sashiko. None impact anything upstream
+  yet so it doesn't need to be a fix.
+* Restore vma->vm_start if an mmap hook has moved it before tearing the
+  VMA down, so we unmap the range we established rather than the one the
+  hook invented, as per Sashiko.
+* Reject a discontiguous kernel page batch of zero pages rather than
+  looping forever, and bound batches by the pages remaining in the VMA,
+  as per Sashiko.
+* Add the missing map_kernel_discontig member to the userland VMA tests'
+  copy of struct mmap_action as per Sashiko.
+* Set VM_DONTEXPAND on hfi1's RCV_HDRQ, RCV_EGRBUF and RTAIL mappings, as
+  dma_mmap_coherent() doesn't on the IOMMU-DMA path, as per Sashiko.
+* Recompute vma->vm_page_prot in snd_pcm_mmap_status() after clearing
+  VM_WRITE, as vm_insert_page() uses it immediately rather than at fault
+  time, as per Sashiko.
+* munlock_vma_folio() now tests VMA_LOCKED_MASK so an unmap racing the
+  mlock walk still munlocks folios the walk has already counted, as per
+  Sashiko.
+https://lore.kernel.org/r/20260914-b4-mmap-prepare-vma-flag-sanify-v2-0-7d9781ed5361@kernel.org
+
+v1:
+https://lore.kernel.org/r/20260908-b4-mmap-prepare-vma-flag-sanify-v1-0-dacf19cce22b@kernel.org
+
+---
+Lorenzo Stoakes (ARM) (40):
+      mm/vma: fix mmap_prepare file handling, remove file_doesnt_need_get
+      mm/vma: predicate setting mmap_prepare VMA fields on new vma alloc
+      mm/vma: introduce and use vma_[flags_]can_merge()
+      mm: consistently validate VMA state after mmap[_prepare] hooks
+      mm/vma: ensure mmap_prepare doesn't set actions on a mergeable vma
+      mm: make map_kernel_pages_[prepare,complete] internal and unexported
+      mm/vma: tidy up map kernel pages enum values
+      mm: add mmap action for discontiguous kernel page mapping
+      docs: filesystems: update mmap_prepare docs for discontig kernel pgs
+      drivers/usb/mon: update to use mmap_prepare + map kernel pages
+      infiniband: update hfi1 to use remap_vmalloc_range()
+      selinux: reject writable opens of policy file, drop mmap shared/write check
+      ALSA: pcm: use vm_insert_page() to map PCM status page
+      bpf: arena: mark arena_map_mmap() mappings VM_MIXEDMAP
+      mm/vma: add vma[_flags]_is_kernel_owned() predicates
+      mm/vma: only allow mmap to clear VMA_MAYWRITE_BIT if kernel-owned
+      mm/vma: add and use vma_[flags]_is_fixed_mapping
+      scsi: sg: convert mmap hook to mmap_prepare and rework
+      fbdev: defio: assert FBINFO_VIRTFB, drop VM_IO, add VM_MIXEDMAP
+      HSI: cmt_speech: convert mmap hook to mmap_prepare, refactor
+      mm/gup: error out early on !VMA_MAYREAD_BIT VMAs
+      uprobes: remove VM_IO, set VM_MIXEDMAP for mapped kernel pages
+      mm/mlock: clear VMA_LOCKED_MASK over mmap callback
+      mm/mlock: eliminate weird VMA_IO_BIT abuse and simplify
+      mm/vma: enforce that only kernel-owned mappings may set VMA_IO_BIT
+      mm: remove VMA_IO_BIT check in vma[_flags]_is_kernel_owned()
+      mm: remove hugetlb_inline.h
+      mm: rename is_vm_hugetlb_page() to vma_is_hugetlb()
+      mm: drop some redundant checks around hugetlb VMAs
+      mm/madvise: update is_valid_guard_vma() to use vma_can_merge()
+      mm/vma: introduce vma[_flags]_is_persistent()
+      mm/uffd: use predicates for userfaultfd checks
+      mm/madvise: use predicates for madvise(..., MADV_DOFORK)
+      mm: eliminate VMA_SPECIAL_FLAGS usage when hugetlb explicitly tested
+      mm: eliminate VMA_SPECIAL_FLAGS check in lru_gen_look_around()
+      mm: avoid use of VMA_SPECIAL_FLAGS in migrate_vma_setup()
+      mm: eliminate VM_SPECIAL, VMA_SPECIAL_FLAGS
+      fuse: dax: do not set VM_MIXEDMAP
+      mm/huge_memory: remove vma_is_special_huge()
+      mm/vma: introduce and use vma[_flags]_can_gup()
+
+ Documentation/filesystems/mmap_prepare.rst |  81 +++++++++
+ arch/arm64/kvm/mmu.c                       |   4 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c       |   6 +-
+ arch/powerpc/mm/nohash/e500_hugetlbpage.c  |   2 +-
+ arch/powerpc/mm/nohash/tlb.c               |   2 +-
+ arch/riscv/kvm/mmu.c                       |   2 +-
+ arch/riscv/mm/tlbflush.c                   |   2 +-
+ arch/s390/mm/gmap_helpers.c                |   6 +-
+ arch/sparc/mm/init_64.c                    |   2 +-
+ arch/x86/kernel/uprobes.c                  |   2 +-
+ drivers/gpu/drm/drm_gpusvm.c               |   5 +-
+ drivers/hsi/clients/cmt_speech.c           |  33 +---
+ drivers/infiniband/hw/hfi1/file_ops.c      |  83 +++------
+ drivers/scsi/sg.c                          | 115 ++++++-------
+ drivers/usb/mon/mon_bin.c                  |  82 +++++----
+ drivers/video/fbdev/core/fb_defio.c        |   6 +-
+ drivers/video/fbdev/ssd1307fb.c            |   2 +
+ fs/coredump.c                              |   6 +-
+ fs/fuse/dax.c                              |   2 +-
+ fs/hugetlbfs/inode.c                       |   2 +-
+ fs/proc/task_mmu.c                         |   8 +-
+ include/asm-generic/tlb.h                  |   4 +-
+ include/linux/hugetlb.h                    |   5 +-
+ include/linux/hugetlb_inline.h             |  28 ---
+ include/linux/mm.h                         | 266 +++++++++++++++++++++++++++--
+ include/linux/mm_types.h                   |  50 +++++-
+ include/linux/pagemap.h                    |   1 -
+ include/linux/rmap.h                       |   2 +-
+ include/linux/userfaultfd_k.h              |   1 -
+ kernel/bpf/arena.c                         |   3 +-
+ kernel/events/core.c                       |   2 +-
+ kernel/events/uprobes.c                    |   4 +-
+ kernel/sched/fair.c                        |   3 +-
+ mm/folio.c                                 |   2 +-
+ mm/gup.c                                   |  15 +-
+ mm/hmm.c                                   |   3 +-
+ mm/huge_memory.c                           |  31 ++--
+ mm/hugetlb.c                               |  14 +-
+ mm/internal.h                              |  81 +++++----
+ mm/ksm.c                                   |   4 +-
+ mm/madvise.c                               |  28 +--
+ mm/memory.c                                | 142 ++++++++++++---
+ mm/mempolicy.c                             |   5 +-
+ mm/migrate_device.c                        |  12 +-
+ mm/mlock.c                                 |  51 +++---
+ mm/mmap.c                                  |   2 +-
+ mm/mmu_gather.c                            |   2 +-
+ mm/mprotect.c                              |   5 +-
+ mm/mremap.c                                |  11 +-
+ mm/page_vma_mapped.c                       |   4 +-
+ mm/pagewalk.c                              |   2 +-
+ mm/rmap.c                                  |   4 +-
+ mm/swapfile.c                              |   2 +-
+ mm/userfaultfd.c                           |  45 +++--
+ mm/util.c                                  |  29 +++-
+ mm/vma.c                                   | 246 +++++++++++++++++++-------
+ mm/vma.h                                   |  31 +++-
+ mm/vma_internal.h                          |   1 -
+ mm/vmscan.c                                |   9 +-
+ security/selinux/selinuxfs.c               |  11 +-
+ sound/core/pcm_native.c                    |  38 ++---
+ tools/testing/vma/include/dup.h            |  80 +++++++--
+ tools/testing/vma/include/stubs.h          |   2 +-
+ tools/testing/vma/tests/merge.c            |  10 +-
+ 64 files changed, 1169 insertions(+), 575 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Pass the number of elements as the first argument to calloc()
+[PATCH kvmtool 1/7] arm64: Pass the number of elements as the first argument to calloc()
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+man 3 calloc is pretty clear that the first argument to calloc() is the
+number of elements to be allocated, and the second argument is the size
+of one element. Fix the instances where the order was inversed.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arm64/kvm.c | 2 +-
+ arm64/pmu.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Fix --vcpu-affinity
+[PATCH kvmtool 0/7] Fix --vcpu-affinity
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+This is my attempt at fixing --vcpu-affinity, which I introduced. Patches #1-#4
+are straightforward fixes, and they don't modify the current (broken) behaviour
+in any way. Patch #5 fixes is most of the fix: with it, the VCPU threads run on
+the physical CPUs passed to --vcpu-affinity, and most of the kvmtool threads,
+except the virtio threads, use the main thread affinity.
+
+The virtio threads are special because they are spawned from the VCPU threads,
+and they inherit the VCPU thread affinity. Note that there might be other cases
+where this happens.
+
+Patches #6-#7 attempt to fix the remaining issue: #6 switch the entire codebase
+to kvm_create_thread() instead of pthread_create(). In #7, kvm_create_thread()
+will use the main thread affinity when creating new threads. These two patches
+are RFC because they cause a lot of churn and I would like some feedback if it's
+worth it.
+
+Why is it useful to run the VCPUs on different physical CPUs than the other
+threads? I can think of two situations:
+
+1. Testing heterogenous hardware configurations, where the VM creation and setup
+happens on a set of physical CPUs, and the VCPUs are run on a different set. I
+used these patches for the KVM SPE series.
+
+2. I/O testing. Maybe?
+
+Tested on an Orion board and a x86 machine. On the x86 machine, there's was this
+one thread called 'kvm-nx-lpage-re' which had affinity of the VCPUs, but I
+couldn't figure out where it was created. I grep'ed for each part of the name in
+the source node, no luck. I used strace, and couldn't see a clone call that
+returned the corresponding pid. Any clues would be appreciated.
+
+Alexandru Elisei (7):
+  arm64: Pass the number of elements as the first argument to calloc()
+  arm64: Consistently treat vcpu_affinity_cpuset as dynamically
+    allocated
+  arm64: Free the temporary cpumask in vcpu_affinity_parser()
+  arm64/pmu: Consider kvmtool's affinity when searching for a PMU
+  Correctly apply --vcpu-affinity to the VCPU threads
+  Introduce kvm_create_thread()
+  Don't apply --vcpu-affinity to threads spawned from VCPUs
+
+ arm64/include/kvm/kvm-arch.h        |  2 --
+ arm64/include/kvm/kvm-config-arch.h |  5 ----
+ arm64/kvm-cpu.c                     |  9 ------
+ arm64/kvm.c                         | 31 --------------------
+ arm64/pmu.c                         | 31 +++++++++++---------
+ builtin-run.c                       | 41 +++++++++++++++++++++++++--
+ disk/aio.c                          |  3 +-
+ disk/blk.c                          | 12 ++++++--
+ disk/core.c                         | 29 ++++++++++---------
+ disk/qcow.c                         | 44 ++++++++++++++++++++---------
+ disk/raw.c                          | 21 +++++++++++---
+ epoll.c                             |  2 +-
+ include/kvm/disk-image.h            | 28 ++++++++++++------
+ include/kvm/kvm-config.h            |  1 +
+ include/kvm/kvm.h                   |  2 ++
+ include/kvm/qcow.h                  |  3 +-
+ include/kvm/uip.h                   |  2 ++
+ include/kvm/util.h                  |  6 ++++
+ kvm.c                               | 18 ++++++++++++
+ net/uip/tcp.c                       |  7 ++---
+ net/uip/udp.c                       |  5 ++--
+ term.c                              |  4 +--
+ ui/gtk3.c                           |  2 +-
+ ui/sdl.c                            |  2 +-
+ ui/vnc.c                            |  2 +-
+ util/threadpool.c                   |  9 +++---
+ util/util.c                         | 42 +++++++++++++++++++++++++++
+ virtio/blk.c                        |  2 +-
+ virtio/net.c                        | 26 +++++++++++------
+ 29 files changed, 258 insertions(+), 133 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio: cache KVM VM file references instead of raw struct kvm pointers
+[RFC PATCH v6 01/11] vfio: cache KVM VM file references instead of raw struct kvm pointers
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+VFIO currently records struct kvm pointers on vfio_group, vfio_device_file
+and the opened vfio_device. Switch VFIO to track the VM's struct file
+instead, so VFIO and iommufd can use normal file references for VM lifetime
+instead of depending on KVM's internal struct kvm refcounting.
+
+KVM_CREATE_DEVICE binds the KVM VM lifetime to the KVM device fd lifetime.
+For KVM_DEV_TYPE_VFIO, the KVM VFIO device fd also takes references to each
+VFIO file added through KVM_DEV_VFIO_FILE_ADD. The KVM VFIO device fd
+therefore owns both the internal KVM reference and the VFIO file references
+in kvf->file.
+
+KVM_DEV_VFIO_FILE_ADD further installs the VM file association into the
+VFIO file. VFIO converts the struct kvm pointer to a VM file reference with
+get_file_active(&kvm->_file), because the KVM device fd can keep struct kvm
+alive after the original VM fd is already in final release.
+
+The association intentionally pins the VM file until KVM_DEV_VFIO_FILE_DEL
+or until the KVM VFIO device fd is released. This gives VFIO/iommufd a
+stable VM file reference source without taking a dependency on KVM's struct
+kvm lifetime. The KVM VFIO device release path clears the VFIO-side
+association before dropping its VFIO file references.
+
+When a VFIO device is opened or bound, VFIO takes an additional reference
+from the associated VM file and stores it in vfio_device::kvm_file for
+driver and iommufd use. That open-time reference is released from
+vfio_device_put_kvm() when the VFIO device is closed or unbound.
+
+This gives the ownership model:
+
+  - KVM device fd pins struct kvm through kvm->users_count
+  - KVM VFIO device fd pins VFIO files through kvf->file
+  - VFIO group/device-file state pins the VM file while associated with KVM
+  - vfio_device::kvm_file pins the VM file during active VFIO device use
+
+Acked-by: Anthony Krowiak <akrowiak@linxux.ibm.com>
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/s390/crypto/vfio_ap_ops.c |  5 +-
+ drivers/vfio/device_cdev.c        | 10 ++--
+ drivers/vfio/group.c              | 14 +++---
+ drivers/vfio/pci/vfio_pci_zdev.c  |  7 +--
+ drivers/vfio/vfio.h               | 16 ++++--
+ drivers/vfio/vfio_main.c          | 81 ++++++++++++++++---------------
+ include/linux/kvm_host.h          |  3 ++
+ include/linux/vfio.h              | 17 ++++++-
+ virt/kvm/kvm_main.c               |  2 +
+ 9 files changed, 91 insertions(+), 64 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  iommufd: Infrastructure for vIOMMU creation for confidential guests and guest TSM requests
+[RFC PATCH v6 00/11] iommufd: Infrastructure for vIOMMU creation for confidential guests and guest TSM requests
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+This series adds the IOMMUFD and PCI/TSM infrastructure required for device
+assignment. It introduces an IOMMUFD-owned vIOMMU provider registry and the
+IOMMU_VDEVICE_TSM_REQ ioctl.
+
+The series adds a vIOMMU provider abstraction that allows a subsystem
+other than the physical IOMMU driver to implement a vIOMMU type. It groups
+the vIOMMU operations with their module owner and private data, and makes
+that implementation discoverable during vIOMMU allocation.
+
+External providers are selected by exact vIOMMU type. When no provider
+matches, vIOMMU creation falls back to the physical IOMMU driver. Once a
+provider matches, its result is authoritative and failures do not trigger
+fallback.
+
+Guest TSM requests are dispatched through the vdevice. PCI/TSM uses
+reference-counted contexts to retain the resources needed by providers,
+without introducing separate IOMMUFD TSM bind or unbind ioctls.
+
+Note: Codex was used to assist with commit message formatting and code
+rearrangement.
+
+Changes from v5:
+https://lore.kernel.org/all/20260525154816.1029642-1-aneesh.kumar@kernel.org
+* Replace the TSM bind/unbind interface with reference-counted contexts.
+* Add the IOMMUFD vIOMMU provider abstraction.
+* Route TSM guest requests through viommu operations.
+
+Changes from v4:
+https://lore.kernel.org/all/20260427061005.901854-1-aneesh.kumar@kernel.org
+* Switch VFIO/iommufd to use struct file *kvm_file instead of relying on
+  kvm->users_count references.
+* Define TSM request scope values globally in iommufd.
+* Rename the ioctl to IOMMU_VDEVICE_TSM_REQ.
+* Address other review feedback.
+
+Changes from v2:
+https://lore.kernel.org/all/20260309111704.2330479-1-aneesh.kumar@kernel.org
+* Bump the series revision to v4 to keep it in sync with the dependent CCA DA
+  patchsets. There was no v3 posting.
+* Drop [PATCH v2 1/3] iommufd/viommu: Allow associating a KVM VM fd with a
+  vIOMMU
+* Add two new patches to associate a struct kvm * with iommufd objects:
+  iommufd/device: Associate a kvm pointer to iommufd_device
+  iommufd/viommu: Associate a kvm pointer to iommufd_viommu
+* Address review feedback
+
+Changes from v1:
+https://lore.kernel.org/all/20250728135216.48084-8-aneesh.kumar@kernel.org
+* Rebase onto the latest kernel
+* Address review feedback
+* Drop the TSM map ioctl; the KVM prefault patch will be used instead to
+  ensure that private memory is preallocated
+
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: Alexey Kardashevskiy <aik@amd.com>
+Cc: Bjorn Helgaas <helgaas@kernel.org>
+Cc: Joerg Roedel <joro@8bytes.org>
+Cc: Jonathan Cameron <jic23@kernel.org>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: Nicolin Chen <nicolinc@nvidia.com>
+Cc: Samuel Ortiz <sameo@rivosinc.com>
+Cc: Steven Price <steven.price@arm.com>
+Cc: Suzuki K Poulose <Suzuki.Poulose@arm.com>
+Cc: Will Deacon <will@kernel.org>
+Cc: Xu Yilun <yilun.xu@linux.intel.com>
+Cc: Shameer Kolothum <shameerali.kolothum.thodi@huawei.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+
+Aneesh Kumar K.V (Arm) (9):
+  vfio: cache KVM VM file references instead of raw struct kvm pointers
+  vfio: cdev: Reject duplicate bind before updating KVM file
+  iommu: Add a helper to validate a vIOMMU parent
+  iommu: Add a helper to query vIOMMU hardware parameters
+  coco: tsm: Expose active-user lifetime references
+  iommufd: Add vIOMMU provider support
+  iommufd: Add the vdevice TSM request ioctl
+  PCI/TSM: Remove the legacy guest request interface
+  PCI/TSM: Add reference-counted contexts for vdevice providers
+
+Nicolin Chen (1):
+  iommufd/viommu: Keep a reference to the KVM file
+
+Shameer Kolothum (1):
+  iommufd/device: Associate KVM file pointer with iommufd_device
+
+ Documentation/ABI/testing/sysfs-bus-pci |  29 ++-
+ drivers/iommu/iommu.c                   |  22 ++
+ drivers/iommu/iommufd/Makefile          |   5 +-
+ drivers/iommu/iommufd/device.c          |   7 +-
+ drivers/iommu/iommufd/iommufd_private.h |  32 +++
+ drivers/iommu/iommufd/main.c            |   3 +
+ drivers/iommu/iommufd/selftest.c        |   2 +-
+ drivers/iommu/iommufd/tsm.c             |  98 ++++++++
+ drivers/iommu/iommufd/viommu.c          |  36 ++-
+ drivers/iommu/iommufd/viommu_provider.c | 160 ++++++++++++
+ drivers/pci/tsm/core.c                  | 312 ++++++++++--------------
+ drivers/s390/crypto/vfio_ap_ops.c       |   5 +-
+ drivers/vfio/device_cdev.c              |  14 +-
+ drivers/vfio/group.c                    |  14 +-
+ drivers/vfio/iommufd.c                  |   3 +-
+ drivers/vfio/pci/vfio_pci_zdev.c        |   7 +-
+ drivers/vfio/vfio.h                     |  16 +-
+ drivers/vfio/vfio_main.c                |  81 +++---
+ drivers/virt/coco/tsm-core.c            |  55 ++++-
+ include/linux/iommu.h                   |  15 ++
+ include/linux/iommufd.h                 |  42 +++-
+ include/linux/kvm_host.h                |   3 +
+ include/linux/pci-tsm.h                 | 140 ++++-------
+ include/linux/tsm.h                     |  38 +++
+ include/linux/vfio.h                    |  17 +-
+ include/uapi/linux/iommufd.h            |  73 ++++++
+ samples/devsec/link_tsm.c               | 146 -----------
+ tools/testing/devsec/devsec.sh          |  27 +-
+ virt/kvm/kvm_main.c                     |   2 +
+ 29 files changed, 866 insertions(+), 538 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Fix IPI delivery for out-of-order vcpu_id
+[PATCH] RISC-V: KVM: Fix IPI delivery for out-of-order vcpu_id
+Author: Xiaofeng Yuan <yuanxiaofeng@eswincomputing.com>
+
+The SBI IPI handler walks vCPUs with kvm_for_each_vcpu(), which
+iterates by vcpu_idx (creation order) rather than vcpu_id order.
+Since vcpu_id can be assigned out of order by userspace, a vCPU whose
+hart_bit falls outside the XLEN-bit hart_mask range may be reached
+before vCPUs the mask actually targets. In that case the handler jumps
+to "done" and stops sending IPIs, leaving valid target vCPUs without
+an interrupt.
+
+Replace the early "goto done" with "continue" so vCPUs outside the
+hart_mask range are skipped without aborting the loop.
+
+Reproduced with a minimal userspace VMM driving KVM inside a QEMU
+(RISC-V virt) guest: three vCPUs are created with ids 100, 0, 1 (in
+creation order) and sbi_send_ipi(hart_mask=bit0, hbase=0) is called
+from vcpu_id 1. Before this change the IPI is dropped and the ecall
+returns SBI_ERR_INVALID_PARAM; with this change the IPI is delivered
+and the ecall returns SBI_SUCCESS.
+
+Fixes: 0611f78f83c9 ("riscv: KVM: Fix SBI IPI error generation")
+Cc: stable@vger.kernel.org
+Suggested-by: Andrew Jones <ajones@ventanamicro.com>
+Signed-off-by: Xiaofeng Yuan <yuanxiaofeng@eswincomputing.com>
+---
+ arch/riscv/kvm/vcpu_sbi_replace.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Replace imsic switch-case macros with range checks
+[PATCH] RISC-V: KVM: Replace imsic switch-case macros with range checks
+Author: Xiaofeng Yuan <yuanxiaofeng@eswincomputing.com>
+
+The imsic_eix_read/swap/write/set accessors use a family of macros
+that expand into a switch with 128 cases covering the EIP and EIE
+register windows. This mirrors the csr_read_num() idiom required where
+a CSR number must be encoded as a csrr instruction immediate (e.g.
+drivers/perf/riscv_pmu.c), but here the register number is merely
+written to vsiselect as data, so the expansion solves no real
+constraint. It costs ~90 lines of nested macros and trips ~30
+checkpatch errors and warnings.
+
+Since the generated cases form two contiguous windows, [IMSIC_EIP0,
+IMSIC_EIP63] and [IMSIC_EIE0, IMSIC_EIE63], the same behavior is
+expressed with a simple range check. Introduce imsic_eix_ireg_is_valid()
+and use it in the four accessors, removing the macros along with the
+~30 checkpatch errors and warnings they caused.
+
+No functional change intended. Compile tested with riscv64-linux-gnu-gcc
+and tested on QEMU (RISC-V virt, AIA).
+
+Signed-off-by: Xiaofeng Yuan <yuanxiaofeng@eswincomputing.com>
+---
+ arch/riscv/kvm/aia_imsic.c | 124 +++++--------------------------------
+ 1 file changed, 15 insertions(+), 109 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: Fix UCONTROL inconsistencies
+[PATCH v1 1/1] KVM: s390: Fix UCONTROL inconsistencies
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+For UCONTROL VMs, when a vCPU segment entry is mapped but unallocated,
+the tl field was set to 1. This collides with the present bit, which
+means that other parts of gmap would mistake the entry for a present
+one.
+
+Refactor the code to use a different combination of flags to indicate a
+mapped but unallocated segment.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Fixes: a2c17f9270cc ("KVM: s390: New gmap code")
+---
+ arch/s390/kvm/gmap/dat.h  | 16 +++++++++++++++-
+ arch/s390/kvm/gmap/gmap.c | 40 ++++++++++++++++++---------------------
+ 2 files changed, 33 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Fix access_tracking_perf_test for larger host page size
+[PATCH 1/3] KVM: selftests: Fix access_tracking_perf_test for larger host page size
+Author: Zenghui Yu <zenghui.yu@linux.dev>
+
+
+access_tracking_perf_test marks guest memory idle through page_idle by
+walking its test region one guest page at a time and checking/marking the
+host PFN backing each guest page.  The walk assumes that every guest page
+maps to a distinct host page, which only holds when the guest page size is
+>= the host page size.
+
+On an arm64 host with 64K pages, the test also runs guest modes that use 4K
+pages, where 16 consecutive guest pages are backed by one host page.  The
+first of them marks the shared host page idle and the other 15 then see the
+page as already idle and count it as "still idle", inflating still_idle to
+~94% and failing the test:
+
+  $ ./access_tracking_perf_test
+  Random seed: 0x1c04f013
+  lru_gen: Could not open /sys/kernel/mm/lru_gen/enabled
+  Using page_idle for aging
+  Testing guest mode: PA-bits:48,  VA-bits:48,  4K pages
+  __vm_create: mode='PA-bits:48,  VA-bits:48,  4K pages' type='0', pages='1696'
+  guest physical test memory: [0xffffbfff0000, 0xffffffff0000)
+
+  Populating memory             : 0.299047690s
+  Writing to populated memory   : 0.008723980s
+  Reading from populated memory : 0.010692350s
+
+  ==== Test Assertion Failure ====
+    access_tracking_perf_test.c:164: idle_pages_warn_only
+    pid=3503998 tid=3504006 errno=4 - Interrupted system call
+       1	0x000000000040308f: too_many_idle_pages at access_tracking_perf_test.c:164
+       2	 (inlined by) pageidle_mark_vcpu_memory_idle at access_tracking_perf_test.c:229
+       3	 (inlined by) vcpu_thread_main at access_tracking_perf_test.c:339
+       4	0x000000000040a267: vcpu_thread_main at memstress.c:277
+       5	0x00007fff958ef09b: ?? ??:0
+       6	0x00007fff959548db: ?? ??:0
+    vCPU0: Too many pages still idle (245647 out of 262144)
+
+Idle tracking is fundamentally per host page though.  Walk the region in
+units of the larger of the guest and host page size instead.  This changes
+nothing when the guest page size is >= the host's - if the guest page is
+bigger, the guest only ever faults the first host page of each guest page
+anyway.
+
+Assisted-by: GLM-5.3 OpenCode
+Signed-off-by: Zenghui Yu (Huawei) <zenghui.yu@linux.dev>
+---
+ .../selftests/kvm/access_tracking_perf_test.c    | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: access_tracking_perf_test fixes and cleanups
+[PATCH 0/3] KVM: selftests: access_tracking_perf_test fixes and cleanups
+Author: Zenghui Yu <zenghui.yu@linux.dev>
+
+
+Patch 1 fixes a deterministic failure of access_tracking_perf_test when the
+host page size is bigger than the guest's, e.g. the 4K guest modes on a 64K
+arm64 host: page_idle tracks idleness per host page, so walk the test
+region at that granularity.  Patches 2 and 3 are two small cleanups found
+along the way.
+
+Tested on an arm64 host with 64K pages.
+
+Zenghui Yu (Huawei) (3):
+  KVM: selftests: Fix access_tracking_perf_test for larger host page
+    size
+  KVM: selftests: Add missing newline to access_tracking_perf_test help
+  KVM: selftests: Remove destroy_cgroup() from access_tracking_perf_test
+
+ .../selftests/kvm/access_tracking_perf_test.c | 23 +++++++++++--------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: remove "full" out-argument from flush_tlb_gva
+[PATCH] KVM: x86: remove "full" out-argument from flush_tlb_gva
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+The "full" out-argument in flush_tlb_gva is only ever set on AMD
+processors, where the TLB flush is little more than a memory write and
+thus extremely cheap anyway.
+
+Simplify the code by letting the implementation of Hyper-V TLB flush
+hypercalls always go through all the addresses queued in tlb_flush_fifo;
+there are no performance concerns since that is already the case on
+VMX, and also was on SVM prior to commit 26505e1b5b54 ("KVM: SVM: make
+svm_flush_tlb_gva do a full asid flush if NPT enabled", 2026-08-06).
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/include/asm/kvm_host.h | 2 +-
+ arch/x86/kvm/hyperv.c           | 7 +++----
+ arch/x86/kvm/mmu/mmu.c          | 2 +-
+ arch/x86/kvm/svm/svm.c          | 4 +---
+ arch/x86/kvm/vmx/main.c         | 4 ++--
+ arch/x86/kvm/vmx/vmx.c          | 2 +-
+ arch/x86/kvm/vmx/x86_ops.h      | 2 +-
+ 7 files changed, 10 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Move the IPA limit rule into kvm_get_ipa_max()
+[PATCH v1 1/4] KVM: arm64: Move the IPA limit rule into kvm_get_ipa_max()
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Move the rule kvm_set_ipa_limit() applies to PARange into a helper
+beside kvm_get_parange(), which bounds the same field by a different
+rule, so the hypervisor can size a guest's IPA space by it.
+
+No functional change intended.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 15 +++++++++++++++
+ arch/arm64/kvm/reset.c               | 12 +-----------
+ 2 files changed, 16 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Honour KVM_VM_TYPE_ARM_IPA_SIZE under pKVM
+[PATCH v1 0/4] KVM: arm64: Honour KVM_VM_TYPE_ARM_IPA_SIZE under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+pKVM has ignored KVM_VM_TYPE_ARM_IPA_SIZE since it started running
+guest stage 2 at EL2 (v6.2): every VM gets the host's IPA limit,
+whatever its VMM requested, and an out-of-range request that every
+other host rejects with -EINVAL is accepted. This series makes pKVM
+handle the type the way KVM does everywhere else, fixes the bugs that
+causes, and two found on the way.
+
+Ignoring the type has two consequences I hit while testing the ITS table
+save series [1]: vgic_init fails on any pKVM host whose limit exceeds 40
+bits, because the addresses it expects a 40-bit VM to reject are in
+range; and on a 64K kernel built for 48-bit PAs on a 52-bit part the
+host sizes a VM at 52 bits while EL2 gives it 48, so a memslot above
+2^48 the host accepts can't be mapped.
+
+Patch 3 is the fix. EL2 takes the IPA size from the VTCR the host
+sized the VM with, bounded by the same rule as the host's limit, and
+the host-side override goes: the request is range-checked and the VM
+gets the size it requested, so the VMM owns the guest's IPA layout on
+a pKVM host too, and the host and EL2 agree on it.
+
+The rest supports that. Patch 1 moves the limit rule into a helper EL2
+can share. Patch 2 rejects a pgd donation that's page-aligned but not
+aligned to its own size, which crashes EL2 today; patch 3 changes how
+that size is computed, so the check goes in first. Patch 4 frees a VM
+vgic_init and vgic_v5 leak when the GIC probe fails.
+
+A VMM that requests less than the host limit under pKVM, the 40-bit
+default type included, now gets that size, and on a host whose limit is
+below 40 bits the default type is refused, as it is without pKVM.
+kvmtool requests the smallest size its RAM needs, for protected VMs
+too, and crosvm requests the limit, so neither places anything beyond
+its request.
+
+vgic_init passes with this, its range checks untouched, on QEMU under
+pKVM and VHE at 52- and 48-bit host IPA limits. On a 64K/PA_BITS_48 pKVM
+host a guest mapping above 2^48 fails without patch 3 and works with it.
+On an M4, whose limit is 40 bits, pKVM used to create a VM for a 44-bit
+request and give a 36-bit VM a 40-bit stage 2; with this it refuses the
+first and bounds the second, as the same machine does without pKVM.
+
+Based on Linux 7.3-rc3 (fd73f4a665989; also applies to kvmarm/next
+8476ce1f1e949).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260821064445.615838-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (3):
+  KVM: arm64: Move the IPA limit rule into kvm_get_ipa_max()
+  KVM: arm64: Honour the requested IPA size under pKVM
+  KVM: arm64: selftests: Free the VM when the GIC device probe fails
+
+Quentin Perret (1):
+  KVM: arm64: Check PGD alignment when creating a pVM
+
+ arch/arm64/include/asm/kvm_pgtable.h          | 15 ++++++++++++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |  2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                | 24 +++++++++++++++----
+ arch/arm64/kvm/mmu.c                          |  4 +---
+ arch/arm64/kvm/reset.c                        | 12 +---------
+ tools/testing/selftests/kvm/arm64/vgic_init.c |  4 +++-
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   |  4 +++-
+ 7 files changed, 44 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Track configurable CPUID bits allowed by KVM
+[PATCH v4 1/4] KVM: TDX: Track configurable CPUID bits allowed by KVM
+Author: Binbin Wu <binbin.wu@linux.intel.com>
+
+Add tdx_cpu_cfg_caps[] to track the subset of TDX directly configurable
+CPUID feature bits that KVM supports, and build the masks during TDX
+hardware setup via tdx_initialize_cpu_cfg_caps().
+
+The TDX module reports the CPUID bits that the VMM can directly configure
+for a TD, but KVM cannot blindly expose all reported bits to userspace.
+Certain features imply additional architectural state, e.g. one or more
+MSRs, that KVM must explicitly manage across host/guest transitions to
+prevent host state corruption.  The existing hardcoded denylist cannot
+account for new host state clobbering features introduced by future TDX
+modules.
+
+Except for a few fixed-1 bits required for basic TDX support, host state
+clobbering features are either directly configurable or gated by TD
+ATTRIBUTES/XFAM, which KVM already validates.  Tracking only the directly
+configurable bits to build an allowlist is therefore sufficient.
+
+Organize tdx_cpu_cfg_caps[] following kvm_cpu_caps[] so that the masks can
+be built with similar feature-name based initializers.  Directly
+configurable non-feature bits will be handled separately.
+
+The allowlist is prepared to be consumed by later patches to filter
+KVM_TDX_CAPABILITIES and to reject unsupported CPUID input to
+KVM_TDX_INIT_VM, so that newly introduced TDX directly configurable CPUID
+feature bits stay hidden from userspace until KVM explicitly opts in.
+
+By default, intersect the allowlist with kvm_cpu_caps[] via TDX_CFG_F().
+Requiring support for non-TDX VMs avoids committing to TDX-specific
+behavior before general KVM support is established, and respects KVM's
+logic around disabling certain features, since the reasons for disabling
+them could apply to TDX as well.  Allow exceptions through
+TDX_CFG_EXTRA_F() only with sufficient justification.
+
+Add comments as placeholders for HLE, RTM, WAITPKG and FRED, which KVM
+doesn't support for TDX yet.
+
+Allow MWAIT, XTPR, and HT through TDX_CFG_EXTRA_F(), as these bits are
+not advertised in kvm_cpu_caps[].  The remaining directly configurable
+feature bits outside kvm_cpu_caps[] are left out of the allowlist:
+
+  - Features forced to zero when #VE is reduced, or lacking KVM support
+    for the associated MSRs: EST, TM2, SDBG, DCA, ACPI, ACC (TM), RDT_A,
+    RDT_M, TME, PCONFIG, and CORE_CAPABILITIES.  Handle CORE_CAPABILITIES
+    in a subsequent patch.
+
+  - Features tied to IA32_MISC_ENABLE bits that a TD cannot set when
+    TDCS.TD_CTLS.REDUCE_VE is set: CID and PBE.
+
+  - Features that can clobber host state and lack KVM support for TDX:
+    FRED.
+
+  - Unsupported features: PREFETCHWT1 (Xeon Phi only), PSN (absent from
+    TDX-capable CPUs), AMX-TRANSPOSE (never implemented on an Intel
+    platform), and RAO_INT (defined only for future processors).
+
+Filtering KVM_TDX_CAPABILITIES in a subsequent patch will intentionally
+stop advertising the excluded bits as configurable, as the corresponding
+features are unsupported or cannot be properly virtualized.
+
+Signed-off-by: Binbin Wu <binbin.wu@linux.intel.com>
+---
+v4:
+- Add XTPR and HT to the allowlist.
+- Explain in the changelog why some directly configurable bits are not
+  added to the allowlist.
+- Improve comments/changelog. (Xiaoyao)
+- Fix the bug that AMX_COMPLEX should be added for CPUID_1E_1_EAX instead
+  of CPUID_7_1_EDX.
+
+v3:
+- Drop the new data structure in v2 and only track feature bits by
+  following the organization of kvm_cpu_caps[], handle non-feature
+  bits separately. (Sean)
+- Use two versions of macros (TDX_CFG_F() vs. TDX_CFG_EXTRA_F()) to
+  distinguish whether a supported TDX configurable CPUID bit should be
+  checked against KVM's common cpu capabilities.
+- Add AMX_COMPLEX since it has been defined in the CPUID virtualization doc.
+---
+ arch/x86/kvm/vmx/tdx.c | 164 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 164 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: TDX: Validate directly configurable CPUID bits
+[PATCH v4 0/4] KVM: TDX: Validate directly configurable CPUID bits
+Author: Binbin Wu <binbin.wu@linux.intel.com>
+
+The TDX module reports a set of CPUID bits that the VMM can directly
+configure for a TD, but KVM cannot blindly expose all module-supported
+bits to userspace.  Certain features imply additional architectural state
+(such as one or more MSRs) that KVM must explicitly manage across
+host/guest transitions to prevent host state corruption.
+
+Today, KVM hardcodes a denylist to filter out host state clobbering
+features that KVM doesn't support.  However, a denylist doesn't scale as
+the TDX module evolves, i.e. host state clobbering features added by a
+future TDX module are not covered by the denylist, and userspace could
+enable a feature that KVM doesn't support.
+
+This series builds an allowlist for directly configurable CPUID bits, and
+filters and validates userspace input against it, so that newly introduced
+TDX directly configurable CPUID feature bits can only be enabled by
+userspace after KVM explicitly opts in.  Except for a few fixed-1 bits
+required for basic TDX support, host state clobbering features are either
+directly configurable or gated by TD ATTRIBUTES/XFAM.  KVM already
+validates ATTRIBUTES/XFAM, so the allowlist only needs to cover directly
+configurable bits.
+
+For this version, I'm hoping to collect some RBs and Acks.  The key
+discussions from v3 [1] are summarized below.  Note, FRED KVM support is
+in progress upstream [2], and no TDX module with FRED support exists yet,
+so there is no immediate issue.  But it would be nice to get this series
+merged sooner rather than later.
+
+Discussions from v3:
+- Whether to restrict the TDX feature bits to kvm_cpu_caps[].
+  Xiaoyao and Sean preferred not to restrict the TDX feature bits to
+  kvm_cpu_caps[], to avoid an unnecessary dependency on feature enabling
+  for non-TDX VMs [3][4].  However, Rick pointed out that ideally the TDX
+  arch would not be finalized before the normal VM KVM design reaches some
+  level of maturity [5].  Also, it's safer for TDX to respect KVM's logic
+  around disabling certain features, since the reasons for disabling them
+  could apply to TDX as well [6].
+
+  This version still restricts the TDX feature bits to kvm_cpu_caps[], with
+  a few exceptions.  If TDX feature enabling turns out to be consistently
+  blocked by non-TDX VM enabling, a solution can be worked out then.
+
+  Note that the final allowlist is the same either way, i.e. whether or
+  not the TDX feature bits are restricted to kvm_cpu_caps[].
+
+- New opt-in interface vs. backporting.
+  There are two options for old KVM versions that don't do the filtering
+  and validation:
+  1) Add a new opt-in interface to expose features newly introduced by the
+     TDX module.
+  2) Backport this series to LTS/stable branches.
+
+  The opt-in design vs. backport decision is deferred, since this series is
+  correct and an improvement either way [7].
+
+- Potential backward compatibility issue when an effective fixed-1 bit
+  becomes directly configurable due to x86 feature deprecation.
+  This is left for the future, i.e. it can be addressed if and when such a
+  deprecation actually happens, e.g. by adding an opt-in interface to let
+  users/admins choose between migration flexibility and backwards
+  compatibility on old platforms [8].
+
+Changes since v3:
+- Audited the directly configurable CPUID bits outside of kvm_cpu_caps[],
+  added XTPR and HT to the allowlist, in addition to MWAIT and
+  CORE_CAPABILITIES.  The remaining bits are left out of the allowlist
+  because they are either not supported or can't be properly virtualized.
+- Improved comments/changelogs. (Xiaoyao, Kishen)
+- Updated documentation/comment about the ABI change. (Xiaoyao, Rick)
+- Renamed functions for better readability. (Tony)
+- Collected two RBs from Tony.
+
+The series follows the CSV version of the CPUID virtualization document
+from "Intel TDX Module ABI Definitions" [9], updated in June 2026.
+
+AI tools were used to:
+- Polish the cover letter and commit messages.
+- Do code review.
+
+[1] v3: https://lore.kernel.org/all/20260827031837.2863609-1-binbin.wu@linux.intel.com
+    v2: https://lore.kernel.org/all/20260604023314.3907511-1-binbin.wu@linux.intel.com
+    v1: https://lore.kernel.org/all/20260417073610.3246316-1-binbin.wu@linux.intel.com
+[2] https://lore.kernel.org/all/20260911213659.2025974-1-sohil.mehta@intel.com
+[3] https://lore.kernel.org/all/9abeed40-bcdc-48d9-8cbb-cb87154bb9f6@intel.com
+[4] https://lore.kernel.org/all/aqHdwkOFVR4XoS2M@google.com
+[5] https://lore.kernel.org/all/c967dc3eb6b128055e415bae45d1c14a52dc4acd.camel@intel.com
+[6] https://lore.kernel.org/all/4c379b90da893c5d1ffea46dc7e40303e7923872.camel@intel.com
+[7] https://lore.kernel.org/all/c6b240bd-3c45-4abe-b17c-72a1a7da582f@linux.intel.com
+[8] https://lore.kernel.org/all/1deddc78d14326b378ddd62ad99c21d66da401e6.camel@intel.com
+[9] https://cdrdv2.intel.com/v1/dl/getContent/795381
+
+Binbin Wu (4):
+  KVM: TDX: Track configurable CPUID bits allowed by KVM
+  KVM: TDX: Report CORE_CAPABILITIES as configurable
+  KVM: TDX: Filter configurable CPUID bits
+  KVM: TDX: Validate userspace CPUID input for KVM_TDX_INIT_VM
+
+ Documentation/virt/kvm/x86/intel-tdx.rst |  10 +
+ arch/x86/include/uapi/asm/kvm.h          |   2 +
+ arch/x86/kvm/vmx/tdx.c                   | 279 ++++++++++++++++++++---
+ 3 files changed, 262 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 0b3b149eb to abb7c9aa1
+KVM mailing list update from 0b3b149eb to abb7c9aa1
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     42 kernel.org
+     12 arm.com
+      9 linux.dev
+      2 google.com
+      2 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     41  "Lorenzo Stoakes (ARM)" <ljs@kernel.org>
+      8  Alexandru Elisei <alexandru.elisei@arm.com>
+      5  Fuad Tabba <fuad.tabba@linux.dev>
+      4  "Zenghui Yu (Huawei)" <zenghui.yu@linux.dev>
+      4  Wei-Lin Chang <weilin.chang@arm.com>
+      2  Yuchao Zhang <ndaugoing@gmail.com>
+      1  Vincent Donnefort <vdonnefort@google.com>
+      1  Quentin Perret <qperret@google.com>
+      1  Marc Zyngier <maz@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: vgic: Do not remove in-flight LPIs from AP list on disable
+[PATCH 1/1] KVM: arm64: vgic: Do not remove in-flight LPIs from AP list on disable
+Author: zjamg <ndaugoing@gmail.com>
+
+
+By code inspection, a race condition and potential Use-After-Free/crash
+exists between remote LPI disabling and local LR folding when EOImode==0.
+
+Commit 6da5e537f5af ("KVM: arm64: vgic: Pick EOIcount deactivations from
+AP-list tail") introduced tracking the last interrupt placed in a List
+Register in per-CPU host data (*host_data_ptr(last_lr_irq)) and traverses
+the remaining ap_list via list_for_each_entry_continue() in
+vgic_v3_fold_lr_state().
+
+However, an interrupt loaded into an LR can be an LPI. While vCPU-B is
+running the guest, another vCPU-A can write to vCPU-B's redistributor
+GICR_CTLR to clear EnableLPIs, which dispatches vgic_flush_pending_lpis().
+
+vgic_flush_pending_lpis() unconditionally removes all LPIs from ap_list
+without checking whether the interrupt is currently in an LR
+(irq->on_lr):
+- It calls list_del(&irq->ap_list), setting ap_list.next to LIST_POISON1,
+  and drops the AP-list reference.
+- If the LPI is unmapped or its translation cache was invalidated, the
+  vgic_irq refcount drops to zero and the object is freed via RCU.
+- Meanwhile, vCPU-B's per-CPU *host_data_ptr(last_lr_irq) cannot be
+  cleared by remote vCPUs and is left dangling.
+
+When vCPU-B subsequently exits the guest:
+1. vgic_v3_fold_lr_state() resumes using the unlinked last_lr_irq.
+2. list_for_each_entry_continue() unconditionally evaluates
+   list_next_entry(irq, ap_list) during loop initialization, accessing
+   LIST_POISON1 (or freed memory).
+3. If eoicount > 0, it attempts guard(raw_spinlock)(&irq->irq_lock) on
+   the poisoned address, leading to an immediate host kernel panic.
+
+Fix this by:
+1. In vgic_flush_pending_lpis(), do not remove LPIs that are currently
+   in-flight in an LR (irq->on_lr == true). They will be naturally pruned
+   by the owning vCPU's vgic_prune_ap_list() after LR folding.
+2. In vgic_fold_state(), clear *host_data_ptr(last_lr_irq) after folding
+   so that no stale pointer survives past guest execution.
+3. In vgic_v3_fold_lr_state() and vgic_v2_fold_lr_state(), bail out
+   immediately if eoicount is zero, avoiding unnecessary list_next_entry()
+   evaluation.
+
+Note: this closes the primary race (the last_lr_irq node itself is no
+longer unlinkable while in-flight), but the fold traversal can still
+race with a remote flush unlinking a subsequent non-LR node in the
+ap_list tail. Fully closing that window needs the fold side to take
+references before dropping locks (in the spirit of the prune-side fix
+in commit 7258770e5814 ("KVM: arm64: vgic: Handle race between
+interrupt affinity change and LPI disabling")) and is left as a
+follow-up.
+
+Fixes: 6da5e537f5af ("KVM: arm64: vgic: Pick EOIcount deactivations from AP-list tail")
+Cc: stable@vger.kernel.org
+Signed-off-by: Yuchao Zhang <ndaugoing@gmail.com>
+---
+ arch/arm64/kvm/vgic/vgic-v2.c |  3 +++
+ arch/arm64/kvm/vgic/vgic-v3.c |  3 +++
+ arch/arm64/kvm/vgic/vgic.c    | 10 +++++++---
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: fix UAF/crash on remote LPI disable
+[PATCH 0/1] KVM: arm64: vgic: fix UAF/crash on remote LPI disable
+Author: zjamg <ndaugoing@gmail.com>
+
+
+Hi Marc, Oliver, and KVM/arm64 maintainers,
+
+By code inspection of commit 6da5e537f5af ("KVM: arm64: vgic: Pick EOIcount
+deactivations from AP-list tail"), a race condition exists when a remote
+vCPU disables LPIs while the target vCPU has an in-flight LPI in a List
+Register (LR).
+
+Specifically:
+- vgic_flush_pending_lpis() unconditionally unlinks all LPIs from ap_list
+  without checking whether the interrupt is in an LR (irq->on_lr).
+- If the LPI in the LR happened to be the last one populated, the per-CPU
+  pointer *host_data_ptr(last_lr_irq) on the target vCPU is left dangling.
+- When the target vCPU exits guest mode, vgic_v3_fold_lr_state() starts
+  traversing ap_list via list_for_each_entry_continue() from this unlinked,
+  poisoned (or freed) last_lr_irq, leading to UAF or an immediate panic
+  when locking irq->irq_lock.
+
+Solution & Scope:
+This patch prevents unlinking LPIs that are currently on an LR in
+vgic_flush_pending_lpis(), ensures *host_data_ptr(last_lr_irq) is cleared
+after folding, and skips the ap_list walk when eoicount is zero.
+
+Note: this closes the primary race (the last_lr_irq node itself is no
+longer unlinkable while in-flight), but the fold traversal can still
+race with a remote flush unlinking a subsequent non-LR node in the
+ap_list tail. Fully closing that window needs the fold side to take
+references before dropping locks (in the spirit of the prune-side fix
+in commit 7258770e5814 ("KVM: arm64: vgic: Handle race between
+interrupt affinity change and LPI disabling")) and is left as a
+follow-up.
+
+Any feedback is greatly appreciated.
+
+Thanks,
+Yuchao Zhang
+
+Yuchao Zhang (1):
+  KVM: arm64: vgic: Do not remove in-flight LPIs from AP list on disable
+
+ arch/arm64/kvm/vgic/vgic-v2.c |  3 +++
+ arch/arm64/kvm/vgic/vgic-v3.c |  3 +++
+ arch/arm64/kvm/vgic/vgic.c    | 10 +++++++---
+ 3 files changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: nv: Don't advertise FEAT_LPA2 for guest stage-1
+[PATCH v2 1/4] KVM: arm64: nv: Don't advertise FEAT_LPA2 for guest stage-1
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+There is no FEAT_LPA2 support for NV guests as of now, but we missed
+limiting it for the non-stage-2 granule size fields (TGRAN4, TGRAN16) in
+ID_AA64MMFR0_EL1. Add the sanitisation.
+
+Fixes: 9f75b6d447d7 ("KVM: arm64: nv: Filter out unsupported features from ID regs")
+Signed-off-by: Wei-Lin Chang <weilin.chang@arm.com>
+Cc: stable@vger.kernel.org
+---
+ arch/arm64/kvm/nested.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Properly advertise !FEAT_LPA2 for NV
+[PATCH v2 0/4] KVM: arm64: Properly advertise !FEAT_LPA2 for NV
+Author: Wei-Lin Chang <weilin.chang@arm.com>
+
+Hi,
+
+This v2 fixes a few naming and styling issues, collects Mark's
+Reviewed-by tag, and adds Marc's TCR_EL2 reset patch [1]. Please see
+details below.
+
+* Changes from v1 [2]:
+
+  - Renamed tcr_el2_vhe_* to vhe_tcr_el2_*, rename tcr_el2_nvhe_* to
+    tcr_el2_* to better align with the TCR_EL2 macros. (Marc)
+
+  - Added Marc's TCR_EL2 reset patch (thanks!).
+
+  - Put each == comparison on one line. (Marc)
+
+  - Added Fixes and Cc: stable tags to patch 1.
+
+  - Collected Reviewed-by tag from Mark (thanks!).
+
+Series based on v7.3-rc3.
+
+Below is the same cover from v1:
+
+Previously for NV FEAT_LPA2 is accidentally exposed to the guest at
+stage-1 if hardware supports it. Stage-2 is correctly sanitised out in
+ID_AA64MMFR0_EL1 but not stage-1. This is wrong on two fronts:
+
+- There is no FEAT_LPA2 support for NV yet.
+- It is non-architectural to advertise different FEAT_LPA2 support in
+  stage-1 and stage-2.
+
+This series first removes FEAT_LPA2 from TGRAN4, TGRAN16 for NV, to
+present a !FEAT_LPA2 system. Then guest TCR_EL2 sanitisation is added,
+to make the DS bit RES0 for NV guests. Note that this sanitisation
+can't cover all cases, as we don't trap VHE L1 accesses to the vCPU's
+TCR_EL2 via TCR_EL1.
+
+TCR_EL2 sanitisation differs slightly from the AARCHMRS, please see the
+commits for details.
+
+For testing I booted a 4K 52-bit nVHE L1 and checked:
+1. It is using 48-bit VAs in stage-1.
+2. Writing 1 to TCR_EL2.DS and reading it back reads 0.
+
+Thanks!
+
+[1]: https://lore.kernel.org/kvmarm/86pkyk6us5.wl-maz@kernel.org/
+[2]: https://lore.kernel.org/kvmarm/20260909222015.3046432-1-weilin.chang@arm.com/
+
+Marc Zyngier (1):
+  KVM: arm64: Reset TCR_EL2 according to guest's E2H mode
+
+Wei-Lin Chang (3):
+  KVM: arm64: nv: Don't advertise FEAT_LPA2 for guest stage-1
+  arm64: sysreg: Add TCR_EL2 to sysreg infrastructure
+  KVM: arm64: Convert TCR_EL2 to config-driven sanitisation
+
+ arch/arm64/include/asm/kvm_arm.h  |  13 ----
+ arch/arm64/include/asm/kvm_host.h |   2 +-
+ arch/arm64/include/asm/sysreg.h   |   1 -
+ arch/arm64/kvm/config.c           | 113 +++++++++++++++++++++++++++
+ arch/arm64/kvm/nested.c           |  15 ++++
+ arch/arm64/kvm/sys_regs.c         |  10 ++-
+ arch/arm64/tools/sysreg           | 125 ++++++++++++++++++++++++++++++
+ 7 files changed, 263 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm/vma: fix mmap_prepare file handling, remove
+[PATCH v3 01/40] mm/vma: fix mmap_prepare file handling, remove
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+The map->file_doesnt_need_get flag is confusing and the existing
+implementation has holes.
+
+Drivers are permitted to change the owning file of a mapping. If they do
+so, they are required to take a reference on that file.
+
+The mmap() operation which ultimately invokes __mmap_region() is guaranteed
+to drop the refcount for the original file the mapping was made under, but
+this is not true for the replaced file.
+
+This has been addressed so far by tracking map->file_doesnt_need_get, which
+is rather poorly named and unfortunately fails to correctly track whether
+or not an additional put were needed in a number of cases.
+
+Make life easier by removing this flag, and instead drop the reference for
+both mmap_prepare and the deprecated mmap callback in a new function
+put_map().
+
+Track whether this needs to be done by aligning mmap_state with
+vm_area_desc and store the original file in the map->file field, keeping
+the updated file in map->vm_file.
+
+In order to have the same behaviour for both types of hooks, only drop the
+reference __mmap_new_file_vma() itself took in its error path, deferring
+the replaced file's reference to put_map().
+
+To make this work correctly, map->vm_file has to be updated before any
+error handling, so update __mmap_new_file_vma() and call_mmap_prepare() to
+set this field first.
+
+Also when mmap_prepare() changes the file and is then merged, the reference
+count also must be decremented, so update the logic to call put_map() in
+this case too.
+
+Also update __compat_vma_mmap() to manually perform this step for stacked
+file systems using the compatibility layer, and update
+compat_set_vma_from_desc() to replace vma_set_file() with a correct
+refcount/file update.
+
+No in-tree driver is impacted by the incorrect implementation of this
+currently (no driver that does this is mergeable for one), so this does not
+need to be a fix.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+ mm/internal.h |  1 +
+ mm/util.c     |  5 +++-
+ mm/vma.c      | 83 +++++++++++++++++++++++++++++++++++------------------------
+ mm/vma.h      |  6 +++--
+ 4 files changed, 59 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: make VMA flag semantics explicit, eliminate
+[PATCH v3 00/40] mm: make VMA flag semantics explicit, eliminate
+Author: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+
+The VM_SPECIAL / VMA_SPECIAL_FLAGS mask conflates several unrelated
+properties:
+
+* Is this kernel-owned, whether MMIO, kernel-allocated pages, or ordinary
+  pages a driver maps itself?
+* Can it be expanded or merged?
+* Is this a 'weird' case like mlock where migration might race and we
+  'have' to set invalid flags to notify?
+* Is it another 'weird' case where we just want to stop GUP from touching
+  it?
+
+Driver writers have often been confused about this, and who can blame them?
+
+It also interacts badly with the eternal edgecase known as hugetlb - which
+sets VMA_DONTEXPAND_BIT but doesn't also want to be treated like a
+'special' flag.
+
+Another issue is that we cannot make sensible assumptions about flag
+use. It's not possible to assume VMA_IO_BIT means iommu because drivers
+abuse it and mlock abuses it.
+
+Special is also an overloaded term in mm. VDSO and VVAR mappings are also
+called 'special' but they're special in a... special way.
+
+Sometimes things are called special that are a subset of
+VMA_SPECIAL_FLAGS (VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT for instance when it
+comes to zapping or vm_normal_folio()).
+
+There's a specific kind of special for THP too, which considers
+PFN map, mixed map 'special' but DAX not.
+
+It's all rather a mess.
+
+This series brings some order to things by both limiting what drivers can
+do with VMA flags and switching to using predicates that describe
+behaviour, not arbitrary flags.
+
+It establishes the invariant that only kernel-owned mappings may set
+VMA_IO_BIT or clear VMA_MAYWRITE_BIT in an mmap hook, enforcing this by
+validating VMA state after every mmap and mmap_prepare hook.
+
+It updates usbmon and sg to mmap_prepare in order to do so, adding a new
+mmap action for mapping discontiguous kernel pages, and has hfi1 and the
+ALSA PCM status page map their pages eagerly instead.
+
+It also establishes the invariant that VMA_MIXEDMAP_BIT be set when mapping
+kernel memory, something that is usually the case but happens not to be for
+some users - specifically defio, cmt_speech, uprobes and the bpf arena, all
+of which are updated to do the right thing.
+
+It replaces VM_SPECIAL and arbitrary flag tests with predicates that say
+what is actually being tested:
+
+   vma_is_kernel_owned()   Does a driver or kernel code manage a VMA's
+                           life cycle?
+
+  vma_is_fixed_mapping()   Is the VMA not permitted to be expanded or
+                           merged?
+
+     vma_is_persistent()   Do bytes written to the VMA stay written, and
+                           bytes read stay the same unless userland changes
+                           them?
+
+         vma_can_merge()   Can the VMA be merged with a compatible
+                           neighbour?
+
+           vma_can_gup()   Can GUP obtain pages from the VMA, i.e. is it
+                           neither a PFN map nor memory-mapped I/O?
+
+Remaining raw VMA_IO_BIT, VMA_PFNMAP_BIT and VMA_MIXEDMAP_BIT tests
+scattered across mm are also converted to predicates where it makes sense
+to do so.
+
+And also the opportunity is taken to eliminate THP's vma_is_special_huge()
+which was an existing source of confusion.
+
+Signed-off-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+---
+v3:
+* Fixed up bug in patch 1 as reported by Mike - have to delay setting
+  map->vma_flags until after action prepare, though map->vm_file needs to
+  be set before for correct reference count management.
+* Updated 4/40 to add a symmetric vm_end check as well as vm_start in case
+  of a dangerously insane driver, as per Sashiko.
+* Updated 8/40 to check if a driver did something REALLY stupid like having
+  a NULL discontig_kernel_page_ops ptr, as per Sashiko.
+* Updated 15/40 to trivially synchronise userland test comments.
+* Updated 17/40 to correctly duplicate code to the userland VMA tests as
+  per Sashiko.
+
+v2:
+* Rebased on mm-unstable.
+* Introduced new patch to fix various mmap_prepare and file interactions
+  that weren't quite right as per Sashiko. None impact anything upstream
+  yet so it doesn't need to be a fix.
+* Restore vma->vm_start if an mmap hook has moved it before tearing the
+  VMA down, so we unmap the range we established rather than the one the
+  hook invented, as per Sashiko.
+* Reject a discontiguous kernel page batch of zero pages rather than
+  looping forever, and bound batches by the pages remaining in the VMA,
+  as per Sashiko.
+* Add the missing map_kernel_discontig member to the userland VMA tests'
+  copy of struct mmap_action as per Sashiko.
+* Set VM_DONTEXPAND on hfi1's RCV_HDRQ, RCV_EGRBUF and RTAIL mappings, as
+  dma_mmap_coherent() doesn't on the IOMMU-DMA path, as per Sashiko.
+* Recompute vma->vm_page_prot in snd_pcm_mmap_status() after clearing
+  VM_WRITE, as vm_insert_page() uses it immediately rather than at fault
+  time, as per Sashiko.
+* munlock_vma_folio() now tests VMA_LOCKED_MASK so an unmap racing the
+  mlock walk still munlocks folios the walk has already counted, as per
+  Sashiko.
+https://lore.kernel.org/r/20260914-b4-mmap-prepare-vma-flag-sanify-v2-0-7d9781ed5361@kernel.org
+
+v1:
+https://lore.kernel.org/r/20260908-b4-mmap-prepare-vma-flag-sanify-v1-0-dacf19cce22b@kernel.org
+
+---
+Lorenzo Stoakes (ARM) (40):
+      mm/vma: fix mmap_prepare file handling, remove file_doesnt_need_get
+      mm/vma: predicate setting mmap_prepare VMA fields on new vma alloc
+      mm/vma: introduce and use vma_[flags_]can_merge()
+      mm: consistently validate VMA state after mmap[_prepare] hooks
+      mm/vma: ensure mmap_prepare doesn't set actions on a mergeable vma
+      mm: make map_kernel_pages_[prepare,complete] internal and unexported
+      mm/vma: tidy up map kernel pages enum values
+      mm: add mmap action for discontiguous kernel page mapping
+      docs: filesystems: update mmap_prepare docs for discontig kernel pgs
+      drivers/usb/mon: update to use mmap_prepare + map kernel pages
+      infiniband: update hfi1 to use remap_vmalloc_range()
+      selinux: reject writable opens of policy file, drop mmap shared/write check
+      ALSA: pcm: use vm_insert_page() to map PCM status page
+      bpf: arena: mark arena_map_mmap() mappings VM_MIXEDMAP
+      mm/vma: add vma[_flags]_is_kernel_owned() predicates
+      mm/vma: only allow mmap to clear VMA_MAYWRITE_BIT if kernel-owned
+      mm/vma: add and use vma_[flags]_is_fixed_mapping
+      scsi: sg: convert mmap hook to mmap_prepare and rework
+      fbdev: defio: assert FBINFO_VIRTFB, drop VM_IO, add VM_MIXEDMAP
+      HSI: cmt_speech: convert mmap hook to mmap_prepare, refactor
+      mm/gup: error out early on !VMA_MAYREAD_BIT VMAs
+      uprobes: remove VM_IO, set VM_MIXEDMAP for mapped kernel pages
+      mm/mlock: clear VMA_LOCKED_MASK over mmap callback
+      mm/mlock: eliminate weird VMA_IO_BIT abuse and simplify
+      mm/vma: enforce that only kernel-owned mappings may set VMA_IO_BIT
+      mm: remove VMA_IO_BIT check in vma[_flags]_is_kernel_owned()
+      mm: remove hugetlb_inline.h
+      mm: rename is_vm_hugetlb_page() to vma_is_hugetlb()
+      mm: drop some redundant checks around hugetlb VMAs
+      mm/madvise: update is_valid_guard_vma() to use vma_can_merge()
+      mm/vma: introduce vma[_flags]_is_persistent()
+      mm/uffd: use predicates for userfaultfd checks
+      mm/madvise: use predicates for madvise(..., MADV_DOFORK)
+      mm: eliminate VMA_SPECIAL_FLAGS usage when hugetlb explicitly tested
+      mm: eliminate VMA_SPECIAL_FLAGS check in lru_gen_look_around()
+      mm: avoid use of VMA_SPECIAL_FLAGS in migrate_vma_setup()
+      mm: eliminate VM_SPECIAL, VMA_SPECIAL_FLAGS
+      fuse: dax: do not set VM_MIXEDMAP
+      mm/huge_memory: remove vma_is_special_huge()
+      mm/vma: introduce and use vma[_flags]_can_gup()
+
+ Documentation/filesystems/mmap_prepare.rst |  81 +++++++++
+ arch/arm64/kvm/mmu.c                       |   4 +-
+ arch/powerpc/mm/book3s64/radix_tlb.c       |   6 +-
+ arch/powerpc/mm/nohash/e500_hugetlbpage.c  |   2 +-
+ arch/powerpc/mm/nohash/tlb.c               |   2 +-
+ arch/riscv/kvm/mmu.c                       |   2 +-
+ arch/riscv/mm/tlbflush.c                   |   2 +-
+ arch/s390/mm/gmap_helpers.c                |   6 +-
+ arch/sparc/mm/init_64.c                    |   2 +-
+ arch/x86/kernel/uprobes.c                  |   2 +-
+ drivers/gpu/drm/drm_gpusvm.c               |   5 +-
+ drivers/hsi/clients/cmt_speech.c           |  33 +---
+ drivers/infiniband/hw/hfi1/file_ops.c      |  83 +++------
+ drivers/scsi/sg.c                          | 115 ++++++-------
+ drivers/usb/mon/mon_bin.c                  |  82 +++++----
+ drivers/video/fbdev/core/fb_defio.c        |   6 +-
+ drivers/video/fbdev/ssd1307fb.c            |   2 +
+ fs/coredump.c                              |   6 +-
+ fs/fuse/dax.c                              |   2 +-
+ fs/hugetlbfs/inode.c                       |   2 +-
+ fs/proc/task_mmu.c                         |   8 +-
+ include/asm-generic/tlb.h                  |   4 +-
+ include/linux/hugetlb.h                    |   5 +-
+ include/linux/hugetlb_inline.h             |  28 ---
+ include/linux/mm.h                         | 266 +++++++++++++++++++++++++++--
+ include/linux/mm_types.h                   |  50 +++++-
+ include/linux/pagemap.h                    |   1 -
+ include/linux/rmap.h                       |   2 +-
+ include/linux/userfaultfd_k.h              |   1 -
+ kernel/bpf/arena.c                         |   3 +-
+ kernel/events/core.c                       |   2 +-
+ kernel/events/uprobes.c                    |   4 +-
+ kernel/sched/fair.c                        |   3 +-
+ mm/folio.c                                 |   2 +-
+ mm/gup.c                                   |  15 +-
+ mm/hmm.c                                   |   3 +-
+ mm/huge_memory.c                           |  31 ++--
+ mm/hugetlb.c                               |  14 +-
+ mm/internal.h                              |  81 +++++----
+ mm/ksm.c                                   |   4 +-
+ mm/madvise.c                               |  28 +--
+ mm/memory.c                                | 142 ++++++++++++---
+ mm/mempolicy.c                             |   5 +-
+ mm/migrate_device.c                        |  12 +-
+ mm/mlock.c                                 |  51 +++---
+ mm/mmap.c                                  |   2 +-
+ mm/mmu_gather.c                            |   2 +-
+ mm/mprotect.c                              |   5 +-
+ mm/mremap.c                                |  11 +-
+ mm/page_vma_mapped.c                       |   4 +-
+ mm/pagewalk.c                              |   2 +-
+ mm/rmap.c                                  |   4 +-
+ mm/swapfile.c                              |   2 +-
+ mm/userfaultfd.c                           |  45 +++--
+ mm/util.c                                  |  29 +++-
+ mm/vma.c                                   | 246 +++++++++++++++++++-------
+ mm/vma.h                                   |  31 +++-
+ mm/vma_internal.h                          |   1 -
+ mm/vmscan.c                                |   9 +-
+ security/selinux/selinuxfs.c               |  11 +-
+ sound/core/pcm_native.c                    |  38 ++---
+ tools/testing/vma/include/dup.h            |  80 +++++++--
+ tools/testing/vma/include/stubs.h          |   2 +-
+ tools/testing/vma/tests/merge.c            |  10 +-
+ 64 files changed, 1169 insertions(+), 575 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-its: Update GITS_CTLR.Enabled under its_lock
+[PATCH] KVM: arm64: vgic-its: Update GITS_CTLR.Enabled under its_lock
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+vgic_mmio_write_its_ctlr() clears its->enabled and invalidates the
+translation cache under cmd_lock, but vgic_its_resolve_lpi() tests the
+bit and populates the cache under its_lock. An injection that passed
+the test before the disable can cache its translation after the
+invalidation, and the cached path then injects from a disabled ITS.
+
+Commit 13031fb6b835 ("KVM: arm64: vgic-its: Drop the translation cache
+reference only for the erased entry") made the concurrent invalidations
+safe but left this window open. The linked v2 closed it, and Oliver
+withdrew his own diff there over a kvm->lock/vcpu->mutex inversion in
+its vgic_its_invalidate_all_caches() hunk.
+
+Take its_lock around the store and the invalidation, nested under
+cmd_lock as the command handlers do. This is the v2's GITS_CTLR half,
+widened to cover the store, and it has no such inversion.
+
+Fixes: 8201d1028caa ("KVM: arm64: vgic-its: Maintain a translation cache per ITS")
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Link: https://lore.kernel.org/ah6Lsi4MfKUU6wBR@v4bel/
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+
+Notes:
+    Based on v7.3-rc3, applies cleanly to kvmarm/fixes.
+    
+    Picking up the fix Marc was worried had stalled [1]. Unlike the v2's
+    GITS_CTLR hunk [2], the its->enabled store is inside the locked section
+    too, so the enable test in vgic_its_resolve_lpi() is serialized by the
+    lock rather than by store order.
+    
+    vgic_its_invalidate_all_caches(), the GICR_CTLR.EnableLPIs path, is
+    left as is: it can take neither kvm->lock (it runs with vcpu->mutex
+    held) nor config_lock (the userspace GICR_CTLR route already holds it).
+    It belongs to the locking cleanup Oliver deferred as a long-term fix
+    when he withdrew the v2 [3].
+    
+    [1] https://lore.kernel.org/861pbr6emw.wl-maz@kernel.org/
+    [2] https://lore.kernel.org/ah6Lsi4MfKUU6wBR@v4bel/
+    [3] https://lore.kernel.org/ah9KeH8bFl8NOveO@kernel.org/
+
+ arch/arm64/kvm/vgic/vgic-its.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  arm64: Pass the number of elements as the first argument to calloc()
+[PATCH kvmtool 1/7] arm64: Pass the number of elements as the first argument to calloc()
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+man 3 calloc is pretty clear that the first argument to calloc() is the
+number of elements to be allocated, and the second argument is the size
+of one element. Fix the instances where the order was inversed.
+
+Signed-off-by: Alexandru Elisei <alexandru.elisei@arm.com>
+---
+ arm64/kvm.c | 2 +-
+ arm64/pmu.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Fix --vcpu-affinity
+[PATCH kvmtool 0/7] Fix --vcpu-affinity
+Author: Alexandru Elisei <alexandru.elisei@arm.com>
+
+This is my attempt at fixing --vcpu-affinity, which I introduced. Patches #1-#4
+are straightforward fixes, and they don't modify the current (broken) behaviour
+in any way. Patch #5 fixes is most of the fix: with it, the VCPU threads run on
+the physical CPUs passed to --vcpu-affinity, and most of the kvmtool threads,
+except the virtio threads, use the main thread affinity.
+
+The virtio threads are special because they are spawned from the VCPU threads,
+and they inherit the VCPU thread affinity. Note that there might be other cases
+where this happens.
+
+Patches #6-#7 attempt to fix the remaining issue: #6 switch the entire codebase
+to kvm_create_thread() instead of pthread_create(). In #7, kvm_create_thread()
+will use the main thread affinity when creating new threads. These two patches
+are RFC because they cause a lot of churn and I would like some feedback if it's
+worth it.
+
+Why is it useful to run the VCPUs on different physical CPUs than the other
+threads? I can think of two situations:
+
+1. Testing heterogenous hardware configurations, where the VM creation and setup
+happens on a set of physical CPUs, and the VCPUs are run on a different set. I
+used these patches for the KVM SPE series.
+
+2. I/O testing. Maybe?
+
+Tested on an Orion board and a x86 machine. On the x86 machine, there's was this
+one thread called 'kvm-nx-lpage-re' which had affinity of the VCPUs, but I
+couldn't figure out where it was created. I grep'ed for each part of the name in
+the source node, no luck. I used strace, and couldn't see a clone call that
+returned the corresponding pid. Any clues would be appreciated.
+
+Alexandru Elisei (7):
+  arm64: Pass the number of elements as the first argument to calloc()
+  arm64: Consistently treat vcpu_affinity_cpuset as dynamically
+    allocated
+  arm64: Free the temporary cpumask in vcpu_affinity_parser()
+  arm64/pmu: Consider kvmtool's affinity when searching for a PMU
+  Correctly apply --vcpu-affinity to the VCPU threads
+  Introduce kvm_create_thread()
+  Don't apply --vcpu-affinity to threads spawned from VCPUs
+
+ arm64/include/kvm/kvm-arch.h        |  2 --
+ arm64/include/kvm/kvm-config-arch.h |  5 ----
+ arm64/kvm-cpu.c                     |  9 ------
+ arm64/kvm.c                         | 31 --------------------
+ arm64/pmu.c                         | 31 +++++++++++---------
+ builtin-run.c                       | 41 +++++++++++++++++++++++++--
+ disk/aio.c                          |  3 +-
+ disk/blk.c                          | 12 ++++++--
+ disk/core.c                         | 29 ++++++++++---------
+ disk/qcow.c                         | 44 ++++++++++++++++++++---------
+ disk/raw.c                          | 21 +++++++++++---
+ epoll.c                             |  2 +-
+ include/kvm/disk-image.h            | 28 ++++++++++++------
+ include/kvm/kvm-config.h            |  1 +
+ include/kvm/kvm.h                   |  2 ++
+ include/kvm/qcow.h                  |  3 +-
+ include/kvm/uip.h                   |  2 ++
+ include/kvm/util.h                  |  6 ++++
+ kvm.c                               | 18 ++++++++++++
+ net/uip/tcp.c                       |  7 ++---
+ net/uip/udp.c                       |  5 ++--
+ term.c                              |  4 +--
+ ui/gtk3.c                           |  2 +-
+ ui/sdl.c                            |  2 +-
+ ui/vnc.c                            |  2 +-
+ util/threadpool.c                   |  9 +++---
+ util/util.c                         | 42 +++++++++++++++++++++++++++
+ virtio/blk.c                        |  2 +-
+ virtio/net.c                        | 26 +++++++++++------
+ 29 files changed, 258 insertions(+), 133 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Fix access_tracking_perf_test for larger host page size
+[PATCH 1/3] KVM: selftests: Fix access_tracking_perf_test for larger host page size
+Author: Zenghui Yu <zenghui.yu@linux.dev>
+
+
+access_tracking_perf_test marks guest memory idle through page_idle by
+walking its test region one guest page at a time and checking/marking the
+host PFN backing each guest page.  The walk assumes that every guest page
+maps to a distinct host page, which only holds when the guest page size is
+>= the host page size.
+
+On an arm64 host with 64K pages, the test also runs guest modes that use 4K
+pages, where 16 consecutive guest pages are backed by one host page.  The
+first of them marks the shared host page idle and the other 15 then see the
+page as already idle and count it as "still idle", inflating still_idle to
+~94% and failing the test:
+
+  $ ./access_tracking_perf_test
+  Random seed: 0x1c04f013
+  lru_gen: Could not open /sys/kernel/mm/lru_gen/enabled
+  Using page_idle for aging
+  Testing guest mode: PA-bits:48,  VA-bits:48,  4K pages
+  __vm_create: mode='PA-bits:48,  VA-bits:48,  4K pages' type='0', pages='1696'
+  guest physical test memory: [0xffffbfff0000, 0xffffffff0000)
+
+  Populating memory             : 0.299047690s
+  Writing to populated memory   : 0.008723980s
+  Reading from populated memory : 0.010692350s
+
+  ==== Test Assertion Failure ====
+    access_tracking_perf_test.c:164: idle_pages_warn_only
+    pid=3503998 tid=3504006 errno=4 - Interrupted system call
+       1	0x000000000040308f: too_many_idle_pages at access_tracking_perf_test.c:164
+       2	 (inlined by) pageidle_mark_vcpu_memory_idle at access_tracking_perf_test.c:229
+       3	 (inlined by) vcpu_thread_main at access_tracking_perf_test.c:339
+       4	0x000000000040a267: vcpu_thread_main at memstress.c:277
+       5	0x00007fff958ef09b: ?? ??:0
+       6	0x00007fff959548db: ?? ??:0
+    vCPU0: Too many pages still idle (245647 out of 262144)
+
+Idle tracking is fundamentally per host page though.  Walk the region in
+units of the larger of the guest and host page size instead.  This changes
+nothing when the guest page size is >= the host's - if the guest page is
+bigger, the guest only ever faults the first host page of each guest page
+anyway.
+
+Assisted-by: GLM-5.3 OpenCode
+Signed-off-by: Zenghui Yu (Huawei) <zenghui.yu@linux.dev>
+---
+ .../selftests/kvm/access_tracking_perf_test.c    | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: access_tracking_perf_test fixes and cleanups
+[PATCH 0/3] KVM: selftests: access_tracking_perf_test fixes and cleanups
+Author: Zenghui Yu <zenghui.yu@linux.dev>
+
+
+Patch 1 fixes a deterministic failure of access_tracking_perf_test when the
+host page size is bigger than the guest's, e.g. the 4K guest modes on a 64K
+arm64 host: page_idle tracks idleness per host page, so walk the test
+region at that granularity.  Patches 2 and 3 are two small cleanups found
+along the way.
+
+Tested on an arm64 host with 64K pages.
+
+Zenghui Yu (Huawei) (3):
+  KVM: selftests: Fix access_tracking_perf_test for larger host page
+    size
+  KVM: selftests: Add missing newline to access_tracking_perf_test help
+  KVM: selftests: Remove destroy_cgroup() from access_tracking_perf_test
+
+ .../selftests/kvm/access_tracking_perf_test.c | 23 +++++++++++--------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Move the IPA limit rule into kvm_get_ipa_max()
+[PATCH v1 1/4] KVM: arm64: Move the IPA limit rule into kvm_get_ipa_max()
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Move the rule kvm_set_ipa_limit() applies to PARange into a helper
+beside kvm_get_parange(), which bounds the same field by a different
+rule, so the hypervisor can size a guest's IPA space by it.
+
+No functional change intended.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 15 +++++++++++++++
+ arch/arm64/kvm/reset.c               | 12 +-----------
+ 2 files changed, 16 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Honour KVM_VM_TYPE_ARM_IPA_SIZE under pKVM
+[PATCH v1 0/4] KVM: arm64: Honour KVM_VM_TYPE_ARM_IPA_SIZE under pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+pKVM has ignored KVM_VM_TYPE_ARM_IPA_SIZE since it started running
+guest stage 2 at EL2 (v6.2): every VM gets the host's IPA limit,
+whatever its VMM requested, and an out-of-range request that every
+other host rejects with -EINVAL is accepted. This series makes pKVM
+handle the type the way KVM does everywhere else, fixes the bugs that
+causes, and two found on the way.
+
+Ignoring the type has two consequences I hit while testing the ITS table
+save series [1]: vgic_init fails on any pKVM host whose limit exceeds 40
+bits, because the addresses it expects a 40-bit VM to reject are in
+range; and on a 64K kernel built for 48-bit PAs on a 52-bit part the
+host sizes a VM at 52 bits while EL2 gives it 48, so a memslot above
+2^48 the host accepts can't be mapped.
+
+Patch 3 is the fix. EL2 takes the IPA size from the VTCR the host
+sized the VM with, bounded by the same rule as the host's limit, and
+the host-side override goes: the request is range-checked and the VM
+gets the size it requested, so the VMM owns the guest's IPA layout on
+a pKVM host too, and the host and EL2 agree on it.
+
+The rest supports that. Patch 1 moves the limit rule into a helper EL2
+can share. Patch 2 rejects a pgd donation that's page-aligned but not
+aligned to its own size, which crashes EL2 today; patch 3 changes how
+that size is computed, so the check goes in first. Patch 4 frees a VM
+vgic_init and vgic_v5 leak when the GIC probe fails.
+
+A VMM that requests less than the host limit under pKVM, the 40-bit
+default type included, now gets that size, and on a host whose limit is
+below 40 bits the default type is refused, as it is without pKVM.
+kvmtool requests the smallest size its RAM needs, for protected VMs
+too, and crosvm requests the limit, so neither places anything beyond
+its request.
+
+vgic_init passes with this, its range checks untouched, on QEMU under
+pKVM and VHE at 52- and 48-bit host IPA limits. On a 64K/PA_BITS_48 pKVM
+host a guest mapping above 2^48 fails without patch 3 and works with it.
+On an M4, whose limit is 40 bits, pKVM used to create a VM for a 44-bit
+request and give a 36-bit VM a 40-bit stage 2; with this it refuses the
+first and bounds the second, as the same machine does without pKVM.
+
+Based on Linux 7.3-rc3 (fd73f4a665989; also applies to kvmarm/next
+8476ce1f1e949).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260821064445.615838-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (3):
+  KVM: arm64: Move the IPA limit rule into kvm_get_ipa_max()
+  KVM: arm64: Honour the requested IPA size under pKVM
+  KVM: arm64: selftests: Free the VM when the GIC device probe fails
+
+Quentin Perret (1):
+  KVM: arm64: Check PGD alignment when creating a pVM
+
+ arch/arm64/include/asm/kvm_pgtable.h          | 15 ++++++++++++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |  2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                | 24 +++++++++++++++----
+ arch/arm64/kvm/mmu.c                          |  4 +---
+ arch/arm64/kvm/reset.c                        | 12 +---------
+ tools/testing/selftests/kvm/arm64/vgic_init.c |  4 +++-
+ tools/testing/selftests/kvm/arm64/vgic_v5.c   |  4 +++-
+ 7 files changed, 44 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
