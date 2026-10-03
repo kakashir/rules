@@ -1,0 +1,904 @@
+
+On /root/mail/repo:
+From 692f3ff12 to ec8c44b5d
+KVM mailing list update from 692f3ff12 to ec8c44b5d
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      7 gmail.com
+      4 amd.com
+      3 ryzome.com
+      2 arm.com
+      1 openai.com
+      1 linux.ibm.com
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+      6  Jia Jia <physicalmtea@gmail.com>
+      4  Babu Moger <babu.moger@amd.com>
+      3  Loc Nguyen <loc@ryzome.com>
+      2  Suzuki K Poulose <suzuki.poulose@arm.com>
+      1  Sean Christopherson <seanjc@google.com>
+      1  Kyle Zeng <kylebot@openai.com>
+      1  Christoph Schlameuss <schlameuss@linux.ibm.com>
+      1  Chengfeng Ye <nicoyip.dev@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v3 3/3] x86,fs/resctrl: Keep mbm_assign_mode in default mode at boot
+Author: Babu Moger <babu.moger@amd.com>
+
+The "mbm_event" mode assigns hardware MBM counters to RMID/event pairs.
+It is intended for deployments that need to manage counter assignment on
+platforms where the number of monitoring groups exceeds the available
+hardware counters. Hardware counters are scarce, so mbm_event mode suits
+workflows that monitor a subset of groups at a time and rotate
+assignments as needed.
+
+resctrl enables the "mbm_event" mode by default on hardware that
+supports it. That breaks the pqos tool [1], which assumes the historical
+default mode. pqos treats a non-numeric event read as zero bandwidth. It
+creates 16 or more monitoring groups and uses two counters per group.
+On a platform with 32 counters per domain, that consumes the pool, so
+further groups read "Unassigned" and pqos reports 0 MB/s for them:
+
+  $sudo pqos -m all:0-4
+  CORE         IPC      MISSES     LLC[KB]   MBL[MB/s]   MBR[MB/s]
+     0        0.69         16k       192.0         0.0         0.0
+     1        0.40          3k         0.0         0.0         0.0
+     2        0.44          1k        64.0         0.0         0.0
+     3        0.39          1k        64.0         0.0         0.0
+     4        0.43          1k         0.0         0.0         0.0
+
+Leave mbm_assign_mode in "default" mode during initialization. Default
+mode uses one counter per monitoring group. On existing AMD platforms
+that pool is 64 counters and may be larger on newer hardware. The
+"mbm_event" mode uses two counters per group, so 32 counters cover only
+16 groups.
+
+Deployments within that pool receive accurate bandwidth measurements
+with default mode. The hardware supports 4096 monitoring groups. Beyond
+that pool, readings may be misleading or "Unavailable", with no
+user-visible indication.
+
+Default mode is still limited once the number of monitoring groups
+exceeds that counter pool. After hardware re-allocates a counter, a
+read may return "Unavailable". pqos still treats "Unavailable" as zero.
+Successive reads can be a count, "Unavailable", then another count.
+pqos treats those jumps as wraparound and can report an inconsistent
+rate:
+
+  $sudo pqos -m all:0-4
+  CORE     IPC      MISSES     LLC[KB]   MBL[MB/s]   MBR[MB/s]
+  0        0.76         60k        32.0         0.0         0.0
+  1        0.45          1k        32.0         0.0         0.0
+  2        1.57        107k        64.0         0.0 17592186044184.9
+  3        1.62        276k      4928.0         3.2         0.5
+
+Users that need stable measurements beyond that pool should use
+"mbm_event" mode and rotate assignments as needed.
+Enable it with:
+
+  $echo mbm_event > /sys/fs/resctrl/info/L3_MON/mbm_assign_mode
+
+Fixes: 0f1576e43adc ("x86/resctrl: Configure mbm_event mode if supported")
+Closes: https://github.com/intel/intel-cmt-cat/issues/311
+Link: https://github.com/intel/intel-cmt-cat # [1]
+Cc: stable@vger.kernel.org
+Signed-off-by: Babu Moger <babu.moger@amd.com>
+---
+ Documentation/filesystems/resctrl.rst | 48 ++++++++++++++++++---------
+ arch/x86/kernel/cpu/resctrl/monitor.c |  1 -
+ 2 files changed, 33 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/3] fs/resctrl: Assign counters to existing groups when enabling mbm_event
+Author: Babu Moger <babu.moger@amd.com>
+
+When the user enables counter assignment mode by writing "mbm_event"
+to /sys/fs/resctrl/info/L3_MON/mbm_assign_mode, resctrl resets all
+monitoring state and sets mbm_assign_on_mkdir for subsequent mkdir, but
+does not assign counters to groups that already exist, including the
+default group created at mount. The counters of those groups return
+"Unassigned" until the user assigns counters by hand.
+
+Enable mbm_assign_on_mkdir and assign counters, while there are some
+available, to existing CTRL_MON and MON groups so the switch matches
+mkdir auto-assignment. An event left without a counter reads
+"Unassigned".
+
+Fixes: 8004ea01cf63 ("fs/resctrl: Introduce the interface to switch between monitor modes")
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://sashiko.dev/#/patchset/8cb66e18e32e4087a9712c1e68ee6da614efe244.1784322818.git.babu.moger%40amd.com
+Cc: stable@vger.kernel.org
+Signed-off-by: Babu Moger <babu.moger@amd.com>
+---
+v3: Changelog update.
+    Code comment cleanup.
+    Added Cc to stable.
+    Added Reported-by and Closes tags.
+
+v2: New patch.
+    This patch addresses the Sashiko comment about documentation issue where
+    counters are not assigned automatically when mode is switched to mbm_event.
+    https://sashiko.dev/#/patchset/8cb66e18e32e4087a9712c1e68ee6da614efe244.1784322818.git.babu.moger%40amd.com
+    In fact, it exposed a real issue. When switching to mbm_event mode, existing
+    monitoring groups should be assigned counters whenever counters are available.
+    This provides a smooth transition between modes and aligns the behavior with
+    the existing auto-assignment mechanism.
+---
+ Documentation/filesystems/resctrl.rst |  7 ++++--
+ fs/resctrl/monitor.c                  | 35 +++++++++++++++++++++++----
+ 2 files changed, 35 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/3] x86/resctrl: Fix ABMC counter programming
+Author: Babu Moger <babu.moger@amd.com>
+
+AMD's Assignable Bandwidth Monitoring Counters (ABMC) are configured via
+MSR_IA32_L3_QOS_ABMC_CFG. The architecture [1] received an update that
+expands the counter ID field (l3_qos_abmc_cfg.split.cntr_id) from 5 to 12
+bits.
+
+Use the updated field width. The number of supported counters is enumerated
+separately. Mark this as a fix to the original ABMC support to avoid
+misconfigurations caused by truncating counter IDs on hardware that
+supports a large number of counters.
+
+Also limit the number of supported counters to the maximum value that can
+be represented by the 12-bit cntr_id field if hardware reports more than
+12 bits.
+
+The AMD64 Architecture Programmer's Manual [1], available at [2], will be
+updated in a future revision to document the expanded cntr_id field.
+
+[1] AMD64 Architecture Programmer's Manual Volume 2: System Programming,
+    Publication #24593, Revision 3.41, Section 19.3.3.3 "Assignable
+    Bandwidth Monitoring (ABMC)"
+
+Fixes: 84ecefb76674 ("x86/resctrl: Add data structures and definitions for ABMC assignment")
+Signed-off-by: Babu Moger <babu.moger@amd.com>
+Cc: stable@vger.kernel.org
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=206537 # [2]
+---
+v3: Dropped the fix for truncation on 32-bit x86.
+    Removed the change bw_src field(RMID) width to 15 bits.
+    Added new check to limit the number of counters to 12 bits.
+
+v2: Moved the link tag to the last.
+
+v1: https://lore.kernel.org/lkml/980f39d3a0e0d9f73925e362f835aeef070a1bc5.1784322818.git.babu.moger@amd.com/
+---
+ arch/x86/kernel/cpu/resctrl/internal.h | 4 ++--
+ arch/x86/kernel/cpu/resctrl/monitor.c  | 3 ++-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/3] x86,fs/resctrl: Keep default MBM mode at boot and fix ABMC
+Author: Babu Moger <babu.moger@amd.com>
+
+
+Hi All,
+
+This series restores default MBM assignment mode at boot, assigns counters
+when switching to mbm_event, and fixes ABMC programming for more than 32
+counters.
+
+Commit 0f1576e43adc ("x86/resctrl: Configure mbm_event mode if supported")
+enabled ABMC at boot. That breaks the pqos tool from intel-cmt-cat [1],
+which treats a non-numeric event read as zero bandwidth. pqos creates 16
+or more groups and uses two counters per group. On a platform with 32
+counters per domain, that consumes the pool, so further groups read
+"Unassigned" and pqos reports 0 MB/s.
+
+Leaving the mode at "default" does not make pqos correct. pqos still
+treats "Unavailable" as zero. Once the default-mode counter pool is
+exceeded, hardware can re-allocate a counter between reads and pqos can
+report that as a wraparound. That shows up only after the pool is
+exceeded. Default mode uses one counter per monitoring group. On existing
+AMD platforms that pool is 64 counters and may be larger on newer
+hardware, so common deployments stay within it. mbm_event mode uses two
+counters per group, so the same 32 counters cover only 16 groups.
+
+mbm_event remains available as an opt-in. Users that need stable
+measurements beyond the default-mode pool should enable it and rotate
+assignments. The limitation of default mode is documented.
+
+Patch 1: widen cntr_id in L3_QOS_ABMC_CFG from 5 bits to 12 bits, and
+limit the enumerated counter count to 4096, which is what that field can
+encode. The APM [2] at [3] will be updated for the expanded cntr_id field.
+
+Patch 2: when switching to mbm_event, assign counters to existing
+groups, including the default group, matching mkdir auto-assignment.
+
+Patch 3: leave mbm_assign_mode as "default" at boot. This seems to be
+the patch that has generated the most discussion. Let me know, if additional
+justification in the documentation would be helpful, I'd be happy to add it.
+
+Based on tip/master:
+
+  1aeb52f7869a Merge branch into tip/master: 'x86/tdx'
+
+[1] https://github.com/intel/intel-cmt-cat/issues/311
+[2] AMD64 Architecture Programmer's Manual Volume 2: System Programming,
+    Publication #24593, Revision 3.41, Section 19.3.3.3 "Assignable
+    Bandwidth Monitoring (ABMC)"
+[3] https://bugzilla.kernel.org/show_bug.cgi?id=206537
+
+v3:
+- Patch 1: drop the 32-bit u64 change and the bw_src widening. Cap the
+  enumerated counter count at 4096 instead of truncating the CPUID field.
+- Patch 2: clean up comments. Add Reported-by, Closes, and Cc: stable.
+- Patch 3: document one counter per group in default mode and two counters
+  per group in mbm_event mode. Describe the default-mode pool and the pqos
+  wraparound once that pool is exceeded.
+
+v2:
+- Added patch 2 to address Sashiko's comment regarding the documentation
+  issue. In fact, it exposed a real issue. When switching to mbm_event mode,
+  existing monitoring groups should be assigned counters whenever counters
+  are available. This provides a smooth transition between modes and aligns
+  the behavior with the existing auto-assignment mechanism.
+  https://sashiko.dev/#/patchset/8cb66e18e32e4087a9712c1e68ee6da614efe244.1784322818.git.babu.moger%40amd.com
+
+- Combine the two v1 patches and add patch 2 (assign existing groups
+  on mbm_event switch; Sashiko review).
+- Keep boot-default separate from the encoding/truncation fixes.
+- Document the default-mode counter-pool limitation.
+
+v1: https://lore.kernel.org/lkml/980f39d3a0e0d9f73925e362f835aeef070a1bc5.1784322818.git.babu.moger@amd.com/
+v2: https://lore.kernel.org/lkml/cover.1788545152.git.babu.moger@amd.com/
+
+Thanks
+Babu Moger
+
+Babu Moger (3):
+  x86/resctrl: Fix ABMC counter programming
+  fs/resctrl: Assign counters to existing groups when enabling mbm_event
+  x86,fs/resctrl: Keep mbm_assign_mode in default mode at boot
+
+ Documentation/filesystems/resctrl.rst  | 57 ++++++++++++++++++--------
+ arch/x86/kernel/cpu/resctrl/internal.h |  4 +-
+ arch/x86/kernel/cpu/resctrl/monitor.c  |  4 +-
+ fs/resctrl/monitor.c                   | 35 +++++++++++++---
+ 4 files changed, 73 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 6.1.y] kvm: s390: Reject memory region operations for ucontrol VMs
+Author: Artem Dinaburg <artem@trailofbits.com>
+
+
+[ Upstream commit 7816e58967d0e6cadce05c8540b47ed027dc2499 ]
+
+This change rejects the KVM_SET_USER_MEMORY_REGION and
+KVM_SET_USER_MEMORY_REGION2 ioctls when called on a ucontrol VM.
+This is necessary since ucontrol VMs have kvm->arch.gmap set to 0 and
+would thus result in a null pointer dereference further in.
+Memory management needs to be performed in userspace and using the
+ioctls KVM_S390_UCAS_MAP and KVM_S390_UCAS_UNMAP.
+
+Also improve s390 specific documentation for KVM_SET_USER_MEMORY_REGION
+and KVM_SET_USER_MEMORY_REGION2.
+
+[ Backport to 6.1.y: omitted KVM_SET_USER_MEMORY_REGION2 documentation
+  because that ioctl is absent from 6.1. ]
+
+Signed-off-by: Christoph Schlameuss <schlameuss@linux.ibm.com>
+Fixes: 27e0393f15fc ("KVM: s390: ucontrol: per vcpu address spaces")
+Reviewed-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Link: https://lore.kernel.org/r/20240624095902.29375-1-schlameuss@linux.ibm.com
+Signed-off-by: Janosch Frank <frankja@linux.ibm.com>
+[frankja@linux.ibm.com: commit message spelling fix, subject prefix fix]
+Message-ID: <20240624095902.29375-1-schlameuss@linux.ibm.com>
+Assisted-by: LLM
+Signed-off-by: Artem Dinaburg <artem@trailofbits.com>
+---
+Hi Greg, Sasha, and kvm s390 maintainers,
+
+I am working through the small CVE backports still missing from 6.1.y.
+This one addresses CVE-2024-43819. It rejects memory-region ioctls before a
+ucontrol VM can dereference its NULL gmap.
+
+The corresponding 6.6.y backport is already in the 6.6.y stable queue.
+The fix is already present in 6.12.y, 6.18.y, and 7.2.y, but not
+in 6.1.y.
+The target-specific adjustment is recorded in the bracketed note above.
+
+Could you please queue it for 6.1.y?
+
+CVE: CVE-2024-43819
+Upstream: 7816e58967d0e6cadce05c8540b47ed027dc2499
+
+AI assistance: An LLM helped identify, adapt, and validate this backport; I
+reviewed the resulting code and validation evidence.
+
+Thanks,
+Artem Dinaburg
+
+ Documentation/virt/kvm/api.rst | 6 ++++++
+ arch/s390/kvm/kvm-s390.c       | 3 +++
+ 2 files changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: x86: Protect virtualization-enable VM walks with RCU
+Author: Chengfeng Ye <nicoyip.dev@gmail.com>
+
+Protect the vm_list walks in kvm_arch_enable_virtualization_cpu() with
+RCU, publish and remove VMs with RCU list operations, and wait for
+pre-existing readers before tearing down a VM.
+
+The change that introduced kvm_usage_lock replaced kvm_lock with a
+dedicated usage-count mutex when enabling virtualization.  Because
+vm_list mutators do not take the usage-count mutex, this left the x86
+walks without lifetime protection.
+
+During CPU online, the hotplug thread can load a VM from vm_list.  A
+concurrent close of the last VM file can then remove that VM and destroy
+its vCPUs before the hotplug thread dereferences the stale VM or vCPU.
+Reacquiring kvm_lock from the CPU-hotplug path would restore the lock cycle
+that the same change fixed.
+
+KASAN reported:
+
+  BUG: KASAN: wild-memory-access in kvm_arch_enable_virtualization_cpu+0x25f/0x870
+  Read of size 4 at addr dead0000000000f0 by task cpuhp/3/31
+  Call Trace:
+   kvm_arch_enable_virtualization_cpu+0x25f/0x870
+   kvm_online_cpu+0x1a/0x50
+   cpuhp_invoke_callback+0x291/0xfd0
+   cpuhp_thread_fun+0x256/0x4a0
+   smpboot_thread_fn+0x287/0x6c0
+
+Fixes: 44d174596260 ("KVM: Use dedicated mutex to protect kvm_usage_count to avoid deadlock")
+Cc: stable@vger.kernel.org
+Assisted-by: GPT-6-Astra
+Signed-off-by: Chengfeng Ye <nicoyip.dev@gmail.com>
+Signed-off-by: Qi Zhang <marsy12010123@gmail.com>
+---
+Changes in v2:
+- Rebase onto current kvm-x86/next; keep the same RCU lifetime fix.
+- Clarify the scope of the Sashiko finding: the hotplug update of
+  tsc_offset_adjustment and the vCPU-load read/reset are unchanged by
+  this patch. RCU protects VM/vCPU lifetime; it does not synchronize
+  those field accesses. A separate synchronization change would need
+  its own analysis and review.
+
+Link: https://lore.kernel.org/r/20260804123243.2213854-1-marsy12010123@gmail.com/ [v1]
+Link: https://lore.kernel.org/r/20260804125109.B20491F000E9@smtp.kernel.org/ [review]
+
+ arch/x86/kvm/x86.c  | 6 ++++--
+ virt/kvm/kvm_main.c | 5 +++--
+ 2 files changed, 7 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[kvm-unit-tests PATCH] x86/pmu: Relax overcounting checks to allow
+Author: Sean Christopherson <seanjc@google.com>
+
+Relax the check on the allowed instruction count range in the PMC overflow
+testcase for AMD CPUs (all of which overcount instructions retired due to
+treating VMRUN as retiring in guest context).  Empirically, modern CPUs can
+overcount by ~150 instructions, which seems high, but is reasonable when
+considering the main loop executes one million nops.  Arbitrarily allow for
+an "extra" 199 VM-Exits in the loop, expressed as a function of the number
+of nops in the loop (the "per 5000" math was derived from wanting to allow
+for ~200 VM-Exits).
+
+Opportunistically drop the "allow undercounting by 1", which presumably was
+a workaround for the VMRUN overcounting behavior (which is now addressed by
+tagging AMD CPUs as having pmu.errata.instructions_retired_overcount=true).
+
+Opportunistically use the same logic for Intel CPUs.  While hitting Intel's
+errata is apparently less common (doesn't happen on every VM-Exit?), trying
+to precisely validate the counts when they are known to be buggy doesn't
+add much value.  E.g. if an overcounting CPU happened to generate 14 extra
+events, odds are good the allowed count would simply be increased.
+
+Reported-by: Sandipan Das <sandipan.das@amd.com>
+Closes: https://lore.kernel.org/all/2dd84890-3c21-4942-a9e4-8e07408620d3@amd.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ x86/pmu.c | 16 +++++++++-------
+ 1 file changed, 9 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Cancel PIT timer on failed creation
+Author: Bruno Produit <bruno.produit@trailofbits.com>
+
+
+Cancel the PIT hrtimer if PIT creation fails after registering the PIO
+device. This matches normal teardown and ensures the timer no longer
+uses the PIT before its memory is freed.
+
+KVM registers the PIT's PIO device before registering the optional dummy
+speaker device.  If speaker registration fails, a vCPU can have already
+programmed channel 0 and armed pit_state.timer through the published PIT
+device. When I/O bus registration became fallible, its cleanup did not
+cancel the timer before freeing the PIT.
+
+Fixes: 090b7aff2712 ("KVM: make io_bus interface more robust")
+Cc: stable@vger.kernel.org
+Assisted-by: Codex:gpt-5.6-sol
+Signed-off-by: Kyle Zeng <kylebot@openai.com>
+Signed-off-by: Bruno Produit <bruno.produit@trailofbits.com>
+---
+ arch/x86/kvm/i8254.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 5/5] vsock: defer RX readable notifications until batch unlock
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+An RX batch can make a socket readable while the worker still owns its
+socket lock. Waking a reader at that point can make it immediately wait
+for the same lock.
+
+For the callback installed by sock_init_data(), record when the existing
+low-watermark condition is met and issue one notification after the batch
+releases the lock. Save the initial sock_def_readable() callback when the
+AF_VSOCK socket is created. virtio_transport_common can be built as a
+module and cannot refer to that unexported symbol directly.
+
+Custom data-ready callbacks retain per-packet notification behavior. If
+the callback changes while a default notification is pending, finish the
+batch before returning to the per-packet path.
+
+Keep the socket reference until the deferred callback completes. A sockmap
+attachment takes the socket lock, so data queued before the attachment is
+reported through the saved default callback.
+
+Control packets, state transitions, transport changes and non-batched
+sockets retain their existing behavior.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |  1 +
+ include/net/af_vsock.h                  |  3 +-
+ net/vmw_vsock/af_vsock.c                |  1 +
+ net/vmw_vsock/virtio_transport_common.c | 53 ++++++++++++++++++++++++++-----
+ 4 files changed, 49 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 4/5] vsock: coalesce RX write-space notifications in lock batches
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+Each received packet updates peer credit and calls sk_write_space() when
+send space is available. A writer cannot use the newly advertised credit
+until the socket lock is released, so repeated callbacks within one lock
+batch cannot let it make progress sooner.
+
+For the callback installed by sock_init_data(), record one pending
+write-space notification and deliver it immediately before release_sock().
+Save the initial sock_def_write_space() callback when the AF_VSOCK socket
+is created because it is not visible to virtio_transport_common when built
+as a module. Custom write-space callbacks retain per-packet notification
+behavior.
+
+Set the batch socket before processing its first packet so a batch
+ending on that packet cannot lose the notification.
+
+Packets outside the eligible STREAM/RW batch path retain per-packet
+notification behavior. The 64-packet and 64K limits cap the packets whose
+notifications can be coalesced.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |  1 +
+ include/net/af_vsock.h                  |  2 ++
+ net/vmw_vsock/af_vsock.c                |  1 +
+ net/vmw_vsock/virtio_transport_common.c | 30 +++++++++++++++++++++++++-----
+ 4 files changed, 29 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/5] vsock: reuse same-flow socket lookup in RX batches
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+An RX lock batch still looks up the socket for every packet and takes a
+temporary lookup reference, even though the batch already holds a
+reference to the locked socket.
+
+Record the network namespace and packet address tuple when a batch
+starts. Reuse the batch socket for later STREAM/RW packets with the same
+tuple, and release the batch before looking up a different flow.
+
+The cached path still traces every packet, takes an skb owner reference,
+validates socket state, source and transport, updates credit, and runs
+the receive state machine. Only the socket table lookup and its temporary
+reference are skipped.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |  3 ++
+ net/vmw_vsock/virtio_transport_common.c | 58 +++++++++++++++----------
+ 2 files changed, 37 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/5] vsock: amortize RX socket locking for stream packets
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+The virtio-vsock RX worker currently acquires and releases the socket lock
+for every received packet. Keep the lock held while processing a bounded
+run of packets that belongs to the same socket.
+
+Only ordinary RW packets for an established STREAM socket whose transport
+and protocol remain unchanged are eligible. Control packets, SEQPACKET
+traffic, state or transport changes, malformed packets, and sockets whose
+protocol has been replaced end the active batch and retain their existing
+handling.
+
+Serialize the initial eligibility check with sk_callback_lock because
+sockmap removal restores the protocol without taking the socket lock.
+
+Limit each batch to 64 packets or 64K of payload to bound the work
+performed under one socket lock. Keep the lookup reference until the batch
+finishes.
+
+The virtqueue callback remains a queue_work() callback. Batching runs only
+in the process-context RX worker.
+
+Introduce virtio_transport_rx_batch_finish() to tear down the batch and
+release the socket lock and lookup reference.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |   9 ++
+ net/vmw_vsock/virtio_transport.c        |  48 ++++++++-
+ net/vmw_vsock/virtio_transport_common.c | 126 +++++++++++++++++++++++-
+ 3 files changed, 181 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/5] vsock: split socket lookup from locked RX processing
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+Split virtio_transport_recv_pkt() so socket lookup is separate from the
+receive state machine that runs under the socket lock.
+
+Keep virtio_transport_recv_pkt() on its existing per-packet locking path.
+Pass the source and destination addresses used for lookup to the locked
+receive path so they are decoded only once.
+
+Pass the network namespace and decoded address tuple to the locked receive
+path through a packet context so later extensions remain cleanly
+encapsulated.
+
+Preserve source validation and failure handling. Keep the lookup reference
+separate from the skb owner reference so a later patch can retain it while
+processing a bounded run of packets under one socket lock.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 140 ++++++++++++++++--------
+ 1 file changed, 95 insertions(+), 45 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/5] vsock: reduce RX per-packet socket overhead
+Author: physicalmtea <physicalmtea@gmail.com>
+
+
+This series reduces per-packet socket overhead in the virtio-vsock RX
+worker.
+
+Patch 1: separate socket lookup from locked packet processing.
+
+Patch 2: keep one socket lock across a bounded run of established
+STREAM/RW packets for the same native socket.
+
+Patch 3: reuse the locked socket for later packets with the same
+address tuple.
+
+Patch 4: coalesce default write-space notifications while that
+lock is held.
+
+Patch 5: defer the default readable callback until after the batch
+unlocks. Custom callbacks retain per-packet notification behavior.
+
+Performance:
+
+Tested on single-stream AF_VSOCK (1 reader on Guest CPU0, virtio-vsock IRQ
+on Guest CPU1, fresh QEMU guest per state, 16 balanced AB/BA pairs per
+payload).
+
+End-to-end RX throughput (64K receiver buffer, SO_RCVLOWAT=1):
+
+  payload  baseline RX (G/s)  PATCH RX (G/s)  throughput change (95% CI)
+  256B     0.5722             1.0286          +79.76% [+75.40%, +84.23%]
+  512B     1.1464             1.9779          +72.53% [+69.50%, +75.63%]
+  1K       2.2714             3.6368          +60.12% [+56.92%, +63.37%]
+  4K       3.9095             7.7160          +97.37% [+92.09%, +102.79%]
+
+Fixed-syscall stress test (receiver buffer = sender write size; RX in G/s):
+
+  payload baseline RX PATCH RX throughput change (95% CI) recv() base/patch
+  256B     0.2885       0.6737    +133.50% [+123.58%, +143.86%]  1048577/1048577
+  512B     0.5631       1.2091    +114.71% [+104.97%, +124.92%]  1048577/1048577
+  1K       1.5361       2.9678    +93.20% [+80.15%, +107.20%]     1048577/1048577
+  4K       2.8378       6.1878    +118.05% [+109.15%, +127.33%]  538802/525645
+
+Request-response latency (Ping-Pong RTT, 10,000 requests):
+
+  payload  baseline mean RTT (us)  PATCH mean RTT (us)  change (95% CI)
+  256B     126.968                124.541              -1.91% [-3.35%, -0.45%]
+  4K       130.362                126.664              -2.84% [-5.12%, -0.50%]
+
+Diagnostic Guest CPU1 system-wide cycles (fixed-64K receiver, with perf):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  256B     15.287            13.630          -10.84% [-12.51%, -9.14%]
+  512B      7.306             6.611           -9.51% [-10.92%, -8.08%]
+  1K        3.811             3.458           -9.25% [-10.96%, -7.50%]
+  4K        1.850             1.669           -9.75% [-11.78%, -7.67%]
+
+Jia Jia (5):
+  vsock: split socket lookup from locked RX processing
+  vsock: amortize RX socket locking for stream packets
+  vsock: reuse same-flow socket lookup in RX batches
+  vsock: coalesce RX write-space notifications in lock batches
+  vsock: defer RX readable notifications until batch unlock
+
+ include/linux/virtio_vsock.h            |  14 ++
+ include/net/af_vsock.h                  |   3 +
+ net/vmw_vsock/af_vsock.c                |   2 +
+ net/vmw_vsock/virtio_transport.c        |  48 ++++-
+ net/vmw_vsock/virtio_transport_common.c | 341 +++++++++++++++++++++++++++-----
+ 5 files changed, 357 insertions(+), 51 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 07/10] kernel: hibernate: Add an arch hook for preventing hiberation
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add a hook to allow arch code disable hibernation. On arm64, with an RMM active,
+there could be pages that are delegated to the "Realm" security state. Any
+access to them are fatal (e.g., hibernate save image or restoring an image to
+a delegated page). pKVM host also has its restrictions on enabling hibernation.
+
+Add a weak arch hook to let the architectures have a say.
+
+Cc: "Rafael J. Wysocki" <rafael@kernel.org>
+Cc: Len Brown <lenb@kernel.org>
+Cc: Pavel Machek <pavel@kernel.org>
+Cc: linux-pm@vger.kernel.org
+Cc: Sudeep Holla <sudeep.holla@kernel.org>
+Suggested-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ include/linux/suspend.h  | 1 +
+ kernel/power/hibernate.c | 8 +++++++-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 08/10] arm64: Block hibernate and kexec while RMM is active
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+RMM can be deactivated only after all delegated granules have been
+reclaimed. If a new kernel is entered while any granules remain in the
+Realm PAS, accesses to that memory can raise a Granule Protection Fault
+and be fatal to the new kernel.
+
+Crash kexec/kdump needs separate handling. It can be supported only once
+the crash kernel can tolerate delegated memory inherited from the primary
+kernel. i.e., be able to read the pages safely and fixup the GPF. Until
+then disable the kexec completely.
+
+Hibernate has a similar problem. The image cannot be safely saved for
+delegated pages, as the RMM doesn't support exporting the pages.
+Also, on the resume path, if the RMM is active, there could be delegated
+granules and overwriting them is fatal.
+
+Disable both kexec and hiberation while the RMM is active.
+
+Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Drop cpus_are_stuck_in_kernel() from arch_hibernation_available()
+ - Split arch_hibernation_available() hook as a separate patch
+Changes since v20:
+ - Add arch_hibernation_available() hook for archs to have a say and drop the
+   other checks.
+Changes since v19:
+ - New patch to disable kexec and hibernation with RMM
+---
+ arch/arm64/kernel/hibernate.c     | 14 ++++++++++++++
+ arch/arm64/kernel/machine_kexec.c | 11 +++++++++++
+ 2 files changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] KVM: selftests: Add a test for lost nested APF VM-Exits
+Author: Loc Nguyen <loc@ryzome.com>
+
+Exercise delivery of an asynchronous page fault from L2 to L1 as a
+synthetic #PF VM-Exit.  Hold L2's backing page missing with userfaultfd
+and bound the critical KVM_RUN with a signal-based timeout.
+
+On an affected kernel, KVM queues the nested VM-Exit without requesting
+event processing, re-enters L2, and blocks on the same missing page.  The
+test detects the timeout and verifies that L1's APF record still contains
+KVM_PV_REASON_PAGE_NOT_PRESENT.
+
+On a fixed kernel, verify that L1 receives an exception VM-Exit with a #PF,
+error code zero, a nonzero APF token, and a matching page-not-present
+reason.
+
+Skip the test when VMX, EPT, the nested APF features, or userfaultfd fault
+handling are unavailable.
+
+Signed-off-by: Loc Nguyen <loc@ryzome.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/nested_apf_event_test.c | 306 ++++++++++++++++++
+ 2 files changed, 307 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: x86: Request event processing for exception VM-Exits
+Author: Loc Nguyen <loc@ryzome.com>
+
+Request event processing whenever kvm_queue_exception_vmexit() queues an
+exception VM-Exit.  Most callers reach the helper through
+kvm_multiple_exception(), which already sets KVM_REQ_EVENT, but nested
+asynchronous page faults call it directly.
+
+Without another event request, vcpu_enter_guest() skips
+kvm_check_and_inject_events() and re-enters L2.  A subsequent VM-Exit can
+clear the pending exception while reconstructing vectoring state, losing
+the synthetic #PF VM-Exit.  The APF reason remains PAGE_NOT_PRESENT and a
+later regular #PF can consume the stale value.
+
+Setting KVM_REQ_EVENT in the common helper ensures that L1 receives the
+queued VM-Exit before KVM re-enters L2.
+
+Fixes: 7709aba8f716 ("KVM: x86: Morph pending exceptions to pending VM-Exit=
+s at queue time")
+Cc: stable@vger.kernel.org
+Signed-off-by: Loc Nguyen <loc@ryzome.com>
+---
+ arch/x86/kvm/x86.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] KVM: x86: Fix lost nested APF VM-Exits
+Author: Loc Nguyen <loc@ryzome.com>
+
+A nested asynchronous page fault delivered to L1 as a synthetic #PF=20
+VM-Exit can be lost after KVM queues the exception.  Most callers of
+kvm_queue_exception_vmexit() arrive through kvm_multiple_exception(),
+which requests event processing, but the nested APF path calls the=20
+helper directly.
+
+Without KVM_REQ_EVENT, vcpu_enter_guest() can skip
+kvm_check_and_inject_events() and re-enter L2.  A later VM-Exit can then
+clear the pending exception while reconstructing vectoring state.  The=20
+APF reason remains PAGE_NOT_PRESENT, allowing a later regular #PF to
+consume the stale reason.
+
+Patch 1 requests event processing in kvm_queue_exception_vmexit() so
+that all queued exception VM-Exits are processed before re-entering the=20
+guest.
+
+Patch 2 adds a regression test that holds an L2 backing page missing
+with userfaultfd.  The test verifies that L1 receives the synthetic #PF=20
+VM-Exit with the expected APF token and PAGE_NOT_PRESENT reason.
+
+Testing was performed in a nested VMX environment:
+
+  - x86_64 kernel build with KVM_WERROR=3Dy
+  - nested_apf_event_test fails on the base kernel with a lost nested
+    APF event and passes with the fix=20
+  - full KVM selftest suite passes
+  - kvm-unit-tests VMX suite passes with TIMEOUT=3D900
+
+Loc Nguyen (2):
+  KVM: x86: Request event processing for exception VM-Exits
+  KVM: selftests: Add a test for lost nested APF VM-Exits
+
+ arch/x86/kvm/x86.c                            |   2 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/nested_apf_event_test.c | 306 ++++++++++++++++++
+ 3 files changed, 309 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 68cf346e1 to 7ac101b13
+KVM mailing list update from 68cf346e1 to 7ac101b13
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      2 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  Suzuki K Poulose <suzuki.poulose@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v22 08/10] arm64: Block hibernate and kexec while RMM is active
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+RMM can be deactivated only after all delegated granules have been
+reclaimed. If a new kernel is entered while any granules remain in the
+Realm PAS, accesses to that memory can raise a Granule Protection Fault
+and be fatal to the new kernel.
+
+Crash kexec/kdump needs separate handling. It can be supported only once
+the crash kernel can tolerate delegated memory inherited from the primary
+kernel. i.e., be able to read the pages safely and fixup the GPF. Until
+then disable the kexec completely.
+
+Hibernate has a similar problem. The image cannot be safely saved for
+delegated pages, as the RMM doesn't support exporting the pages.
+Also, on the resume path, if the RMM is active, there could be delegated
+granules and overwriting them is fatal.
+
+Disable both kexec and hiberation while the RMM is active.
+
+Reviewed-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Drop cpus_are_stuck_in_kernel() from arch_hibernation_available()
+ - Split arch_hibernation_available() hook as a separate patch
+Changes since v20:
+ - Add arch_hibernation_available() hook for archs to have a say and drop the
+   other checks.
+Changes since v19:
+ - New patch to disable kexec and hibernation with RMM
+---
+ arch/arm64/kernel/hibernate.c     | 14 ++++++++++++++
+ arch/arm64/kernel/machine_kexec.c | 11 +++++++++++
+ 2 files changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 07/10] kernel: hibernate: Add an arch hook for preventing hiberation
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add a hook to allow arch code disable hibernation. On arm64, with an RMM active,
+there could be pages that are delegated to the "Realm" security state. Any
+access to them are fatal (e.g., hibernate save image or restoring an image to
+a delegated page). pKVM host also has its restrictions on enabling hibernation.
+
+Add a weak arch hook to let the architectures have a say.
+
+Cc: "Rafael J. Wysocki" <rafael@kernel.org>
+Cc: Len Brown <lenb@kernel.org>
+Cc: Pavel Machek <pavel@kernel.org>
+Cc: linux-pm@vger.kernel.org
+Cc: Sudeep Holla <sudeep.holla@kernel.org>
+Suggested-by: Catalin Marinas <catalin.marinas@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ include/linux/suspend.h  | 1 +
+ kernel/power/hibernate.c | 8 +++++++-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
