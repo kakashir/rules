@@ -1,0 +1,3811 @@
+
+On /root/mail/repo:
+From 50567b68f to 652f2f6f5
+KVM mailing list update from 50567b68f to 652f2f6f5
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     22 arm.com
+     13 amazon.co.uk
+      7 linux.intel.com
+      6 linux.ibm.com
+      3 tencent.com
+      3 intel.com
+      2 nvidia.com
+      2 linaro.org
+      1 snu.ac.kr
+
+Top 15 contributors (Based on Email Body)
+
+     18  Suzuki K Poulose <suzuki.poulose@arm.com>
+      7  Xu Yilun <yilun.xu@linux.intel.com>
+      7  Fred Griffoul <fgriffo@amazon.co.uk>
+      6  Mushahid Hussain <hmushi@amazon.co.uk>
+      5  Omar Elghoul <oelghoul@linux.ibm.com>
+      4  Steven Price <steven.price@arm.com>
+      3  Wanpeng Li <wanpengli@tencent.com>
+      3  Vishal Verma <vishal.l.verma@intel.com>
+      2  Simon Song <xinmengs@nvidia.com>
+      2  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      1  Seongjun Hong <hsj0512@snu.ac.kr>
+      1  Gautam Menghani <gautam@linux.ibm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v4 2/2] x86/early_printk: Add earlyprintk=tdx to drive the
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+A TDX guest cannot execute port I/O instructions directly, but
+earlyprintk's serial console still issues plain inb()/outb() and lets
+each one fault into the #VE handler to be emulated as a TDVMCALL.
+
+While that works, it is a roundabout way to get a character out.
+early_serial_putc() polls the LSR, and then writes a byte, but since the
+TDX guest can't directly do port I/O, a #VE exception is raised. The #VE
+handler must call TDG.VP.VEINFO.GET to find out what faulted, and then
+it can issue the TDVMCALL that does the actual work.
+
+This makes #VE a functional mechanism for doing I/O, which is not
+desirable, is unnecessarily complicated and fragile, and results in
+twice the number of calls into the TDX module.
+
+Instead, add an earlyprintk=tdx option, which can issue the TDVMCALLs
+directly. Add a pair of tdx_serial_in() and tdx_serial_out() accessors
+and set them up in this case.
+
+Note that the output does not appear any earlier - "earlyprintk=" is an
+early_param(), so the console is still registered from
+parse_early_param(). This only changes how the bytes leave the guest
+once it is up.
+
+LLMs were used under supervision to create this patch, to help
+understand the scope and mechanisms, create testing instrumentation
+(throwaway) to count #VEs in the serial vs tdx earlyprintk setups,
+and to drive lab machines to do this testing.
+
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+---
+ Documentation/admin-guide/kernel-parameters.txt |  8 +++++++
+ arch/x86/include/asm/tdx.h                      |  4 ++++
+ arch/x86/coco/tdx/tdx.c                         | 29 +++++++++++++++++++++++++
+ arch/x86/kernel/early_printk.c                  | 20 +++++++++++++++++
+ 4 files changed, 61 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 1/2] x86/tdx: Move port I/O definitions to a shared
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+In preparation for adding a 'tdx' option for early_printk which uses
+direct TDVMCALLs for I/O, factor out the PORT_READ and PORT_WRITE
+definitions from arch/x86/coco/tdx/tdx.c into
+arch/x86/include/asm/shared/tdx.h, and namespace them with 'TDVMCALL_'.
+
+The decompressor also used 0/1 literals in its tdx_io_{in,out} helpers -
+switch those to use the new definitions.
+
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+Reviewed-by: Kiryl Shutsemau (Meta) <kas@kernel.org>
+Cc: Rick Edgecombe <rick.p.edgecombe@intel.com>
+---
+ arch/x86/include/asm/shared/tdx.h | 6 ++++++
+ arch/x86/boot/compressed/tdx.c    | 4 ++--
+ arch/x86/coco/tdx/tdx.c           | 8 ++------
+ 3 files changed, 10 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 0/2] x86/tdx: Use TDVMCALLs directly for earlyprintk
+Author: Vishal Verma <vishal.l.verma@intel.com>
+
+Background
+==========
+
+TDX guests have early_printk support, but it is through a roundabout way
+using a #VE exception as a functional mechanism. The exception handler
+has to use TDG.VP.VEINFO.GET to find out what faulted, and then issue
+the TDVMCALL. Simplify this by using a TDVMCALL from the guest which can
+directly perform the port I/O.
+
+Patch details
+=============
+
+Patch 1 is a cleanup that moves the port I/O direction constants to
+arch/x86/include/asm/shared/tdx.h.
+
+Patch 2: Add a new earlyprintk=tdx option, which calls the new
+tdx_serial_in() / tdx_serial_out() helpers to perform the port I/O
+directly using TDVMCALLs.
+
+The serial earlyprintk path is left as is - TD guests using this will
+still take a #VE exception, and the exception handler will perform the
+I/O.
+
+Testing
+=======
+
+Added a counter for the number of COM1 port I/O #VEs handled:
+
+  no earlyprintk     -  ~63000
+  earlyprintk=ttyS0  -  ~61000
+  earlyprintk=tdx    -  ~35000
+
+The new tdx option nearly halves the number of #VEs handled.
+
+Additionally, ran the usual suite of CI testing, which covers KVM self
+tests, KVM unit tests, and Avocado KVM tests without any regressions.
+
+Signed-off-by: Vishal Verma <vishal.l.verma@intel.com>
+---
+Changes in v4:
+- Rename the tdx_inb()/tdx_outb() helpers directly to the serial
+  accessors with __noendbr annotations, and remove the config ifdefs
+  from early_printk.c. (Kiryl)
+- Rebase to v7.3-rc6
+- Link to v3: https://patch.msgid.link/20260922-b4-tdx_earlyprintk_tdcalls-v3-0-6ebaa599df10@intel.com
+
+Changes in v3:
+- Drop the ttySN and baudrate option parsing for earlyprintk=tdx (Dave Hansen)
+- Link to v2: https://patch.msgid.link/20260921-b4-tdx_earlyprintk_tdcalls-v2-0-ad1fde3f25fd@intel.com
+
+Changes in v2:
+- Rebase to v7.3-rc4
+- Move the TDX hypercall helpers into coco/tdx/tdx.c (Kiryl)
+- Add a new earlyprintk=tdx option that implements the direct TDVMCALL
+  path (Dave Hansen)
+- Link to v1: https://patch.msgid.link/20260910-b4-tdx_earlyprintk_tdcalls-v1-0-4b2b1bf9001b@intel.com
+
+---
+Vishal Verma (2):
+      x86/tdx: Move port I/O definitions to a shared header
+      x86/early_printk: Add earlyprintk=tdx to drive the UART with TDVMCALLs
+
+ Documentation/admin-guide/kernel-parameters.txt |  8 ++++++
+ arch/x86/include/asm/shared/tdx.h               |  6 ++++
+ arch/x86/include/asm/tdx.h                      |  4 +++
+ arch/x86/boot/compressed/tdx.c                  |  4 +--
+ arch/x86/coco/tdx/tdx.c                         | 37 +++++++++++++++++++++----
+ arch/x86/kernel/early_printk.c                  | 20 +++++++++++++
+ 6 files changed, 71 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] i386: Hyper-V partition time restore feature
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+A nested Hyper-V that sees the frequency MSRs lets L0 own the
+partition reference time. After a resume from hibernation it issues
+HvCallRestorePartitionTime with the TSC and the reference counter it
+saved. Hyper-V offers hibernation to its root partition only when L0
+advertises CPUID 0x40000004 EAX bit 20 (RestoreTimeOnResume).
+
+Add 'hv-restore-time-on-resume' for the bit. It requires
+'hv-frequencies'. KVM reports the bit in KVM_GET_SUPPORTED_HV_CPUID
+when it handles the hypercall.
+
+KVM side: https://lore.kernel.org/kvm/20261005192431.87317-4-hmushi@amazon.co.uk/
+
+The TLFS marks the bit as reserved. The name comes from Microsoft's
+hvdef crate.
+
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+---
+ docs/system/i386/hyperv.rst    | 9 +++++++++
+ target/i386/cpu.c              | 2 ++
+ target/i386/cpu.h              | 1 +
+ target/i386/kvm/hyperv-proto.h | 1 +
+ target/i386/kvm/kvm.c          | 8 ++++++++
+ 5 files changed, 21 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 3/3] KVM: x86: hyper-v: Implement HvCallRestorePartitionTime
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+A nested Hyper-V that sees the frequency MSRs lets its parent own
+the partition reference time. After a resume from hibernation it
+issues HvCallRestorePartitionTime (0x103) with the TSC and the
+reference counter it saved, and expects both clocks to continue
+from there. KVM rejected the hypercall. The guest time base stayed
+inconsistent and the root partition did not run.
+
+Restore both clocks in one pvclock update, so no vCPU runs with the
+new TSC and the old reference time. Each vCPU computes and writes its
+own TSC offset from the recorded step, so no other vCPU writes its
+TSC state. kvm_synchronize_tsc() writes the offset of the calling
+vCPU only. Mark the TSC page as changed by the guest, so it is
+recomputed even when TSC emulation control is set.
+
+The TLFS marks the hypercall, its input and CPUID 0x40000004 EAX
+bit 20 (RestoreTimeOnResume) as reserved. Microsoft's hvdef crate
+defines them (hypercall::RestorePartitionTime), and Microsoft's
+OHCL kernel carries the same C definitions in hvgdk_mini.h.
+
+Advertise bit 20 and gate the hypercall on it under
+KVM_CAP_HYPERV_ENFORCE_CPUID. Hyper-V offers hibernation to its root
+partition only when the parent sets this bit.
+
+Assisted-by: Claude:claude-fable-5.1
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  5 ++
+ arch/x86/kvm/hyperv.c           | 36 ++++++++++++
+ arch/x86/kvm/x86.c              | 99 +++++++++++++++++++++++++++++++--
+ arch/x86/kvm/x86.h              |  1 +
+ include/hyperv/hvgdk_mini.h     | 12 ++++
+ 5 files changed, 148 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/3] KVM: x86: Extract __kvm_set_clock() from kvm_vm_ioctl_set_clock()
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+Move the body of KVM_SET_CLOCK into __kvm_set_clock() and leave the
+copy from userspace and the flags check in the ioctl handler. A
+following patch steps kvmclock from inside KVM and needs the worker.
+
+No functional change intended.
+
+Assisted-by: Claude:claude-fable-5.1
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 40 +++++++++++++++++++++++-----------------
+ 1 file changed, 23 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/3] KVM: nVMX: Clear stale vmcs02 sync flag in free_nested()
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+free_nested() frees vmcs02 but leaves need_sync_vmcs02_to_vmcs12_rare
+set. The flag means that the rare guest fields of vmcs12 are valid
+only in vmcs02. After vmcs02 is freed the flag is wrong.
+
+L1 then executes VMXON and loads a vmcs12 with VMPTRLD. The flag is
+still set, so the first sync copies the rare fields from the new,
+never launched vmcs02 into vmcs12. This sets TR, LDTR, GDTR, IDTR,
+the segment registers and the FS/GS bases to zero in guest memory.
+set_current_vmptr() re-arms the other lazy flags at VMPTRLD. This
+flag has no such point, so VMXOFF is the place to clear it.
+
+A nested Hyper-V follows this sequence when it resumes from
+hibernation. It executes VMXOFF before hibernation. On resume, it
+reloads the VMCS images that winresume restored from the hiberfile.
+VM-entry fails with exit reason 0x80000021 (invalid guest state) and
+the guest hypervisor resets the machine. vmx_leave_nested() also goes
+through free_nested(), so KVM_SET_NESTED_STATE takes the same path.
+
+Clear the flag together with the other nested state.
+
+Fixes: 7952d769c29c ("KVM: nVMX: Sync rarely accessed guest fields only when needed")
+Cc: stable@vger.kernel.org
+Assisted-by: Claude:claude-fable-5.1
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+---
+ arch/x86/kvm/vmx/nested.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 0/3] KVM: x86: Support hibernation of a nested Hyper-V
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+A Windows guest with the Hyper-V role enabled runs its own hypervisor
+(hvix64) nested under KVM. When KVM advertises the Hyper-V time and
+frequency MSRs, hvix64 lets KVM own the partition reference time. It
+then offers hibernation to Windows only if KVM also advertises CPUID
+0x40000004 EAX bit 20 (RestoreTimeOnResume), and on resume restores
+the saved TSC and reference time through HvCallRestorePartitionTime
+(0x103). Both are reserved in the TLFS and defined in Microsoft's
+hvdef crate.
+
+Patch 1 fixes a stale nVMX sync flag that zeroed the vmcs12 segment
+state hvix64 reloads on resume. It stands alone and is tagged for
+stable. Patch 2 is a refactor with no functional change. Patch 3
+advertises the bit and implements the hypercall, restoring kvmclock
+and every vCPU's TSC inside one pvclock update.
+
+Tested on Windows Server 2025 with Hyper-V running, guest initiated
+hibernate and resume, under QEMU with a matching CPU property:
+https://github.com/hmushi/qemu/tree/hv-restore-time-on-resume
+
+Mushahid Hussain (3):
+  KVM: nVMX: Clear stale vmcs02 sync flag in free_nested()
+  KVM: x86: Extract __kvm_set_clock() from kvm_vm_ioctl_set_clock()
+  KVM: x86: hyper-v: Implement HvCallRestorePartitionTime
+
+ arch/x86/include/asm/kvm_host.h |   5 ++
+ arch/x86/kvm/hyperv.c           |  36 +++++++++
+ arch/x86/kvm/vmx/nested.c       |   1 +
+ arch/x86/kvm/x86.c              | 131 +++++++++++++++++++++++++++-----
+ arch/x86/kvm/x86.h              |   1 +
+ include/hyperv/hvgdk_mini.h     |  12 +++
+ 6 files changed, 168 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86/mmu: Fail nested EPT walks for GPAs beyond the EPT width
+Author: Mushahid Hussain <hmushi@amazon.co.uk>
+
+Fail the nested EPT walk when the L2 guest-physical address has bits
+above the width of L1's EPT. The width is 48 bits for a 4-level EPT
+and 57 bits for a 5-level EPT. Report no RWX bits in the exit
+qualification, as for a translation that no table entry provides. L1
+then handles the EPT violation itself.
+
+Hardware signals an EPT violation for such an address without a table
+walk. KVM's shadow walker instead indexes the tables with PT_INDEX(),
+which drops the high bits. The walk resolves the aliased address and
+KVM installs a shadow mapping for the alias. The CPU faults on the
+original address again, and KVM repeats the walk without end. L1 does
+not see an EPT violation for the access, and the L2 vCPU is stuck.
+
+Any L2 that references an address at or above 2^48 under a 4-level
+EPT triggers the hang. The easy way to get there is a MAXPHYADDR that
+differs between L1 and the host. Take L1 MAXPHYADDR 48 on a 52-bit
+host with KVM's default allow_smaller_maxphyaddr=0. A PTE bit that L1
+treats as reserved is then valid for the CPU. kvm-unit-tests "access"
+and "vmx_pf_exception_test", run as L2 under an L1 KVM with MAXPHYADDR
+48, hang at the first present PTE with bit 51 set.
+
+Fixes: 37406aaaeebc ("nEPT: Add EPT tables support to paging_tmpl.h")
+Assisted-by: Claude:claude-fable-5.1
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+---
+Reproducer:
+  L1: KVM, CPUID MAXPHYADDR 48, 4-level EPT.
+  Host: 52-bit MAXPHYADDR, allow_smaller_maxphyaddr=0.
+  L2: kvm-unit-tests "access" and "vmx_pf_exception_test" under QEMU.
+      Both set a PTE with bit 51, which L1 treats as reserved and the
+      CPU treats as an address bit.
+
+Without the patch both tests hang at the first such PTE. L1 sees no
+EPT violation.
+
+With the patch L1 receives the EPT violation. Both tests pass with the
+bit-51 cases excluded, as access.c does for MAXPHYADDR >= 52. This holds
+with ept=1 and ept=0.
+
+ arch/x86/kvm/mmu/paging_tmpl.h | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/1] vfio/pci: Give drivers control of PCI driver_data
+Author: Simon Song <xinmengs@nvidia.com>
+
+Hi all,
+
+This patch lets VFIO PCI variant drivers store their private structures
+in PCI driver_data, removing the requirement that it point directly to
+struct vfio_pci_core_device. This also accommodates the typed driver data
+used by the Rust PCI infrastructure, as discussed for the proposed Rust
+NVIDIA vGPU VFIO driver [1].
+
+Runtime PM and AER helpers receive an explicit vfio_pci_core_device
+pointer. VFIO_PCI_CORE_DEFINE_CALLBACKS() generates per-driver wrappers
+that retrieve the driver's private data and pass its embedded core device
+to these helpers. Each driver installs its own PM ops table.
+
+VGA initialization selects the decode callback in vfio_pci_vga_init()
+based on vfio_vga_disabled(vdev). Both callbacks use pci_dev directly and
+do not depend on driver_data.
+
+Changes since v2 [2]:
+- Drop the unused pci_channel_state_t argument from the core AER helper
+  and its callers, preserving the PCI callback signature (Danilo).
+- Wrap each driver's PM ops pointer with pm_ptr() so unused tables can
+  be removed when CONFIG_PM=n (Sashiko).
+
+Changes since v1:
+- Extend VFIO_PCI_CORE_DEFINE_CALLBACKS() to accept the driver's private
+  structure type and the member containing vfio_pci_core_device.
+- Store each variant driver's private structure in PCI driver_data.
+- Select the VGA decode callback in the core and retain the one-argument
+  vfio_pci_core_register_device() interface.
+
+[1] https://lore.kernel.org/all/DLFD2ZDSK9YQ.3A4R66G8UJMD8@kernel.org/
+[2] https://lore.kernel.org/r/20260930143641.4160785-1-xinmengs@nvidia.com/
+
+Thanks,
+Simon
+
+Simon Song (1):
+  vfio/pci: Remove the core dependency on driver data
+
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 27 ++++----
+ drivers/vfio/pci/ism/main.c                   | 19 +++---
+ drivers/vfio/pci/mlx5/main.c                  | 13 ++--
+ drivers/vfio/pci/nvgrace-gpu/main.c           | 19 +++---
+ drivers/vfio/pci/pds/pci_drv.c                |  8 ++-
+ drivers/vfio/pci/pds/vfio_dev.c               |  5 +-
+ drivers/vfio/pci/qat/main.c                   | 12 ++--
+ drivers/vfio/pci/vfio_pci.c                   | 33 +++++++++-
+ drivers/vfio/pci/vfio_pci_core.c              | 61 +++++++------------
+ drivers/vfio/pci/virtio/main.c                |  8 ++-
+ drivers/vfio/pci/xe/main.c                    |  8 ++-
+ include/linux/vfio_pci_core.h                 | 41 ++++++++++++-
+ 12 files changed, 159 insertions(+), 95 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/1] vfio/pci: Remove the core dependency on driver data
+Author: Simon Song <xinmengs@nvidia.com>
+
+vfio-pci-core currently has runtime functions that interpret pci
+driver_data as a pointer to vfio_pci_core_device, and enforce vfio
+variant drivers must set vfio_pci_core_device to their pci driver_data.
+This constrains variant drivers' private-data layout, including the
+typed driver data used by the Rust PCI infrastructure.
+
+Add VFIO_PCI_CORE_DEFINE_CALLBACKS marcos to generate wrapper code for
+each vfio variant driver, update vfio variant drivers to store their
+private strctures in driver_data and use generated wrapper to pass the
+vfio core device to helpers.
+
+Select the vga decode callback during vfio_pci_vga_init based on if
+vfio_vga_disabled, the callback only use pci_dev and does not require
+driver_data
+
+Assisted-by: LLM
+Suggested-by: Jason Gunthorpe <jgg@nvidia.com>
+Suggested-by: Alex Williamson <alex.williamson@nvidia.com>
+Suggested-by: Danilo Krummrich <dakr@kernel.org>
+Link: https://lore.kernel.org/all/DLFD2ZDSK9YQ.3A4R66G8UJMD8@kernel.org/
+Signed-off-by: Simon Song <xinmengs@nvidia.com>
+---
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    | 27 ++++----
+ drivers/vfio/pci/ism/main.c                   | 19 +++---
+ drivers/vfio/pci/mlx5/main.c                  | 13 ++--
+ drivers/vfio/pci/nvgrace-gpu/main.c           | 19 +++---
+ drivers/vfio/pci/pds/pci_drv.c                |  8 ++-
+ drivers/vfio/pci/pds/vfio_dev.c               |  5 +-
+ drivers/vfio/pci/qat/main.c                   | 12 ++--
+ drivers/vfio/pci/vfio_pci.c                   | 33 +++++++++-
+ drivers/vfio/pci/vfio_pci_core.c              | 61 +++++++------------
+ drivers/vfio/pci/virtio/main.c                |  8 ++-
+ drivers/vfio/pci/xe/main.c                    |  8 ++-
+ include/linux/vfio_pci_core.h                 | 41 ++++++++++++-
+ 12 files changed, 159 insertions(+), 95 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 6/6] x86/virt/tdx: Support DPAMT when adding memory for
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+The TDX module uses Physical Address Metadata Table (PAMT) to track some
+state for each page of physical memory that it might use. 3 levels of
+PAMTs are used to track pages of different sizes - 1GB, 2MB and 4KB.
+Dynamic PAMT (DPAMT) allows saving memory by allocating 4KB PAMT
+dynamically, while the 1GB and 2MB levels remain allocated on TDX module
+initialization. The kernel has helpers to install 4K DPAMT.
+
+Although the memory for the extensions is tens of megabytes and the host
+allocates it in a large chunk, the TDX module accepts it at 4K
+granularity. Thus the host has to install 4K DPAMT for each page of it.
+
+Call tdx_pamt_get() for each page before adding it to TDX module.
+Normally, these operations should not fail, and if they do,
+intentionally keep the error handling as simple as before - leak all
+pages, including the installed 4K DPAMT metadata.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+---
+v3:
+ - New patch
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 5/6] x86/virt/tdx: Re-initialize the extensions on
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+Runtime TDX module update introduces a mechanism to update the module
+firmware while preserving and restoring TDX operations. The extensions
+functionalities should also be re-initialized as part of the restoration
+process.
+
+The TDX architecture supports an update flow which allows updated
+extensions to consume more memory than their original boot-time
+requirement. So the arch defines the extensions re-initialization flow
+the same as boot-up initialization: the host queries TDX module how much
+additional memory needed, allocates it, adds it to the module via
+TDH.EXT.MEM.ADD, then re-initializes the extensions via TDH.EXT.INIT.
+
+Linux runs the updates in stop_machine() context, which prevents memory
+allocation. So for Linux, a compatible update must not install updated
+extensions that require additional memory.
+
+Given that the memory for the extensions must not increase, the
+re-initialization skips the memory adding steps. It is simplified as:
+
+  - Check if the extensions are supported via TDX_FEATURES0_EXT. If not,
+    skip the extensions re-initialization.
+
+  - Re-initialize the extensions via TDH.EXT.INIT. The SEAMCALL leaf
+    will fail if the updated extensions require more memory, which
+    indicates the update image is not compatible.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+---
+v3:
+ - Add this patch back cause the latest discussion decides the
+   re-initialization won't be integrated in TDH.SYS.UPDATE, a dedicated
+   TDH.EXT.INIT call is still needed (Dave & Rick)
+ - Drop the ext_required check (Rick)
+ - Rename the reinit function as reinit_tdx_module_extensions() (Tony)
+ - Move the reinit function right under tdh_sys_update() (Rick)
+
+v2:
+ - Removed this patch cause the TDX module is expected to re-initialize
+   the extensions on TDH.SYS.UPDATE
+
+v1:
+ - Don't update the extensions metadata any more, only check the
+   metadata originated at boot time.
+ - Remove memory_pool_required_pages check, let TDH.EXT.INIT fail if
+   more memory required.
+ - Changelog & code comments
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/6] x86/virt/tdx: Make TDX module initialize the
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+TDX module extensions need memory for their execution environment
+to serve SEAMCALL leafs. Several add-on features depend on the
+extensions to execute their SEAMCALL leafs.
+
+After providing all required memory to the TDX module, initialize TDX
+module extensions via TDH.EXT.INIT, then those add-on features can use
+their SEAMCALL leafs normally.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+Reviewed-by: Xiaoyao Li <xiaoyao.li@intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+Reviewed-by: Adrian Hunter <adrian.hunter@intel.com>
+---
+v1:
+ - Fix return value for SEAMCALL wrappers (Chao)
+ - Print SEAMCALL error code for SEAMCALL wrappers (Xiaoyao)
+ - Changelog & code comments
+---
+ arch/x86/virt/vmx/tdx/tdx.h |  1 +
+ arch/x86/virt/vmx/tdx/tdx.c | 25 ++++++++++++++++++++++++-
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/6] x86/virt/tdx: Add extra memory to TDX module for
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+TDX module extensions need memory for their execution environment to
+serve SEAMCALL leafs. The TDX architecture implements the extensions
+in such a way that they use the memory outside of SEAM range, so the
+kernel should add the memory upfront at initialization time.
+
+Introduce a new memory adding process backed by a new SEAMCALL leaf
+TDH.EXT.MEM.ADD. The kernel queries TDX module how much memory needed,
+allocates it, adds it to the module, and never gets it back.
+
+The TDX module accepts the memory in the form of an HPA array. This
+array is passed via a single 64-bit SEAMCALL leaf parameter, which
+encodes two values: the PFN of the container page holding the array, and
+the number of entries in the array. Create a helper to encode this
+format and name it after the TDX module term: HPA_LIST_INFO.
+
+TDX module extensions consume tens of megabytes memory that will never
+be returned to the host. Use contiguous page allocation to isolate these
+large blocks entirely. This is a simple way to avoid permanent memory
+fragmentation: requiring the full size to be contiguous is more
+expensive than needed but should be good during the boot time. Print the
+allocation amount on TDX module extensions initialization for
+visibility.
+
+The TDX module provides a metadata field "memory_pool_required_pages" to
+indicate the required memory size. This metadata is present only when the
+module supports the extensions and is meaningful only after the add-on
+feature configuration. Don't read and cache the metadata in tdx_sysinfo
+at the very beginning of TDX module initialization. Instead read it
+right before allocating memory for the extensions, when it is guaranteed
+to be valid.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+An alternative solution is to use a loop that gives memory on a memory
+error code - TDX_EXT_MEMORY_POOL_REQUIRED, add one page per iteration
+until TDH.EXT.INIT succeeds. Something like:
+
+	do {
+		ret = tdh_sys_init();
+		if (ret == TDX_EXT_MEMORY_POOL_REQUIRED)
+			tdh_ext_mem_add(); //single page
+	} while (ret == TDX_EXT_MEMORY_POOL_REQUIRED);
+
+This approach is slightly simpler as we don't have to query the module
+for the total memory, no memory pre-allocation or segmentation math.
+But allocating a single 4K page per iteration may cause permanent memory
+fragmentation.
+
+v3:
+ - Merge remaining pre-check operations from the previous patch (Rick)
+ - Don't save the metadata in tdx_sysinfo (Rick)
+ - Tweak the code comment for memory_pool_required_pages == 0 (Chao)
+ - Re-phrase the code comment for struct tdx_hpa_list (Tony)
+ - Put the error handling comments on top of memory add loop, to avoid
+   moving them around when DPAMT support is added in the following
+   patch.
+ - Print memory size before adding memory; it won't be freed afterward,
+   whether the operation succeeds or fails.
+ - Collect Reviewed-by tags
+
+v2:
+ - Add code comments for container page allocation (Kiryl)
+ - Adjust comments/changelog for contiguous allocation of extensions
+   memory (Kiryl)
+ - s/PFN array/HPA array in commit log (Kiryl)
+ - State the alternative solution (Rick)
+ - Add code comment for struct tdx_hpa_list
+
+v1:
+ - Fix return value for SEAMCALL wrappers (Chao)
+ - Print SEAMCALL error code for SEAMCALL wrappers (Xiaoyao)
+ - Rename local vars to make the ext memory adding loop clear (Rick)
+ - Remove input parameters for tdx_ext_mem_setup() (Kevin)
+ - Add a Macro for tdh_hpa_list size.
+ - Change the SEAMALL wrapper parameter type,
+   struct page *hpa_list => struct tdx_hpa_list *hpa_list
+ - changelog & code comments
+---
+ arch/x86/include/asm/tdx.h                  |   1 +
+ arch/x86/include/asm/tdx_global_metadata.h  |   4 +
+ arch/x86/virt/vmx/tdx/tdx.h                 |   1 +
+ arch/x86/virt/vmx/tdx/tdx.c                 | 140 ++++++++++++++++++++++++++++
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c |  14 +++
+ 5 files changed, 160 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/6] x86/virt/tdx: Configure add-on features on TDX
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+The TDX architecture identifies some features that are off by default
+but can be enabled by the host during TDX module initialization. They
+are classified as add-on features because enabling them affects existing
+TDX systems: they may change existing feature behavior, or reserve more
+memory.
+
+The TDX module extends TDH.SYS.CONFIG with a new register argument to
+specify which add-on features to enable. This new argument is a bitmap
+that uses the same feature bits as TDX_FEATURES0. Note that Dynamic PAMT
+is an exception: although it is an add-on feature, it is controlled via
+a legacy, dedicated register argument [1].
+
+The kernel needs to enable these add-on features when it supports them.
+Add a get_tdx_usable_addon_features0() helper to return the bitmap of
+the add-on features that the module & kernel both support. Initially,
+this helper returns 0. It will be updated to return specific feature
+bits as full kernel support lands. Pass this bitmap as an argument to
+TDH.SYS.CONFIG.
+
+The TDX module requires SEAMCALL leaf version 1 for TDH.SYS.CONFIG when
+passing the new bitmap argument. A previous change [2] supports the
+versioned SEAMCALL leafs by adding a "version" field in
+struct tdx_module_args. Set the version field to 1 if the new bitmap
+argument is used to enable any add-on feature, otherwise keep the
+version as 0. This retains backward compatibility with older modules
+that don't recognize version 1.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+Reviewed-by: Nikolay Borisov <nik.borisov@suse.com>
+Link: https://lore.kernel.org/all/20260904215841.303070-10-rick.p.edgecombe@intel.com/ # [1]
+Link: https://lore.kernel.org/all/20260921-seamcall-version-v7-1-cf05fe76b467@linux.intel.com/ # [2]
+---
+v3:
+ - Update the stale changlog for bitmap arg of the wrapper (Chao)
+ - s/get_tdx_addon_features0()/get_tdx_usable_addon_features0() (Tony)
+ - Collect Reviewed-by tags
+
+v2:
+ - Don't pass addon_features0 parameter around, get it in the wrappers
+  (Dave)
+ - Remove TDH.SYS.UPDATE wrapper (Dave & Rick)
+ - Drop the changelog section explaining why add-on feature enabling is
+   needed in this series, as it is a generally understood pattern (Rick)
+ - Add a note in the changelog that Dynamic PAMT is not enabled via the
+   new bitmap argument (Rick)
+ - Add __init tag for get_tdx_addon_features0() (AI nitpicker)
+
+v1:
+ - Use tdx_module_args.version to assign SEAMCALL leaf versions (Dave)
+ - Remove DICE specific descriptions (Rick)
+ - Remove the global var tdx_addon_features0 (Chao)
+ - Add a Macro to collect kernel supported add-on feature bits (Rick)
+ - Changelog & code comments change
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/6] x86/virt/tdx: Move TDH.SYS.CONFIG operations into a
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+In Linux, SEAMCALL wrappers are introduced to avoid broad SEAMCALL
+access by exposing only a selection of SEAMCALL leafs, but also to
+abstract the SEAMCALL register ABIs. The abstraction improves
+readability and reuse for SEAMCALL leafs that are called multiple times.
+
+Some SEAMCALL leafs are not explicitly wrapped because the level of TDX
+ABI details needed to perform the call is low enough to flow well with
+the calling code.
+
+For some of the currently unwrapped SEAMCALL leafs, the TDX architecture
+has evolved the ABI to introduce new leaf versions. The host can select
+the version to call based on what is supported by the loaded TDX module.
+When future kernel implements this version selection, more ABI details
+will leak into the surrounding caller code, which decreases the
+readability of the caller logic. To keep the ABI details contained, move
+the SEAMCALL leaf that will need version selection into a wrapper.
+
+When defining the wrapper, the cleanest separation would be to have
+kernel data types for the SEAMCALL wrapper arguments, and have them
+marshaled into SEAMCALL leaf ABI types (often u64s) inside the wrapper.
+This works for many SEAMCALL leafs but becomes cumbersome when the
+register ABI type is a physical address which points to a buffer for an
+in-memory ABI. If the SEAMCALL wrapper only accepts kernel data types,
+it may need duplicate buffer allocation and copies to match the
+in-memory ABI. Another solution is to define a named helper structure
+that mirrors the in-memory ABI, populate it in a separate flow, then
+pass it to the SEAMCALL wrapper. struct seamldr_params is an existing
+example of this pattern.
+
+TDH.SYS.CONFIG requires a list of TDMR information in the form of a PA
+array. The PA array is the in-memory ABI. Create a structure for the PA
+array, use it as the argument when creating the wrapper for
+TDH.SYS.CONFIG.
+
+For readability, adjust a bit of the existing PA array size calculation:
+use the new PA array structure's element type instead of hardcoding u64.
+
+Signed-off-by: Xu Yilun <yilun.xu@linux.intel.com>
+Reviewed-by: Nikolay Borisov <nik.borisov@suse.com>
+Reviewed-by: Tony Lindgren <tony.lindgren@linux.intel.com>
+---
+v3:
+ - sizeof(tdmr_pa_array->phys[0]) instead of sizeof(u64) (Rick)
+ - Re-phrase the code comments for struct tdmr_info_pa_array (Tony)
+ - Refactor the changelog
+ - Collect Reviewed-by tags
+v2:
+ - Remove TDH.SYS.UPDATE wrapper (Dave & Rick)
+ - Talk about the handling of in-memory ABIs for SEAMCALL wrappers
+   (Rick)
+ - Refactor the entire changelog according to Rick's suggestion (Rick)
+ - Add code comment for struct tdmr_info_pa_array (AI nitpicker)
+ - Use kernel data type for nr_tdmr_pa parameter (AI nitpicker)
+
+v1:
+ - This patch is split out from the last series (Rick)
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 46 +++++++++++++++++++++++++++++++--------------
+ 1 file changed, 32 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/6] Enable TDX module extensions
+Author: Xu Yilun <yilun.xu@linux.intel.com>
+
+Hi,
+
+This is another respin of the TDX module extensions series. Thank you
+all for the design discussion and architectural review. During the last
+version, some architecture discussions lead to changes. And the need to
+support DPAMT creates more touch points. But the all the design issues
+are settled, we don't have any major opens.
+
+So Kiryl, Rick and TDX developers, please help review. If there is no
+major change, I hope to get your RBs and then ask Dave to look at this
+version.
+
+== Changes ==
+
+One change is that the extensions re-initialization patch is picked back
+into this series. In v2, the extensions re-initialization operation
+(TDH.EXT.INIT) was expected to be integrated in TDH.SYS.UPDATE. Host
+didn't have to explicitly invoke it on update anymore. But later an
+off-list discussion concludes that the separation of TDH.SYS.UPDATE &
+TDH.EXT.INIT brings more flexibility for needs from different types of
+VMMs, such as reducing the black-out time of update, allowing for new
+feature enabling... So now the host needs to call TDH.EXT.INIT right
+after TDH.SYS.UPDATE to restore the extensions functionalities.
+
+However the add-on feature re-configuration is orthogonal to the
+update flow change. We should still start with the basic update
+functionality that restores the previous settings. Re-configuring new
+feature is a separate functionality and the use case is unclear now.
+So I still expect that a TDH.SYS.UPDATE v0 would restore add-on features
+that was configured during boot.
+
+Rick pointed out that if TDH.EXT.INIT could always return a reasonable
+return code, we don't have to query ext_required metadata. A fix for the
+ABI is: TDH.EXT.INIT should return success if no extensions are
+required. We reached agreement with TDX module team and removed
+ext_required. After ext_required removal, the v2:Patch 3 became too
+trivial so merge it into v2:Patch 4.
+
+Rick raised a question that a single 4K allocation per iteration on
+boot may not cause much fragmentation. Kiryl answered
+CONFIG_SHUFFLE_PAGE_ALLOCATOR may affect the actual behavior but we'd
+better verify this in practice. The test result shows the allocation is
+affected by several aspects, e.g. MPOL_INTERLEAVED, per-CPU page cache.
+The allocated pages were scattered across many more page blocks than
+expected.
+
+The DPAMT is now queued in tip x86/tdx and will be default on in next
+rc1. Adding memory to the extensions without first installing DPAMT will
+trigger SEAMCALL failure and in turn fail the whole TDX module
+initialization. Add a new patch to support DPAMT.
+
+Other changes:
+  - Patch 1: sizeof(tdmr_pa_array->phys[0]) instead of sizeof(u64)
+    (Rick)
+
+  - Patch 1: Re-phrase the code comments for struct tdmr_info_pa_array
+    (Tony)
+
+  - Patch 2: Update the stale changlog for bitmap arg of the wrapper
+    (Chao)
+
+  - Patch 2: s/get_tdx_addon_features0()/get_tdx_usable_addon_features0()
+    (Tony)
+
+  - Patch 3: Don't save the metadata in tdx_sysinfo (Rick)
+
+  - Patch 3: Tweak the code comment for memory_pool_required_pages == 0
+    (Chao)
+
+  - Patch 3: Re-phrase the code comment for struct tdx_hpa_list (Tony)
+
+  - Patch 5: Rename the reinit function as reinit_tdx_module_extensions()
+    (Tony)
+
+  - Patch 5: Move the extensions re-init under TDH.SYS.UPDATE (Rick)
+
+v2: https://lore.kernel.org/all/20260915102658.713079-1-yilun.xu@linux.intel.com/
+
+v1: https://lore.kernel.org/all/20260821032920.256225-1-yilun.xu@linux.intel.com/
+
+Quoting v2: https://lore.kernel.org/lkml/20260618081355.3253581-1-yilun.xu@linux.intel.com/
+
+Quoting v1: https://lore.kernel.org/all/20260522034128.3144354-1-yilun.xu@linux.intel.com/
+
+== Overview ==
+
+To date, SEAMCALL execution must either complete quickly to avoid
+stalling the host, or yield quickly at pre-defined interrupt
+checkpoints. This is acceptable for the existing SEAMCALL leafs,
+which perform simple, bounded operations.
+
+However, some new features such as attestation and TD migration require
+higher level security protocols inside the TDX module, which cannot fit
+within that constraint. TDX solves this by making those operations
+inherently preemptible and resumable like OS tasks. TDX provides a
+separate SEAMCALL execution environment - the TDX module extensions -
+for those operations.
+
+This capability allows for higher-level SEAMCALL ABI design - like
+"create a DICE-based attestation quote". Several new features, such as
+DICE-based attestation, TDISP and TD migration, use SEAMCALL leafs
+backed by the TDX module extensions.
+
+The TDX module extensions need memory for their execution environment
+to serve these SEAMCALL leafs, so they need extra setup steps during TDX
+module initialization. The bulk of this series implements these setup
+steps.
+
+At runtime, the host invokes these SEAMCALL leafs just as normal ones -
+if interrupted, simply re-invoke the leaf to resume.
+
+For more information on TDX module extensions, please refer to [1].
+
+[1] https://lore.kernel.org/lkml/20260618081355.3253581-1-yilun.xu@linux.intel.com/
+
+== Branch stack ==
+
+This is based on tip x86/tdx. You can find the full branch stack at [2].
+The DICE part is in the full branch as an example for extensions. But it
+does not include the other DICE feedbacks.
+
+The full branch contains:
+
+  This series: Patch 1~7: This series, including this cover-letter.
+  Use case:    Patch 8~N: The old DICE part as an example.
+
+[2] https://github.com/intel-staging/tdx/tree/tdx-module-ext
+
+---
+Xu Yilun (6):
+      x86/virt/tdx: Move TDH.SYS.CONFIG operations into a wrapper
+      x86/virt/tdx: Configure add-on features on TDX module init
+      x86/virt/tdx: Add extra memory to TDX module for the extensions
+      x86/virt/tdx: Make TDX module initialize the extensions
+      x86/virt/tdx: Re-initialize the extensions on runtime TDX module update
+      x86/virt/tdx: Support DPAMT when adding memory for the extensions
+
+ arch/x86/include/asm/tdx.h                  |   1 +
+ arch/x86/include/asm/tdx_global_metadata.h  |   4 +
+ arch/x86/virt/vmx/tdx/tdx.h                 |   2 +
+ arch/x86/virt/vmx/tdx/tdx.c                 | 252 ++++++++++++++++++++++++++--
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c |  14 ++
+ 5 files changed, 259 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] vfio/mlx5: Fix boundary check in set_report_output()
+Author: Seongjun Hong <hsj0512@snu.ac.kr>
+
+Use > instead of >= on boundary check of recv_buf to avoid the bug which
+the full message in the last slot of recv_buf is ignored even though the
+received data size does not overflow the recv_buf.
+
+Fixes: 9c7c5430bca3 ("vfio/mlx5: Align the page tracking max message size with the device capability")
+Cc: stable@vger.kernel.org
+Reviewed-by: Yishai Hadas <yishaih@nvidia.com>
+Signed-off-by: Seongjun Hong <hsj0512@snu.ac.kr>
+---
+Changes in v2:
+- Drop the max_msg_size readability change. Keep only the fix.
+- Add Cc: stable@vger.kernel.org.
+- Link to v1: https://lore.kernel.org/r/20261004-vfio-mlx5-fix-boundary-check-v1-1-1d3b8e55e23f@snu.ac.kr
+---
+ drivers/vfio/pci/mlx5/cmd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 0/4] vfio-pci/zdev: Improved zPCI Function Measurement Support
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Hi,
+
+This patch series improves support for function measurement for zPCI
+passthrough devices on s390.
+
+Changelog
+=========
+v7 -> v8:
+* Patch 2/4:
+  - Replace the fmb_enabled bitfield in struct zpci_dev with a dedicated
+    bool to avoid future tearing bugs
+  - Rewrite commit message for a more natural flow
+
+* Patch 4/4:
+  - Replace mutex_lock/unlock() in vfio_pci_zdev_feature_fmb_read() with
+    a scoped_guard()
+
+v6 -> v7:
+* Patch 2/4:
+  - Don't re-enable FMB if it wasn't already enabled
+
+v5 -> v6:
+* Patch 2/4:
+  - Rework the FMB re-enablement code to reuse the same buffer again
+  - Make the FMB buffer persistent once allocated for as long as the
+    device's lifetime to accommodate an architectural quirk
+* Patch 4/4:
+  - Update the liveness check to use the new FMB enabled bool
+
+v4 -> v5:
+* Typo in the cover letter
+* Swap the ordering of patches 3/4 and 4/4 to ease merging (i.e., to
+  ensure the three s390 patches are ordered before the VFIO patch)
+* Patch 2/4:
+  - Drop the refactor of zpci_fmb_enable_device() and the separation of
+    zpci_fmb_clear_iommu_ctrs() and zpci_fmb_do_enable()
+  - Allocate a new buffer in zpci_fmb_reenable_device() rather than
+    reusing the same buffer to avoid firmware edge cases
+
+* Patch 3/4 (previously 4/4):
+  - Avoid reading from userspace while holding kzdev_lock unnecessarily
+
+* Patch 4/4 (previously 3/4):
+  - Drop allowing usercopy of the FMB when initializing the kmem_cache
+  - Avoid copying to userspace while holding fmb_lock unnecessarily
+    - Restore the FMB bounce buffer to achieve this one
+  - Clarify uAPI documentation and ensure it accurately describes the
+    behavior of the VFIO features
+
+v3 -> v4:
+* Patch 2/4:
+  - Replace mutex_lock/unlock in zpci_reenable_device() with a guard
+
+* Patch 3/4:
+  - Allow usercopy of the FMB when initializing its kmem_cache
+  - Move the guard in vfio_pci_zdev_feature_fmb_enable() lower to only
+    protect the FMB
+  - Ensure vfio_pci_zdev_feature_fmb_enable() fails on double-enable for
+    consistency with the documentation
+  - Eliminate the bounce buffer in vfio_pci_zdev_feature_fmb_read()
+  - Replace the void pointer with __aligned_u64 in the FMB read uAPI
+    structure
+
+v2 -> v3:
+* Patch 1/4 (new patch):
+  - Fix race conditions in pcibios_enable/disable_device() with regard to
+    the FMB enable/disable
+  - Assert that fmb_lock is held within zpci_fmb_enable_device() and
+    zpci_fmb_disable_device()
+
+* Patch 2/4 (previously 1/3):
+  - Move the FMB enable logic into a static function zpci_fmb_do_enable()
+    to reduce code duplication between zpci_fmb_enable_device() and
+    zpci_fmb_reenable_device()
+  - Reword commit message to use the imperative voice more consistently
+
+* Patch 3/4 (previously 2/3):
+  - Split the previous VFIO feature into a SET-only and a GET-only feature
+    for enabling/disabling and reading the FMB respectively
+  - Remove FMB definitions from the VFIO uAPI and instead treat it as an
+    opaque structure
+
+* Patch 4/4 (previously 3/3):
+  - Clarify goto label name to reduce misunderstandings
+
+v1 -> v2:
+* Patch 1/3:
+  - Address a possible race condition in zpci_reenable_device() caused by
+    calling zpci_fmb_reenable_device() without holding fmb_lock
+  - Assert that fmb_lock is held within zpci_fmb_reenable_device()
+
+* Patch 3/3:
+  - Address a possible race condition in pci_perf_seq_write() caused by
+    consuming zdev->kzdev without holding kzdev_lock
+
+Motivation
+==========
+The firmware on s390x machines allows for tracking a variety of statistics
+relating to zPCI devices in a function measurement block (FMB). However,
+the kernel currently lacks a structured mechanism of sharing this
+information with userspace, beyond /sys/kernel/debug/pci/ID/statistics.
+This can lead to shortcomings when running a guest on KVM with PCI
+passthrough devices, as QEMU is unable to provide an accurate FMB snapshot
+to the guest.
+
+Proposal
+========
+We propose adding a new VFIO device feature to zPCI passthrough devices,
+allowing userspace programs to read the latest FMB snapshot as it is
+written by the firmware. We ensure that function measurement enablement is
+preserved across device resets on the host. Furthermore, we guard against
+host tampering with the FMB via sysfs when the zPCI device is in
+passthrough to protect the VM's state.
+
+I'd appreciate some feedback on these patches.
+
+Thanks in advance.
+
+Omar Elghoul (4):
+  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+  s390/pci: Reuse FMB buffer and preserve state in device re-enablement
+  s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+  vfio-pci/zdev: Add VFIO FMB device features
+
+ arch/s390/include/asm/pci.h      |  2 +
+ arch/s390/pci/pci.c              | 84 +++++++++++++++++++++++++-------
+ arch/s390/pci/pci_debug.c        | 11 ++++-
+ drivers/vfio/pci/vfio_pci_core.c |  4 ++
+ drivers/vfio/pci/vfio_pci_priv.h | 18 +++++++
+ drivers/vfio/pci/vfio_pci_zdev.c | 57 ++++++++++++++++++++++
+ include/uapi/linux/vfio.h        | 29 +++++++++++
+ 7 files changed, 187 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 4/4] vfio-pci/zdev: Add VFIO FMB device features
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce new VFIO features for zPCI devices to provide FMB passthrough to
+userspace.
+
+Allow the user to enable or disable the FMB using the SET-only feature
+VFIO_DEVICE_FEATURE_ZPCI_FMB_ENABLE. Likewise allow the user to read the
+latest FMB using the GET-only feature VFIO_DEVICE_FEATURE_ZPCI_FMB_READ
+in the case when the FMB is enabled.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c |  4 +++
+ drivers/vfio/pci/vfio_pci_priv.h | 18 ++++++++++
+ drivers/vfio/pci/vfio_pci_zdev.c | 57 ++++++++++++++++++++++++++++++++
+ include/uapi/linux/vfio.h        | 29 ++++++++++++++++
+ 4 files changed, 108 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v8 3/4] s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce a fence over enabling or disabling FMB via debugfs when the zPCI
+device is associated with a KVM. This will prevent processes on the host
+from tampering with the FMB while the guest is still using it, which may
+cause partial counter resets and inconsistent reads which have no parallel
+in the architecture.
+
+For VFIO devices that are not associated with a KVM (i.e., for userspace
+drivers other than QEMU), this fence does not take effect.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+---
+ arch/s390/pci/pci_debug.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v8 2/4] s390/pci: Reuse FMB buffer and preserve state in device re-enablement
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Don't free the FMB buffer when disabling measurement in
+zpci_fmb_disable_device(). Instead, make the buffer persistent for the
+lifetime of the device and reuse it across enable/disable cycles. Defer
+freeing the buffer until teardown in zpci_release_device().
+
+To support the persistent buffers, add the fmb_enabled bool to struct
+zpci_dev to decouple whether FMB is enabled from whether the buffer has
+been allocated. Audit the only consumer of zdev->fmb as a liveness check
+and update it to reflect this change.
+
+Introduce the function zpci_fmb_reenable_device() to ensure that the FMB
+is enabled. If it was already enabled, disable it, zero the counters,
+and re-enable it. This allows the function to be used in both first-time
+enabling and re-enabling measurement. Call it in zpci_reenable_device()
+to preserve the FMB enablement if it had been implicitly disabled by
+firmware in zpci_disable_device().
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ arch/s390/include/asm/pci.h |  2 +
+ arch/s390/pci/pci.c         | 76 ++++++++++++++++++++++++++++---------
+ arch/s390/pci/pci_debug.c   |  2 +-
+ 3 files changed, 62 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8 1/4] s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Ensure that fmb_lock is held by pcibios_enable_device() and
+pcibios_disable_device() when calling zpci_fmb_enable_device() or
+zpci_fmb_disable_device(), respectively. Additionally, assert that the
+fmb_lock is held within the latter two functions to prevent future race
+conditions regarding new callers.
+
+Fixes: af0a8a8453f7 ("s390/pci: implement pcibios_add_device")
+Fixes: 944239c59e93 ("s390/pci: implement pcibios_release_device")
+Cc: stable@vger.kernel.org
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Niklas Schnelle <schnelle@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+---
+ arch/s390/pci/pci.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 3/3] KVM: LAPIC: Also cancel preemption timer during SET_LAPIC
+Author: Roman Demidov <roman.demidov.nn@gmail.com>
+
+
+commit 35fe7cfbab2e81f1afb23fc4212210b1de6d9633 upstream.
+
+The below warning is splatting during guest reboot.
+
+  ------------[ cut here ]------------
+  WARNING: CPU: 0 PID: 1931 at arch/x86/kvm/x86.c:10322 kvm_arch_vcpu_ioctl_run+0x874/0x880 [kvm]
+  CPU: 0 PID: 1931 Comm: qemu-system-x86 Tainted: G          I       5.17.0-rc1+ #5
+  RIP: 0010:kvm_arch_vcpu_ioctl_run+0x874/0x880 [kvm]
+  Call Trace:
+   <TASK>
+   kvm_vcpu_ioctl+0x279/0x710 [kvm]
+   __x64_sys_ioctl+0x83/0xb0
+   do_syscall_64+0x3b/0xc0
+   entry_SYSCALL_64_after_hwframe+0x44/0xae
+  RIP: 0033:0x7fd39797350b
+
+This can be triggered by not exposing tsc-deadline mode and doing a reboot in
+the guest. The lapic_shutdown() function which is called in sys_reboot path
+will not disarm the flying timer, it just masks LVTT. lapic_shutdown() clears
+APIC state w/ LVT_MASKED and timer-mode bit is 0, this can trigger timer-mode
+switch between tsc-deadline and oneshot/periodic, which can result in preemption
+timer be cancelled in apic_update_lvtt(). However, We can't depend on this when
+not exposing tsc-deadline mode and oneshot/periodic modes emulated by preemption
+timer. Qemu will synchronise states around reset, let's cancel preemption timer
+under KVM_SET_LAPIC.
+
+Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+Message-Id: <1643102220-35667-1-git-send-email-wanpengli@tencent.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+Signed-off-by: Roman Demidov <roman.demidov.nn@gmail.com>
+---
+Backport fix for CVE-2022-48765
+
+ arch/x86/kvm/lapic.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 2/3] KVM: LAPIC: Write 0 to TMICT should also cancel vmx-preemption timer
+Author: Roman Demidov <roman.demidov.nn@gmail.com>
+
+
+commit e898da784aed0ea65f7672d941c01dc9b79e6299 upstream.
+
+According to the SDM 10.5.4.1:
+
+  A write of 0 to the initial-count register effectively stops the local
+  APIC timer, in both one-shot and periodic mode.
+
+However, the lapic timer oneshot/periodic mode which is emulated by vmx-preemption
+timer doesn't stop by writing 0 to TMICT since vmx->hv_deadline_tsc is still
+programmed and the guest will receive the spurious timer interrupt later. This
+patch fixes it by also cancelling the vmx-preemption timer when writing 0 to
+the initial-count register.
+
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+Message-Id: <1623050385-100988-1-git-send-email-wanpengli@tencent.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Stable-dep-of: 54b3439c8e70 ("KVM: LAPIC: Also cancel preemption timer during SET_LAPIC")
+Signed-off-by: Roman Demidov <roman.demidov.nn@gmail.com>
+---
+ arch/x86/kvm/lapic.c | 17 +++++++++++------
+ 1 file changed, 11 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 1/3] KVM: LAPIC: Advancing the timer expiration on guest initiated write
+Author: Roman Demidov <roman.demidov.nn@gmail.com>
+
+
+commit 35737d2db2f4567106c90060ad110b27cb354fa4 upstream.
+
+Advancing the timer expiration should only be necessary on guest initiated
+writes. When we cancel the timer and clear .pending during state restore,
+clear expired_tscdeadline as well.
+
+Reviewed-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Wanpeng Li <wanpengli@tencent.com>
+Message-Id: <1614818118-965-1-git-send-email-wanpengli@tencent.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Stable-dep-of: 54b3439c8e70 ("KVM: LAPIC: Also cancel preemption timer during SET_LAPIC")
+Signed-off-by: Roman Demidov <roman.demidov.nn@gmail.com>
+---
+ arch/x86/kvm/lapic.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 6/6] samples/kvm, selftests/kvm: Exercise dma-buf backing
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Turn the sample into a dma-buf exporter, and move every supported test
+to dma-buf-backed guest_memfd. Doing both in one commit avoids a state
+where the sample and the tests use different interfaces.
+
+The sample owns one root region and creates a child descriptor for each
+VM. It supports moving, donating and reclaiming pages, absent pages,
+read-only ranges, a scratch page and per-child ioctl allowlists.
+
+The sample's get_phys() reports the run at the requested offset. It
+uses bitmap searches to find where presence or read-only state changes.
+An absent page returns -ENOENT. In scratch mode, an absent page of a
+root child is reported as the read-only scratch page instead. Scratch
+mode applies only to root children, because a mode change invalidates
+only them. Every change of ownership sends a ranged invalidation.
+
+Each test passes one dma-buf fd to both guest_memfd and iommufd. New
+tests cover:
+
+- two VMMs, checking what the guest, the device and the host see;
+- SET_PRESENT and SET_READONLY racing with one KVM_CREATE_GUEST_MEMFD,
+  so that lockdep checks attachment setup;
+- a 2 MiB-aligned region in which every other page is replaced by the
+  scratch page. The guest reads zeros and its own data, and KVM maps
+  the region with 4 KiB pages. An untouched aligned region still maps
+  at 2 MiB.
+
+The sample sizes the CMA root before children overlap, and publishes
+each child only after its ownership and allowlist are set. Confidential
+VMs are out of scope; their test is an explicit skip.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ samples/kvm/gmem_provider.c                   | 1287 ++++++++++-------
+ samples/kvm/gmem_provider.h                   |  144 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |    3 +-
+ .../kvm/gmem_provider_nvme_dma_test.c         |   28 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |   25 +-
+ .../testing/selftests/kvm/x86/gmem_poc_test.c |  824 +++++++++++
+ .../kvm/x86/gmem_provider_hugepage_test.c     |   30 +-
+ .../kvm/x86/gmem_provider_iommufd_test.c      |   42 +-
+ .../kvm/x86/gmem_provider_readonly_test.c     |  172 +++
+ .../kvm/x86/gmem_provider_revoke_test.c       |   34 +-
+ .../selftests/kvm/x86/gmem_provider_test.c    |  190 +--
+ .../kvm/x86/gmem_provider_vfio_test.c         |   45 +-
+ 12 files changed, 2091 insertions(+), 733 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 5/6] KVM: guest_memfd: Add dma-buf backing
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A memory owner that exports a dma-buf should be able to use that one
+object for both guest stage-2 mappings and device IOMMU mappings. A
+second, KVM-specific backing interface would duplicate the description
+of the memory layout and the rules for invalidating it.
+
+Add GUEST_MEMFD_FLAG_USE_DMABUF and a dmabuf_fd field to
+KVM_CREATE_GUEST_MEMFD. This backing has its own kvm_gmem_ops.
+guest_memfd attaches to the buffer as a revocable importer without a
+device. At creation, it asks for the run at offset 0 and refuses MMIO
+or unknown attributes, so a buffer that KVM can never map fails early.
+Offset 0 may be unbacked.
+
+On a fault, guest_memfd takes the reservation once. It asks get_phys()
+about the PUD-sized, PMD-sized and page-sized blocks around the faulting
+page, in that order, and maps the first block that one aligned RAM run
+covers. If the page is not backed or the run is not supported, the
+fault returns -EFAULT. A READONLY run is mapped without stage-2 write
+permission.
+
+The invalidation callback only runs KVM's invalidation over the
+affected range. It does not allocate memory or call the exporter. A
+fault that read the layout during the change sees mmu_invalidate_seq
+move and retries.
+
+Callbacks can start as soon as guest_memfd attaches. A dma-buf-backed
+file is therefore added to the inode's list of guest_memfd files under
+filemap_invalidate_lock.
+
+mmap() uses the exporter's dma-buf mmap. fallocate() and populate are
+not supported. Import the DMA_BUF symbol namespace so that a
+CONFIG_KVM=m build passes modpost.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ include/linux/kvm_host.h       |   1 +
+ include/uapi/linux/kvm.h       |   6 +-
+ tools/include/uapi/linux/kvm.h |   6 +-
+ virt/kvm/Kconfig               |   1 +
+ virt/kvm/guest_memfd.c         | 239 +++++++++++++++++++++++++++++++--
+ 5 files changed, 243 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 3/6] dma-buf: Add ranged mapping invalidation
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+dma_buf_invalidate_mappings() tells every importer that the whole
+buffer changed. An exporter that changes one part of its memory cannot
+say which bytes changed, so importers throw away mappings that are
+still valid.
+
+Add an exporter helper that invalidates a byte range, and an importer
+callback that receives it. The callback means that the address, the
+attributes or the backing of the range changed. If part of the range is
+no longer backed, get_phys() returns -ENOENT for it. Importers must stop
+using their old answer before the callback returns. Importers that do
+not implement the callback still receive a whole-buffer invalidation.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/dma-buf/dma-buf.c | 30 ++++++++++++++++++++++++++++++
+ include/linux/dma-buf.h   | 16 ++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 4/6] dma-buf: Allow dynamic attach without a device
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+dma_buf_dynamic_attach() requires a struct device: the device for which
+the buffer is mapped for DMA. Exporters may also check it before they
+accept the attachment. An importer that does not perform DMA has no
+such device. iommufd already attaches with a global placeholder device
+for this reason. KVM would need one too, although it only needs to know
+where the memory is so that it can map it into a guest.
+
+Allow @dev to be NULL for a dynamic importer. Such an importer learns
+where the memory is from get_phys() and builds its own mappings. It
+must not map the attachment for DMA, and dma_buf_map_attachment()
+refuses an attachment without a device. An exporter that needs a device
+to answer can refuse the attachment in its attach op, as it can for any
+other reason.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/dma-buf/dma-buf.c      | 15 +++++++++++++--
+ include/trace/events/dma_buf.h |  2 +-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 2/6] dma-buf: Add get_phys() to describe a physical run
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+iommufd and KVM write physical addresses into their own page tables.
+To do so, they must ask the exporter which frames back an offset of a
+dma-buf, whether that memory is RAM or MMIO, and whether it may be
+written.
+
+Add a get_phys() operation. The importer passes an offset and a maximum
+length. The exporter reports one run: the frames that start at the
+offset, are backed and physically contiguous, and share one attribute
+word. The run never exceeds the length. The exporter may end it early,
+so importers must not assume that it is the longest possible run.
+
+get_phys() returns -ENOENT when the byte at the offset is not backed,
+and -ENODEV when the buffer is revoked. The caller holds the
+reservation, and either pins the attachment or handles revocation. A
+reported frame stays valid until an invalidation that covers it
+returns.
+
+The attribute word holds the memory type and a READONLY flag. Zero
+means writable RAM. Importers refuse unknown types, reserved bits and
+unknown flags, so attributes added later fail safely. Two flag bits are
+reserved: one for holes and one for confidential memory.
+
+Convert vfio-pci, the iommufd selftest exporter and the KVM sample.
+iommufd behaves as before: it maps a buffer only when one writable run
+covers all of it.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/dma-buf/dma-buf.c               |  47 +++++++++++
+ drivers/iommu/iommufd/iommufd_private.h |   8 --
+ drivers/iommu/iommufd/iommufd_test.h    |  16 ++++
+ drivers/iommu/iommufd/pages.c           |  74 ++++-------------
+ drivers/iommu/iommufd/selftest.c        | 106 ++++++++++++++++++++----
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  58 ++++++-------
+ include/linux/dma-buf.h                 |  54 ++++++++++++
+ include/linux/vfio_pci_core.h           |   3 -
+ samples/kvm/gmem_provider.c             |  39 ++++-----
+ 9 files changed, 267 insertions(+), 138 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 1/6] KVM: guest_memfd: Add a writable result to get_pfn()
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A guest_memfd backing has no way to tell KVM that a page must stay
+mapped but must not be written by the guest. get_pfn() returns only a
+frame, and KVM takes write access from the memslot flags.
+KVM_MEM_READONLY is not an option: KVM refuses it on guest_memfd slots,
+because it emulates a write to a read-only slot as MMIO, which private
+memory cannot support.
+
+Add a writable output to get_pfn(). KVM sets it to true before the
+call, and the backing may clear it. When it is false, the x86 and arm64
+stage-2 fault paths map the page without write permission. A guest
+write to that page then exits to userspace as a memory fault; KVM first
+releases any page that the backing returned. Callers that do not map
+the page pass NULL.
+
+The result applies to stage-2 mappings only. When KVM writes guest
+memory through the memslot's host address, the permissions of the host
+mapping apply.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/arm64/kvm/mmu.c        | 13 ++++++++-----
+ arch/arm64/kvm/nested.c     | 10 +++++++---
+ arch/x86/kvm/mmu/mmu.c      | 18 ++++++++++++++++--
+ arch/x86/kvm/svm/sev.c      |  4 ++--
+ include/linux/kvm_host.h    | 11 ++++++++---
+ samples/kvm/gmem_provider.c |  3 ++-
+ virt/kvm/guest_memfd.c      | 13 ++++++++-----
+ 7 files changed, 51 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 0/6] KVM: guest_memfd: back guest_memfd with an imported dma-buf
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+This extends David Woodhouse's "KVM: Allow alternative providers of
+guest_memfd backed by PFNMAP memory" RFC (v2) to let guest_memfd import
+a dma-buf as its page source:
+
+  https://lore.kernel.org/kvm/20260720111259.122911-1-dwmw2@infradead.org/
+
+The memory owner is a plain dma-buf exporter, linking against neither
+KVM nor iommufd. guest_memfd imports it for the guest (stage-2) plane
+and iommufd imports the same buffer for the device (DMA) plane, so one
+object and one invalidation protocol serve both. This is a concrete
+answer to the "how do we plug into iommufd without masquerading as a
+dma-buf" question from David's cover: the provider does not pretend to
+be anything; the dma-buf is the shared object.
+
+Applies on top of David's v2 series.
+
+Patches:
+
+ 1 KVM: guest_memfd: Add a writable result to get_pfn()
+   Give get_pfn() a writable out-param so a backing can map a page
+   present but read-only (KVM_MEM_READONLY is rejected on guest_memfd
+   slots). A guest write then exits as a memory fault. Stage-2 only;
+   KVM's own host-mapped accesses are unaffected.
+
+ 2 dma-buf: Add get_phys() to describe a physical run
+   New exporter op: for an offset+len, return one physically contiguous
+   backed run and an attribute word (RAM/MMIO, plus READONLY). -ENOENT
+   for an unbacked byte, -ENODEV when revoked. Lets a page-table-building
+   importer ask where the memory is instead of taking a scatterlist.
+   Converts vfio-pci, the iommufd selftest exporter and the sample;
+   iommufd behaviour is unchanged.
+
+ 3 dma-buf: Add ranged mapping invalidation
+   Invalidate a byte range rather than the whole buffer. The callback
+   means "re-query this range" and covers loss, replacement and
+   read-only flips. Importers without the callback still get a
+   whole-buffer invalidation.
+
+ 4 dma-buf: Allow dynamic attach without a device
+   Allow a dynamic importer with no struct device, for a consumer (KVM)
+   that only needs the physical layout and builds its own tables. Such
+   an importer must not map the attachment for DMA.
+
+ 5 KVM: guest_memfd: Add dma-buf backing
+   Add GUEST_MEMFD_FLAG_USE_DMABUF and a dmabuf_fd to
+   KVM_CREATE_GUEST_MEMFD. guest_memfd attaches as a revocable importer
+   without a device, serves faults from get_phys() (largest aligned RAM
+   run, read-only honoured), and zaps the range on the invalidation
+   callback.
+
+ 6 samples/kvm, selftests/kvm: Exercise dma-buf backing
+   Turn the sample into a dma-buf exporter (a toy memory owner: one root
+   region, a child per VM, move/donate/reclaim, absent and read-only
+   pages, a scratch page, per-child ioctl allowlists) and move the
+   selftests to feed one dma-buf fd to both guest_memfd and iommufd.
+
+Scope: non-confidential VMs, RAM backings only; iommufd keeps its
+single-range import for now. As with David's series, this is largely
+AI-assisted and is posted to get the interface shape reviewed.
+
+Fred Griffoul (6):
+  KVM: guest_memfd: Add a writable result to get_pfn()
+  dma-buf: Add get_phys() to describe a physical run
+  dma-buf: Add ranged mapping invalidation
+  dma-buf: Allow dynamic attach without a device
+  KVM: guest_memfd: Add dma-buf backing
+  samples/kvm, selftests/kvm: Exercise dma-buf backing
+
+ arch/arm64/kvm/mmu.c                          |   13 +-
+ arch/arm64/kvm/nested.c                       |   10 +-
+ arch/x86/kvm/mmu/mmu.c                        |   18 +-
+ arch/x86/kvm/svm/sev.c                        |    4 +-
+ drivers/dma-buf/dma-buf.c                     |   92 +-
+ drivers/iommu/iommufd/iommufd_private.h       |    8 -
+ drivers/iommu/iommufd/iommufd_test.h          |   16 +
+ drivers/iommu/iommufd/pages.c                 |   74 +-
+ drivers/iommu/iommufd/selftest.c              |  106 +-
+ drivers/vfio/pci/vfio_pci_dmabuf.c            |   58 +-
+ include/linux/dma-buf.h                       |   70 +
+ include/linux/kvm_host.h                      |   12 +-
+ include/linux/vfio_pci_core.h                 |    3 -
+ include/trace/events/dma_buf.h                |    2 +-
+ include/uapi/linux/kvm.h                      |    6 +-
+ samples/kvm/gmem_provider.c                   | 1311 ++++++++++-------
+ samples/kvm/gmem_provider.h                   |  144 +-
+ tools/include/uapi/linux/kvm.h                |    6 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |    3 +-
+ .../kvm/gmem_provider_nvme_dma_test.c         |   28 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |   25 +-
+ .../testing/selftests/kvm/x86/gmem_poc_test.c |  824 +++++++++++
+ .../kvm/x86/gmem_provider_hugepage_test.c     |   30 +-
+ .../kvm/x86/gmem_provider_iommufd_test.c      |   42 +-
+ .../kvm/x86/gmem_provider_readonly_test.c     |  172 +++
+ .../kvm/x86/gmem_provider_revoke_test.c       |   34 +-
+ .../selftests/kvm/x86/gmem_provider_test.c    |  190 +--
+ .../kvm/x86/gmem_provider_vfio_test.c         |   45 +-
+ virt/kvm/Kconfig                              |    1 +
+ virt/kvm/guest_memfd.c                        |  252 +++-
+ 30 files changed, 2703 insertions(+), 896 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 23/23] KVM: arm64: CCA: Control user register access for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+The RMM restricts the access to the register states that the host can
+read/modify for a given Realm.
+
+e.g., At VCPU creation, can modify GPRS (x0-x30) and PC.
+      While servicing SMCCC calls via RSI_HOST_CALL or servicing PSCI
+      requests.
+      MMIO emulation in the unprotected space.
+
+Additionally we use the sysreg configuration to advertise/configure the
+following Realm parameters, which are required before the Realm Descriptor
+is created:
+ - SVE Vector Length
+ - Number of HW Breakpoints/Watchpoints
+ - PMU Counters.
+
+Thus KVM also additionally allows access to ID_AA64DFR0_EL1 and SVE_VLS for
+the configuration of Realm creation parameters. We don't support PMUs for
+the Realm VMs yet, so PMCR is not exposed.
+
+The RMM makes similar restrictions for reading of the guest's registers
+(this is *confidential* compute after all), however we don't impose the
+restriction here. This allows the VMM to read (stale) values from the
+registers which might be useful to read back the initial values even if
+the RMM doesn't provide the latest version. For migration of a realm VM,
+a new interface will be needed so that the VMM can receive an
+(encrypted) blob of the VM's state.
+
+Reflect the above in KVM_GET_REG_LIST, KVM_SET_ONE_REG calls.
+
+Signed-off-by: Jean-Philippe Brucker <jean-philippe@linaro.org>
+Co-developed-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Co-developed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/guest.c      | 63 +++++++++++++++++++++++++++++++++++++
+ arch/arm64/kvm/hypercalls.c |  4 +--
+ arch/arm64/kvm/sys_regs.c   | 28 +++++++++++++----
+ 3 files changed, 87 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 22/23] KVM: arm64: CCA: Expose SVE VL register before VCPU finalization
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+Userspace must configure the SVE vector length before the Realm is created
+(as it is part of the parameter for Realm creation), but the Realm VCPUs
+cannot be finalized until after the Realm Descriptor has been created.
+
+KVM_GET_REG_LIST currently rejects the unfinalized VCPUs, which prevents
+the userspace from discovering and configuring the VLs for  the Realm.
+
+Allow KVM_GET_REG_LIST for unfinalized RECs and make the SVE register
+enumeration handle the unfinalized case explicitly. i.e., only expose
+KVM_REG_ARM64_SVE_VLS before SVE is finalized.
+
+One adverse side effect of this change is that a KVM_GET_REG_LIST call that
+only probes for the array size will now succeed even if SVE is not
+finalized, but that seems harmless since the following KVM_GET_REG_LIST
+with the full array will fail.
+
+Signed-off-by: Jean-Philippe Brucker <jean-philippe@linaro.org>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arm.c   | 15 ++++++++++++++-
+ arch/arm64/kvm/guest.c | 10 +++++-----
+ 2 files changed, 19 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 21/23] KVM: arm64: CCA: Support timers in realm RECs
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+The RMM keeps track of the timer while the realm REC is running, but on
+exit to the normal world KVM is responsible for handling the timers.
+
+A later patch adds the support for propagating the timer values from the
+exit data structure and making sure the values are in sync for KVM.
+
+Also, RMM doesn't support injecting virtual interrupts backed by Physical
+interrupts. So, use the existing software resampling mechanims for Realm
+timer interrupts.
+
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arch_timer.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 20/23] KVM: arm64: CCA: WARN on injected undef exceptions
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+The RMM doesn't allow injection of a undefined exception into a realm
+guest. Add a WARN to catch if this ever happens.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/inject_fault.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 19/23] KVM: arm64: CCA: Don't expose unsupported capabilities for realm guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Limit the capabilities that are allowed for Realm VMs. Similarly block
+the vm_ioctls backed by the capabilities.
+
+Repurpose the kvm_pkvm_ioctl_allowed() to support both pKVM and Realm
+ioctls. Rename the helper to kvm_vm_ioctl_allowed() and move it
+into arch/arm64/kvm/arm.c. Also add a generic kvm_vm_ext_allowed()
+to handle pKVM and Realm capability filtering and route them accordingly.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Drop WARN_ON_ONCE() from kvm_vm_ioctl_allowed to synchronise with
+   what is in -rc5 and make the conflict resolution easier.
+---
+ arch/arm64/include/asm/kvm_pkvm.h | 19 ------------
+ arch/arm64/include/asm/kvm_rmi.h  | 24 +++++++++++++++
+ arch/arm64/kvm/arm.c              | 49 +++++++++++++++++++++++++++++--
+ 3 files changed, 70 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 18/23] KVM: arm64: CCA: Introduce Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+Add foundational work for supporting Realms.
+ - Add a new VM flavor.
+ - At KVM init, check if the KVM can support Realms (though not functional
+   yet) and will be advertised by static key kvm_rmi_is_available. This
+   will be turned on in a later patches, once we have all the bits and
+   pieces ready. For now check if we are blessed with KVM_MODE_RMM.
+ - Add realm specific tracking in kvm_arch. Since Realm and protected pKVM
+   states are mutually exclusive, move them into a union.
+
+Please note that we cannot create Realm VMs yet. This requires further
+changes to the UABI and core RMI driver support, which will come later.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Co-developed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 16 ++++++++
+ arch/arm64/include/asm/kvm_host.h    | 19 ++++++---
+ arch/arm64/include/asm/kvm_rmi.h     | 61 ++++++++++++++++++++++++++++
+ arch/arm64/include/asm/virt.h        |  1 +
+ arch/arm64/kvm/Makefile              |  2 +-
+ arch/arm64/kvm/arm.c                 |  6 +++
+ arch/arm64/kvm/mmu.c                 |  1 +
+ arch/arm64/kvm/rmi.c                 | 18 ++++++++
+ 8 files changed, 118 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 17/23] KVM: arm64: CCA: Add bare minimal S2 operations for Realm
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add bare minimal MMU operation hooks for Realms. The mem_abort handling
+is chosen as the default KVM variant. However this cannot be reached for
+Realms yet and we would need real RMI command support to make it fully
+functional. Similarly, unmapping stage2 requires RMI command support.
+Until then reuse follow protected pKVM hook and ignore unmapping.
+This will be addressed in the later series.
+
+RMM takes care of the TLB flushing as required, when the Stage2 is
+modified. So host doesn't need to do anything explicitly. RMM doesn't
+support access flags for the stage2, even for the shared IPA.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Reuse no_age_gfn for Realms. Also use no_stage2_unmap_range for
+   now, until we get proper RMI backed driver.
+---
+ arch/arm64/kvm/mmu.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 16/23] KVM: arm64: CCA: Add VCPU load/put for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+RMM controls the VCPU settings and most are hidden from the KVM, except
+for the VGIC and timer bits.
+
+A later patch would add syncing the VCPU state into the Realm REC related
+SMC parameters.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arm.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 15/23] KVM: arm64: CCA: Add a new mode for supporting Realm guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add an explicit mode to support Arm CCA guests.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ Documentation/admin-guide/kernel-parameters.txt | 3 +++
+ arch/arm64/include/asm/kvm_host.h               | 1 +
+ arch/arm64/kvm/arm.c                            | 5 +++++
+ 3 files changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 14/23] KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+pKVM does not trust the host. Realm VMs follow a similar trust model, with
+the Realm Management Monitor owning the protected state instead of the
+host. Add a helper to identify VMs that run under a host-distrusting
+hypervisor.
+
+Use this for blocking ioremap of vgic-v2 into stage2 and prevent creation
+of VGIC other than v3.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 4 ++++
+ arch/arm64/kvm/mmu.c              | 2 +-
+ arch/arm64/kvm/vgic/vgic-init.c   | 2 ++
+ 3 files changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 13/23] KVM: arm64: Abstract out memory abort handling
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Move the memory abort handling under VM specific s2 operation.
+
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Rename protected_vm_mem_abort => protected_pkvm_mem_abort for consistency
+   with the other callbacks.
+---
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/mmu.c              | 33 ++++++++++++++++++-------------
+ 2 files changed, 21 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 12/23] KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+kvm_handle_guest_abort() repeatedly obtains the VM from vcpu->kvm.
+
+Introduce a local kvm pointer and use it throughout the function. While
+touching the code, fix the missing whitespace in the
+kvm_is_nested_s2_mmu() call.
+
+Suggested-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 11/23] KVM: arm64: Add VM specific callback for S2 MMU operations
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM type specific S2 MMU operation backends which can be initialized per
+VM flavor, to keep the handling cleaner.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Change since v21:
+ - Define all vm_s2_ops call back. All calls are mandatory.
+ - Define callback for each flavor, disjointing the non-protetcted pKVM and
+   normal KVM (VHE & nVHE) and remove the KVM_PGT_FN() hacks.
+ - Dropped Reviews due to the changes.
+ - Add "no_age_gfn" and "no_stage2_unmap_range" for pKVM callbacks, no_age_*
+   to be also reused by Realms later.
+ - Move kvm_vm_s2_ops field to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h |  14 +++
+ arch/arm64/kvm/mmu.c              | 173 +++++++++++++++++++++++++-----
+ 2 files changed, 160 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 10/23] KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+In preparation for adding VM specific backends for stage2 operations,
+nuke __unmap_stage2_range() and fold the logic into
+kvm_stage2_unmap_range(). Also, make kvm_unmap_gfn_range(), the only other
+user of the __unmap_stage2_range() call the kvm_stage2_unmap_range(). Also,
+while at it fix the comment to make it clear that mmu_lock must always be
+held while unmapping. The code already mandates that and the two call paths
+do have the write mmu_lock held.
+
+Later we would replace the logic in kvm_stage2_unmap_range() with VM
+specific backends.
+
+No functional changes intended.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Change since v21:
+ - Nuke __unmap_stage2_range and consolidate the stage2_unmap_range logic
+   into kvm_stage2_unmap_range(), in preparation for removing the KVM_PGT_FN()
+   for stage2_unmap
+---
+ arch/arm64/kvm/mmu.c | 38 ++++++++++++++++----------------------
+ 1 file changed, 16 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 09/23] KVM: arm64: Prevent unsupported vcpu features for VM types
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Prevent unsupported VCPU features for the protected VCPUs. Realms and pVMs
+not support 32bit EL1 or NV yet. pKVM doesn't rely on the host vcpu
+features and it clears the unsupported features while hyp_vcpu is
+initialised. Block the features early in the vcpu init if we detect
+incompatible features.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arm.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 08/23] KVM: arm64: Add vcpu load/put call backs for flavors
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM flavor specific handlers for VCPU load/put, in an effort to make it
+easier to follow the code. pauth traps were removed from VMs running PKVM
+as it is a no-op for them.
+
+Based on a patch by Marc Zyngier
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Add '&' into the KVM_VCPU_OPS() macro
+---
+ arch/arm64/include/asm/kvm_host.h |   6 ++
+ arch/arm64/kvm/arm.c              | 138 +++++++++++++++++++++++-------
+ 2 files changed, 114 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 07/23] KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+To keep the VCPU load/put handling cleaner with the different kinds of VM
+types, we are about to introduce VM specific callbacks to do just the right
+thing. In preparation for that, make some refactoring to add the change
+easier by mainly feature specific configurations to individual wrappers,
+so that different callbacks could reuse the helpers.
+
+Adds vcpu_prepare_mmu()/vcpu_put_mmu() wrappers to load/put MMU related
+configurations for !pKVM guests. Additionally makes it explicit that
+kvm_arm_vmid_clear_active() is not required for pKVM host.
+
+Add vcpu_load_pvtime(), vcpu_set_wfx_traps() wrappers for handling the
+corresponding configurations.
+
+While at it, also make it clear that the timer loading constraints only
+apply for the VHE.
+
+No functional changes intended. Based on a work by Marc Zyngier.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Add vcpu_put_mmu() to pair with the vcpu_prepare_mmu() and make the
+   call conditional on !is_protected_kvm_enabled(). Preparing the path
+   for per-flavor callbacks
+ - Update the timer load constraints comment to reflect that it only applies
+   for VHE
+ - Wrap kvm_arm_vmid_clear_active() to vcpu_put_mmu() to compliement
+   with the vcpu_prepare_mmu(). Also only clear the VMID for non-pKVM
+   guests
+---
+ arch/arm64/kvm/arm.c | 59 ++++++++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 06/23] KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+vcpu_set_pauth_traps() bails out and does nothing for pKVM hosts.
+Clean this up by moving the is_protected_kvm_enabled() check to the
+caller, in preparation for adding VM specific vcpu load/put callbacks.
+
+While at it, do an early return if the vcpu doesn't have ptrauth.
+
+No functional changes
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - New patch, since addition of this to the Refactoring patch makes it a bit
+   more bigger and harder to review
+---
+ arch/arm64/kvm/arm.c | 52 +++++++++++++++++++++++---------------------
+ 1 file changed, 27 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 05/23] KVM: arm64: Track the type of VM in kvm_arch
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+KVM arm64 has different types of VMs with all the different modes in which
+the hypervisor code can be run. e.g., VHE, nVHE, pKVM etc. Then there is
+protected VM and normal VMs with pKVM. We might soon add other types,
+e.g., Arm CCA Realm. So in an effort to make the handling of these
+different types of VMs a bit more friendly to the eyes, add a VM flavor to
+the kvm_arch and we could then add handlers for different operations based
+on the VM type.
+
+Keep the flavor initialisation at the beginning to allow for the detection
+early enough and fail out on any unsupported requests.
+
+With that, add wrappers for checking the "type" of a VM and replace the
+existing users with the new wrappers.
+
+Given we already have the construct of "kvm_vm_is_protected" in the core
+KVM code, use that for all confidential compute guests including Realms
+that we are about to add. Adds __VM_PROTECTED marker vm flavor to draw the
+boundary for "protected VMs". In later patches, we would add Realm VMs,
+ which would also be classified as protected.
+
+Add a explicit helper to detect if a given VM is a "protected" VM under pKVM.
+Change the existing users that precisely want to check the VM type. These
+include :
+  - kvm_arch_prepare_memory_region - For preventing memslot changes after
+    pVM creation.
+
+All the others are retained as a wider check for confidential guest VMs.
+These are:
+ - kvm_vm_ioctl_set_counter_offset - For disallowing timer offset
+   configuration
+ - io_mem_abort for dabt handling without valid syndrome information
+
+Both of which are true for Realms too.
+
+Realms support is restricted to VHE host and thus "kvm_vm_is_protected()"
+checks in the pkvm hyp specific code doesn't need to change, as the only
+protected guests it deals with is "protected pKVM" guests. To tighten this
+init_pkvm_hyp_vm() restricts the hyp copy of the vm_flavor to the ones it
+supports.
+
+vcpu_is_protected() usage from nVHE hyp code is tricky, as we need to
+convert the vcpu->kvm to the HYP VA before checking the flavor. This
+involves kern_hyp_va() usage in asm/kvm_host.h. To avoid build breaks,
+include asm/kvm_mmu.h to arm64/kvm/mmio.c.
+
+While at it move the psci_version around to keep the structure packed.
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Drop kern_hyp_va() and restrict nvhe code to always use vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() and open code the check
+ - Move psci_version field in kvm_arch around to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h      | 42 +++++++++++++++++++++++---
+ arch/arm64/include/asm/kvm_pkvm.h      |  4 +--
+ arch/arm64/kvm/arm.c                   | 33 ++++++++++++++++----
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h |  2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c         |  6 +++-
+ arch/arm64/kvm/hyp/nvhe/switch.c       |  4 +--
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c     |  2 +-
+ arch/arm64/kvm/mmio.c                  |  1 +
+ arch/arm64/kvm/mmu.c                   |  2 +-
+ arch/arm64/kvm/pkvm.c                  |  6 ++--
+ 10 files changed, 79 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 04/23] KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+To avoid future include cycles, drop the linux/kvm_host.h include in
+kvm_pgtable.h and include the lightweight headers required for the types
+and inline helpers used there. Additionally provide a forward
+declaration for struct kvm_s2_mmu as it's only used as a pointer in this
+file.
+
+Both pgtable.c and kvm_pkvm.h relied on the indirect inclusion of
+kvm_host.h, so make that explicit.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Include asm/memory.h, asm/page.h , linux/bitfield.h in asm/kvm_pgtable.h
+   (Sashiko)
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 10 +++++++++-
+ arch/arm64/include/asm/kvm_pkvm.h    |  2 +-
+ arch/arm64/kvm/hyp/pgtable.c         |  1 +
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 02/23] KVM: arm64: Disable Steal time accounting for protected guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+PVTIME support is advertised by KVM_CAP_STEAL_TIME, which doesn't take into
+account the kvm instance. Even with that, a VMM could skip the CAP check
+and proceed to configure the PVTIME as we don't do further check on the
+DEVICE_CTRL. Tighten this up by passing the KVM instance around wherever
+possible and catch things early.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +-
+ arch/arm64/kvm/arm.c              |  2 +-
+ arch/arm64/kvm/pvtime.c           | 14 +++++++-------
+ 3 files changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 03/23] KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Fix a potential build error (like below, when asm/kvm_emulate.h gets
+included after the kvm/arm_psci.h) by including the missing header file
+in kvm/arm_psci.h:
+
+./include/kvm/arm_psci.h: In function ‘kvm_psci_version’:
+./include/kvm/arm_psci.h:29:13: error: implicit declaration of function
+   ‘vcpu_has_feature’; did you mean ‘cpu_have_feature’? [-Werror=implicit-function-declaration]
+   29 |         if (vcpu_has_feature(vcpu, KVM_ARM_VCPU_PSCI_0_2)) {
+	         |             ^~~~~~~~~~~~~~~~
+			       |             cpu_have_feature
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ include/kvm/arm_psci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 01/23] KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Protected VMs doesn't allow setting offsets for virtual and physical
+counters, as the offset is always fixed to 0. The VM ioctl is filtered
+out based on the cap. However we don't prevent the userspace from trying
+to write to the CNTVCT/CNTPCT registers. This would lead to KVM triggering
+a WARN() in timer_set_offset() as the vm_offset pointer is set to NULL.
+
+Fix this by always "fixing" the timer offsets to 0 and marking that the
+timer offset is set in the kvm->arch.flags at KVM init time for protected
+VMs. This prevents the access to the VM specific vm_offset at low cost.
+A userspace writing to the CNT*CT_EL0 would observe success, without
+any real effect. This is cleaner over spilling "*_is_protected()"
+checks and "matches" what we really do in practise. i.e., always run
+with "fixed counter offset of 0".
+
+Reported by Sashiko
+
+Link: https://lore.kernel.org/all/20260908164641.416911F00A3A@smtp.kernel.org
+Fixes: f7d05ee84a6a ("KVM: arm64: Prevent host from managing timer offsets for protected VMs")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ Changes since v19:
+  - Fix typos in commit description and explain why we choose the approach.
+  - Improve comment in the code
+ Changes since v18:
+  - Retain NULL vm_offset for protected VMs to avoid host tampering with the
+    offset.
+  - Moved the flag setting into kvm_timer_init_vm(), where it should have been
+    in the first place
+---
+ arch/arm64/kvm/arch_timer.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 00/23] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This series is a trimmed down version of the Arm CCA KVM support, previously
+posted here [0]. Like in the v17, we have tried to split the entire series
+into the following chunks.
+
+ 1) Base RMM RMI support under drivers/firmware/arm_rmm -> [1]
+ 2) Linux Host support for handling GPFs - [2]
+ 3) NEW: Enlighten KVM arm64 about the different VM types and use call
+    backs for the VM type, rather than spilling the is_this_type_of_vm()
+    everywhere. Adds VCPU and Stage2 MMU related callbacks with support
+    for the existing VM types. There are other places where we may be
+    able to abstract, but those need careful performance evaluations
+    to make sure they are fit (e.g., vcpu_run)
+
+   With that in place we generalise the predicate "kvm_vm_is_protected()"
+   to cover all  "Confidential" VMs (which includes Protected VM and Realms),
+   allowing us to handle common themes without having to do things like :
+
+     if (kvm_vm_is_protected() || kvm_vm_is_realm())
+
+   Also replaces the code with precise check for a given VM type to
+   avoiding combination of if (). e.g,, kvm_vm_is_unprotected_pkvm(kvm).
+   The checks under arch/arm64/kvm/{nvhe,pkvm} still retain the vm_is_protected()
+   check as pVMs are the only possible protected VMs there.
+   
+ 4) Bare minimal Realm VM support without the actual functionality to
+    run a Realm. This would help the maintainers to review the series in
+    smaller chunks. This doesn't depend on [1] and can be independently
+    merged, without being "functional".
+    This series includes vcpu operations and the s2 vm operations, which
+    do need the RMI driver backend to be meaningful. But the KVM handler
+    is in the right shape. The remaining changes would be added once the
+    RMI firmware library lands. Also covers the SET_ONE_REG/GET_ONE_REG
+
+ 5) Core implementation of the RMI driver for KVM and actual enablement of the
+    Realm support. This depends on (1), (2) and the guest-memfd-in-place
+    conversion series v12 from Ackerley. This is available here at the integration
+    branch [3]
+
+
+NOTE: There is a conflict with Fuad's patch to drop the WARN for unknown vm
+ioctls, that is queued in ~fixes~ in v7.3-rc5. I have dropped the
+WARN_ON_ONCE() to match the code after resolution.
+
+  https://lore.kernel.org/all/20260914093838.1082637-1-fuad.tabba@linux.dev 
+
+This series is comprised of (3) and (4) above.
+
+The integration branch has been tested with the following components:
+
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3 [4]
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git tag:cca-kvm-v20
+
+[0] Arm CCA KVM Support v16 : https://lore.kernel.org/all/20260803134403.80630-1-steven.price@arm.com
+[1] Linux firmware RMI v22 https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/fw_rmm/v22
+[2] Linux GPF Host  https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/host-gpf/v19
+[3] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v222integration
+[4] https://support.arm.com/documentation/den0137/2-0bet3/
+
+Changes since v21:
+ https://lore.kernel.org/all/20261001210703.1597150-1-suzuki.poulose@arm.com
+ - Keep the kvm_arch struct packed, by moving psci_version, closer to vm_flavor and also moving the vm_s2_ops, closer to vm_flavor.
+ - Drop the kern_hyp_va() for vcpu_is_protected() in nVHE, instead ban nVHE
+   code from using vcpu_is_protected() (by using BUILD_BUG_ON()) and convert
+   all users to vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() in favor of open coded check against VM_PKVM
+ - Drop WARN_ON_ONCE() in the kvm_vm_ioctl_allowed() to match Fuad's fix merged in v7.3-rc5
+ - Move '&' to the KVM_*_OPS macros
+ - Nuke __unmap_stage2_range() and define per-VM callback for stage2_unmap_range, removing the KVM_PGT_FN() hack for the call, and also for the others
+ - Drop NULL check for vm_s2_ops callbacks and always define everything.
+ - Add no_age_gfn() which plugs in for pVMs and Realms for the vm_age_*gfn callbacks
+
+Changes since v20:
+ https://lore.kernel.org/all/20260924160504.853911-1-suzuki.poulose@arm.com
+
+ - Allow KVM_ARM_CAP_DEVICE_CTRL for Realms to allow SMCCC filtering
+ - New patch: Deny vcpu features not compatible with protected VMs
+ - Remove suprious ":w" in commit description (Thanks Catalin)
+
+Changes since v19:
+ https://lore.kernel.org/all/20260920212845.707-1-suzuki.poulose@arm.com
+
+ - Collect Reviews from Jonathan, and Tested-by from Gavin - Thank you both!
+ - Add a new patch prepare the the vcpu_set_pauth_traps for the addition of
+   VCPU callbacks. Could have merged with the existing one, but that becomes
+   quite too much to follow.
+ - Add another new preparatory patch to replace vcpu->kvm => new local variable
+   kvm in kvm_handle_guest_abort(), making it also easier for abstracting memory
+   abort handling.
+ - Fix vcpu_is_protected for nvhe hyp code, by using kern_hyp_va() for vcpu->kvm
+ - Use READ_ONCE() to read the host kvm->arch.vm_flavor in EL2 pKVM code
+ - Move the replacement of !kvm_vm_is_protected() in kvm_arch_vcpu_put() with
+   kvm_vm_is_unprotected_pkvm() to this patch
+ - Drop ',' after the end marker in vm_flavor enums
+ - Wrap kvm_arm_vmid_clear_active() in 'vcpu_put_mmu()' to compliment the
+   vcpu_prepare_mmu and call it conditional on !pKVM.
+ - Update the time loading constraints comment to clarify that it only applies
+   for VHE.
+ - Sort the vcpu ops by vm_flavor enum value
+ - Add blank line in kvm_arch_flush_remote_tlbs()
+ - Drop local variable ret and directly return from if...else for kvm_vm_mem_abort
+
+Changes since v18:
+  https://lore.kernel.org/all/20260915160141.3543048-1-suzuki.poulose@arm.com
+
+ - Patch count down by 3, after merging different patches together, see more below
+ - Retain NULL vm_offset for pVMs and move the counter offset flag initialisation
+   to kvm_timer_init_vm() - Marc
+ - Merge widening the scope of kvm_vm_is_protected() to the patch where the
+   flavors are introduced(Marc) and also dropped Fuad's reviewed-by, as the
+   patch is now bigger.
+ - Merge "Use kvm_vm_is_unprotected_pkvm" for !kvm_vm_is_protected to patch
+   where flavor is introuced.
+ - Merge "vgic-v3" mandate and preventing vgic-v2 mappings to a single patch,
+   where kvm_vm_hyp_is_distrusting() introduced - Fuad
+ - Drop kvm_vm_hyp_is_pkvm(), reverting to is_protected_kvm_enabled()
+ - Use is_protected_kvm_enabeld() for pKVM guest flavor checks.
+ - s/PKVM/pKVM for commit descriptions too
+ - Make sure the vm_mem_abort callback is !NULL at init time.
+ - Bail out early for !pKVM && !Realm VMs in kvm_vm_ioctl_allowed(). Use
+   kvm_vm_hyp_is_distrusting()
+ - WARN_ON_ONCE(!kvm) for kvm_vm_ioctl_allowed() as it must be only called with
+   a valid kvm instance and only from kvm_arch_vm_ioctl()
+ - Rename kvm_arch_vm_{ext,ioctl}_allowed => kvm_vm_{ext,ioctl}_allowed - Fuad
+ - Move kvm_realm_ext_allowed() to asm/kvm_rmi.h - Fuad
+ - Don't expose PMCR_EL0 to the userspace until we support PMU
+
+
+Changes since v17:
+https://lore.kernel.org/all/20260908162223.1683432-1-suzuki.poulose@arm.com 
+
+ - Add a patch to fix pKVM handling of SYS_CNTVCT/CNTPCT to override the counter
+   offset (Patch1)
+ - Restrict Realms to VGIC v3 only - New patch
+ - Add kvm_vm_is_unprotected() to replace is_protected_kvm_enabled() &&
+   !kvm_vm_is_protected() - New patch
+ - Use macro to initialize the per-flavor vcpu, s2_vm ops
+ - Add a wrapper to initialise vcpu and s2_vm ops with a BUILD_BUG_ON()
+   for the array size checks against VM flavour types
+ - Drop forward decalaration of the vcpu, s2_vm operations that spoiled the
+   fun ;-)
+ - Remove irrelevant comment about the order of timer loading for !VHE
+ - Use the explicti kvm_call_hyp_nvhe for pKVM specific ops
+ - Don't call nvhe_vcpu_put from pkvm_vcpu_put, open code them
+ - Drop cpu argument for vcpu_load() callback. We set the cpu
+   before the callbacks are invoked
+ - Drop kvm_vm_is_confidential(), instead widen the scope of kvm_vm_is_protected()
+   to cover pVMs and Realms. Add an explicit helper kvm_vm_is_protected_pkvm()
+   for the cases where we need to check for a "pVM on pKVM"
+ - Add kvm_vm_hyp_is_pkvm() for checking if the VM is running on pKVM.
+   covers both unprotected and pvms. But really uses is_protected_kvm_enabled()
+   under the hood
+ - Add kvm_vm_hyp_is_distrusting() to cover pKVM guests (both protected and
+   unprotected) and Realms. Use this for preventing the vgic v2 mapping into
+   Stage2 for a guest
+ - Drop superfluous !kvm check from kvm_vm_ioctl_enable_cap() - Sashiko
+ - Drop KVM_CAP_CREATE_IRQCHIP, as we don't support VGIC_V2 for Realms
+ - Filter out the vm_ioctls that are based on blocked cap.
+ - Repurpose the pkvm plumbing for filtering the caps and ioctl to generic
+   and plumb the Realm support in
+ - s/PKVM/pKVM for the comments
+ - Drop type argument for pkvm_init_host_vm and also drop protected variable,
+   now that we have the vm_flavor to check.
+ - Use kvm_vm_hyp_is_pkvm() to replace is_protected_kvm_enabled() with valid
+   kvm instance
+ - CCA: Merge the GET/SET REG handling patches into a single patch
+ - CCA: Reword the commit description for SVE VL access handling
+ - Reordered the patches to group the Realm realted to changes to the rear end
+
+Jean-Philippe Brucker (2):
+  KVM: arm64: CCA: Expose SVE VL register before VCPU finalization
+  KVM: arm64: CCA: Control user register access for Realms
+
+Steven Price (4):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Introduce Realms
+  KVM: arm64: CCA: WARN on injected undef exceptions
+  KVM: arm64: CCA: Support timers in realm RECs
+
+Suzuki K Poulose (17):
+  KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+  KVM: arm64: Disable Steal time accounting for protected guests
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: Prevent unsupported vcpu features for VM types
+  KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+  KVM: arm64: Abstract out memory abort handling
+  KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+  KVM: arm64: CCA: Add a new mode for supporting Realm guests
+  KVM: arm64: CCA: Add VCPU load/put for Realms
+  KVM: arm64: CCA: Add bare minimal S2 operations for Realm
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ arch/arm64/include/asm/kvm_emulate.h          |  16 +
+ arch/arm64/include/asm/kvm_host.h             |  90 ++++-
+ arch/arm64/include/asm/kvm_pgtable.h          |  10 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |  25 +-
+ arch/arm64/include/asm/kvm_rmi.h              |  85 ++++
+ arch/arm64/include/asm/virt.h                 |   1 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arch_timer.c                   |  34 +-
+ arch/arm64/kvm/arm.c                          | 367 ++++++++++++++----
+ arch/arm64/kvm/guest.c                        |  73 +++-
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h        |   2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |   6 +-
+ arch/arm64/kvm/hyp/nvhe/switch.c              |   4 +-
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c            |   2 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   1 +
+ arch/arm64/kvm/hypercalls.c                   |   4 +-
+ arch/arm64/kvm/inject_fault.c                 |   1 +
+ arch/arm64/kvm/mmio.c                         |   1 +
+ arch/arm64/kvm/mmu.c                          | 273 +++++++++----
+ arch/arm64/kvm/pkvm.c                         |   6 +-
+ arch/arm64/kvm/pvtime.c                       |  14 +-
+ arch/arm64/kvm/rmi.c                          |  18 +
+ arch/arm64/kvm/sys_regs.c                     |  28 +-
+ arch/arm64/kvm/vgic/vgic-init.c               |   2 +
+ include/kvm/arm_psci.h                        |   2 +
+ 26 files changed, 858 insertions(+), 212 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4] KVM: PPC: Book3S HV: Avoid spurious interrupts caused by LPCR_MER bit
+Author: Gautam Menghani <gautam@linux.ibm.com>
+
+A huge number of spurious interrupts can be seen immediately after a KVM
+on PowerNV guest boots up in XIVE mode.
+
+$ cat /proc/interrupts  | grep SPU
+SPU:     223705     192439     273526     147623   Spurious interrupts
+
+This bug was introduced by commit ecd10702baae5 ("KVM: PPC: Book3S HV:
+Handle pending exceptions on guest entry with MSR_EE"). The root cause
+is that once LPCR_MER bit is set, it is supposed to be reset by
+software. But when a vCPU starts running with LPCR_MER set, the vCPU does
+not exit back to the host until the decrementer expires or there is an
+hcall, etc. This is because KVM on PowerNV guests have support for
+native XIVE, so they are not dependent on host for interrupt emulation.
+Due to this behaviour, a huge number of spurious interrupts are seen
+since LPCR_MER continues to be set and LPCR_MER cannot be reset until the
+vCPU exits to the host.
+
+Fix this behaviour by not using the LPCR_MER bit whenever native XIVE is
+available (currently in case of KVM on PowerNV only), as the XIVE hardware
+can present interrupts to the KVM guest vCPU directly. So the LPCR_MER
+functionality is not required. This reduces the number of spurious
+interrupts drastically.
+
+Fixes: ecd10702baae5 ("KVM: PPC: Book3S HV: Handle pending exceptions on guest entry with MSR_EE")
+Cc: stable@vger.kernel.org # 6.8+
+Reported-by: Timothy Pearson <tpearson@raptorengineering.com>
+Closes: https://lore.kernel.org/linuxppc-dev/582904882.11159.1786719390349.JavaMail.zimbra@raptorengineeringinc.com
+Signed-off-by: Gautam Menghani <gautam@linux.ibm.com>
+---
+v4:
+1. If interrupt mode is changed to XICS during guest reboot, MER should
+be used. (Amit)
+
+v3:
+1. Continue the use of LPCR_MER when kernel-irqchip=off (Sashiko)
+
+v2:
+1. Handle the case where xive_interrupt_pending() is true and also the
+external exception bit is set. (Narayana)
+
+ arch/powerpc/include/asm/kvm_ppc.h | 7 +++++++
+ arch/powerpc/kvm/book3s_hv.c       | 2 +-
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 51c259a62 to baa4b643e
+KVM mailing list update from 51c259a62 to baa4b643e
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     22 arm.com
+      7 amazon.co.uk
+      2 linux.dev
+      2 linaro.org
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     18  Suzuki K Poulose <suzuki.poulose@arm.com>
+      7  Fred Griffoul <fgriffo@amazon.co.uk>
+      4  Steven Price <steven.price@arm.com>
+      2  Jean-Philippe Brucker <jean-philippe@linaro.org>
+      2  Fuad Tabba <fuad.tabba@linux.dev>
+      1  Vincent Donnefort <vdonnefort@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[RFC PATCH 6/6] samples/kvm, selftests/kvm: Exercise dma-buf backing
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Turn the sample into a dma-buf exporter, and move every supported test
+to dma-buf-backed guest_memfd. Doing both in one commit avoids a state
+where the sample and the tests use different interfaces.
+
+The sample owns one root region and creates a child descriptor for each
+VM. It supports moving, donating and reclaiming pages, absent pages,
+read-only ranges, a scratch page and per-child ioctl allowlists.
+
+The sample's get_phys() reports the run at the requested offset. It
+uses bitmap searches to find where presence or read-only state changes.
+An absent page returns -ENOENT. In scratch mode, an absent page of a
+root child is reported as the read-only scratch page instead. Scratch
+mode applies only to root children, because a mode change invalidates
+only them. Every change of ownership sends a ranged invalidation.
+
+Each test passes one dma-buf fd to both guest_memfd and iommufd. New
+tests cover:
+
+- two VMMs, checking what the guest, the device and the host see;
+- SET_PRESENT and SET_READONLY racing with one KVM_CREATE_GUEST_MEMFD,
+  so that lockdep checks attachment setup;
+- a 2 MiB-aligned region in which every other page is replaced by the
+  scratch page. The guest reads zeros and its own data, and KVM maps
+  the region with 4 KiB pages. An untouched aligned region still maps
+  at 2 MiB.
+
+The sample sizes the CMA root before children overlap, and publishes
+each child only after its ownership and allowlist are set. Confidential
+VMs are out of scope; their test is an explicit skip.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ samples/kvm/gmem_provider.c                   | 1287 ++++++++++-------
+ samples/kvm/gmem_provider.h                   |  144 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |    3 +-
+ .../kvm/gmem_provider_nvme_dma_test.c         |   28 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |   25 +-
+ .../testing/selftests/kvm/x86/gmem_poc_test.c |  824 +++++++++++
+ .../kvm/x86/gmem_provider_hugepage_test.c     |   30 +-
+ .../kvm/x86/gmem_provider_iommufd_test.c      |   42 +-
+ .../kvm/x86/gmem_provider_readonly_test.c     |  172 +++
+ .../kvm/x86/gmem_provider_revoke_test.c       |   34 +-
+ .../selftests/kvm/x86/gmem_provider_test.c    |  190 +--
+ .../kvm/x86/gmem_provider_vfio_test.c         |   45 +-
+ 12 files changed, 2091 insertions(+), 733 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 5/6] KVM: guest_memfd: Add dma-buf backing
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A memory owner that exports a dma-buf should be able to use that one
+object for both guest stage-2 mappings and device IOMMU mappings. A
+second, KVM-specific backing interface would duplicate the description
+of the memory layout and the rules for invalidating it.
+
+Add GUEST_MEMFD_FLAG_USE_DMABUF and a dmabuf_fd field to
+KVM_CREATE_GUEST_MEMFD. This backing has its own kvm_gmem_ops.
+guest_memfd attaches to the buffer as a revocable importer without a
+device. At creation, it asks for the run at offset 0 and refuses MMIO
+or unknown attributes, so a buffer that KVM can never map fails early.
+Offset 0 may be unbacked.
+
+On a fault, guest_memfd takes the reservation once. It asks get_phys()
+about the PUD-sized, PMD-sized and page-sized blocks around the faulting
+page, in that order, and maps the first block that one aligned RAM run
+covers. If the page is not backed or the run is not supported, the
+fault returns -EFAULT. A READONLY run is mapped without stage-2 write
+permission.
+
+The invalidation callback only runs KVM's invalidation over the
+affected range. It does not allocate memory or call the exporter. A
+fault that read the layout during the change sees mmu_invalidate_seq
+move and retries.
+
+Callbacks can start as soon as guest_memfd attaches. A dma-buf-backed
+file is therefore added to the inode's list of guest_memfd files under
+filemap_invalidate_lock.
+
+mmap() uses the exporter's dma-buf mmap. fallocate() and populate are
+not supported. Import the DMA_BUF symbol namespace so that a
+CONFIG_KVM=m build passes modpost.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ include/linux/kvm_host.h       |   1 +
+ include/uapi/linux/kvm.h       |   6 +-
+ tools/include/uapi/linux/kvm.h |   6 +-
+ virt/kvm/Kconfig               |   1 +
+ virt/kvm/guest_memfd.c         | 239 +++++++++++++++++++++++++++++++--
+ 5 files changed, 243 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 4/6] dma-buf: Allow dynamic attach without a device
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+dma_buf_dynamic_attach() requires a struct device: the device for which
+the buffer is mapped for DMA. Exporters may also check it before they
+accept the attachment. An importer that does not perform DMA has no
+such device. iommufd already attaches with a global placeholder device
+for this reason. KVM would need one too, although it only needs to know
+where the memory is so that it can map it into a guest.
+
+Allow @dev to be NULL for a dynamic importer. Such an importer learns
+where the memory is from get_phys() and builds its own mappings. It
+must not map the attachment for DMA, and dma_buf_map_attachment()
+refuses an attachment without a device. An exporter that needs a device
+to answer can refuse the attachment in its attach op, as it can for any
+other reason.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/dma-buf/dma-buf.c      | 15 +++++++++++++--
+ include/trace/events/dma_buf.h |  2 +-
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 3/6] dma-buf: Add ranged mapping invalidation
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+dma_buf_invalidate_mappings() tells every importer that the whole
+buffer changed. An exporter that changes one part of its memory cannot
+say which bytes changed, so importers throw away mappings that are
+still valid.
+
+Add an exporter helper that invalidates a byte range, and an importer
+callback that receives it. The callback means that the address, the
+attributes or the backing of the range changed. If part of the range is
+no longer backed, get_phys() returns -ENOENT for it. Importers must stop
+using their old answer before the callback returns. Importers that do
+not implement the callback still receive a whole-buffer invalidation.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/dma-buf/dma-buf.c | 30 ++++++++++++++++++++++++++++++
+ include/linux/dma-buf.h   | 16 ++++++++++++++++
+ 2 files changed, 46 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 2/6] dma-buf: Add get_phys() to describe a physical run
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+iommufd and KVM write physical addresses into their own page tables.
+To do so, they must ask the exporter which frames back an offset of a
+dma-buf, whether that memory is RAM or MMIO, and whether it may be
+written.
+
+Add a get_phys() operation. The importer passes an offset and a maximum
+length. The exporter reports one run: the frames that start at the
+offset, are backed and physically contiguous, and share one attribute
+word. The run never exceeds the length. The exporter may end it early,
+so importers must not assume that it is the longest possible run.
+
+get_phys() returns -ENOENT when the byte at the offset is not backed,
+and -ENODEV when the buffer is revoked. The caller holds the
+reservation, and either pins the attachment or handles revocation. A
+reported frame stays valid until an invalidation that covers it
+returns.
+
+The attribute word holds the memory type and a READONLY flag. Zero
+means writable RAM. Importers refuse unknown types, reserved bits and
+unknown flags, so attributes added later fail safely. Two flag bits are
+reserved: one for holes and one for confidential memory.
+
+Convert vfio-pci, the iommufd selftest exporter and the KVM sample.
+iommufd behaves as before: it maps a buffer only when one writable run
+covers all of it.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/dma-buf/dma-buf.c               |  47 +++++++++++
+ drivers/iommu/iommufd/iommufd_private.h |   8 --
+ drivers/iommu/iommufd/iommufd_test.h    |  16 ++++
+ drivers/iommu/iommufd/pages.c           |  74 ++++-------------
+ drivers/iommu/iommufd/selftest.c        | 106 ++++++++++++++++++++----
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  58 ++++++-------
+ include/linux/dma-buf.h                 |  54 ++++++++++++
+ include/linux/vfio_pci_core.h           |   3 -
+ samples/kvm/gmem_provider.c             |  39 ++++-----
+ 9 files changed, 267 insertions(+), 138 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 1/6] KVM: guest_memfd: Add a writable result to get_pfn()
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A guest_memfd backing has no way to tell KVM that a page must stay
+mapped but must not be written by the guest. get_pfn() returns only a
+frame, and KVM takes write access from the memslot flags.
+KVM_MEM_READONLY is not an option: KVM refuses it on guest_memfd slots,
+because it emulates a write to a read-only slot as MMIO, which private
+memory cannot support.
+
+Add a writable output to get_pfn(). KVM sets it to true before the
+call, and the backing may clear it. When it is false, the x86 and arm64
+stage-2 fault paths map the page without write permission. A guest
+write to that page then exits to userspace as a memory fault; KVM first
+releases any page that the backing returned. Callers that do not map
+the page pass NULL.
+
+The result applies to stage-2 mappings only. When KVM writes guest
+memory through the memslot's host address, the permissions of the host
+mapping apply.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/arm64/kvm/mmu.c        | 13 ++++++++-----
+ arch/arm64/kvm/nested.c     | 10 +++++++---
+ arch/x86/kvm/mmu/mmu.c      | 18 ++++++++++++++++--
+ arch/x86/kvm/svm/sev.c      |  4 ++--
+ include/linux/kvm_host.h    | 11 ++++++++---
+ samples/kvm/gmem_provider.c |  3 ++-
+ virt/kvm/guest_memfd.c      | 13 ++++++++-----
+ 7 files changed, 51 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 0/6] KVM: guest_memfd: back guest_memfd with an imported dma-buf
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+This extends David Woodhouse's "KVM: Allow alternative providers of
+guest_memfd backed by PFNMAP memory" RFC (v2) to let guest_memfd import
+a dma-buf as its page source:
+
+  https://lore.kernel.org/kvm/20260720111259.122911-1-dwmw2@infradead.org/
+
+The memory owner is a plain dma-buf exporter, linking against neither
+KVM nor iommufd. guest_memfd imports it for the guest (stage-2) plane
+and iommufd imports the same buffer for the device (DMA) plane, so one
+object and one invalidation protocol serve both. This is a concrete
+answer to the "how do we plug into iommufd without masquerading as a
+dma-buf" question from David's cover: the provider does not pretend to
+be anything; the dma-buf is the shared object.
+
+Applies on top of David's v2 series.
+
+Patches:
+
+ 1 KVM: guest_memfd: Add a writable result to get_pfn()
+   Give get_pfn() a writable out-param so a backing can map a page
+   present but read-only (KVM_MEM_READONLY is rejected on guest_memfd
+   slots). A guest write then exits as a memory fault. Stage-2 only;
+   KVM's own host-mapped accesses are unaffected.
+
+ 2 dma-buf: Add get_phys() to describe a physical run
+   New exporter op: for an offset+len, return one physically contiguous
+   backed run and an attribute word (RAM/MMIO, plus READONLY). -ENOENT
+   for an unbacked byte, -ENODEV when revoked. Lets a page-table-building
+   importer ask where the memory is instead of taking a scatterlist.
+   Converts vfio-pci, the iommufd selftest exporter and the sample;
+   iommufd behaviour is unchanged.
+
+ 3 dma-buf: Add ranged mapping invalidation
+   Invalidate a byte range rather than the whole buffer. The callback
+   means "re-query this range" and covers loss, replacement and
+   read-only flips. Importers without the callback still get a
+   whole-buffer invalidation.
+
+ 4 dma-buf: Allow dynamic attach without a device
+   Allow a dynamic importer with no struct device, for a consumer (KVM)
+   that only needs the physical layout and builds its own tables. Such
+   an importer must not map the attachment for DMA.
+
+ 5 KVM: guest_memfd: Add dma-buf backing
+   Add GUEST_MEMFD_FLAG_USE_DMABUF and a dmabuf_fd to
+   KVM_CREATE_GUEST_MEMFD. guest_memfd attaches as a revocable importer
+   without a device, serves faults from get_phys() (largest aligned RAM
+   run, read-only honoured), and zaps the range on the invalidation
+   callback.
+
+ 6 samples/kvm, selftests/kvm: Exercise dma-buf backing
+   Turn the sample into a dma-buf exporter (a toy memory owner: one root
+   region, a child per VM, move/donate/reclaim, absent and read-only
+   pages, a scratch page, per-child ioctl allowlists) and move the
+   selftests to feed one dma-buf fd to both guest_memfd and iommufd.
+
+Scope: non-confidential VMs, RAM backings only; iommufd keeps its
+single-range import for now. As with David's series, this is largely
+AI-assisted and is posted to get the interface shape reviewed.
+
+Fred Griffoul (6):
+  KVM: guest_memfd: Add a writable result to get_pfn()
+  dma-buf: Add get_phys() to describe a physical run
+  dma-buf: Add ranged mapping invalidation
+  dma-buf: Allow dynamic attach without a device
+  KVM: guest_memfd: Add dma-buf backing
+  samples/kvm, selftests/kvm: Exercise dma-buf backing
+
+ arch/arm64/kvm/mmu.c                          |   13 +-
+ arch/arm64/kvm/nested.c                       |   10 +-
+ arch/x86/kvm/mmu/mmu.c                        |   18 +-
+ arch/x86/kvm/svm/sev.c                        |    4 +-
+ drivers/dma-buf/dma-buf.c                     |   92 +-
+ drivers/iommu/iommufd/iommufd_private.h       |    8 -
+ drivers/iommu/iommufd/iommufd_test.h          |   16 +
+ drivers/iommu/iommufd/pages.c                 |   74 +-
+ drivers/iommu/iommufd/selftest.c              |  106 +-
+ drivers/vfio/pci/vfio_pci_dmabuf.c            |   58 +-
+ include/linux/dma-buf.h                       |   70 +
+ include/linux/kvm_host.h                      |   12 +-
+ include/linux/vfio_pci_core.h                 |    3 -
+ include/trace/events/dma_buf.h                |    2 +-
+ include/uapi/linux/kvm.h                      |    6 +-
+ samples/kvm/gmem_provider.c                   | 1311 ++++++++++-------
+ samples/kvm/gmem_provider.h                   |  144 +-
+ tools/include/uapi/linux/kvm.h                |    6 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |    3 +-
+ .../kvm/gmem_provider_nvme_dma_test.c         |   28 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |   25 +-
+ .../testing/selftests/kvm/x86/gmem_poc_test.c |  824 +++++++++++
+ .../kvm/x86/gmem_provider_hugepage_test.c     |   30 +-
+ .../kvm/x86/gmem_provider_iommufd_test.c      |   42 +-
+ .../kvm/x86/gmem_provider_readonly_test.c     |  172 +++
+ .../kvm/x86/gmem_provider_revoke_test.c       |   34 +-
+ .../selftests/kvm/x86/gmem_provider_test.c    |  190 +--
+ .../kvm/x86/gmem_provider_vfio_test.c         |   45 +-
+ virt/kvm/Kconfig                              |    1 +
+ virt/kvm/guest_memfd.c                        |  252 +++-
+ 30 files changed, 2703 insertions(+), 896 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 23/23] KVM: arm64: CCA: Control user register access for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+The RMM restricts the access to the register states that the host can
+read/modify for a given Realm.
+
+e.g., At VCPU creation, can modify GPRS (x0-x30) and PC.
+      While servicing SMCCC calls via RSI_HOST_CALL or servicing PSCI
+      requests.
+      MMIO emulation in the unprotected space.
+
+Additionally we use the sysreg configuration to advertise/configure the
+following Realm parameters, which are required before the Realm Descriptor
+is created:
+ - SVE Vector Length
+ - Number of HW Breakpoints/Watchpoints
+ - PMU Counters.
+
+Thus KVM also additionally allows access to ID_AA64DFR0_EL1 and SVE_VLS for
+the configuration of Realm creation parameters. We don't support PMUs for
+the Realm VMs yet, so PMCR is not exposed.
+
+The RMM makes similar restrictions for reading of the guest's registers
+(this is *confidential* compute after all), however we don't impose the
+restriction here. This allows the VMM to read (stale) values from the
+registers which might be useful to read back the initial values even if
+the RMM doesn't provide the latest version. For migration of a realm VM,
+a new interface will be needed so that the VMM can receive an
+(encrypted) blob of the VM's state.
+
+Reflect the above in KVM_GET_REG_LIST, KVM_SET_ONE_REG calls.
+
+Signed-off-by: Jean-Philippe Brucker <jean-philippe@linaro.org>
+Co-developed-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Co-developed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/guest.c      | 63 +++++++++++++++++++++++++++++++++++++
+ arch/arm64/kvm/hypercalls.c |  4 +--
+ arch/arm64/kvm/sys_regs.c   | 28 +++++++++++++----
+ 3 files changed, 87 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 22/23] KVM: arm64: CCA: Expose SVE VL register before VCPU finalization
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+Userspace must configure the SVE vector length before the Realm is created
+(as it is part of the parameter for Realm creation), but the Realm VCPUs
+cannot be finalized until after the Realm Descriptor has been created.
+
+KVM_GET_REG_LIST currently rejects the unfinalized VCPUs, which prevents
+the userspace from discovering and configuring the VLs for  the Realm.
+
+Allow KVM_GET_REG_LIST for unfinalized RECs and make the SVE register
+enumeration handle the unfinalized case explicitly. i.e., only expose
+KVM_REG_ARM64_SVE_VLS before SVE is finalized.
+
+One adverse side effect of this change is that a KVM_GET_REG_LIST call that
+only probes for the array size will now succeed even if SVE is not
+finalized, but that seems harmless since the following KVM_GET_REG_LIST
+with the full array will fail.
+
+Signed-off-by: Jean-Philippe Brucker <jean-philippe@linaro.org>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arm.c   | 15 ++++++++++++++-
+ arch/arm64/kvm/guest.c | 10 +++++-----
+ 2 files changed, 19 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 21/23] KVM: arm64: CCA: Support timers in realm RECs
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+The RMM keeps track of the timer while the realm REC is running, but on
+exit to the normal world KVM is responsible for handling the timers.
+
+A later patch adds the support for propagating the timer values from the
+exit data structure and making sure the values are in sync for KVM.
+
+Also, RMM doesn't support injecting virtual interrupts backed by Physical
+interrupts. So, use the existing software resampling mechanims for Realm
+timer interrupts.
+
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arch_timer.c | 22 ++++++++++++++++++++--
+ 1 file changed, 20 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 20/23] KVM: arm64: CCA: WARN on injected undef exceptions
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+The RMM doesn't allow injection of a undefined exception into a realm
+guest. Add a WARN to catch if this ever happens.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/inject_fault.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 19/23] KVM: arm64: CCA: Don't expose unsupported capabilities for realm guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Limit the capabilities that are allowed for Realm VMs. Similarly block
+the vm_ioctls backed by the capabilities.
+
+Repurpose the kvm_pkvm_ioctl_allowed() to support both pKVM and Realm
+ioctls. Rename the helper to kvm_vm_ioctl_allowed() and move it
+into arch/arm64/kvm/arm.c. Also add a generic kvm_vm_ext_allowed()
+to handle pKVM and Realm capability filtering and route them accordingly.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Drop WARN_ON_ONCE() from kvm_vm_ioctl_allowed to synchronise with
+   what is in -rc5 and make the conflict resolution easier.
+---
+ arch/arm64/include/asm/kvm_pkvm.h | 19 ------------
+ arch/arm64/include/asm/kvm_rmi.h  | 24 +++++++++++++++
+ arch/arm64/kvm/arm.c              | 49 +++++++++++++++++++++++++++++--
+ 3 files changed, 70 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 18/23] KVM: arm64: CCA: Introduce Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+Add foundational work for supporting Realms.
+ - Add a new VM flavor.
+ - At KVM init, check if the KVM can support Realms (though not functional
+   yet) and will be advertised by static key kvm_rmi_is_available. This
+   will be turned on in a later patches, once we have all the bits and
+   pieces ready. For now check if we are blessed with KVM_MODE_RMM.
+ - Add realm specific tracking in kvm_arch. Since Realm and protected pKVM
+   states are mutually exclusive, move them into a union.
+
+Please note that we cannot create Realm VMs yet. This requires further
+changes to the UABI and core RMI driver support, which will come later.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Co-developed-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_emulate.h | 16 ++++++++
+ arch/arm64/include/asm/kvm_host.h    | 19 ++++++---
+ arch/arm64/include/asm/kvm_rmi.h     | 61 ++++++++++++++++++++++++++++
+ arch/arm64/include/asm/virt.h        |  1 +
+ arch/arm64/kvm/Makefile              |  2 +-
+ arch/arm64/kvm/arm.c                 |  6 +++
+ arch/arm64/kvm/mmu.c                 |  1 +
+ arch/arm64/kvm/rmi.c                 | 18 ++++++++
+ 8 files changed, 118 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 17/23] KVM: arm64: CCA: Add bare minimal S2 operations for Realm
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add bare minimal MMU operation hooks for Realms. The mem_abort handling
+is chosen as the default KVM variant. However this cannot be reached for
+Realms yet and we would need real RMI command support to make it fully
+functional. Similarly, unmapping stage2 requires RMI command support.
+Until then reuse follow protected pKVM hook and ignore unmapping.
+This will be addressed in the later series.
+
+RMM takes care of the TLB flushing as required, when the Stage2 is
+modified. So host doesn't need to do anything explicitly. RMM doesn't
+support access flags for the stage2, even for the shared IPA.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Reuse no_age_gfn for Realms. Also use no_stage2_unmap_range for
+   now, until we get proper RMI backed driver.
+---
+ arch/arm64/kvm/mmu.c | 23 +++++++++++++++++++++++
+ 1 file changed, 23 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 16/23] KVM: arm64: CCA: Add VCPU load/put for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+RMM controls the VCPU settings and most are hidden from the KVM, except
+for the VGIC and timer bits.
+
+A later patch would add syncing the VCPU state into the Realm REC related
+SMC parameters.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arm.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 15/23] KVM: arm64: CCA: Add a new mode for supporting Realm guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add an explicit mode to support Arm CCA guests.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ Documentation/admin-guide/kernel-parameters.txt | 3 +++
+ arch/arm64/include/asm/kvm_host.h               | 1 +
+ arch/arm64/kvm/arm.c                            | 5 +++++
+ 3 files changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 14/23] KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+pKVM does not trust the host. Realm VMs follow a similar trust model, with
+the Realm Management Monitor owning the protected state instead of the
+host. Add a helper to identify VMs that run under a host-distrusting
+hypervisor.
+
+Use this for blocking ioremap of vgic-v2 into stage2 and prevent creation
+of VGIC other than v3.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 4 ++++
+ arch/arm64/kvm/mmu.c              | 2 +-
+ arch/arm64/kvm/vgic/vgic-init.c   | 2 ++
+ 3 files changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 13/23] KVM: arm64: Abstract out memory abort handling
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Move the memory abort handling under VM specific s2 operation.
+
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Rename protected_vm_mem_abort => protected_pkvm_mem_abort for consistency
+   with the other callbacks.
+---
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/mmu.c              | 33 ++++++++++++++++++-------------
+ 2 files changed, 21 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 12/23] KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+kvm_handle_guest_abort() repeatedly obtains the VM from vcpu->kvm.
+
+Introduce a local kvm pointer and use it throughout the function. While
+touching the code, fix the missing whitespace in the
+kvm_is_nested_s2_mmu() call.
+
+Suggested-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 11/23] KVM: arm64: Add VM specific callback for S2 MMU operations
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM type specific S2 MMU operation backends which can be initialized per
+VM flavor, to keep the handling cleaner.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Change since v21:
+ - Define all vm_s2_ops call back. All calls are mandatory.
+ - Define callback for each flavor, disjointing the non-protetcted pKVM and
+   normal KVM (VHE & nVHE) and remove the KVM_PGT_FN() hacks.
+ - Dropped Reviews due to the changes.
+ - Add "no_age_gfn" and "no_stage2_unmap_range" for pKVM callbacks, no_age_*
+   to be also reused by Realms later.
+ - Move kvm_vm_s2_ops field to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h |  14 +++
+ arch/arm64/kvm/mmu.c              | 173 +++++++++++++++++++++++++-----
+ 2 files changed, 160 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 10/23] KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+In preparation for adding VM specific backends for stage2 operations,
+nuke __unmap_stage2_range() and fold the logic into
+kvm_stage2_unmap_range(). Also, make kvm_unmap_gfn_range(), the only other
+user of the __unmap_stage2_range() call the kvm_stage2_unmap_range(). Also,
+while at it fix the comment to make it clear that mmu_lock must always be
+held while unmapping. The code already mandates that and the two call paths
+do have the write mmu_lock held.
+
+Later we would replace the logic in kvm_stage2_unmap_range() with VM
+specific backends.
+
+No functional changes intended.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Change since v21:
+ - Nuke __unmap_stage2_range and consolidate the stage2_unmap_range logic
+   into kvm_stage2_unmap_range(), in preparation for removing the KVM_PGT_FN()
+   for stage2_unmap
+---
+ arch/arm64/kvm/mmu.c | 38 ++++++++++++++++----------------------
+ 1 file changed, 16 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 09/23] KVM: arm64: Prevent unsupported vcpu features for VM types
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Prevent unsupported VCPU features for the protected VCPUs. Realms and pVMs
+not support 32bit EL1 or NV yet. pKVM doesn't rely on the host vcpu
+features and it clears the unsupported features while hyp_vcpu is
+initialised. Block the features early in the vcpu init if we detect
+incompatible features.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/arm.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 08/23] KVM: arm64: Add vcpu load/put call backs for flavors
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM flavor specific handlers for VCPU load/put, in an effort to make it
+easier to follow the code. pauth traps were removed from VMs running PKVM
+as it is a no-op for them.
+
+Based on a patch by Marc Zyngier
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Add '&' into the KVM_VCPU_OPS() macro
+---
+ arch/arm64/include/asm/kvm_host.h |   6 ++
+ arch/arm64/kvm/arm.c              | 138 +++++++++++++++++++++++-------
+ 2 files changed, 114 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 07/23] KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+To keep the VCPU load/put handling cleaner with the different kinds of VM
+types, we are about to introduce VM specific callbacks to do just the right
+thing. In preparation for that, make some refactoring to add the change
+easier by mainly feature specific configurations to individual wrappers,
+so that different callbacks could reuse the helpers.
+
+Adds vcpu_prepare_mmu()/vcpu_put_mmu() wrappers to load/put MMU related
+configurations for !pKVM guests. Additionally makes it explicit that
+kvm_arm_vmid_clear_active() is not required for pKVM host.
+
+Add vcpu_load_pvtime(), vcpu_set_wfx_traps() wrappers for handling the
+corresponding configurations.
+
+While at it, also make it clear that the timer loading constraints only
+apply for the VHE.
+
+No functional changes intended. Based on a work by Marc Zyngier.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Add vcpu_put_mmu() to pair with the vcpu_prepare_mmu() and make the
+   call conditional on !is_protected_kvm_enabled(). Preparing the path
+   for per-flavor callbacks
+ - Update the timer load constraints comment to reflect that it only applies
+   for VHE
+ - Wrap kvm_arm_vmid_clear_active() to vcpu_put_mmu() to compliement
+   with the vcpu_prepare_mmu(). Also only clear the VMID for non-pKVM
+   guests
+---
+ arch/arm64/kvm/arm.c | 59 ++++++++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 06/23] KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+vcpu_set_pauth_traps() bails out and does nothing for pKVM hosts.
+Clean this up by moving the is_protected_kvm_enabled() check to the
+caller, in preparation for adding VM specific vcpu load/put callbacks.
+
+While at it, do an early return if the vcpu doesn't have ptrauth.
+
+No functional changes
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - New patch, since addition of this to the Refactoring patch makes it a bit
+   more bigger and harder to review
+---
+ arch/arm64/kvm/arm.c | 52 +++++++++++++++++++++++---------------------
+ 1 file changed, 27 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 05/23] KVM: arm64: Track the type of VM in kvm_arch
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+KVM arm64 has different types of VMs with all the different modes in which
+the hypervisor code can be run. e.g., VHE, nVHE, pKVM etc. Then there is
+protected VM and normal VMs with pKVM. We might soon add other types,
+e.g., Arm CCA Realm. So in an effort to make the handling of these
+different types of VMs a bit more friendly to the eyes, add a VM flavor to
+the kvm_arch and we could then add handlers for different operations based
+on the VM type.
+
+Keep the flavor initialisation at the beginning to allow for the detection
+early enough and fail out on any unsupported requests.
+
+With that, add wrappers for checking the "type" of a VM and replace the
+existing users with the new wrappers.
+
+Given we already have the construct of "kvm_vm_is_protected" in the core
+KVM code, use that for all confidential compute guests including Realms
+that we are about to add. Adds __VM_PROTECTED marker vm flavor to draw the
+boundary for "protected VMs". In later patches, we would add Realm VMs,
+ which would also be classified as protected.
+
+Add a explicit helper to detect if a given VM is a "protected" VM under pKVM.
+Change the existing users that precisely want to check the VM type. These
+include :
+  - kvm_arch_prepare_memory_region - For preventing memslot changes after
+    pVM creation.
+
+All the others are retained as a wider check for confidential guest VMs.
+These are:
+ - kvm_vm_ioctl_set_counter_offset - For disallowing timer offset
+   configuration
+ - io_mem_abort for dabt handling without valid syndrome information
+
+Both of which are true for Realms too.
+
+Realms support is restricted to VHE host and thus "kvm_vm_is_protected()"
+checks in the pkvm hyp specific code doesn't need to change, as the only
+protected guests it deals with is "protected pKVM" guests. To tighten this
+init_pkvm_hyp_vm() restricts the hyp copy of the vm_flavor to the ones it
+supports.
+
+vcpu_is_protected() usage from nVHE hyp code is tricky, as we need to
+convert the vcpu->kvm to the HYP VA before checking the flavor. This
+involves kern_hyp_va() usage in asm/kvm_host.h. To avoid build breaks,
+include asm/kvm_mmu.h to arm64/kvm/mmio.c.
+
+While at it move the psci_version around to keep the structure packed.
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Drop kern_hyp_va() and restrict nvhe code to always use vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() and open code the check
+ - Move psci_version field in kvm_arch around to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h      | 42 +++++++++++++++++++++++---
+ arch/arm64/include/asm/kvm_pkvm.h      |  4 +--
+ arch/arm64/kvm/arm.c                   | 33 ++++++++++++++++----
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h |  2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c         |  6 +++-
+ arch/arm64/kvm/hyp/nvhe/switch.c       |  4 +--
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c     |  2 +-
+ arch/arm64/kvm/mmio.c                  |  1 +
+ arch/arm64/kvm/mmu.c                   |  2 +-
+ arch/arm64/kvm/pkvm.c                  |  6 ++--
+ 10 files changed, 79 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 04/23] KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+To avoid future include cycles, drop the linux/kvm_host.h include in
+kvm_pgtable.h and include the lightweight headers required for the types
+and inline helpers used there. Additionally provide a forward
+declaration for struct kvm_s2_mmu as it's only used as a pointer in this
+file.
+
+Both pgtable.c and kvm_pkvm.h relied on the indirect inclusion of
+kvm_host.h, so make that explicit.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Include asm/memory.h, asm/page.h , linux/bitfield.h in asm/kvm_pgtable.h
+   (Sashiko)
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 10 +++++++++-
+ arch/arm64/include/asm/kvm_pkvm.h    |  2 +-
+ arch/arm64/kvm/hyp/pgtable.c         |  1 +
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 02/23] KVM: arm64: Disable Steal time accounting for protected guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+PVTIME support is advertised by KVM_CAP_STEAL_TIME, which doesn't take into
+account the kvm instance. Even with that, a VMM could skip the CAP check
+and proceed to configure the PVTIME as we don't do further check on the
+DEVICE_CTRL. Tighten this up by passing the KVM instance around wherever
+possible and catch things early.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +-
+ arch/arm64/kvm/arm.c              |  2 +-
+ arch/arm64/kvm/pvtime.c           | 14 +++++++-------
+ 3 files changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 03/23] KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Fix a potential build error (like below, when asm/kvm_emulate.h gets
+included after the kvm/arm_psci.h) by including the missing header file
+in kvm/arm_psci.h:
+
+./include/kvm/arm_psci.h: In function ‘kvm_psci_version’:
+./include/kvm/arm_psci.h:29:13: error: implicit declaration of function
+   ‘vcpu_has_feature’; did you mean ‘cpu_have_feature’? [-Werror=implicit-function-declaration]
+   29 |         if (vcpu_has_feature(vcpu, KVM_ARM_VCPU_PSCI_0_2)) {
+	         |             ^~~~~~~~~~~~~~~~
+			       |             cpu_have_feature
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ include/kvm/arm_psci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v22 01/23] KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Protected VMs doesn't allow setting offsets for virtual and physical
+counters, as the offset is always fixed to 0. The VM ioctl is filtered
+out based on the cap. However we don't prevent the userspace from trying
+to write to the CNTVCT/CNTPCT registers. This would lead to KVM triggering
+a WARN() in timer_set_offset() as the vm_offset pointer is set to NULL.
+
+Fix this by always "fixing" the timer offsets to 0 and marking that the
+timer offset is set in the kvm->arch.flags at KVM init time for protected
+VMs. This prevents the access to the VM specific vm_offset at low cost.
+A userspace writing to the CNT*CT_EL0 would observe success, without
+any real effect. This is cleaner over spilling "*_is_protected()"
+checks and "matches" what we really do in practise. i.e., always run
+with "fixed counter offset of 0".
+
+Reported by Sashiko
+
+Link: https://lore.kernel.org/all/20260908164641.416911F00A3A@smtp.kernel.org
+Fixes: f7d05ee84a6a ("KVM: arm64: Prevent host from managing timer offsets for protected VMs")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ Changes since v19:
+  - Fix typos in commit description and explain why we choose the approach.
+  - Improve comment in the code
+ Changes since v18:
+  - Retain NULL vm_offset for protected VMs to avoid host tampering with the
+    offset.
+  - Moved the flag setting into kvm_timer_init_vm(), where it should have been
+    in the first place
+---
+ arch/arm64/kvm/arch_timer.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v22 00/23] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This series is a trimmed down version of the Arm CCA KVM support, previously
+posted here [0]. Like in the v17, we have tried to split the entire series
+into the following chunks.
+
+ 1) Base RMM RMI support under drivers/firmware/arm_rmm -> [1]
+ 2) Linux Host support for handling GPFs - [2]
+ 3) NEW: Enlighten KVM arm64 about the different VM types and use call
+    backs for the VM type, rather than spilling the is_this_type_of_vm()
+    everywhere. Adds VCPU and Stage2 MMU related callbacks with support
+    for the existing VM types. There are other places where we may be
+    able to abstract, but those need careful performance evaluations
+    to make sure they are fit (e.g., vcpu_run)
+
+   With that in place we generalise the predicate "kvm_vm_is_protected()"
+   to cover all  "Confidential" VMs (which includes Protected VM and Realms),
+   allowing us to handle common themes without having to do things like :
+
+     if (kvm_vm_is_protected() || kvm_vm_is_realm())
+
+   Also replaces the code with precise check for a given VM type to
+   avoiding combination of if (). e.g,, kvm_vm_is_unprotected_pkvm(kvm).
+   The checks under arch/arm64/kvm/{nvhe,pkvm} still retain the vm_is_protected()
+   check as pVMs are the only possible protected VMs there.
+   
+ 4) Bare minimal Realm VM support without the actual functionality to
+    run a Realm. This would help the maintainers to review the series in
+    smaller chunks. This doesn't depend on [1] and can be independently
+    merged, without being "functional".
+    This series includes vcpu operations and the s2 vm operations, which
+    do need the RMI driver backend to be meaningful. But the KVM handler
+    is in the right shape. The remaining changes would be added once the
+    RMI firmware library lands. Also covers the SET_ONE_REG/GET_ONE_REG
+
+ 5) Core implementation of the RMI driver for KVM and actual enablement of the
+    Realm support. This depends on (1), (2) and the guest-memfd-in-place
+    conversion series v12 from Ackerley. This is available here at the integration
+    branch [3]
+
+
+NOTE: There is a conflict with Fuad's patch to drop the WARN for unknown vm
+ioctls, that is queued in ~fixes~ in v7.3-rc5. I have dropped the
+WARN_ON_ONCE() to match the code after resolution.
+
+  https://lore.kernel.org/all/20260914093838.1082637-1-fuad.tabba@linux.dev 
+
+This series is comprised of (3) and (4) above.
+
+The integration branch has been tested with the following components:
+
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3 [4]
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git tag:cca-kvm-v20
+
+[0] Arm CCA KVM Support v16 : https://lore.kernel.org/all/20260803134403.80630-1-steven.price@arm.com
+[1] Linux firmware RMI v22 https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/fw_rmm/v22
+[2] Linux GPF Host  https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/host-gpf/v19
+[3] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v222integration
+[4] https://support.arm.com/documentation/den0137/2-0bet3/
+
+Changes since v21:
+ https://lore.kernel.org/all/20261001210703.1597150-1-suzuki.poulose@arm.com
+ - Keep the kvm_arch struct packed, by moving psci_version, closer to vm_flavor and also moving the vm_s2_ops, closer to vm_flavor.
+ - Drop the kern_hyp_va() for vcpu_is_protected() in nVHE, instead ban nVHE
+   code from using vcpu_is_protected() (by using BUILD_BUG_ON()) and convert
+   all users to vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() in favor of open coded check against VM_PKVM
+ - Drop WARN_ON_ONCE() in the kvm_vm_ioctl_allowed() to match Fuad's fix merged in v7.3-rc5
+ - Move '&' to the KVM_*_OPS macros
+ - Nuke __unmap_stage2_range() and define per-VM callback for stage2_unmap_range, removing the KVM_PGT_FN() hack for the call, and also for the others
+ - Drop NULL check for vm_s2_ops callbacks and always define everything.
+ - Add no_age_gfn() which plugs in for pVMs and Realms for the vm_age_*gfn callbacks
+
+Changes since v20:
+ https://lore.kernel.org/all/20260924160504.853911-1-suzuki.poulose@arm.com
+
+ - Allow KVM_ARM_CAP_DEVICE_CTRL for Realms to allow SMCCC filtering
+ - New patch: Deny vcpu features not compatible with protected VMs
+ - Remove suprious ":w" in commit description (Thanks Catalin)
+
+Changes since v19:
+ https://lore.kernel.org/all/20260920212845.707-1-suzuki.poulose@arm.com
+
+ - Collect Reviews from Jonathan, and Tested-by from Gavin - Thank you both!
+ - Add a new patch prepare the the vcpu_set_pauth_traps for the addition of
+   VCPU callbacks. Could have merged with the existing one, but that becomes
+   quite too much to follow.
+ - Add another new preparatory patch to replace vcpu->kvm => new local variable
+   kvm in kvm_handle_guest_abort(), making it also easier for abstracting memory
+   abort handling.
+ - Fix vcpu_is_protected for nvhe hyp code, by using kern_hyp_va() for vcpu->kvm
+ - Use READ_ONCE() to read the host kvm->arch.vm_flavor in EL2 pKVM code
+ - Move the replacement of !kvm_vm_is_protected() in kvm_arch_vcpu_put() with
+   kvm_vm_is_unprotected_pkvm() to this patch
+ - Drop ',' after the end marker in vm_flavor enums
+ - Wrap kvm_arm_vmid_clear_active() in 'vcpu_put_mmu()' to compliment the
+   vcpu_prepare_mmu and call it conditional on !pKVM.
+ - Update the time loading constraints comment to clarify that it only applies
+   for VHE.
+ - Sort the vcpu ops by vm_flavor enum value
+ - Add blank line in kvm_arch_flush_remote_tlbs()
+ - Drop local variable ret and directly return from if...else for kvm_vm_mem_abort
+
+Changes since v18:
+  https://lore.kernel.org/all/20260915160141.3543048-1-suzuki.poulose@arm.com
+
+ - Patch count down by 3, after merging different patches together, see more below
+ - Retain NULL vm_offset for pVMs and move the counter offset flag initialisation
+   to kvm_timer_init_vm() - Marc
+ - Merge widening the scope of kvm_vm_is_protected() to the patch where the
+   flavors are introduced(Marc) and also dropped Fuad's reviewed-by, as the
+   patch is now bigger.
+ - Merge "Use kvm_vm_is_unprotected_pkvm" for !kvm_vm_is_protected to patch
+   where flavor is introuced.
+ - Merge "vgic-v3" mandate and preventing vgic-v2 mappings to a single patch,
+   where kvm_vm_hyp_is_distrusting() introduced - Fuad
+ - Drop kvm_vm_hyp_is_pkvm(), reverting to is_protected_kvm_enabled()
+ - Use is_protected_kvm_enabeld() for pKVM guest flavor checks.
+ - s/PKVM/pKVM for commit descriptions too
+ - Make sure the vm_mem_abort callback is !NULL at init time.
+ - Bail out early for !pKVM && !Realm VMs in kvm_vm_ioctl_allowed(). Use
+   kvm_vm_hyp_is_distrusting()
+ - WARN_ON_ONCE(!kvm) for kvm_vm_ioctl_allowed() as it must be only called with
+   a valid kvm instance and only from kvm_arch_vm_ioctl()
+ - Rename kvm_arch_vm_{ext,ioctl}_allowed => kvm_vm_{ext,ioctl}_allowed - Fuad
+ - Move kvm_realm_ext_allowed() to asm/kvm_rmi.h - Fuad
+ - Don't expose PMCR_EL0 to the userspace until we support PMU
+
+
+Changes since v17:
+https://lore.kernel.org/all/20260908162223.1683432-1-suzuki.poulose@arm.com 
+
+ - Add a patch to fix pKVM handling of SYS_CNTVCT/CNTPCT to override the counter
+   offset (Patch1)
+ - Restrict Realms to VGIC v3 only - New patch
+ - Add kvm_vm_is_unprotected() to replace is_protected_kvm_enabled() &&
+   !kvm_vm_is_protected() - New patch
+ - Use macro to initialize the per-flavor vcpu, s2_vm ops
+ - Add a wrapper to initialise vcpu and s2_vm ops with a BUILD_BUG_ON()
+   for the array size checks against VM flavour types
+ - Drop forward decalaration of the vcpu, s2_vm operations that spoiled the
+   fun ;-)
+ - Remove irrelevant comment about the order of timer loading for !VHE
+ - Use the explicti kvm_call_hyp_nvhe for pKVM specific ops
+ - Don't call nvhe_vcpu_put from pkvm_vcpu_put, open code them
+ - Drop cpu argument for vcpu_load() callback. We set the cpu
+   before the callbacks are invoked
+ - Drop kvm_vm_is_confidential(), instead widen the scope of kvm_vm_is_protected()
+   to cover pVMs and Realms. Add an explicit helper kvm_vm_is_protected_pkvm()
+   for the cases where we need to check for a "pVM on pKVM"
+ - Add kvm_vm_hyp_is_pkvm() for checking if the VM is running on pKVM.
+   covers both unprotected and pvms. But really uses is_protected_kvm_enabled()
+   under the hood
+ - Add kvm_vm_hyp_is_distrusting() to cover pKVM guests (both protected and
+   unprotected) and Realms. Use this for preventing the vgic v2 mapping into
+   Stage2 for a guest
+ - Drop superfluous !kvm check from kvm_vm_ioctl_enable_cap() - Sashiko
+ - Drop KVM_CAP_CREATE_IRQCHIP, as we don't support VGIC_V2 for Realms
+ - Filter out the vm_ioctls that are based on blocked cap.
+ - Repurpose the pkvm plumbing for filtering the caps and ioctl to generic
+   and plumb the Realm support in
+ - s/PKVM/pKVM for the comments
+ - Drop type argument for pkvm_init_host_vm and also drop protected variable,
+   now that we have the vm_flavor to check.
+ - Use kvm_vm_hyp_is_pkvm() to replace is_protected_kvm_enabled() with valid
+   kvm instance
+ - CCA: Merge the GET/SET REG handling patches into a single patch
+ - CCA: Reword the commit description for SVE VL access handling
+ - Reordered the patches to group the Realm realted to changes to the rear end
+
+Jean-Philippe Brucker (2):
+  KVM: arm64: CCA: Expose SVE VL register before VCPU finalization
+  KVM: arm64: CCA: Control user register access for Realms
+
+Steven Price (4):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+  KVM: arm64: CCA: Introduce Realms
+  KVM: arm64: CCA: WARN on injected undef exceptions
+  KVM: arm64: CCA: Support timers in realm RECs
+
+Suzuki K Poulose (17):
+  KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+  KVM: arm64: Disable Steal time accounting for protected guests
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: Prevent unsupported vcpu features for VM types
+  KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+  KVM: arm64: Abstract out memory abort handling
+  KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+  KVM: arm64: CCA: Add a new mode for supporting Realm guests
+  KVM: arm64: CCA: Add VCPU load/put for Realms
+  KVM: arm64: CCA: Add bare minimal S2 operations for Realm
+  KVM: arm64: CCA: Don't expose unsupported capabilities for realm
+    guests
+
+ .../admin-guide/kernel-parameters.txt         |   3 +
+ arch/arm64/include/asm/kvm_emulate.h          |  16 +
+ arch/arm64/include/asm/kvm_host.h             |  90 ++++-
+ arch/arm64/include/asm/kvm_pgtable.h          |  10 +-
+ arch/arm64/include/asm/kvm_pkvm.h             |  25 +-
+ arch/arm64/include/asm/kvm_rmi.h              |  85 ++++
+ arch/arm64/include/asm/virt.h                 |   1 +
+ arch/arm64/kvm/Makefile                       |   2 +-
+ arch/arm64/kvm/arch_timer.c                   |  34 +-
+ arch/arm64/kvm/arm.c                          | 367 ++++++++++++++----
+ arch/arm64/kvm/guest.c                        |  73 +++-
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h        |   2 +-
+ arch/arm64/kvm/hyp/nvhe/pkvm.c                |   6 +-
+ arch/arm64/kvm/hyp/nvhe/switch.c              |   4 +-
+ arch/arm64/kvm/hyp/nvhe/timer-sr.c            |   2 +-
+ arch/arm64/kvm/hyp/pgtable.c                  |   1 +
+ arch/arm64/kvm/hypercalls.c                   |   4 +-
+ arch/arm64/kvm/inject_fault.c                 |   1 +
+ arch/arm64/kvm/mmio.c                         |   1 +
+ arch/arm64/kvm/mmu.c                          | 273 +++++++++----
+ arch/arm64/kvm/pkvm.c                         |   6 +-
+ arch/arm64/kvm/pvtime.c                       |  14 +-
+ arch/arm64/kvm/rmi.c                          |  18 +
+ arch/arm64/kvm/sys_regs.c                     |  28 +-
+ arch/arm64/kvm/vgic/vgic-init.c               |   2 +
+ include/kvm/arm_psci.h                        |   2 +
+ 26 files changed, 858 insertions(+), 212 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: pkvm: Drop keneldoc markers for the allocator structs
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: Pend host SErrors for protected vCPUs through HCR_EL2.VSE
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+kvm_inject_serror_esr() reads PSTATE.A and SCTLR2_EL1.NMEA to decide
+whether to emulate the SError's exception entry or pend it through
+HCR_EL2.VSE. For a protected vCPU, the host's copy of those is stale,
+and when it reads as unmasked KVM emulates the entry on that copy. EL2
+never delivers it as an SError: its entry handler turns the pending
+exception into an external abort on the trapped access, and an MMIO
+completion still pending trips WARN_ON(INCREMENT_PC).
+
+Always pend through HCR_EL2.VSE for a protected vCPU. EL2 forwards it,
+and the guest's own masking decides when the SError is taken.
+
+Fixes: 872383bd12e11 ("KVM: arm64: Add per-EC entry/exit state marshalling for protected guests")
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20261001142109.794CA1F000FF@smtp.kernel.org/
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+Applies on kvmarm/next. A follow-up to "KVM: arm64: Confine protected VM
+vCPU state to EL2" [1], from Sashiko's review of its v4 patch 12.
+
+[1] https://lore.kernel.org/all/20261001135711.1640520-1-fuad.tabba@linux.dev/
+
+ arch/arm64/kvm/inject_fault.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3] KVM: arm64: selftests: Check SError is not pending after delivery
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+test_serror() never looks at the vCPU after the SError is delivered, so
+a stale pending SError goes unnoticed. Read the vCPU events back and
+check the SError is no longer pending.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+The fix from v2 was applied [1], but not this test.
+
+Changes since v2 [2]:
+- Dropped the fix, now in kvmarm/next.
+- Rebased on kvmarm/next.
+
+[1] https://lore.kernel.org/all/20261001135711.1640520-2-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/20260921101030.1231605-1-fuad.tabba@linux.dev/
+
+ tools/testing/selftests/kvm/arm64/external_aborts.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
