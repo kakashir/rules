@@ -1,0 +1,1201 @@
+
+On /root/mail/repo:
+From 652f2f6f5 to d0426366d
+KVM mailing list update from 652f2f6f5 to d0426366d
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     11 gmail.com
+     10 ozlabs.org
+     10 amazon.co.uk
+      4 linux.ibm.com
+      1 trailofbits.com
+
+Top 15 contributors (Based on Email Body)
+
+     10  Matt Evans <matt@ozlabs.org>
+     10  Fred Griffoul <fgriffo@amazon.co.uk>
+      8  "Ritesh Harjani (IBM)" <ritesh.list@gmail.com>
+      4  Amit Machhiwal <amachhiw@linux.ibm.com>
+      1  Nicholas Piggin <npiggin@gmail.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+      1  Charlie Jenkins <thecharlesjenkins@gmail.com>
+      1  Bruno Produit <bruno.produit@trailofbits.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  riscv: KVM: Fix compilation when CONFIG_RISCV_ISA_V=n
+[PATCH] riscv: KVM: Fix compilation when CONFIG_RISCV_ISA_V=n
+Author: Charlie Jenkins <thecharlesjenkins@gmail.com>
+
+Fix the KVM code to use stubbed out versions of vector functions when
+vector is not enabled instead of failing to compile. An alternative
+approach would be to ifdef out the vector code but since a handful of
+the vector code already just uses stubbed functions to tell the compiler
+to drop the implementation, follow the same pattern.
+
+Fixes: b5060a4aa33d ("RISC-V: KVM: fix vcpu vector context handling for kernel-mode vector")
+Signed-off-by: Charlie Jenkins <thecharlesjenkins@gmail.com>
+---
+I was reviewing [1] and noticed that when I disabled FPU and tried to
+compile that vector got disabled and the kernel failed to compile.
+
+[1] https://lore.kernel.org/all/20261006075303.205216-1-radim.krcmar@oss.qualcomm.com/
+---
+ arch/riscv/include/asm/kvm_vcpu_vector.h | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Remove DMABUF export dependency on vdev->memory_lock
+[PATCH v8 1/9] vfio/pci: Remove DMABUF export dependency on vdev->memory_lock
+Author: Matt Evans <matt@ozlabs.org>
+
+The VFIO_DEVICE_FEATURE_DMA_BUF export previously used
+vdev->memory_lock to protect VFIO's list of exported DMABUFs
+(vdev->dmabufs) and their revocation status.  When adding a new
+export, memory_lock was taken for write.
+
+A future commit will refactor DMABUF export into a function used from
+mmap(), which would create a new mmap_lock -> memory_lock dependency.
+
+In preparation, this commit introduces a vdev->dmabuf_lock that
+protects the dmabufs list, per-DMABUF revocation state, and a new
+bars_revoked flag.  The flag tracks the device-wide BAR revocation
+state set via vfio_pci_dma_buf_move() under dmabuf_lock, removing the
+test of __vfio_pci_memory_enabled() and dependency on
+vdev->memory_lock.
+
+This is a cleanup currently, but allows the future export path to
+avoid holding memory_lock under mmap_lock and a therefore avoid a
+deadlock scenario (a fault handler attempting to take mmap_lock in a
+vfio-pci variant driver thread that holds memory_lock, vs another
+thread doing an mmap/export holding them both in the other order).
+
+Signed-off-by: Matt Evans <matt@ozlabs.org>
+---
+ drivers/vfio/pci/vfio_pci_core.c   |  2 ++
+ drivers/vfio/pci/vfio_pci_dmabuf.c | 30 +++++++++++++++++++++++++-----
+ include/linux/vfio_pci_core.h      |  2 ++
+ 3 files changed, 29 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add mmap() for DMABUFs
+[PATCH v8 0/9] vfio/pci: Add mmap() for DMABUFs
+Author: Matt Evans <matt@ozlabs.org>
+
+Hi all,
+
+
+The goal of this series is to enable userspace driver designs that use
+VFIO to export DMABUFs representing subsets of PCI device BARs, and
+"vend" those buffers from a primary process to other subordinate
+processes by fd.  This is achieved by allowing the processes to mmap()
+the DMABUFs; their access to the device is isolated to the exported
+ranges.  The primary userspace driver process can forcibly revoke
+access to previously-shared buffers upon cleanup (without requiring
+cooperation from the subordinate processes).  This is an improvement
+on sharing the VFIO device fd to subordinate processes, which would
+allow unfettered access.  See the RFCs for background.
+
+The existing VFIO PCI BAR mmap() becomes backed by a DMABUF too,
+keeping common vm_ops and fault handler for VMAs from the VFIO device
+and explicitly-exported DMABUFs.  This will help future iommufd
+emulation of VFIO Type1 peer-to-peer, making it easier to get a DMABUF
+for a VFIO BAR as a DMA target.
+
+Below are per-patch notes & background info, and at the bottom are
+several related questions that reviewers may like to consider (worth
+at least skipping to #1, a possible bug).
+
+
+Notes on patches
+================
+
+mmap() conversion to use DMABUF underneath has been done for vfio-pci,
+but not sub-drivers:
+
+nvgrace-gpu's mmap() override path is unchanged; I kept this out of
+scope for now not least because I don't have a thorough test setup for
+this system.  I would prefer to help the nvgrace-gpu maintainers
+enable BAR mmap() DMABUFs themselves.
+
+It's also worth noting that one reason for nvgrace-gpu's special BAR
+handling is to map RESMEM with a WC memory type.  This is unchanged
+for existing mmap() but WC is not currently supported for mapping
+DMABUFs exported for that BAR; all DMABUF VMAs currently have the same
+memory type and control of UC/WC for a mapping is future work.
+
+
+ vfio/pci: Remove DMABUF export dependency on vdev->memory_lock
+
+   In v5 of this series we discover that doing an export from the VFIO
+   mmap() path (fundamental!) adds a dependency between mmap_lock and
+   vdev->memory_lock(W) because export was using memory_lock(W) to
+   protect the vdev->dmabufs list and state within, and a deadlock
+   scenario leapt out to bite:
+
+   https://lore.kernel.org/kvm/9a615f22-c0d4-46ae-9654-db11e94e5fec@ozlabs.org/
+
+   The suggestion was to add a dedicated mutex/rwsem specifically for
+   the DMABUFs/list, which is cleaner than overloading memory_lock(W).
+
+   But whilst export could now downgrade to holding memory_lock(R) to
+   test __vfio_pci_memory_enabled(), a very similar deadlock can still
+   arise due to a memory_lock(W) elsewhere depending on a prior
+   memory_lock(R) to be released, and attempting to take
+   memory_lock(R) will queue behind the (W) for fairness (effectively
+   an R->R dependency).  I'd overlooked that rwsem cannot guarantee
+   multiple readers.
+
+   To be able to export while holding mmap_lock, export cannot hold
+   memory_lock at all.  Instead of testing __vfio_pci_memory_enabled()
+   (which tracks PCI_COMMAND.MSE and PM state), this patch tracks
+   device-global DMABUF revocation state in a new vdev->bars_revoked
+   flag updated by vfio_pci_dma_buf_move().  If an mmap() is somehow
+   performed during a period when DMABUFs are all revoked, then the
+   DMABUF is created revoked.  Move() already bookends reset, PM
+   transitions etc., so subsequent revocation state changes work
+   as-is.  This flag is also protected by the dmabuf_lock and thus
+   memory_lock is not required to export.
+
+
+ vfio/pci: Un-revoke DMABUFs in LOW_POWER_ENTRY_WITH_WAKEUP resume
+
+   On LOW_POWER entry, DMABUFs have a move(revoke=true), but the
+   runtime resume path didn't un-revoke.  This adds a corresponding
+   move(revoke=false), which will later turn into
+   vfio_pci_unrevoke_bars().
+
+   NOTE: the unrevoke is reordered _before_ the eventfd_signal() in
+   vfio_pci_core_runtime_resume() to remove a window in which a waking
+   waiter could have observed the DMABUF state as still revoked (or
+   pm_runtime_engaged = true).  (The UAPI docs state the event means
+   the resume's complete, so observing otherwise seemed unintended.)
+
+   Also, when DMABUFs are later mmap()ed, a waiter waking and taking a
+   fault could have seen the unrevoked state and SIGBUS just before
+   taking the memory_lock.  (If the handler gets to acquire the lock,
+   though, the resume sequence is complete, and the handler observes
+   pm_runtime_engaged = false.)
+
+   This fix is in this series because the issue will impact CPU access
+   to the VMA as well (once they use DMABUFs), and so it's a strict
+   dependency of later commits.
+
+
+ dma-buf: Provide dma_buf_set_name()
+
+   Makes dma_buf_set_name() available for use (by helper patch),
+   taking a kernel-allocated string.  The pre-existing local helper
+   becomes a wrapper copying a __user string for the set-name ioctl.
+
+
+ vfio/pci: Add a helper to look up PFNs for DMABUFs
+
+   Adds a DMABUF VMA fault handler helper to determine arbitrary-sized
+   PFNs from ranges in DMABUF.
+
+
+ vfio/pci: Add a helper to create a DMABUF for a BAR-map VMA
+
+   Refactors DMABUF export for use by the existing export feature, and
+   adds a helper that creates a DMABUF corresponding to a VFIO BAR
+   mmap() request.
+
+   There was a request for decent debug naming in /proc/<pid>/maps
+   etc.  comparable to the existing VFIO names: since the VMAs are
+   DMABUFs, they have a "dmabuf:" prefix and can't be 100% identical
+   to before.  This is a user-visible change, but this patch at least
+   now gives us extra info on the BDF & BAR being mmap()ed.  The name
+   is installed with the new dma_buf_set_name() above.
+
+
+ vfio/pci: Convert BAR mmap() to use a DMABUF
+
+   The vfio-pci core mmap() creates a DMABUF with the helper above,
+   and the vm_ops fault handler uses the other helper to resolve the
+   fault.  Because this depends on DMABUF structs/code,
+   CONFIG_VFIO_PCI_CORE needs to depend on CONFIG_DMA_SHARED_BUFFER.
+   The CONFIG_VFIO_PCI_DMABUF still conditionally enables the export
+   support code.
+
+   NOTE: The user mmap()s a device fd, but the resulting VMA's vm_file
+   becomes that of the DMABUF.  The DMABUF takes ownership of the
+   device file and put()s it on release, which maintains the existing
+   behaviour of a VMA keeping the VFIO device open.
+
+   BAR zapping then happens via the existing vfio_pci_dma_buf_move()
+   path, which now needs to unmap PTEs in the DMABUF's address_space.
+
+   NOTE: As local LLM reviews did, Sashiko might falsely worry about
+   the DMABUF fd being obtained through /proc/pid/map_files and
+   remapped, but the file is an anon inode and doesn't support the
+   open op (-ENXIO) so AFAICT this is currently impossible.
+
+   NOTE: A side-effect of this is that is_mergeable_vma() will be
+   false between adjacent mappings of VFIO BARs; merging would require
+   rebuilding a larger DMABUF representing the union, not just
+   plugging the VMAs together.
+
+   The DMABUF backing the BAR is an implicit/internal export, even
+   when the CONFIG_VFIO_PCI_DMABUF feature is not included because
+   CONFIG_PCI_P2PDMA is not available.  Without P2PDMA, it's
+   acceptable for the DMABUF to not have a P2PDMA provider.  In this
+   configuration, the VFIO DMABUF .attach prohibits any import, which
+   avoids getting as far as a WARN in dma_buf_map_attachment(), which
+   would fail without P2PDMA anyway.
+
+
+ vfio/pci: Clean up BAR zap and revocation
+
+   In general (see NOTE!) the vfio_pci_zap_bars() is now obsolete,
+   since it unmaps PTEs in the VFIO device address_space which is now
+   unused.  This consolidates all calls (e.g. around reset) with the
+   neighbouring vfio_pci_dma_buf_move()s into new functions, to
+   revoke/unrevoke (making the steps clearer).
+
+   NOTE: Because drivers can use their own vm_ops and override .mmap,
+   the core must conservatively assume an overridden .mmap might still
+   add PTEs to the VFIO device address_space and therefore still does
+   the zap.  A new flag, zap_bars_on_revoke, enables the zap when
+   .mmap is overridden.  A driver that does not need the zap can clear
+   this to opt-out, e.g. if the driver calls down to the common mmap
+   (and so uses DMABUFs).  hisi-acc-vfio-pci does just this, and thus
+   sets the opt-out flag.
+
+
+ vfio/pci: Support mmap() of a VFIO DMABUF
+
+   Adds mmap() for a DMABUF fd exported from vfio-pci.
+
+   It was a goal to keep the VFIO device fd lifetime behaviour
+   unchanged with respect to the DMABUFs.  An application can close
+   all device fds, and this will revoke/clean up all DMABUFs; then, no
+   mappings or other access can be performed.  When enabling mmap() of
+   the DMABUFs, this means access through the VMA is also revoked.
+   This complicates the fault handler because whilst the DMABUF
+   exists, it has no guarantee that the corresponding VFIO device is
+   still alive.  Adds synchronisation ensuring the vdev is available
+   before the locks in vdev are touched; this holds the device
+   registration so that even if the buffer has been cleaned up, vdev
+   hasn't been freed and so the locks can be safely taken.
+
+
+ vfio/pci: Revoke a DMABUF on request from userspace
+
+   This is mostly a rename of `revoked` to an enum, `status`, and
+   adding a third state for a buffer: usable, revoked temporary,
+   revoked permanent.  A new VFIO feature is added,
+   VFIO_DEVICE_FEATURE_DMA_BUF_REVOKE, which takes a DMABUF (exported
+   from the same device) and permanently revokes it.  Thus a userspace
+   driver can guarantee any downstream consumers of a shared fd are
+   prevented from accessing a BAR range, and that range can be reused.
+   NOTE: This might block userspace, waiting on importers to detach.
+
+   The code doing revocation in vfio_pci_dma_buf_move() is moved, to a
+   common function used by ..._move() and this new feature.
+
+
+Testing
+=======
+
+(The [RFC ONLY] userspace test program, which drives a QEMU
+bochs-display function, can be found in the GitHub branch below.  It
+at least illustrates how the export, map, revoke, and close semantics
+interoperate.  WIP on a follow-up with a proper vfio-selftests style
+test based on this -- this won't be part of this series.)
+
+This code has been tested in mapping DMABUFs of single/multiple ranges
+from multiple BARs, aliasing mmap()s, aliasing ranges across DMABUFs,
+vm_pgoff > 0, revocation, shutdown/cleanup scenarios, and hugepage
+mappings.  No regressions observed on the VFIO selftests, or on our
+internal vfio-pci applications.  VFIO on i386 has been build-tested.
+Thanks to Alex Mastro for building a (WIP) testcase for the
+prior mmap_lock->memory_lock issue.
+
+
+END
+===
+
+This is based on v7.3-rc6
+
+These commits are on GitHub for easier browsing, along with
+"[RFC ONLY] selftests: vfio: Add standalone vfio_dmabuf_mmap_test":
+
+https://github.com/evansm7/linux/compare/v7.3-rc6...dev/mev/vfio-dmabuf-mmap-v8
+
+Also please see...
+
+https://lore.kernel.org/all/f8efaabd-c06e-4f04-8cfa-489c148e37ba@ozlabs.org/
+("[PATCH] dma-buf: Annul dmabuf->file on file release")
+
+...which fixes a stale file pointer issue that could affect VFIO's
+DMABUF export.  Although the issue exists prior to this series, the
+addition of another dmabuf->file dereference adds additional
+unpleasant failure modes (for example, unmap_mapping_range() the wrong
+file, or good old random data dereference, etc.)
+
+
+Thanks for reading,
+
+
+Matt
+
+
+
+================================================================================
+Changelog:
+
+v8:
+
+ - Rebased, on v7.3-rc6
+
+ - "dma-buf: Provide dma_buf_set_name()": Comment and "DOC: locking
+   convention" updates.  dma_buf_set_name() is is listed in the "do
+   not hold resv" category
+
+v7:	https://lore.kernel.org/all/20260924152159.49702-1-matt@ozlabs.org/
+v6:	https://lore.kernel.org/all/20260911214200.33793-1-matt@ozlabs.org/
+v5:	https://lore.kernel.org/all/20260715174737.15287-1-matt@ozlabs.org/
+v4:	https://lore.kernel.org/all/20260701171245.90111-1-matt@ozlabs.org/
+v3: 	https://lore.kernel.org/all/20260610154327.37758-1-matt@ozlabs.org/
+v2: 	https://lore.kernel.org/all/20260527102319.100128-1-mattev@meta.com/
+v1: 	https://lore.kernel.org/kvm/20260416131815.2729131-1-mattev@meta.com/
+RFCv2:	https://lore.kernel.org/kvm/20260312184613.3710705-1-mattev@meta.com/
+RFCv1:	https://lore.kernel.org/all/20260226202211.929005-1-mattev@meta.com/
+Tech topic: https://lore.kernel.org/linux-iommu/20250918214425.2677057-1-amastro@fb.com/
+
+Matt Evans (9):
+  vfio/pci: Remove DMABUF export dependency on vdev->memory_lock
+  vfio/pci: Un-revoke DMABUFs in LOW_POWER_ENTRY_WITH_WAKEUP resume
+  dma-buf: Provide dma_buf_set_name()
+  vfio/pci: Add a helper to look up PFNs for DMABUFs
+  vfio/pci: Add a helper to create a DMABUF for a BAR-map VMA
+  vfio/pci: Convert BAR mmap() to use a DMABUF
+  vfio/pci: Clean up BAR zap and revocation
+  vfio/pci: Support mmap() of a VFIO DMABUF
+  vfio/pci: Revoke a DMABUF on request from userspace
+
+ drivers/dma-buf/dma-buf.c                     |  84 ++-
+ drivers/vfio/pci/Kconfig                      |   4 +-
+ drivers/vfio/pci/Makefile                     |   3 +-
+ .../vfio/pci/hisilicon/hisi_acc_vfio_pci.c    |  14 +-
+ drivers/vfio/pci/vfio_pci_config.c            |  30 +-
+ drivers/vfio/pci/vfio_pci_core.c              | 222 +++++--
+ drivers/vfio/pci/vfio_pci_dmabuf.c            | 609 +++++++++++++++---
+ drivers/vfio/pci/vfio_pci_priv.h              |  54 +-
+ include/linux/dma-buf.h                       |  16 +-
+ include/linux/vfio_pci_core.h                 |   3 +
+ include/uapi/linux/vfio.h                     |  24 +
+ 11 files changed, 870 insertions(+), 193 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Add a writable result to get_pfn()
+[PATCH 1/9] KVM: guest_memfd: Add a writable result to get_pfn()
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A guest_memfd backing cannot map a page read-only for the guest:
+get_pfn() returns only a frame, and KVM_MEM_READONLY is refused on
+guest_memfd slots. A hypervisor therefore cannot give a guest a page it
+may read but not write.
+
+Let get_pfn() clear a writable result. The x86 and arm64 fault paths
+then map the page without write permission, and a guest write exits
+with KVM_EXIT_MEMORY_FAULT. The result covers the whole block that
+max_order allows.
+
+Callers that hand the page to something that writes it must refuse a
+read-only page: the arm64 VNCR page and the SEV-SNP VMSA. populate() has
+no writable result, so a backing cannot report read-only state through
+it. The result does not cover KVM's own writes through the slot's host
+address.
+
+David's gmem_provider sample gains a read-only ioctl, and a selftest
+checks that a guest write to such a page exits and lands once the page
+is writable again.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/arm64/kvm/mmu.c                          |  13 +-
+ arch/arm64/kvm/nested.c                       |  16 +-
+ arch/x86/kvm/mmu/mmu.c                        |  18 ++-
+ arch/x86/kvm/svm/sev.c                        |  13 +-
+ include/linux/kvm_host.h                      |  16 +-
+ samples/kvm/gmem_provider.c                   |  67 +++++++-
+ samples/kvm/gmem_provider.h                   |  17 ++
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/x86/gmem_provider_readonly_test.c     | 150 ++++++++++++++++++
+ virt/kvm/guest_memfd.c                        |  21 ++-
+ 10 files changed, 309 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: Memory providers for guest_memfd and iommufd
+[RFC PATCH 0/9] mm: Memory providers for guest_memfd and iommufd
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Some drivers manage RAM outside the page allocator: a carve-out, device
+memory, or memory that a host component moves between VMs while they
+run. This memory often has no struct page. The driver wants to lend
+pages to a VM and to its devices, and to take any of them back later.
+
+David Woodhouse's series "KVM: Allow alternative providers of
+guest_memfd backed by PFNMAP memory" lets such a driver back a
+guest_memfd through struct kvm_gmem_ops:
+
+  https://lore.kernel.org/kvm/20260720111259.122911-1-dwmw2@infradead.org/
+
+That covers the guest, but not the VM's devices, which his cover
+letter left as an open question. This series adds a small interface in
+mm: the driver that owns the memory becomes a provider, and the code
+that maps it attaches as a consumer. There are two consumers, a
+guest_memfd backend and IOMMU_IOAS_MAP_FILE in iommufd.
+
+The series is on top of David's v2 (base 0e35b9b6ec0f). Patch 1 was
+part of the earlier dma-buf RFC. The provider backend depends on it, so
+this series carries it.
+
+Why not dma-buf
+===============
+
+The earlier RFC shared the memory as a dma-buf. Christian König
+rejected that: an importer must not build its own page tables from a
+dma-buf, and the use case should stay out of drivers/dma-buf. I
+acknowledged that and dropped it; this series does not touch dma-buf.
+
+Why a new interface
+===================
+
+kvm_gmem_ops gives KVM a way in. For devices, the only option today is
+a dma-buf plus a private call that iommufd looks up with symbol_get(),
+which is how vfio-pci works. Each new owner would need another such
+lookup, and iommufd would end up knowing each owner by name. With a
+common interface, a provider module only calls into mm, and nothing
+needs symbol_get().
+
+It also means the provider revokes a range once. The VMM hands the
+same file to KVM and to iommufd; on a revoke the core forwards it to
+every consumer, so KVM clears the range from stage-2, iommufd from the
+IOMMU page tables, and guest_memfd from the VMM's own mapping, all
+before the revoke returns.
+
+The contract
+============
+
+For a page of a provider file, get_page() returns the frame, its type
+(RAM or MMIO, read-only or not), and the largest aligned block of frames
+of the same type, so that consumers can use large mappings. A page
+without a frame is a hole.
+
+Consumers take no references. A frame stays valid until the revoke that
+removes it returns. To guarantee that, a consumer either holds a lock
+across get_page() and the mapping that its revoke callback also takes,
+or detects a racing revoke and retries.
+
+The interface does not deal with folios. The native guest_memfd backend
+and memfd pinning in iommufd handle pages from the page allocator, and
+pages that can move or swap would need references. A backend that needs
+full control over the file can still write its own kvm_gmem_ops.
+
+Backends
+========
+
+The motivating user is a host-side memory manager. It reserves a region
+of host RAM, lends parts of it to VMs and their devices, moves pages
+between VMs, and has to survive a live update of the host kernel. The
+sample module in this series models it.
+
+Device-DAX could also be a provider: its range never moves, get_page()
+is short, and it only revokes on unbind.  iommufd can map MMIO, but KVM
+takes only RAM, because it picks the guest memory type itself.
+
+Neither consumer keeps state about the provider's frames, which helps
+with live update.  guest_memfd has nothing to save across kexec, since
+KVM refills stage-2 on faults. The provider saves its frames and who
+owns them. Devices cannot fault, so their mappings stay part of the
+existing iommufd live update work, and the provider only has to give
+back the same frames.
+
+Confidential VMs
+================
+
+This series does not support them yet. For now only x86 VMs of type
+KVM_X86_DEFAULT_VM can use a provider.
+
+I don't think a provider should back private pages. Revoking a private
+page loses its contents, and only guest_memfd knows which pages are
+private. The interface could still be useful there later, with
+guest_memfd acting as a provider for its own files so that iommufd only
+maps shared pages. I left that for a later series.
+
+Patches
+=======
+
+  Patch 1 lets a kvm_gmem_ops backend map a page read-only for the
+  guest.  get_pfn() gets a writable output, and a guest write to such a
+  page exits with KVM_EXIT_MEMORY_FAULT. KVM_MEM_READONLY can't be
+  used for this, because guest_memfd slots don't allow it.
+
+  Patch 2 adds the interface and the core, and the FOP_MEM_PROVIDER
+  flag in struct file_operations.
+
+  Patch 3 adds the provider backend to guest_memfd, with the
+  GUEST_MEMFD_FLAG_USE_PROVIDER flag and a provider_fd field.
+  guest_memfd also handles the userspace mapping of the file, if the
+  provider allows it, so providers don't each have to get the fault and
+  revoke handling right.
+
+  Patch 4 prepares iommufd for tracking pages it does not pin. No
+  functional change.
+
+  Patch 5 lets IOMMU_IOAS_MAP_FILE take a provider file. iommufd maps
+  one PAGE_SIZE entry per page and pins nothing. It leaves holes
+  unmapped and honours read-only and MMIO pages. On a revoke, it
+  unmaps the range and maps whatever the provider backs now.
+
+  The PAGE_SIZE entries are deliberate for now: a partial revoke then
+  never has to split a large IOMMU page. Using the block size the
+  provider reports would be better, and needs the revoke to unmap and
+  remap whole blocks. A device that accesses the range between the
+  unmap and the map faults; replacing the entries in place would avoid
+  that, but needs new support in the IOMMU drivers. Both are left for
+  later.
+
+  Patches 6 and 7 add iommufd selftests: two mock-domain queries and a
+  mock provider.
+
+  Patch 8 adds a sample provider. It gives each VM a child file, can
+  move, donate and reclaim pages, and supports read-only pages. A child
+  file is read-only to its holder; the owner changes it through the
+  control device. It only uses the mm interface.
+
+  Patch 9 adds a KVM selftest with one provider and two VMMs. After
+  each change it checks what the guest, the device and the VMM's mapping
+  see.
+
+Testing
+=======
+
+x86_64, in QEMU with KASAN, PROVE_LOCKING and DEBUG_ATOMIC_SLEEP, with
+two ranges hidden from the host with memmap=, one for each sample. No
+KASAN report, lockdep splat or warning in any run.
+
+  - mem_provider_test, the selftest in patch 9: pass.
+  - guest_memfd_test, including the USE_PROVIDER flag check: pass.
+  - iommufd_selftest, iommufd_ioas: the 12 provider tests pass in all
+    four variants. The 4 failures are access_domain_destory, which the
+    series does not touch: it needs hugetlb pages, which this VM has
+    none of.
+  - David's gmem_provider tests, which this series does not change:
+    hugepage, revoke, iommufd and readonly pass; the SNP and vfio-pci
+    tests skip for lack of hardware.
+
+Not tested: arm64, where guest_memfd refuses providers; a real IOMMU,
+since only the mock domain was used.
+
+I wrote most of this series with AI help, and I am posting it as an RFC
+to get feedback on the interface.
+
+Fred Griffoul (9):
+  KVM: guest_memfd: Add a writable result to get_pfn()
+  mm: Add memory providers
+  KVM: guest_memfd: Add a memory provider backing
+  iommufd: Track the domains of pages that are not pinned
+  iommufd: Map memory provider files
+  iommufd/selftest: Add mock-domain IOVA queries
+  iommufd/selftest: Add a mock memory provider
+  samples/kvm: Add a memory provider sample
+  KVM: selftests: Test a memory provider shared by KVM and iommufd
+
+ Documentation/virt/kvm/api.rst                |  45 +-
+ MAINTAINERS                                   |   8 +
+ arch/arm64/kvm/mmu.c                          |  13 +-
+ arch/arm64/kvm/nested.c                       |  16 +-
+ arch/x86/kvm/mmu/mmu.c                        |  18 +-
+ arch/x86/kvm/svm/sev.c                        |  13 +-
+ arch/x86/kvm/x86.c                            |  10 +
+ drivers/iommu/iommufd/Kconfig                 |   1 +
+ drivers/iommu/iommufd/io_pagetable.c          |  37 +-
+ drivers/iommu/iommufd/io_pagetable.h          |  54 +-
+ drivers/iommu/iommufd/iommufd_test.h          |  36 +
+ drivers/iommu/iommufd/pages.c                 | 340 ++++++-
+ drivers/iommu/iommufd/selftest.c              | 286 ++++++
+ include/linux/fs.h                            |   2 +
+ include/linux/kvm_host.h                      |  20 +-
+ include/linux/mem_provider.h                  | 211 +++++
+ include/uapi/linux/iommufd.h                  |  11 +-
+ include/uapi/linux/kvm.h                      |  11 +-
+ mm/Kconfig                                    |   7 +
+ mm/Makefile                                   |   1 +
+ mm/mem_provider.c                             | 177 ++++
+ samples/Kconfig                               |  17 +
+ samples/Makefile                              |   1 +
+ samples/kvm/Makefile                          |   1 +
+ samples/kvm/gmem_provider.c                   |  67 +-
+ samples/kvm/gmem_provider.h                   |  17 +
+ samples/kvm/mem_provider_sample.c             | 855 ++++++++++++++++++
+ samples/kvm/mem_provider_sample.h             | 135 +++
+ tools/include/uapi/linux/kvm.h                |  11 +-
+ tools/testing/selftests/iommu/iommufd.c       | 119 +++
+ tools/testing/selftests/iommu/iommufd_utils.h |  64 ++
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../testing/selftests/kvm/guest_memfd_test.c  |   6 +
+ .../kvm/x86/gmem_provider_readonly_test.c     | 150 +++
+ .../selftests/kvm/x86/mem_provider_test.c     | 582 ++++++++++++
+ virt/kvm/Kconfig                              |   1 +
+ virt/kvm/guest_memfd.c                        | 286 +++++-
+ 37 files changed, 3531 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: PPC: Book3S HV: Add SRCU protection for virtual-mode HPT hcalls
+[PATCH v3 1/3] KVM: PPC: Book3S HV: Add SRCU protection for virtual-mode HPT hcalls
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+The virtual-mode HPT hcall handlers (H_ENTER, H_REMOVE, H_BULK_REMOVE,
+H_CLEAR_REF, H_CLEAR_MOD) call into book3s_hv_rm_mmu.c, which accesses
+memslots via kvm_memslots_raw().  kvm_memslots_raw() uses
+rcu_dereference_raw_check() to bypass SRCU lockdep annotation checking.
+This is safe in real mode because the entire guest entry/exit is wrapped
+in srcu_read_lock/unlock inside kvmppc_run_core() and
+kvmhv_run_single_vcpu().
+
+However, since commit 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual
+mode handlers for HPT hcalls and page faults"), these same handlers are
+also executed in virtual mode via kvmppc_pseries_do_hcall(), which runs
+after SRCU has already been released on guest exit.
+
+A concurrent KVM_SET_USER_MEMORY_REGION deletion or move can therefore
+call synchronize_srcu_expedited() — which does not wait for this thread —
+and then kfree(slot) and vfree(slot->arch.rmap) while the hcall handler
+still holds a raw pointer to the memslot.  lock_rmap() then writes to
+freed vmalloc memory, leading to use-after-free and memory corruption.
+Because kvm_memslots_raw() suppresses lockdep checks, this race is
+entirely silent.
+
+Fix this by factoring out the 7 HPT hcall handlers (H_REMOVE, H_ENTER,
+H_READ, H_CLEAR_MOD, H_CLEAR_REF, H_PROTECT, H_BULK_REMOVE) into a
+helper function, kvmppc_pseries_do_hpt_hcall(), and wrapping its call
+site in srcu_read_lock(&kvm->srcu) / srcu_read_unlock(&kvm->srcu, idx).
+Targeting only the HPT hcalls avoids wrapping non-HPT hcalls that sleep
+(such as H_CONFER, H_REGISTER_VPA, H_PAGE_INIT) or handlers that already
+acquire SRCU internally (such as H_RTAS).
+
+Fixes: 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual mode handlers for HPT hcalls and page faults")
+Cc: stable@vger.kernel.org # v5.14+
+Suggested-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Reviewed-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+ arch/powerpc/kvm/book3s_hv.c | 70 ++++++++++++++++++------------------
+ 1 file changed, 35 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: PPC: Fixes for Book3S HV HPT locking and paired-single decoding
+[PATCH v3 0/3] KVM: PPC: Fixes for Book3S HV HPT locking and paired-single decoding
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+This series addresses bug fixes across KVM PPC Book3S HV
+locking/synchronization and paired-single instruction decoding.
+
+Patches 1 & 2 fix synchronization and preemption issues introduced in
+commit 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual mode handlers for
+HPT hcalls and page faults"):
+
+- Patch 1 adds SRCU read lock protection when walking memslots during
+  virtual-mode HPT hcalls to prevent use-after-free races with concurrent
+  memslot updates.
+
+- Patch 2 adds preempt_disable() around all virtual-mode HPTE bit-lock
+  holders — both the guest vCPU paths (kvmppc_hpte_hv_fault() and
+  kvmppc_pseries_do_hpt_hcall()) and the host-side paths
+  (kvm_unmap_rmapp(), kvm_age_rmapp(), resize_hpt_rehash_hpte()) — to
+  prevent CPU stalls and deadlocks on preemption.
+
+Patch 3 fixes paired-single D-form instruction emulation:
+
+- Patch 3 fixes get_d_signext() to correctly extract the full 12-bit D
+  displacement field and perform proper two's-complement sign extension.
+
+Testing:
+========
+All test kernel builds were compiled with CONFIG_DEBUG_ATOMIC_SLEEP=y.
+The following scenarios were verified:
+
+1. Power9 PowerNV (L0) in Radix mode:
+   - Booted L0 host with kernel containing all 3 patches.
+   - Booted KVM guests in both Radix and Hash modes.
+   - Ran kernel build workload inside guests — no errors observed.
+   - Booted L1 guest with the same kernel — booted and ran cleanly.
+
+2. Power9 PowerNV (L0) in Hash mode:
+   - Booted L0 host with kernel containing all 3 patches.
+   - Booted KVM guest in Hash mode.
+   - Ran kernel build workload inside guest — no errors observed.
+   - Booted L1 nested guest with the same kernel — booted and ran cleanly.
+
+3. Power10 LPAR (L1):
+   - Booted Power10 LPAR with the patched kernel.
+   - Booted KVM guest and ran workloads — no errors observed.
+
+Changes in v3:
+==============
+- v2: https://lore.kernel.org/all/20260930173750.56759-1-amachhiw@linux.ibm.com/
+- Patch 2:
+  - Fixed preemption window in kvm_unmap_rmapp() and kvm_age_rmapp(): moved
+    preempt_disable() before lock_rmap() so both the rmap lock and the HPTE
+    bit-lock are held under a single non-preemptible section, and added
+    preempt_enable() on all early exits and retry paths before cpu_relax().
+  - Cleaned up kvm_test_clear_dirty_npages(): removed redundant per-iteration
+    preempt_disable()/preempt_enable() pairs since the caller
+    kvmppc_hv_get_dirty_log_hpt() already holds preempt_disable() across the
+    entire loop.
+  - Reworded commit message to clearly detail the per-function locking design
+    and rationale.
+  - Picked up Reviewed-by tag from Shrikanth Hegde.
+- Patch 3:
+  - Picked up Reviewed-by tag from Shrikanth Hegde.
+
+Changes in v2:
+==============
+- v1: https://lore.kernel.org/all/20260928122837.8782-1-amachhiw@linux.ibm.com/
+- Patch 2: Extended preempt_disable()/preempt_enable() coverage to also wrap
+  the HPTE bit-lock hold windows in four host-side virtual-mode functions:
+  kvm_unmap_rmapp(), kvm_age_rmapp(), kvm_test_clear_dirty_npages(), and
+  resize_hpt_rehash_hpte(). These were identified as vulnerable by Sashiko AI
+  review and confirmed correct by audit.
+- Dropped Reviewed-by from Ritesh as the patch was materially extended.
+- Patch 2: Added warning comment above kvmppc_pseries_do_hpt_hcall()
+  documenting the preemption requirement.
+
+Amit Machhiwal (3):
+  KVM: PPC: Book3S HV: Add SRCU protection for virtual-mode HPT hcalls
+  KVM: PPC: Book3S HV: Add preempt_disable() around virtual-mode HPTE
+    bit-lock users
+  KVM: PPC: Fix get_d_signext() 12-bit displacement for paired-single
+    D-form
+
+ arch/powerpc/kvm/book3s_64_mmu_hv.c      | 10 +++
+ arch/powerpc/kvm/book3s_hv.c             | 80 +++++++++++++-----------
+ arch/powerpc/kvm/book3s_paired_singles.c |  7 +--
+ 3 files changed, 56 insertions(+), 41 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Don't limit LE dirty-bitmap bitops to s390x
+[PATCH v7 1/8] KVM: selftests: Don't limit LE dirty-bitmap bitops to s390x
+Author: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+
+dirty_log_test already has BITOP_LE_SWIZZLE helpers, but they were
+compiled in only for s390x, so every other big-endian host used native
+test_bit().
+
+The test fails on big-endian powerpc because it treated dirty host pages
+as clean (because of the endianness issue)
+
+w/o the fix the test fails with:
+  Clear page 1 value (1) >= iteration (1)
+
+Fixes: a049a377164c ("KVM: selftests: Enable dirty_log_test on s390x")
+Tested-by: Anushree Mathur <anushree.mathur@linux.ibm.com>
+Signed-off-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+---
+ tools/testing/selftests/kvm/dirty_log_test.c | 12 ++++--------
+ 1 file changed, 4 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: add powerpc support
+[PATCH v7 0/8] KVM: selftests: add powerpc support
+Author: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+
+Patch v5 -> v7:
+================
+(Suggestions from Sean):
+1. Added kvm_is_ppc_pseries_lpar() helper in kvm_util.h to avoid sprinkling
+   multiple #ifdef __powerpc64__ checks.
+2. Enable all tests via TEST_GEN_PROGS_COMMON for powerpc
+3. Enable hardware_disable_test and skip when running on powerpc pseries LPAR
+   (nested).
+4. Re-arranged the fixes in appropriate order.
+
+This is based off v2 of Sean PPC pre-enablement series [1].
+[1]: https://lore.kernel.org/kvm/20260902164123.2546762-1-seanjc@google.com/
+
+Patch v4 -> v5:
+==============
+- Fixed the issues reported by Anushree while running on kvm on powervm
+  (nested).
+- Fixed memslot_perf_test on powerpc.
+
+PATCH v3 -> PATCH v4:
+==================
+- Rebased on top of Sean's new page allocator patch series v2 [1]
+  This allowed to drop and patch-2 since it will now come from Sean's
+  v2.
+- Addressed review comments from Sean - squashed patches 6-10 in patch-1 of
+  this.
+- Dropped patch-5 to print vcpu_id when KVM_CREATE_VCPU ioctl fails.
+- Added additional patch-3 to this series to allow dirty_log_test to run on all
+  big-endian machines.
+
+[1]: https://lore.kernel.org/kvm/20260902164123.2546762-1-seanjc@google.com/
+[v3]: https://lore.kernel.org/linuxppc-dev/2d2c46be7f051c7f1c645afaec67f57067d37a81.1781093720.git.ritesh.list@gmail.com/
+
+Testing updates:
+================
+I have done some fair amount of testing of the selftests both on real HW and
+using various combinations on qemu (powernv+LE (default), pseries+cap-nested-hv,
+pseries+cap-nested-papr, powernv+BE). There were few powerpc kvm kernel fixes
+which were identified as part of this work. I will send those patches separately
+as those anyway needs to go in separately.
+
+<pasted snippet of cover letter from previous versions>
+=======================================================
+
+Hi All,
+
+This series primarly adds KVM selftests support for powerpc (64-bit, BookS,
+radix MMU).
+
+This patch series is originally Nick's work. I have mainly only rebased it on
+the latest upstream tree. Since the rebase required few changes to all the four
+patches (Patch 1-4), I have dropped the earlier Acked-by from Michael Ellerman.
+
+Since the last series was posted three years ago [1], I am resetting the version
+to RFC. This rebase was done as part of a larger effort to improve the selftests
+infrastructure for Linux on PowerPC tree. Thanks to Harsh and Maddy for their
+help on this.
+
+
+Nicholas Piggin (1):
+  KVM: PPC: selftests: add support for powerpc
+
+Ritesh Harjani (IBM) (7):
+  KVM: selftests: Don't limit LE dirty-bitmap bitops to s390x
+  KVM: selftests: Move memslot_perf_test off the 256M ELF load address
+  KVM: selftests: Skip the max vCPU ID test when KVM_CAP_PPC_SMT is set
+  KVM: selftests: Add helper for checking if running on powerpc pseries LPAR
+  KVM: selftests: Skip kvm_create_max_vcpus on powerpc pseries LPAR
+  KVM: selftests: Only warn for idle-page checks on powerpc pseries LPAR
+  KVM: selftests: Skip hardware_disable_test on powerpc pseries LPAR
+
+ MAINTAINERS                                   |   2 +
+ tools/testing/selftests/kvm/Makefile          |   2 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   9 +
+ .../selftests/kvm/access_tracking_perf_test.c |  10 +
+ tools/testing/selftests/kvm/dirty_log_test.c  |  12 +-
+ .../selftests/kvm/hardware_disable_test.c     |   3 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  26 +
+ .../selftests/kvm/include/powerpc/hcall.h     |  17 +
+ .../kvm/include/powerpc/kvm_util_arch.h       |  22 +
+ .../selftests/kvm/include/powerpc/ppc_asm.h   |  32 ++
+ .../selftests/kvm/include/powerpc/processor.h |  39 ++
+ .../selftests/kvm/include/powerpc/ucall.h     |  21 +
+ .../selftests/kvm/kvm_create_max_vcpus.c      |  14 +-
+ tools/testing/selftests/kvm/lib/guest_modes.c |  20 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    |   8 +
+ .../selftests/kvm/lib/powerpc/handlers.S      |  93 ++++
+ .../testing/selftests/kvm/lib/powerpc/hcall.c |  45 ++
+ .../selftests/kvm/lib/powerpc/processor.c     | 512 ++++++++++++++++++
+ .../testing/selftests/kvm/lib/powerpc/ucall.c |  22 +
+ .../testing/selftests/kvm/memslot_perf_test.c |   2 +-
+ 20 files changed, 898 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost-scsi: do not count PI bytes in the data length
+[PATCH] vhost-scsi: do not count PI bytes in the data length
+Author: Jia Jia <physicalmtea@gmail.com>
+
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From baa4b643e to 5c529f82f
+KVM mailing list update from baa4b643e to 5c529f82f
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     10 amazon.co.uk
+      2 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+     10  Fred Griffoul <fgriffo@amazon.co.uk>
+      2  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: guest_memfd: Add a writable result to get_pfn()
+[PATCH 1/9] KVM: guest_memfd: Add a writable result to get_pfn()
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A guest_memfd backing cannot map a page read-only for the guest:
+get_pfn() returns only a frame, and KVM_MEM_READONLY is refused on
+guest_memfd slots. A hypervisor therefore cannot give a guest a page it
+may read but not write.
+
+Let get_pfn() clear a writable result. The x86 and arm64 fault paths
+then map the page without write permission, and a guest write exits
+with KVM_EXIT_MEMORY_FAULT. The result covers the whole block that
+max_order allows.
+
+Callers that hand the page to something that writes it must refuse a
+read-only page: the arm64 VNCR page and the SEV-SNP VMSA. populate() has
+no writable result, so a backing cannot report read-only state through
+it. The result does not cover KVM's own writes through the slot's host
+address.
+
+David's gmem_provider sample gains a read-only ioctl, and a selftest
+checks that a guest write to such a page exits and lands once the page
+is writable again.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/arm64/kvm/mmu.c                          |  13 +-
+ arch/arm64/kvm/nested.c                       |  16 +-
+ arch/x86/kvm/mmu/mmu.c                        |  18 ++-
+ arch/x86/kvm/svm/sev.c                        |  13 +-
+ include/linux/kvm_host.h                      |  16 +-
+ samples/kvm/gmem_provider.c                   |  67 +++++++-
+ samples/kvm/gmem_provider.h                   |  17 ++
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/x86/gmem_provider_readonly_test.c     | 150 ++++++++++++++++++
+ virt/kvm/guest_memfd.c                        |  21 ++-
+ 10 files changed, 309 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm: Memory providers for guest_memfd and iommufd
+[RFC PATCH 0/9] mm: Memory providers for guest_memfd and iommufd
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Some drivers manage RAM outside the page allocator: a carve-out, device
+memory, or memory that a host component moves between VMs while they
+run. This memory often has no struct page. The driver wants to lend
+pages to a VM and to its devices, and to take any of them back later.
+
+David Woodhouse's series "KVM: Allow alternative providers of
+guest_memfd backed by PFNMAP memory" lets such a driver back a
+guest_memfd through struct kvm_gmem_ops:
+
+  https://lore.kernel.org/kvm/20260720111259.122911-1-dwmw2@infradead.org/
+
+That covers the guest, but not the VM's devices, which his cover
+letter left as an open question. This series adds a small interface in
+mm: the driver that owns the memory becomes a provider, and the code
+that maps it attaches as a consumer. There are two consumers, a
+guest_memfd backend and IOMMU_IOAS_MAP_FILE in iommufd.
+
+The series is on top of David's v2 (base 0e35b9b6ec0f). Patch 1 was
+part of the earlier dma-buf RFC. The provider backend depends on it, so
+this series carries it.
+
+Why not dma-buf
+===============
+
+The earlier RFC shared the memory as a dma-buf. Christian König
+rejected that: an importer must not build its own page tables from a
+dma-buf, and the use case should stay out of drivers/dma-buf. I
+acknowledged that and dropped it; this series does not touch dma-buf.
+
+Why a new interface
+===================
+
+kvm_gmem_ops gives KVM a way in. For devices, the only option today is
+a dma-buf plus a private call that iommufd looks up with symbol_get(),
+which is how vfio-pci works. Each new owner would need another such
+lookup, and iommufd would end up knowing each owner by name. With a
+common interface, a provider module only calls into mm, and nothing
+needs symbol_get().
+
+It also means the provider revokes a range once. The VMM hands the
+same file to KVM and to iommufd; on a revoke the core forwards it to
+every consumer, so KVM clears the range from stage-2, iommufd from the
+IOMMU page tables, and guest_memfd from the VMM's own mapping, all
+before the revoke returns.
+
+The contract
+============
+
+For a page of a provider file, get_page() returns the frame, its type
+(RAM or MMIO, read-only or not), and the largest aligned block of frames
+of the same type, so that consumers can use large mappings. A page
+without a frame is a hole.
+
+Consumers take no references. A frame stays valid until the revoke that
+removes it returns. To guarantee that, a consumer either holds a lock
+across get_page() and the mapping that its revoke callback also takes,
+or detects a racing revoke and retries.
+
+The interface does not deal with folios. The native guest_memfd backend
+and memfd pinning in iommufd handle pages from the page allocator, and
+pages that can move or swap would need references. A backend that needs
+full control over the file can still write its own kvm_gmem_ops.
+
+Backends
+========
+
+The motivating user is a host-side memory manager. It reserves a region
+of host RAM, lends parts of it to VMs and their devices, moves pages
+between VMs, and has to survive a live update of the host kernel. The
+sample module in this series models it.
+
+Device-DAX could also be a provider: its range never moves, get_page()
+is short, and it only revokes on unbind.  iommufd can map MMIO, but KVM
+takes only RAM, because it picks the guest memory type itself.
+
+Neither consumer keeps state about the provider's frames, which helps
+with live update.  guest_memfd has nothing to save across kexec, since
+KVM refills stage-2 on faults. The provider saves its frames and who
+owns them. Devices cannot fault, so their mappings stay part of the
+existing iommufd live update work, and the provider only has to give
+back the same frames.
+
+Confidential VMs
+================
+
+This series does not support them yet. For now only x86 VMs of type
+KVM_X86_DEFAULT_VM can use a provider.
+
+I don't think a provider should back private pages. Revoking a private
+page loses its contents, and only guest_memfd knows which pages are
+private. The interface could still be useful there later, with
+guest_memfd acting as a provider for its own files so that iommufd only
+maps shared pages. I left that for a later series.
+
+Patches
+=======
+
+  Patch 1 lets a kvm_gmem_ops backend map a page read-only for the
+  guest.  get_pfn() gets a writable output, and a guest write to such a
+  page exits with KVM_EXIT_MEMORY_FAULT. KVM_MEM_READONLY can't be
+  used for this, because guest_memfd slots don't allow it.
+
+  Patch 2 adds the interface and the core, and the FOP_MEM_PROVIDER
+  flag in struct file_operations.
+
+  Patch 3 adds the provider backend to guest_memfd, with the
+  GUEST_MEMFD_FLAG_USE_PROVIDER flag and a provider_fd field.
+  guest_memfd also handles the userspace mapping of the file, if the
+  provider allows it, so providers don't each have to get the fault and
+  revoke handling right.
+
+  Patch 4 prepares iommufd for tracking pages it does not pin. No
+  functional change.
+
+  Patch 5 lets IOMMU_IOAS_MAP_FILE take a provider file. iommufd maps
+  one PAGE_SIZE entry per page and pins nothing. It leaves holes
+  unmapped and honours read-only and MMIO pages. On a revoke, it
+  unmaps the range and maps whatever the provider backs now.
+
+  The PAGE_SIZE entries are deliberate for now: a partial revoke then
+  never has to split a large IOMMU page. Using the block size the
+  provider reports would be better, and needs the revoke to unmap and
+  remap whole blocks. A device that accesses the range between the
+  unmap and the map faults; replacing the entries in place would avoid
+  that, but needs new support in the IOMMU drivers. Both are left for
+  later.
+
+  Patches 6 and 7 add iommufd selftests: two mock-domain queries and a
+  mock provider.
+
+  Patch 8 adds a sample provider. It gives each VM a child file, can
+  move, donate and reclaim pages, and supports read-only pages. A child
+  file is read-only to its holder; the owner changes it through the
+  control device. It only uses the mm interface.
+
+  Patch 9 adds a KVM selftest with one provider and two VMMs. After
+  each change it checks what the guest, the device and the VMM's mapping
+  see.
+
+Testing
+=======
+
+x86_64, in QEMU with KASAN, PROVE_LOCKING and DEBUG_ATOMIC_SLEEP, with
+two ranges hidden from the host with memmap=, one for each sample. No
+KASAN report, lockdep splat or warning in any run.
+
+  - mem_provider_test, the selftest in patch 9: pass.
+  - guest_memfd_test, including the USE_PROVIDER flag check: pass.
+  - iommufd_selftest, iommufd_ioas: the 12 provider tests pass in all
+    four variants. The 4 failures are access_domain_destory, which the
+    series does not touch: it needs hugetlb pages, which this VM has
+    none of.
+  - David's gmem_provider tests, which this series does not change:
+    hugepage, revoke, iommufd and readonly pass; the SNP and vfio-pci
+    tests skip for lack of hardware.
+
+Not tested: arm64, where guest_memfd refuses providers; a real IOMMU,
+since only the mock domain was used.
+
+I wrote most of this series with AI help, and I am posting it as an RFC
+to get feedback on the interface.
+
+Fred Griffoul (9):
+  KVM: guest_memfd: Add a writable result to get_pfn()
+  mm: Add memory providers
+  KVM: guest_memfd: Add a memory provider backing
+  iommufd: Track the domains of pages that are not pinned
+  iommufd: Map memory provider files
+  iommufd/selftest: Add mock-domain IOVA queries
+  iommufd/selftest: Add a mock memory provider
+  samples/kvm: Add a memory provider sample
+  KVM: selftests: Test a memory provider shared by KVM and iommufd
+
+ Documentation/virt/kvm/api.rst                |  45 +-
+ MAINTAINERS                                   |   8 +
+ arch/arm64/kvm/mmu.c                          |  13 +-
+ arch/arm64/kvm/nested.c                       |  16 +-
+ arch/x86/kvm/mmu/mmu.c                        |  18 +-
+ arch/x86/kvm/svm/sev.c                        |  13 +-
+ arch/x86/kvm/x86.c                            |  10 +
+ drivers/iommu/iommufd/Kconfig                 |   1 +
+ drivers/iommu/iommufd/io_pagetable.c          |  37 +-
+ drivers/iommu/iommufd/io_pagetable.h          |  54 +-
+ drivers/iommu/iommufd/iommufd_test.h          |  36 +
+ drivers/iommu/iommufd/pages.c                 | 340 ++++++-
+ drivers/iommu/iommufd/selftest.c              | 286 ++++++
+ include/linux/fs.h                            |   2 +
+ include/linux/kvm_host.h                      |  20 +-
+ include/linux/mem_provider.h                  | 211 +++++
+ include/uapi/linux/iommufd.h                  |  11 +-
+ include/uapi/linux/kvm.h                      |  11 +-
+ mm/Kconfig                                    |   7 +
+ mm/Makefile                                   |   1 +
+ mm/mem_provider.c                             | 177 ++++
+ samples/Kconfig                               |  17 +
+ samples/Makefile                              |   1 +
+ samples/kvm/Makefile                          |   1 +
+ samples/kvm/gmem_provider.c                   |  67 +-
+ samples/kvm/gmem_provider.h                   |  17 +
+ samples/kvm/mem_provider_sample.c             | 855 ++++++++++++++++++
+ samples/kvm/mem_provider_sample.h             | 135 +++
+ tools/include/uapi/linux/kvm.h                |  11 +-
+ tools/testing/selftests/iommu/iommufd.c       | 119 +++
+ tools/testing/selftests/iommu/iommufd_utils.h |  64 ++
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../testing/selftests/kvm/guest_memfd_test.c  |   6 +
+ .../kvm/x86/gmem_provider_readonly_test.c     | 150 +++
+ .../selftests/kvm/x86/mem_provider_test.c     | 582 ++++++++++++
+ virt/kvm/Kconfig                              |   1 +
+ virt/kvm/guest_memfd.c                        | 286 +++++-
+ 37 files changed, 3531 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
