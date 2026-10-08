@@ -1,0 +1,3575 @@
+
+On /root/mail/repo:
+From d0426366d to 0401022a3
+KVM mailing list update from d0426366d to 0401022a3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     30 kernel.org
+     20 amd.com
+     15 arm.com
+      9 linux.ibm.com
+      4 linux.dev
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     30  Yosry Ahmed <yosry@kernel.org>
+     19  Michael Roth <michael.roth@amd.com>
+     14  Suzuki K Poulose <suzuki.poulose@arm.com>
+      5  Omar Elghoul <oelghoul@linux.ibm.com>
+      4  Fuad Tabba <fuad.tabba@linux.dev>
+      4  Amit Machhiwal <amachhiw@linux.ibm.com>
+      1  Steven Price <steven.price@arm.com>
+      1  Karthikeyan KS <karthiproffesional@gmail.com>
+      1  Ashish Kalra <ashish.kalra@amd.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2 29/29] KVM: selftests: Add a test for nested TLB flushes
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Add a test that exercises most common scenarios for TLB flushes. The
+test is split into two testing scenarios:
+1. Guest-triggered TLB flushes
+2. KVM-triggered TLB flushes
+
+For (1), the test runs an L1 guest that keeps switching an L2 PTE (or
+TDP PTE) between two GPAs, flushes the TLB, and runs L2 to check that
+accessing that address accesses the correct page. A missed TLB flush
+causes L2 to access the wrong GPA through a stale TLB entry. The test
+exercises multiple ways for L1 to flush the TLB, including changing L2's
+ASID/VPID, flushing L2's entire ASID/VPID/EPTP, or flushing an
+individual L2 GVA (using INVLPGA/INVVPID) when L1 does not enable TDP.
+
+On AMD, the test also checks that an ASID flush (or an ASID change)
+flushes shadow NPT mappings for all nCR3 roots, not just the current
+one, by using multiple nested NPT trees.
+
+For (2), the test creates a memslot with 2 pages, and keeps moving the
+base GPA of the memslot between a TEST_GPA and TEST_GPA - PAGE_SIZE,
+essentially resulting in the TEST_GPA being switched between two
+underlying HPAs. KVM should flush the TLB for both L1 and L2 contexts
+when updating a GPA -> HPA mapping.
+
+The test runs an L1 guest that verifies access to page 1, triggers the
+memslot move, and checks that both L1 and L2 now (correctly) access
+page 2. This verifies that a TLB flush in L1's context flushes the TLB
+for both L1 and L2. After that, the test does the opposite and triggers
+the memslot move from L2, to double check that a TLB flush in L2's
+context flushes the TLB for both L1 and L2.
+
+The test runs various test cases with TDP on/off in L1, and actually
+catches multiple injected bugs (in SVM), including:
+- Missing the TLB flush on nested VM-Enter if ASID12 changes.
+- Missing the TLB flush on nested VM-Enter if L1 uses
+  TLB_CONTROL_FLUSH_ASID.
+- Missing the nested NPT resync on nested VM-Enter if L1 uses
+  TLB_CONTROL_FLUSH_ASID with nested NPT enabled.
+- Missing the TLB flush when emulating INVLPGA.
+- Missing flushing both L1 and L2 ASIDs when handling KVM_REQ_TLB_FLUSH.
+
+Assisted-by: LLM
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/include/x86/svm.h |   5 +
+ tools/testing/selftests/kvm/include/x86/vmx.h |  21 +
+ .../testing/selftests/kvm/lib/x86/processor.c |  36 ++
+ .../selftests/kvm/x86/nested_tlb_flush_test.c | 526 ++++++++++++++++++
+ 6 files changed, 590 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 28/29] KVM: nSVM: Use different ASIDs for L1 and L2
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Now that TLB flushes are properly handled and tracked for L1 vs L2
+ASIDs, allocate a separate new ASID for L2 for each vCPU, similar to how
+VMX handles VPIDs. Drop the unconditional flushes and syncs on nested
+transitions.
+
+L1 and L2 can now only share an ASID in two cases:
+- KVM runs out of ASIDs and uses the fallback ASID for both L1 and L2.
+- SEV VMs always use the same ASID for SEV-specific requirements.
+
+WARN if the ASID is shared otherwise.
+
+Initialize last_asid to 0, such that the L2 ASID is always flushed on
+first nested VM-Enter after it's allocated.
+
+On SEV VM migration, free the L2 ASID on the destination vCPU (if nested
+was already initialized) before overwriting it with the SEV ASID.
+
+On a Turin CPU, this results in 8-15% performance boost in CPUID rate
+microbenchmark [1] and netperf TCP_RR latency/throughput.
+
+[1] https://lore.kernel.org/kvm/20231109180646.2963718-1-khorenko@virtuozzo.com/
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 32 +++++++++++++++++++++++---------
+ arch/x86/kvm/svm/sev.c    |  6 ++++--
+ 2 files changed, 27 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 27/29] KVM: nSVM: Flush the ASID on nested transitions if shared by L1 and L2
+Author: Yosry Ahmed <yosry@kernel.org>
+
+If L1 and L2 use the same ASID in hardware, always flush it on nested
+transitions to avoid using L1 TLB entries for L2 or vice versa, since
+from L1's perspective they are two different TLB domains.
+
+This is currently always the case, but KVM will start using separate
+ASIDs for L1 and L2 in most cases soon.
+
+Note that KVM_REQ_TLB_FLUSH_CURRENT is required here, not
+KVM_REQ_TLB_FLUSH_GUEST (used for L1 TLB flush requests). This is
+because KVM could be switching between different NPT roots on the same
+ASID. While this generally requires an ASID flush in the VMCB, which is
+done by both KVM_REQ_TLB_FLUSH_CURRENT and KVM_REQ_TLB_FLUSH_GUEST, it
+also requires a hypercall to specifically flush NPT mappings when
+running on Hyper-V, which is only done with KVM_REQ_TLB_FLUSH_CURRENT
+(as KVM_REQ_TLB_FLUSH_GUEST is only meant to flush translations created
+by the guest).
+
+Note that this is currently a noop as KVM requests
+KVM_REQ_TLB_FLUSH_CURRENT unconditionally on nested transitions, but
+this will soon be removed in favor of conditional flushes.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 26/29] KVM: nSVM: Flush L2's ASID when emulating INVLPGA
+Author: Yosry Ahmed <yosry@kernel.org>
+
+KVM currently handles INVLPGA in the same way as INVLPG, flushing L1's
+own ASID. This is currently correct because L1 and L2 share an ASID, but
+it doesn't work once they have separate ASIDs.
+
+If L1 is flushing a different L2 ASID than the one KVM is tracking, do
+nothing, as KVM will flush L2's ASID in hardware (and sync the MMU if
+needed) when L1 switches to the target ASID.
+
+If L1 is flushing its own ASID, handle the flush the same as INVLPG.
+Otherwise, skip the GVA flush for the current context (L1's ASID), and
+flush the L2 ASID in hardware using INVLPGA if running on the same CPU
+as L2. If not, fallback to a VMCB-based ASID flush. Note that if L2 then
+runs on a different CPU KVM will flush the ASID anyway.
+
+Either way, sync the MMU if NPT is disabled, which is handled by
+__kvm_mmu_invlpg(). Note that all MMU roots are sync'd when NPT is
+disabled, which can be optimized by keying off guest_mode to only sync
+the appropriate context (L1 vs. L2).
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/mmu.h     |  3 +++
+ arch/x86/kvm/mmu/mmu.c |  8 +++++---
+ arch/x86/kvm/svm/svm.c | 38 ++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 44 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 25/29] KVM: x86/mmu: Refactor kvm_mmu_invlpg() to allow skipping the GVA flush
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Refactor helpers out of kvm_mmu_invalidate_addr() and kvm_mmu_invlpg()
+that take in an extra argument to skip the GVA flush.
+
+This will be used when invalidating GVAs in a different context than the
+current one (i.e.  invalidating an L2 GVA from L1), so flushing the
+current context would flush the wrong TLB entries.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/mmu/mmu.c | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 24/29] KVM: x86/mmu: Rename __kvm_mmu_invalidate_addr() to kvm_mmu_sync_addr()
+Author: Yosry Ahmed <yosry@kernel.org>
+
+In preparation for creating another helper for
+kvm_mmu_invalidate_addr(), rename __kvm_mmu_invalidate_addr() to
+kvm_mmu_sync_addr(), which is arguably a more descriptive name.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/mmu/mmu.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 23/29] KVM: nSVM: Do not reset TLB_CONTROL in vmcb02 on nested VM-Enter
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Stop clearing TLB_CONTROL when preparing the control area of vmcb02, as
+this potentially undoes pending TLB flushes for L2 (e.g. through
+KVM_REQ_TLB_FLUSH while L1 is running), and remove the associated TODO
+comment.
+
+This is currently harmless, because nested_svm_entry_tlb_flush() always
+requests KVM_REQ_TLB_FLUSH_CURRENT on nested VM-Enter, which sets
+TLB_CONTROL again before L2 is actually run. However, always flushing
+will soon go away with proper TLB handling for L2, at which point always
+clearing TLB_CONTROL would be a bug.
+
+Clearing TLB_CONTROL on nested VM-Enter was probably done because
+TLB_CONTROL is not cleared by the CPU on VM-Exit. However, KVM always
+clears TLB_CONTROL in the active VMCB after a successful VMRUN. Hence,
+at nested VM-Enter, TLB_CONTROL in vmcb02 can only be non-zero if a TLB
+flush is queued for L2 while L1 is running (i.e. KVM_REQ_TLB_FLUSH), and
+that should never be ignored.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 10 +---------
+ 1 file changed, 1 insertion(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 22/29] KVM: nSVM: Flush the TLB if L1 changes L2's ASID in vmcb12
+Author: Yosry Ahmed <yosry@kernel.org>
+
+KVM uses a single ASID for L2 guests per-vCPU. Hence, when L1 changes
+L2's ASID in vmcb12 (e.g. due to switching to a different L2
+vCPU or simply to avoid flushing an existing ASID), KVM needs to flush
+the L2 ASID to correctly emulate different ASIDs as different TLB
+domains.
+
+Additionally, the nested NPT needs to be resync'd, as the MMU context
+is not tagged by ASID, and KVM cannot reuse nested NPT entries across
+different L2 ASIDs.
+
+Essentially, L1 switching L2's ASID is treated exactly the same as L1
+flushing L2's ASID, which is consistent with the APM:
+
+  Software may effectively flush the guest's TLB entries by allocating a
+  new ASID for the guest and not reusing the old ASID until the entire
+  TLB has been flushed at least once.
+
+This is similar to nVMX's handling of last_vpid, except that when L1
+changes VPID12, KVM does *not* need to resync the nested EPT, because
+VMX VPIDs, unlike SVM ASIDs, do not tag guest-physical translations
+(i.e. nGPA to GPA translations).
+
+Reset last_asid when nested VMRUN fails to force a flush and sync on the
+next nested VMRUN. The TLB flush request survives the failure, but the
+request to sync the nested NPT does not, as it ends up being serviced in
+L1's MMU context after the synthesized VM-Exit.
+
+Drop the commentary about vmcb12's ASID being copied around only for the
+consistency checks, as they no longer apply, and opportunistically fix
+whitespace alignment.
+
+This is currently functionally a noop, as a full flush and sync is
+triggered on every nested transition, but is a step toward eliminating
+that.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 29 +++++++++++++++++++++++------
+ arch/x86/kvm/svm/svm.h    |  2 ++
+ 2 files changed, 25 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 21/29] KVM: nSVM: Handle nested TLB flush requests through TLB_CONTROL
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Handle L1's requests to flush L2's TLB through the TLB_CONTROL field of
+VMCB12.
+
+On nested VM-Enter, flush L2's ASID if any flush is specified in
+TLB_CONTROL. This handles TLB_CONTROL_FLUSH_ASID and
+TLB_CONTROL_FLUSH_ASID_LOCAL equally for simplicity.
+
+On nested VM-Exit, flush L1's own ASID if L1 requested a *full* TLB
+flush (i.e. TLB_CONTROL_FLUSH_ALL_ASID).
+
+Essentially, TLB_CONTROL_FLUSH_ASID[_LOCAL] cause a TLB flush on nested
+VM-Enter only, while TLB_CONTROL_FLUSH_ALL_ASID causes a TLB flush on
+both nested VM-Enter and nested VM-Exit.
+
+Additionally, sync the nested NPTs on nested VM-Enter on an ASID flush,
+as ASID flushes also invalidate guest-physical translations on SVM
+(unlike VMX, which has separate VPID-based and EPT-based flushing). Sync
+all roots, as shadow mappings are not tagged with an ASID, and there
+could be translations belonging to the outgoing or flushed ASID in
+previous roots.
+
+All TLB_CONTROL values can be handled by KVM regardless of FLUSHBYASID
+support on the underlying CPU, so keep advertising FLUSHBYASID to the
+guest unconditionally.
+
+Note, TLB_CONTROL_FLUSH_ALL_ASID is never propagated from the vmcb12 to
+the vmcb02 (unless FLUSHBYASID is not available), as this gives the
+guest the power to flush the entire physical TLB (including translations
+for the host and other VMs).
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 31 ++++++++++++++++++++++++++-----
+ arch/x86/kvm/svm/svm.c    |  5 ++---
+ 2 files changed, 28 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 20/29] KVM: x86: Add KVM_REQ_MMU_SYNC_ALL_ROOTS
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Add a new x86 request to sync all roots, current and previous. This will
+be used when syncing the shadow NPTs on nested VMRUN when an ASID flush
+(or new ASID) is requested by L1, as all physical translations in all
+roots should be sync'd (since shadow mappings are not tagged with an
+ASID).
+
+Refactor syncing all roots (currently only done by
+kvm_vcpu_flush_tlb_guest()) to a helper, and use it to handle the
+request.
+
+Clear KVM_REQ_MMU_SYNC when handling KVM_REQ_MMU_SYNC_ALL_ROOTS as the
+latter is a superset. Do not do so inside kvm_mmu_sync_all_roots(), to
+avoid any subtle behavioral changes from kvm_vcpu_flush_tlb_guest()
+clearing KVM_REQ_MMU_SYNC. It makes sense to always clear it when
+syncing the MMU, but there might be weird dependencies on the sync only
+happening before the actual vCPU run, and kvm_vcpu_flush_tlb_guest() is
+called in other code paths than handling KVM_REQ_TLB_FLUSH_GUEST before
+vCPU run.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/mmu.h              |  7 +++++++
+ arch/x86/kvm/x86.c              | 11 ++++++++---
+ 3 files changed, 16 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 19/29] KVM: nSVM: Service local TLB flushes before nested transitions
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Service pending TLB flushes for a specific context (L1 vs. L2) before
+entering/leaving guest mode, as KVM does not track TLB flush requests
+for L1 vs. L2. This is not currently required as KVM always flushes the
+TLB on nested transitions, but it is a requirement to drop the
+unconditional flushes.
+
+TLB flushes are performed through the VMCB's TLB_CONTROL field, so
+service the flushes before every VMCB switch (except the precautionary
+switch in svm_free_nested()). Servicing flushes may end up purging the
+relevant HV TLB flush FIFO, which is based on guest_mode, so make sure
+local TLB flushes are handled before calling {enter/leave}_guest_mode().
+
+This is conceptually similar to how nVMX calls
+kvm_service_local_tlb_flush_requests(), except that the VMX calls only
+have ordering requirements on {enter/leave}_guest_mode(), and not
+switching the VMCS, because VPID used for TLB flushes depends on
+guest_mode, and flushes are not VMCS-based.
+
+Note that nested_svm_{entry/exit}_tlb_flush() must be called after
+kvm_service_local_tlb_flush_requests(), otherwise the TLB flushes will
+be immediately applied on the outgoing VMCB rather than the incoming
+one.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 18/29] KVM: nSVM: Split nested_svm_transition_tlb_flush() into entry/exit fns
+Author: Yosry Ahmed <yosry@kernel.org>
+
+The handling for the entry and exit TLB flushes will diverge
+significantly in the following changes. Instead of adding an 'is_vmenter'
+argument like nested_vmx_transition_tlb_flush(), just split the function
+into two variants for 'entry' and 'exit'.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 17/29] KVM: nSVM: Always switch VMCB before leaving guest mode
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Move svm_switch_vmcb() calls ahead of leave_guest_mode(), as nothing
+between the calls depends on svm->vmcb being set to vmcb01. This makes
+the nested VM-Exit path consistent with the nested VM-Enter path, and
+having the calls to svm_switch_vmcb() and leave_guest_mode() close makes
+it easier to reason about incoming changes that depend on both VMCB and
+guest_mode context.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 7 ++-----
+ 1 file changed, 2 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 16/29] KVM: nSVM: Flush both L1 and L2 ASIDs on KVM_REQ_TLB_FLUSH
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Flush both L1 and L2 ASIDs in svm_flush_tlb_all() to appropriately
+handle KVM_REQ_TLB_FLUSH by flushing all TLB entries in all contexts
+(e.g. for kvm_flush_remote_tlbs()). Since both L1 and L2 currently share
+an ASID, this is effectively a noop, but it won't be once L2 has a
+separate ASID.
+
+Purge all Hyper-V TLB FIFOs (for both L1 and L2), since both ASIDs are
+flushed, and an ASID flush is a superset of Hyper-V's fine-grained
+flushing (see comment in svm_flush_tlb_asid()).
+
+Note that if one TLB flush FIFO is purged (e.g. as a result of
+KVM_REQ_TLB_FLUSH_CURRENT), it will consume KVM_REQ_HV_TLB_FLUSH, and a
+subsequent KVM_REQ_TLB_FLUSH will not flush the other FIFO. This is
+alright as flushing both FIFOs is a (newly introduced) optimization
+anyway. The other FIFO will be checked after a nested transition, as
+KVM_REQ_HV_TLB_FLUSH is always set on nested transitions.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/hyperv.h     | 6 ++++++
+ arch/x86/kvm/svm/nested.c | 1 -
+ arch/x86/kvm/svm/svm.c    | 8 +++++++-
+ 3 files changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 15/29] KVM: x86: hyper-v: Allow purging all TLB flush FIFOs
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Refactor kvm_hv_purge_tlb_flush_fifo() to introduce an inner helper,
+__kvm_hv_purge_tlb_flush_fifo(), parameterized by an optional FIFO. If a
+FIFO is not passed in, all FIFOs are purged.
+
+Note that KVM_REQ_HV_TLB_FLUSH is consumed by
+__kvm_hv_purge_tlb_flush_fifo(), so a selective purge on one FIFO will
+render any subsequent non-selective purge useless. This is not a problem
+because purging TLB flush FIFOs is an optimization (and there are
+currently no users of the non-selective purges).
+
+No functional change intended as a FIFO is always being passed in now.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/hyperv.h | 25 ++++++++++++++++++-------
+ 1 file changed, 18 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 14/29] KVM: x86: hyper-v: Rename kvm_hv_vcpu_purge_flush_tlb()
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Rename kvm_hv_vcpu_purge_flush_tlb() to kvm_hv_purge_tlb_flush_fifo() to
+clarify that it purges the TLB flush FIFO, not purge *and* flush the
+TLB.
+
+No functional change intended.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/hyperv.h  | 4 ++--
+ arch/x86/kvm/svm/svm.c | 2 +-
+ arch/x86/kvm/x86.c     | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 13/29] KVM: nSVM: Add a placeholder ASID for L2
+Author: Yosry Ahmed <yosry@kernel.org>
+
+In preparation for introducing a separate ASID for L2, introduce a
+'placeholder' ASID that is still the same as L1's ASID. This will
+facilitate future changes that need to distinguish L1 and L2's ASIDs,
+before actually using a different ASID for L1 and L2.
+
+On SEV VM migration, copy the new SEV ASID into asid02 and vmcb02, in
+case nested was already initialized on the destination vCPU before
+migration.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 5 +++--
+ arch/x86/kvm/svm/sev.c    | 9 +++++++++
+ arch/x86/kvm/svm/svm.h    | 2 ++
+ 3 files changed, 14 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 12/29] KVM: nSVM: Drop svm->nested.initialized
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Do NULL checks on svm->nested.vmcb02.ptr instead of using a dedicated
+proxy 'initialized' field.  Make sure svm->nested.vmcb02.ptr is
+correctly set to NULL on initialization failures, as it is currently
+left as a dangling pointer.
+
+This makes it possible to directly do a NULL check on
+svm->nested.vmcb02.ptr before using it, instead of checking a different
+field, which is less error-prone.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 14 ++++++--------
+ arch/x86/kvm/svm/svm.h    |  2 --
+ 2 files changed, 6 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 10/29] KVM: SVM: Use a static ASID per vCPU
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Switch from dynamic ASID allocation to a static per-vCPU ASID.  The
+dynamic ASID allocation logic is now only effectively used when running
+out of ASIDs on a CPU (uncommon on modern hardware), or switching CPUs.
+
+The per-VMCB ASID generation is initialized to 0, which never matches the
+per-CPU ASID generation (bumped every time a CPU is enabled for
+virtualization). This leads to a TLB flush of the ASID on the first VMRUN,
+allocating a new ASID, and bumping the per-VMCB generation to match the
+per-CPU generation. The ASID remains static until one of the following:
+
+- The vCPU runs on a new CPU, in which case KVM resets the generation of
+  both VMCBs to allocate a new ASID on the new CPU.
+
+- KVM hits the maximum ASID on a CPU and increments the per-CPU ASID
+  generation, at which point all vCPUs on this CPU will allocate a new
+  ASID.
+
+- The CPU is re-enabled for virtualization (e.g. after CPU hotplug), at
+  which point the per-CPU generation is bumped and all vCPUs that
+  previously ran on it will allocate a new ASID.
+
+Drop the complexity and make the ASID static for each vCPU.  This makes
+SVM's handling of ASIDs closer to VMX's handling of VPIDs, and
+simplifies the code. It also completely avoids full TLB flushes (i.e.
+TLB_CONTROL_FLUSH_ALL_ASID) on systems with FlushByAsid.  Full flushes
+previously happened when updating the generation, so not so common, but
+should generally be avoided as they cause a VMRUN to invalidate the TLB
+entries for other VMs as well as the host.
+
+When a vCPU is migrated to a new physical CPU, flush the (now static)
+ASID instead of allocating a new one. This might cause extra TLB flushes
+when switching CPUs (compared to just using a new ASID), but odds are
+that the TLB is cold on the new CPU anyway.
+
+Static ASIDs also make the following fixes to the dynamic ASID
+allocation scheme unnecessary, so drop them:
+
+- Bumping the per-CPU generation when enabling virtualization on a CPU,
+  added by commit 25f744ffa0c8 ("KVM: SVM: Bump asid_generation on CPU
+  online to avoid ASID collision after hotplug").  A vCPU can no longer
+  run with an ASID that is (re)assigned to another vCPU.
+
+- Resetting the generation of both VMCBs on a CPU switch, added by
+  commit bf260dc9e7b8 ("KVM: SVM: Trigger new ASID allocation in both
+  VMCBs on pCPU switch").  An ASID is now owned by the same vCPU on all
+  CPUs, so a VMCB that misses a CPU switch can no longer end up using an
+  ASID owned by another vCPU on that CPU.
+
+- Tracking a pending full flush per-CPU (i.e. flush_all_asids), added by
+  commit 60d93c27859f ("KVM: SVM: Preserve TLB control (i.e. pending TLB
+  flush) on failed VMRUN").  The full flush on generation wraparound was
+  needed on behalf of all vCPUs on the CPU, as their ASIDs were about to
+  be recycled, so it had to be tracked per-CPU instead of in the VMCB of
+  the vCPU that happened to trigger the wraparound.  With static ASIDs,
+  TLB flushes are only needed for the vCPU's own ASID, so tracking them in
+  the VMCB is sufficient, and a pending flush in the VMCB is still
+  preserved on a failed VMRUN.
+
+As using ASIDs cannot be disabled like VPIDs, allocate a fallback ASID
+to be shared by all vCPUs after running out of ASIDs (and flushed on
+every vCPU run, for now).  If a fallback ASID cannot be allocated, fail
+vCPU creation (for non-SEV guests), but do not fail SVM initialization,
+to allow for allocating all ASIDs for SEV (if at all possible).
+
+For SEV, the same ASID continues to be used by all vCPUs in a VM. Move
+svm->asid initialization from SEV-specific VMCB initialization to vCPU
+creation, such that svm->asid is always initialized on vCPU creation for
+both SEV and non-SEV vCPUs. This makes the logic simpler to follow, and
+makes it easier to hide it in allocate_asid() and free_asid() helpers.
+Decide whether to free an ASID based on the ASID range rather than the
+VM type, as an SEV VM's vCPUs may stop being SEV vCPUs (or vice versa)
+as a result of SEV VM migration.
+
+Keep the ASID initialization in sev_init_vmcb(), even though it's
+already done in init_vmcb(), to handle SEV VM migration.  svm->asid is
+already reinitialized on destination SEV VMs during migration before
+VMCB initialization, so the ASID ends up correctly in the VMCB.
+Additionally, free any existing non-SEV ASID on the destination vCPU
+before overwriting it, to avoid leaking ASIDs when creating vCPUs then
+migrating an SEV VM onto them.
+
+Note: A nice side-effect is reading the min/max ASIDs once during
+initialization, instead of once per-CPU.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c |  4 +-
+ arch/x86/kvm/svm/sev.c    |  7 +++-
+ arch/x86/kvm/svm/svm.c    | 79 +++++++++++++++------------------------
+ arch/x86/kvm/svm/svm.h    | 25 +++++++++----
+ 4 files changed, 55 insertions(+), 60 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 11/29] KVM: SVM: Only flush the fallback ASID when used by a different vCPU
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Instead of always flushing the fallback ASID on every vCPU run, only
+flush it if the last vCPU that used it on the pCPU changes. This avoids
+constant TLB flushing on a vCPU using the fallback ASID if no other
+vCPUs that use the same ASID ran on the same pCPU.
+
+Note that checking (and flushing) the current ASID on vCPU load is not
+sufficient, as it is possible that a vCPU is using the fallback ASID
+only for L1 or only for L2. To do this correctly on vCPU load, both L1
+and L2 ASIDs would need to be checked, and the respective VMCB would
+need to be flushed. This would not be much simpler, and would perform
+unnecessary flushes in some cases (e.g.  loading a vCPU that uses the
+fallback ASID for L2, but L2 doesn't actually run until the vCPU is
+unloaded).
+
+Another alternative is always flushing on vCPU load if the current ASID
+is the fallback ASID, and flushing on nested transitions if the new ASID
+is the fallback ASID. Again, this is not much simpler and also incurs
+unnecessary flushes in some cases.
+
+Do the logical thing and track the vCPU using the fallback ASID instead.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/svm.c | 13 ++++++++++++-
+ arch/x86/kvm/svm/svm.h |  3 +++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 09/29] KVM: SEV: Explicitly initialize the per vCPU ASID on SEV VM migration
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Explicitly initialize svm->asid on the destination vCPUs as part of SEV
+VM migration, before calling sev_init_vmcb() to make sure the per-vCPU
+ASID is initialized before the VMCB. This is currently unnecessary as
+sev_init_vmcb() initializes the per-vCPU ASID anyway, but will be needed
+when the ASID initialization is moved to vCPU creation.
+
+Add a helper function for the ASID migration as more changes will be
+needed with incoming changes.
+
+Note that svm->asid is left as-is on the source vCPUs, even though the
+ASID now belongs to the destination VM. Clearing it would be a nice
+hardening measure, but it is not as simple as clearing src_svm->asid, as
+the source and destination VMs do not necessarily have the same number
+of vCPUs (e.g. for non SEV-ES), so NULL-handling would be needed in a
+couple of places. Leave it alone for now.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/sev.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 08/29] KVM: SEV: Expose sev_get_asid() outside of sev.c
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Move the function definition to svm.h in preparation for using it in
+more SVM code.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/sev.c |  5 -----
+ arch/x86/kvm/svm/svm.h | 10 ++++++++++
+ 2 files changed, 10 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 07/29] KVM: SEV: Do ASID initialization at VMCB initialization
+Author: Yosry Ahmed <yosry@kernel.org>
+
+The per-vCPU ASID does not change for SEV guests, so move the per-vCPU
+(and per-VMCB) ASID initialization to sev_init_vmcb() to do it once,
+instead of setting it before every VMRUN.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/sev.c | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 06/29] KVM: SVM: Fallback to flush everything if FLUSHBYASID is not available
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Currently, if FLUSHBYASID is not available when performing a TLB flush,
+the fallback is decrementing the ASID generation to trigger allocating a
+new ASID. In preparation for using a static ASID per vCPU (like VMX),
+just fallback to flushing everything if FLUSHBYASID is not available.
+This is probably worse from a performance perspective, but FLUSHBYASID
+has been around for ~15 years and it's not worth carrying the
+complexity.
+
+Move the fallback logic into vmcb_set_flush_asid(), as more callers will
+be added and will need the fallback as well. The only other current
+caller is from SEV code, and no CPUs support SEV but not FLUSHBYASID (at
+least according to AI).
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/svm.c | 5 +----
+ arch/x86/kvm/svm/svm.h | 5 ++++-
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 04/29] KVM: x86/mmu: Support specifying reserved TLB tags
+Author: Yosry Ahmed <yosry@kernel.org>
+
+In preparation for using the TLB tags allocator for SVM, which has a
+range of ASIDs allocated for SEV/SNP, pass in the number of reserved TLB
+tags when initializing the TLB tags allocator. The bitmap is
+conceptually shifted such that bit=0 corresponds to tag=nr_reserved.
+
+Specifying the minimum value during initialization also makes the API
+clearer, as tag=0 is now explicitly reserved by the caller.
+
+No functional change intended for VMX as VPID=0 was already implicitly
+reserved.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/mmu.h     |  2 +-
+ arch/x86/kvm/mmu/mmu.c | 42 ++++++++++++++++++++++++++++--------------
+ arch/x86/kvm/vmx/vmx.h |  2 +-
+ 3 files changed, 30 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 05/29] KVM: SVM: Add helpers to set/clear ASID flush in VMCB
+Author: Yosry Ahmed <yosry@kernel.org>
+
+Introduce set/clear helpers to set tlb_ctl to
+TLB_CONTROL_FLUSH_ASID or TLB_CONTROL_DO_NOTHING. Incoming changes will
+eliminate the use of TLB_CONTROL_FLUSH_ALL_ASID except as a fallback
+when FLUSHBYASID is not available, so the helpers will create a common
+path for this.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c |  2 +-
+ arch/x86/kvm/svm/sev.c    |  2 +-
+ arch/x86/kvm/svm/svm.c    |  4 ++--
+ arch/x86/kvm/svm/svm.h    | 10 ++++++++++
+ 4 files changed, 14 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 03/29] KVM: VMX: Generalize VPID allocation to be vendor-neutral
+Author: Yosry Ahmed <yosry@kernel.org>
+
+In preparation for sharing with SVM, generalize the VMX VPID allocation
+code and move it to common code as a TLB tags allocator. Parameterize
+the TLB tags allocator by the number of tags, and allocate the bitmap
+dynamically. Opportunisitcally use guards to acquire the lock instead of
+spin_{lock/unlock}().
+
+Keep the number of allowed tags capped at VMX's hardware cap, to avoid
+allocating a huge bitmap if L0 advertises a huge number of ASIDs to an
+L1 KVM. Realistically, the number of actual hardware ASIDs wouldn't be
+that large so there is no benefit.
+
+Initialize the TLB tags allocator during hardware setup/unsetup, and
+reserve tag=0 during initialziation, similar to how VPID=0 is currently
+reserved in the VMX-specific bitmap during hardware setup.
+
+Allow nr=0 to allow allocating all ASIDs to SEV on AMD without failing
+hardware setup, if at all possible, in which case any tag allocation
+fails (SEV won't use the tag allocator).  The number of tags includes
+tag=0, which is not usable. The interface is a little confusing in that
+regard, but this will be changed soon when reserved tags are explicitly
+introduced.
+
+Keep allocate_vpid() and free_vpid() as wrapper that check enable_vpid
+to avoid checking at all callsites, and add init_vpids() and
+destroy_vpids() to wrap init/destroy calls as well.
+
+No functional change intended.
+
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/mmu.h     |  8 +++++
+ arch/x86/kvm/mmu/mmu.c | 78 ++++++++++++++++++++++++++++++++++++++++++
+ arch/x86/kvm/vmx/vmx.c | 40 +++++-----------------
+ arch/x86/kvm/vmx/vmx.h | 28 ++++++++++++---
+ 4 files changed, 119 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 02/29] KVM: SVM: Document number of ASIDs CPUID setting
+Author: Yosry Ahmed <yosry@kernel.org>
+
+KVM arbitrarily advertises 8 ASIDs in KVM_GET_SUPPORTED_CPUID for
+historical reasons. Advertising a small number of ASIDs to L1 is
+currently harmless, as KVM (L0) uses the same ASID for both L1 and L2,
+and flushes that ASID on nested transitions.
+
+However, following changes will add proper ASID emulation and a separate
+ASID for L2, minimizing the TLB flushes on nested transitions. At that
+point, a full TLB flush from a KVM guest (L1) would flush both L1 and L2
+ASIDs, so should be avoided as much as possible by advertising more
+ASIDs to L1.
+
+Increasing the value advertised by KVM is tricky, because a VMM copying
+the number of ASIDs from KVM_GET_SUPPORTED_CPUID may perceive a new VM
+with a higher number of ASIDs as incompatible with older KVM (which is
+not true).
+
+Avoid changing the value advertised by KVM, but document that it is
+essentially meaningless and does not represent a limit or a hint. Also,
+more-or-less encourage userspace to advertise a higher value to avoid
+potential unnecessary TLB flushes from an L1 hypervisor.
+
+Suggested-by: Jim Mattson <jmattson@google.com>
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ Documentation/virt/kvm/api.rst | 20 ++++++++++++++++++++
+ arch/x86/kvm/cpuid.c           |  4 ++--
+ 2 files changed, 22 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 00/29] KVM: nSVM: Optimize nSVM TLB flushes
+Author: Yosry Ahmed <yosry@kernel.org>
+
+This series optimizes TLB flushes for nested SVM by using and maintaining
+a separate ASID for L2 for each vCPU (similar to VMX's handling of VPIDs),
+rather than sharing the same ASID and flushing everything on every nested
+transition.
+
+The series also drops the dynamic ASID allocation scheme and uses a
+static ASID per vCPU (or two if using nested), bringing it closer to how
+VMX handles VPIDs. Modern CPUs (Rome, Milan, Genoa, Turin) advertise 32K
+ASIDs, so there is no need for dynamic allocation.
+
+The Hyper-V bits only got build tested. The SEV bits were only tested
+using the SEV selftests.
+
+Otherwise, this series was tested in two ways:
+1. A new selftest:
+  - Tests most basic scenarios where L1 flushes the TLB for L2, as well
+    as when KVM triggers a TLB flush for both L1 and L2.
+  - On AMD, also tests that flushing (or changing) L2's ASID flushes
+    nested NPT translations for all nCR3 roots, not just the current one.
+  - Fails reliably when injecting manual TLB bugs (e.g. commenting out a
+    flush).
+  - Caught an actual bug when I was rebasing the series on top of
+    Paolo's MMU structures rework.
+  - Works for both SVM and VMX.
+  - Was used to repro a separate nVMX TLB bug [1].
+
+2. An AI generated script (now 1300 lines of bash that I still don't dare
+   to read):
+  - Runs 20 L1 VMs, split into two groups:
+    - 10 L1 VMs with vCPUs pinned 1:1 to dedicated host CPUs, each
+      running a single L2 VM with as many vCPUs as L1. This avoids TLB
+      flushes on vCPU migration and L2 ASID switching, which would
+      otherwise hide missed flushes.
+    - 10 L1 VMs with vCPUs confined to half as many host CPUs, each
+      running 4 L2 VMs. This overcommits CPU in both L0 and L1 to
+      exercise TLB flushes on vCPU migration and L2 ASID switching.
+  - Each L2 VM runs a workload that writes to most of its memory and then
+    validates its content from a different vCPU.
+  - L2 VMs overcommit memory in L1, and are periodically recycled to
+    exercise ASID reallocation.
+  - L0 periodically reclaims memory from L1 VMs proactively (exercise
+    L0-induced TLB flushes).
+  - The number of ASIDs is synthetically reduced (using a test-only
+    patch) such that some L1 vCPUs use the fallback ASID for L2.
+  - Runs with NPT enabled/disabled in L0 and L1.
+  - Catches most manually injected TLB bugs, some only semi-reliably.
+  - Caught an actual bug when testing the fallback ASID logic with
+    synthetically reduced number of ASIDs (in v1).
+
+Overall, I think I am happy with the testing I put this series through,
+hence dropping the RFC tag at last.
+
+Breakdown:
+- Patch 1 is a bug fix that can be taken separately.
+- Patches 2-11 implement the change to use static ASIDs per vCPU for
+  SVM (including SEV-specific handling and fallback ASID optimization),
+  and can also be taken separately if needed.
+- Patches 12-28 add the L2 ASID and proper handling for it, leading to
+  dropping the unconditional flushes on nested transitions.
+- Patch 29 adds the nested TLB flush selftest.
+
+v1 -> v2:
+- Rebased on top of kvm-x86-next-2026.10.02. Drop the fixes to the
+  dynamic ASID allocation that landed since v1 when switching to static
+  ASIDs, as they are no longer needed (bumping the ASID generation on CPU
+  online, resetting the ASID generation of both VMCBs on pCPU switch,
+  and tracking pending full flushes per-CPU).
+- Dropped "KVM: SVM: Duplicate pre-run ASID check for SEV and non-SEV
+  guests", and keep syncing the ASID into the VMCB before VMRUN until
+  static ASIDs are used, to avoid leaving vmcb02's ASID uninitialized
+  for SEV guests in between [Sashiko].
+- Explicitly initialize svm->asid during SEV VM migration in a separate
+  patch, before the VMCB is initialized [Sashiko].
+- Free any existing non-SEV ASID on the destination vCPUs during SEV VM
+  migration to avoid leaking it, and decide whether an ASID needs to be
+  freed based on the ASID range rather than the VM type [Sashiko].
+- Update the L2 ASID (and vmcb02) during SEV VM migration if nested was
+  already initialized on the destination vCPUs [Sashiko].
+- Moved "KVM: nSVM: Drop svm->nested.initialized" before introducing the
+  L2 ASID, so that the vmcb02 pointer can be reliably used to check if
+  nested is initialized.
+- Moved the WARN on L1 and L2 unexpectedly sharing an ASID to the patch
+  that actually uses different ASIDs [Sashiko].
+- Added KVM_REQ_MMU_SYNC_ALL_ROOTS, and sync all nested NPT roots (not
+  just the current one) when L1 flushes or changes L2's ASID, as shadow
+  NPT mappings are not tagged by ASID.
+- Reset the last L2 ASID if nested VMRUN fails, to avoid losing the
+  nested NPT sync.
+- Extended the selftest to cover flushing with multiple nested NPT roots.
+- Typo and changelog fixes.
+
+RFC v2 -> v1:
+- Dropped the RFC tag.
+- Document KVM's handling of number of ASIDs in CPUID rather than
+  increase the number of advertised ASIDs [Jim, Sean].
+- Explicitly support reserved TLB tags rather than a minimum TLB tag
+  [Sean].
+- Set an upper bound on the number of TLB tags [Sean].
+- Allow reserving all ASIDs to allow allocating all ASIDs to SEV (if at
+  all possible). [Sashiko].
+- Actually handle TLB flushes for nested on SEV [Sean, Sashiko].
+- Optimize fallback ASID flushes by tracking the last vCPU using it on
+  each pCPU instead of flushing it on every VMRUN [Sean].
+- Drop svm->nested.initialized and properly NULLify the vmcb02 pointer
+  instead (and use it).
+- Make sure servicing local TLB flushes is done when both the VMCB and
+  guest_mode are consistent [Sashiko].
+- Always initialize last_asid to 0 to flush the TLB on the first use of
+  L2's ASID [Sashiko].
+- Open-code TLB flush handling on nested VM-Enter and VM-Exit instead of
+  burying it in svm_switch_vmcb() [Sean].
+- Always flush the hardware ASID on nested transitions if L1 and L2
+  share it (e.g. when using the fallback ASID, or for SEV guests) to
+  prevent TLB entry leakage between L1 and L2.
+- Rename __kvm_mmu_invalidate_addr() to kvm_mmu_sync_addr() [Sean].
+
+RFC v1: https://lore.kernel.org/lkml/20250326193619.3714986-1-yosry.ahmed@linux.dev/
+RFC v2: https://lore.kernel.org/kvm/20260616004155.1435766-1-yosry@kernel.org/
+v1: https://lore.kernel.org/kvm/20260728003557.1136583-1-yosry@kernel.org/
+
+[1] https://lore.kernel.org/kvm/20260722230128.1587363-1-yosry@kernel.org/
+
+Yosry Ahmed (29):
+  KVM: nSVM: Flush the TLB after forcefully leaving nested
+  KVM: SVM: Document number of ASIDs CPUID setting
+  KVM: VMX: Generalize VPID allocation to be vendor-neutral
+  KVM: x86/mmu: Support specifying reserved TLB tags
+  KVM: SVM: Add helpers to set/clear ASID flush in VMCB
+  KVM: SVM: Fallback to flush everything if FLUSHBYASID is not available
+  KVM: SEV: Do ASID initialization at VMCB initialization
+  KVM: SEV: Expose sev_get_asid() outside of sev.c
+  KVM: SEV: Explicitly initialize the per vCPU ASID on SEV VM migration
+  KVM: SVM: Use a static ASID per vCPU
+  KVM: SVM: Only flush the fallback ASID when used by a different vCPU
+  KVM: nSVM: Drop svm->nested.initialized
+  KVM: nSVM: Add a placeholder ASID for L2
+  KVM: x86: hyper-v: Rename kvm_hv_vcpu_purge_flush_tlb()
+  KVM: x86: hyper-v: Allow purging all TLB flush FIFOs
+  KVM: nSVM: Flush both L1 and L2 ASIDs on KVM_REQ_TLB_FLUSH
+  KVM: nSVM: Always switch VMCB before leaving guest mode
+  KVM: nSVM: Split nested_svm_transition_tlb_flush() into entry/exit fns
+  KVM: nSVM: Service local TLB flushes before nested transitions
+  KVM: x86: Add KVM_REQ_MMU_SYNC_ALL_ROOTS
+  KVM: nSVM: Handle nested TLB flush requests through TLB_CONTROL
+  KVM: nSVM: Flush the TLB if L1 changes L2's ASID in vmcb12
+  KVM: nSVM: Do not reset TLB_CONTROL in vmcb02 on nested VM-Enter
+  KVM: x86/mmu: Rename __kvm_mmu_invalidate_addr() to
+    kvm_mmu_sync_addr()
+  KVM: x86/mmu: Refactor kvm_mmu_invlpg() to allow skipping the GVA
+    flush
+  KVM: nSVM: Flush L2's ASID when emulating INVLPGA
+  KVM: nSVM: Flush the ASID on nested transitions if shared by L1 and L2
+  KVM: nSVM: Use different ASIDs for L1 and L2
+  KVM: selftests: Add a test for nested TLB flushes
+
+ Documentation/virt/kvm/api.rst                |  20 +
+ arch/x86/include/asm/kvm_host.h               |   1 +
+ arch/x86/kvm/cpuid.c                          |   4 +-
+ arch/x86/kvm/hyperv.h                         |  33 +-
+ arch/x86/kvm/mmu.h                            |  18 +
+ arch/x86/kvm/mmu/mmu.c                        | 126 ++++-
+ arch/x86/kvm/svm/nested.c                     | 151 +++--
+ arch/x86/kvm/svm/sev.c                        |  37 +-
+ arch/x86/kvm/svm/svm.c                        | 150 +++--
+ arch/x86/kvm/svm/svm.h                        |  55 +-
+ arch/x86/kvm/vmx/vmx.c                        |  40 +-
+ arch/x86/kvm/vmx/vmx.h                        |  28 +-
+ arch/x86/kvm/x86.c                            |  13 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/include/x86/svm.h |   5 +
+ tools/testing/selftests/kvm/include/x86/vmx.h |  21 +
+ .../testing/selftests/kvm/lib/x86/processor.c |  36 ++
+ .../selftests/kvm/x86/nested_tlb_flush_test.c | 526 ++++++++++++++++++
+ 19 files changed, 1093 insertions(+), 173 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 01/29] KVM: nSVM: Flush the TLB after forcefully leaving nested
+Author: Yosry Ahmed <yosry@kernel.org>
+
+KVM flushes the TLB on nested VM-Enter and nested VM-Exit, but not when
+forcefully leaving nested. In this case, L2 TLB entries can leak into
+L1. Flush the TLB after forcefully exiting L2, similar to nested
+VM-Exits.
+
+Note that vmx_leave_nested() handles this correctly, as it reuses
+nested_vmx_vmexit(), which handles the necessary TLB flushes on an L2 ->
+L1 transition.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/svm/nested.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 3/3] KVM: PPC: Fix get_d_signext() 12-bit displacement for paired-single D-form
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+get_d_signext() has two compounding bugs since its introduction in 2010:
+
+1. The extraction mask 0x8FF silently drops bits 8-10 of the 12-bit D
+   field (PPC ISA bits 21-23), corrupting any displacement that has any
+   of those bits set.
+
+2. The sign-magnitude idiom "-(d & 0x7ff)" is wrong for two's-complement:
+   for D=0xFFC (encoding of -4) it returns -252 instead of -4.
+
+Together these errors produce a wrong effective address for psq_l, psq_lu,
+psq_st, and psq_stu whenever the displacement is negative or is a positive
+value >= 0x100 with bits 8-10 set — essentially any real-world paired-
+single stack-relative access.
+
+The D field occupies the bottom 12 bits of the instruction word (confirmed
+by the adjacent W and I extractions via inst_get_field(inst,16,16) and
+inst_get_field(inst,17,19)). Replace the open-coded logic with the standard
+sign_extend32(inst & 0xfff, 11), which correctly performs two's-complement
+sign extension from 12 bits to 32 bits.
+
+Fixes: 831317b605e7 ("KVM: PPC: Implement Paired Single emulation")
+Cc: stable@vger.kernel.org
+Reviewed-by: Shrikanth Hegde <sshegde@linux.ibm.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+Changes in v4:
+- No changes since v3.
+
+ arch/powerpc/kvm/book3s_paired_singles.c | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 2/3] KVM: PPC: Book3S HV: Add preempt_disable() around virtual-mode HPTE bit-lock users
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+kvmppc_hv_find_lock_hpte() requires virtual-mode callers to run with
+preemption disabled, because it can return with HPTE_V_HVLOCK still held
+until the caller later unlocks the HPTE.  Existing virtual-mode callers
+in book3s_64_mmu_hv.c already follow that rule, but several paths do
+not.
+
+kvmppc_handle_exit_hv() calls kvmppc_hpte_hv_fault() for hash-mode
+data-side and instruction-side faults after guest exit with preemption
+enabled.  kvmppc_pseries_do_hcall() executes virtual-mode HPT hcall
+handlers via kvmppc_pseries_do_hpt_hcall() with preemption enabled; the
+handlers for H_ENTER, H_REMOVE, H_READ, H_CLEAR_MOD, H_CLEAR_REF,
+H_PROTECT, and H_BULK_REMOVE all spin on try_lock_hpte() or lock_rmap().
+H_ENTER also reaches kvmppc_do_h_enter(), which uses arch_spin_lock() on
+kvm->mmu_lock.  That raw lock choice is intentional because
+kvmppc_do_h_enter() is also called from real-mode paths, so the correct
+fix is to establish the proper preemption context at the virtual-mode
+caller boundary.  kvm_htab_write(), the HPT migration restore path, also
+called kvmppc_do_h_remove() directly with preemption enabled from two
+sites: once in the n_valid loop to evict any occupied slot before
+inserting a new HPTE, and once in the n_invalid loop to evict any
+occupied slot that the restore marks as invalid.  This was inconsistent:
+the insert in the same function already used the guarded
+kvmppc_virtmode_do_h_enter() helper.
+
+On the host side, kvm_unmap_rmapp(), kvm_age_rmapp(),
+kvm_test_clear_dirty_npages(), and resize_hpt_rehash_hpte() also acquire
+HPTE_V_HVLOCK via try_lock_hpte() in process context with preemption
+enabled, serving MMU notifier callbacks, dirty-log harvesting, and HPT
+resize respectively.
+
+If any of these threads is preempted while holding HPTE_V_HVLOCK, any
+other thread on the same CPU spinning on the same bit-lock can never
+make progress, as the lock owner cannot be rescheduled to release it.
+This is particularly acute when the spinning thread has preemption
+disabled: it will never yield, causing a permanent CPU hang.
+
+Fix this by adding preempt_disable()/preempt_enable() pairs around the
+two kvmppc_hpte_hv_fault() call sites in kvmppc_handle_exit_hv() and
+around the kvmppc_pseries_do_hpt_hcall() invocation in
+kvmppc_pseries_do_hcall().
+
+For kvm_htab_write(), introduce kvmppc_virtmode_do_h_remove(), a thin
+wrapper that brackets kvmppc_do_h_remove() with preempt_disable()/
+preempt_enable(), mirroring the existing kvmppc_virtmode_do_h_enter()
+pattern.  The wrapper retains the full flags and avpn parameters so that
+future virtual-mode callers can use the H_AVPN and H_ANDCOND conditional
+guards if needed.  Note that kvmppc_do_h_remove() spins on both
+HPTE_V_HVLOCK and lock_rmap() (via remove_revmap_chain()); preemption
+must be disabled across both bit-locks.
+
+For kvm_unmap_rmapp() and kvm_age_rmapp(), place preempt_disable() before
+lock_rmap() so that both the rmap chain lock and the subsequent
+HPTE_V_HVLOCK bit-lock are held under a single non-preemptible window.
+There is an ABBA ordering constraint between the two locks: the rmap chain
+lock must be dropped before spinning on the HPTE bit-lock (documented in
+the comment above the try_lock_hpte() call in kvm_unmap_rmapp()).  To
+preserve this, preempt_enable() is called after unlock_rmap() on the
+failed try_lock_hpte() retry path and on any early-exit path, before the
+cpu_relax() spin, so the HPTE lock owner can be scheduled.
+
+For kvm_test_clear_dirty_npages(), remove the per-iteration
+preempt_disable()/preempt_enable() pairs: this function has a single call
+site, kvmppc_hv_get_dirty_log_hpt(), which already holds preempt_disable()
+across the entire loop, making the inner guards redundant.
+
+For resize_hpt_rehash_hpte(), place preempt_disable() before the
+unconditional try_lock_hpte() spin loop and preempt_enable() after
+unlock_hpte() at the single exit point.  This function is called from
+kvm_vm_ioctl_resize_hpt_commit(), which first quiesces all vCPUs by
+clearing kvm->arch.mmu_ready and calling on_each_cpu() to flush any vCPU
+currently running in guest mode back to host.  With all vCPUs out of the
+guest, no vCPU thread can hold HPTE_V_HVLOCK; any remaining lock holder
+(an MMU notifier callback or dirty-log walker) runs on a separate CPU
+and is not preempted, so the spin always makes forward progress.
+
+Fixes: 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual mode handlers for HPT hcalls and page faults")
+Cc: stable@vger.kernel.org # v5.14+
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+Changes in v4:
+- Introduced kvmppc_virtmode_do_h_remove(), a thin wrapper bracketing
+  kvmppc_do_h_remove() with preempt_disable()/preempt_enable(), mirroring
+  kvmppc_virtmode_do_h_enter().  Replaced both raw kvmppc_do_h_remove() call
+  sites in kvm_htab_write() with the new wrapper.
+- Updated commit message to document the kvm_htab_write() fix.
+- Dropped Reviewed-by from Shrikanth as the patch was materially extended.
+
+ arch/powerpc/kvm/book3s_64_mmu_hv.c | 33 +++++++++++++++++++++++++++--
+ arch/powerpc/kvm/book3s_hv.c        | 10 +++++++++
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 0/3] KVM: PPC: Fixes for Book3S HV HPT locking and paired-single decoding
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+This series addresses bug fixes across KVM PPC Book3S HV
+locking/synchronization and paired-single instruction decoding.
+
+Patches 1 & 2 fix synchronization and preemption issues introduced in
+commit 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual mode handlers for
+HPT hcalls and page faults"):
+
+- Patch 1 adds SRCU read lock protection when walking memslots during
+  virtual-mode HPT hcalls to prevent use-after-free races with concurrent
+  memslot updates.
+
+- Patch 2 adds preempt_disable() around all virtual-mode HPTE bit-lock
+  holders — both the guest vCPU paths (kvmppc_hpte_hv_fault() and
+  kvmppc_pseries_do_hpt_hcall()) and the host-side paths
+  (kvm_unmap_rmapp(), kvm_age_rmapp(), resize_hpt_rehash_hpte()) — to
+  prevent CPU stalls and deadlocks on preemption.
+
+Patch 3 fixes paired-single D-form instruction emulation:
+
+- Patch 3 fixes get_d_signext() to correctly extract the full 12-bit D
+  displacement field and perform proper two's-complement sign extension.
+
+Testing:
+========
+All test kernel builds were compiled with CONFIG_DEBUG_ATOMIC_SLEEP=y.
+The following scenarios were verified:
+
+1. Power9 PowerNV (L0) in Radix mode:
+   - Booted L0 host with kernel containing all 3 patches.
+   - Booted KVM guests in both Radix and Hash modes.
+   - Ran kernel build workload inside guests — no errors observed.
+   - Booted L1 guest with the same kernel — booted and ran cleanly.
+
+2. Power9 PowerNV (L0) in Hash mode:
+   - Booted L0 host with kernel containing all 3 patches.
+   - Booted KVM guest in Hash mode.
+   - Ran kernel build workload inside guest — no errors observed.
+   - Booted L1 nested guest with the same kernel — booted and ran cleanly.
+
+3. Power10 LPAR (L1):
+   - Booted Power10 LPAR with the patched kernel.
+   - Booted KVM guest and ran workloads — no errors observed.
+
+Changes in v4:
+==============
+- v3: https://lore.kernel.org/all/20261006122404.99358-1-amachhiw@linux.ibm.com/
+- Patch 2:
+  - Fixed missing preemption guard in kvm_htab_write(): introduced
+    kvmppc_virtmode_do_h_remove(), a thin wrapper that brackets
+    kvmppc_do_h_remove() with preempt_disable()/preempt_enable(), mirroring
+    the existing kvmppc_virtmode_do_h_enter() pattern.  Replaced both raw
+    kvmppc_do_h_remove() call sites in kvm_htab_write() with the new wrapper.
+  - Updated commit message to document the kvm_htab_write() fix.
+  - Dropped Reviewed-by from Shrikanth Hegde as the patch was materially
+    extended.
+
+Changes in v3:
+==============
+- v2: https://lore.kernel.org/all/20260930173750.56759-1-amachhiw@linux.ibm.com/
+- Patch 2:
+  - Fixed preemption window in kvm_unmap_rmapp() and kvm_age_rmapp(): moved
+    preempt_disable() before lock_rmap() so both the rmap lock and the HPTE
+    bit-lock are held under a single non-preemptible section, and added
+    preempt_enable() on all early exits and retry paths before cpu_relax().
+  - Cleaned up kvm_test_clear_dirty_npages(): removed redundant per-iteration
+    preempt_disable()/preempt_enable() pairs since the caller
+    kvmppc_hv_get_dirty_log_hpt() already holds preempt_disable() across the
+    entire loop.
+  - Reworded commit message to clearly detail the per-function locking design
+    and rationale.
+  - Picked up Reviewed-by tag from Shrikanth Hegde.
+- Patch 3:
+  - Picked up Reviewed-by tag from Shrikanth Hegde.
+
+Changes in v2:
+==============
+- v1: https://lore.kernel.org/all/20260928122837.8782-1-amachhiw@linux.ibm.com/
+- Patch 2: Extended preempt_disable()/preempt_enable() coverage to also wrap
+  the HPTE bit-lock hold windows in four host-side virtual-mode functions:
+  kvm_unmap_rmapp(), kvm_age_rmapp(), kvm_test_clear_dirty_npages(), and
+  resize_hpt_rehash_hpte(). These were identified as vulnerable by Sashiko AI
+  review and confirmed correct by audit.
+- Dropped Reviewed-by from Ritesh as the patch was materially extended.
+- Patch 2: Added warning comment above kvmppc_pseries_do_hpt_hcall()
+  documenting the preemption requirement.
+
+Amit Machhiwal (3):
+  KVM: PPC: Book3S HV: Add SRCU protection for virtual-mode HPT hcalls
+  KVM: PPC: Book3S HV: Add preempt_disable() around virtual-mode HPTE
+    bit-lock users
+  KVM: PPC: Fix get_d_signext() 12-bit displacement for paired-single
+    D-form
+
+ arch/powerpc/kvm/book3s_64_mmu_hv.c      | 33 +++++++++-
+ arch/powerpc/kvm/book3s_hv.c             | 80 +++++++++++++-----------
+ arch/powerpc/kvm/book3s_paired_singles.c |  7 +--
+ 3 files changed, 77 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 1/3] KVM: PPC: Book3S HV: Add SRCU protection for virtual-mode HPT hcalls
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+The virtual-mode HPT hcall handlers (H_ENTER, H_REMOVE, H_BULK_REMOVE,
+H_CLEAR_REF, H_CLEAR_MOD) call into book3s_hv_rm_mmu.c, which accesses
+memslots via kvm_memslots_raw().  kvm_memslots_raw() uses
+rcu_dereference_raw_check() to bypass SRCU lockdep annotation checking.
+This is safe in real mode because the entire guest entry/exit is wrapped
+in srcu_read_lock/unlock inside kvmppc_run_core() and
+kvmhv_run_single_vcpu().
+
+However, since commit 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual
+mode handlers for HPT hcalls and page faults"), these same handlers are
+also executed in virtual mode via kvmppc_pseries_do_hcall(), which runs
+after SRCU has already been released on guest exit.
+
+A concurrent KVM_SET_USER_MEMORY_REGION deletion or move can therefore
+call synchronize_srcu_expedited() — which does not wait for this thread —
+and then kfree(slot) and vfree(slot->arch.rmap) while the hcall handler
+still holds a raw pointer to the memslot.  lock_rmap() then writes to
+freed vmalloc memory, leading to use-after-free and memory corruption.
+Because kvm_memslots_raw() suppresses lockdep checks, this race is
+entirely silent.
+
+Fix this by factoring out the 7 HPT hcall handlers (H_REMOVE, H_ENTER,
+H_READ, H_CLEAR_MOD, H_CLEAR_REF, H_PROTECT, H_BULK_REMOVE) into a
+helper function, kvmppc_pseries_do_hpt_hcall(), and wrapping its call
+site in srcu_read_lock(&kvm->srcu) / srcu_read_unlock(&kvm->srcu, idx).
+Targeting only the HPT hcalls avoids wrapping non-HPT hcalls that sleep
+(such as H_CONFER, H_REGISTER_VPA, H_PAGE_INIT) or handlers that already
+acquire SRCU internally (such as H_RTAS).
+
+Fixes: 6165d5dd99db ("KVM: PPC: Book3S HV: add virtual mode handlers for HPT hcalls and page faults")
+Cc: stable@vger.kernel.org # v5.14+
+Suggested-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Reviewed-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+ arch/powerpc/kvm/book3s_hv.c | 70 ++++++++++++++++++------------------
+ 1 file changed, 35 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vhost-scsi: use FOLL_PIN for DMA page pinning
+Author: Karthikeyan KS <karthiproffesional@gmail.com>
+
+vhost_scsi_map_to_sgl() pins guest buffer pages via
+iov_iter_get_pages2() (FOLL_GET), which does not prevent
+copy-on-write or page migration while DMA is in flight. Switch to
+iov_iter_extract_pages() (FOLL_PIN), which does.
+
+Cc: Jason Wang <jasowangio@gmail.com>
+Cc: Mike Christie <michael.christie@oracle.com>
+Cc: John Hubbard <jhubbard@nvidia.com>
+Cc: Michael S. Tsirkin <mst@redhat.com>
+Cc: virtualization@lists.linux.dev
+Signed-off-by: Karthikeyan KS <karthiproffesional@gmail.com>
+---
+ drivers/vhost/scsi.c | 49 ++++++++++++++++++++++++++++++--------------
+ 1 file changed, 34 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 4/4] vfio-pci/zdev: Add VFIO FMB device features
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce new VFIO features for zPCI devices to provide FMB passthrough to
+userspace.
+
+Allow the user to enable or disable the FMB using the SET-only feature
+VFIO_DEVICE_FEATURE_ZPCI_FMB_ENABLE. Likewise allow the user to read the
+latest FMB using the GET-only feature VFIO_DEVICE_FEATURE_ZPCI_FMB_READ
+in the case when the FMB is enabled.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c |  4 +++
+ drivers/vfio/pci/vfio_pci_priv.h | 18 ++++++++++
+ drivers/vfio/pci/vfio_pci_zdev.c | 60 ++++++++++++++++++++++++++++++++
+ include/uapi/linux/vfio.h        | 29 +++++++++++++++
+ 4 files changed, 111 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 3/4] s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Introduce a fence over enabling or disabling FMB via debugfs when the zPCI
+device is associated with a KVM. This will prevent processes on the host
+from tampering with the FMB while the guest is still using it, which may
+cause partial counter resets and inconsistent reads which have no parallel
+in the architecture.
+
+For VFIO devices that are not associated with a KVM (i.e., for userspace
+drivers other than QEMU), this fence does not take effect.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+Reviewed-by: Niklas Schnelle <schnelle@linux.ibm.com>
+---
+ arch/s390/pci/pci_debug.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v9 2/4] s390/pci: Reuse FMB buffer and preserve state in device re-enablement
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Don't free the FMB buffer when disabling measurement in
+zpci_fmb_disable_device(). Instead, make the buffer persistent for the
+lifetime of the device and reuse it across enable/disable cycles. Defer
+freeing the buffer until teardown in zpci_release_device().
+
+Introduce the bool fmb_requested to struct zpci_dev to track whether FMB
+enablement has been requested. This decouples tracking the enablement
+from whether the buffer had been previously allocated, allowing us to
+account for implicit disablement by firmware in zpci_disable_device().
+Audit the only consumer of zdev->fmb and update its liveness check to
+reflect this change.
+
+Separate the buffer allocation and measurement enablement step into the
+new function zpci_fmb_reenable_device(), which allocates the FMB buffer
+on first use, zeroes it on reuse, resets the software IOMMU counters,
+and enables measurement. Make zpci_fmb_enable_device() delegate to this
+function, and call the latter from zpci_reenable_device() when
+fmb_requested is true.
+
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+---
+ arch/s390/include/asm/pci.h |   2 +
+ arch/s390/pci/pci.c         | 106 +++++++++++++++++++++++-------------
+ arch/s390/pci/pci_debug.c   |   2 +-
+ 3 files changed, 70 insertions(+), 40 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 0/4] vfio-pci/zdev: Improved zPCI Function Measurement Support
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Hi,
+
+This patch series improves support for function measurement for zPCI
+passthrough devices on s390.
+
+Changelog
+=========
+v8 -> v9:
+* Patch 2/4:
+  - Remove the intermediate disable step from zpci_fmb_reenable_device()
+    for more uniform semantics
+  - Rename fmb_enabled to fmb_requested with the intent of tracking the
+    desired status of FMB enablement
+  - Make zpci_fmb_enable_device() delegate to zpci_fmb_reenable_device()
+
+* Patch 4/4:
+  - Set fmb_requested when the user enables measurement
+
+v7 -> v8:
+* Patch 2/4:
+  - Replace the fmb_enabled bitfield in struct zpci_dev with a dedicated
+    bool to avoid future tearing bugs
+  - Rewrite commit message for a more natural flow
+
+* Patch 4/4:
+  - Replace mutex_lock/unlock() in vfio_pci_zdev_feature_fmb_read() with
+    a scoped_guard()
+
+v6 -> v7:
+* Patch 2/4:
+  - Don't re-enable FMB if it wasn't already enabled
+
+v5 -> v6:
+* Patch 2/4:
+  - Rework the FMB re-enablement code to reuse the same buffer again
+  - Make the FMB buffer persistent once allocated for as long as the
+    device's lifetime to accommodate an architectural quirk
+* Patch 4/4:
+  - Update the liveness check to use the new FMB enabled bool
+
+v4 -> v5:
+* Typo in the cover letter
+* Swap the ordering of patches 3/4 and 4/4 to ease merging (i.e., to
+  ensure the three s390 patches are ordered before the VFIO patch)
+* Patch 2/4:
+  - Drop the refactor of zpci_fmb_enable_device() and the separation of
+    zpci_fmb_clear_iommu_ctrs() and zpci_fmb_do_enable()
+  - Allocate a new buffer in zpci_fmb_reenable_device() rather than
+    reusing the same buffer to avoid firmware edge cases
+
+* Patch 3/4 (previously 4/4):
+  - Avoid reading from userspace while holding kzdev_lock unnecessarily
+
+* Patch 4/4 (previously 3/4):
+  - Drop allowing usercopy of the FMB when initializing the kmem_cache
+  - Avoid copying to userspace while holding fmb_lock unnecessarily
+    - Restore the FMB bounce buffer to achieve this one
+  - Clarify uAPI documentation and ensure it accurately describes the
+    behavior of the VFIO features
+
+v3 -> v4:
+* Patch 2/4:
+  - Replace mutex_lock/unlock in zpci_reenable_device() with a guard
+
+* Patch 3/4:
+  - Allow usercopy of the FMB when initializing its kmem_cache
+  - Move the guard in vfio_pci_zdev_feature_fmb_enable() lower to only
+    protect the FMB
+  - Ensure vfio_pci_zdev_feature_fmb_enable() fails on double-enable for
+    consistency with the documentation
+  - Eliminate the bounce buffer in vfio_pci_zdev_feature_fmb_read()
+  - Replace the void pointer with __aligned_u64 in the FMB read uAPI
+    structure
+
+v2 -> v3:
+* Patch 1/4 (new patch):
+  - Fix race conditions in pcibios_enable/disable_device() with regard to
+    the FMB enable/disable
+  - Assert that fmb_lock is held within zpci_fmb_enable_device() and
+    zpci_fmb_disable_device()
+
+* Patch 2/4 (previously 1/3):
+  - Move the FMB enable logic into a static function zpci_fmb_do_enable()
+    to reduce code duplication between zpci_fmb_enable_device() and
+    zpci_fmb_reenable_device()
+  - Reword commit message to use the imperative voice more consistently
+
+* Patch 3/4 (previously 2/3):
+  - Split the previous VFIO feature into a SET-only and a GET-only feature
+    for enabling/disabling and reading the FMB respectively
+  - Remove FMB definitions from the VFIO uAPI and instead treat it as an
+    opaque structure
+
+* Patch 4/4 (previously 3/3):
+  - Clarify goto label name to reduce misunderstandings
+
+v1 -> v2:
+* Patch 1/3:
+  - Address a possible race condition in zpci_reenable_device() caused by
+    calling zpci_fmb_reenable_device() without holding fmb_lock
+  - Assert that fmb_lock is held within zpci_fmb_reenable_device()
+
+* Patch 3/3:
+  - Address a possible race condition in pci_perf_seq_write() caused by
+    consuming zdev->kzdev without holding kzdev_lock
+
+Motivation
+==========
+The firmware on s390x machines allows for tracking a variety of statistics
+relating to zPCI devices in a function measurement block (FMB). However,
+the kernel currently lacks a structured mechanism of sharing this
+information with userspace, beyond /sys/kernel/debug/pci/ID/statistics.
+This can lead to shortcomings when running a guest on KVM with PCI
+passthrough devices, as QEMU is unable to provide an accurate FMB snapshot
+to the guest.
+
+Proposal
+========
+We propose adding a new VFIO device feature to zPCI passthrough devices,
+allowing userspace programs to read the latest FMB snapshot as it is
+written by the firmware. We ensure that function measurement enablement is
+preserved across device resets on the host. Furthermore, we guard against
+host tampering with the FMB via sysfs when the zPCI device is in
+passthrough to protect the VM's state.
+
+I'd appreciate some feedback on these patches.
+
+Thanks in advance.
+
+Omar Elghoul (4):
+  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+  s390/pci: Reuse FMB buffer and preserve state in device re-enablement
+  s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+  vfio-pci/zdev: Add VFIO FMB device features
+
+ arch/s390/include/asm/pci.h      |   2 +
+ arch/s390/pci/pci.c              | 108 ++++++++++++++++++++-----------
+ arch/s390/pci/pci_debug.c        |  11 +++-
+ drivers/vfio/pci/vfio_pci_core.c |   4 ++
+ drivers/vfio/pci/vfio_pci_priv.h |  18 ++++++
+ drivers/vfio/pci/vfio_pci_zdev.c |  60 +++++++++++++++++
+ include/uapi/linux/vfio.h        |  29 +++++++++
+ 7 files changed, 195 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v9 1/4] s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Ensure that fmb_lock is held by pcibios_enable_device() and
+pcibios_disable_device() when calling zpci_fmb_enable_device() or
+zpci_fmb_disable_device(), respectively. Additionally, assert that the
+fmb_lock is held within the latter two functions to prevent future race
+conditions regarding new callers.
+
+Fixes: af0a8a8453f7 ("s390/pci: implement pcibios_add_device")
+Fixes: 944239c59e93 ("s390/pci: implement pcibios_release_device")
+Cc: stable@vger.kernel.org
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Niklas Schnelle <schnelle@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+---
+ arch/s390/pci/pci.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 08/19] system/memory: Re-use memory-backend-guest-memfd inode for private memory
+Author: Michael Roth <michael.roth@amd.com>
+
+When convert-in-place=true, the guest_memfd instance created by
+memory-backend-memfd (when guest-memfd=on option is specified) should
+also be used internally for private memory.
+
+Do this by dup()'ing the guest_memfd FD provided by the backend so the
+separate cleanup paths for shared vs. private FDs can be managed in the
+same way they are currently for convert-in-place=false (where shared
+memory must come from something other than guest_memfd).
+
+Introduce a new RAM_GUEST_MEMFD_SHAREABLE flag that can be used to
+limit this dup()'ing to specific backend types like
+memory-backend-memfd.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ backends/hostmem-memfd.c |  1 +
+ include/system/memory.h  |  7 ++++++
+ system/physmem.c         | 50 +++++++++++++++++++++++++++++++++++++---
+ 3 files changed, 55 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 07/19] accel/kvm: Add CGS flag to control in-place conversion support
+Author: Michael Roth <michael.roth@amd.com>
+
+For confidential guests, guest_memfd is currently used only for private
+guest memory, and normal guest memory comes from the configured memory
+backend just as it does for a non-confidential guest. It is now possible
+to use the same physical memory to back a particular GPA regardless of
+whether it is in a shared or private state. This avoids the need to
+rely on discarding memory between shared/private conversions (to avoid
+doubled memory usage), and is intended to be the primary mode of using
+guest_memfd for confidential guests moving forward, and future features
+like hugepage support will likely require it.
+
+Add an internal flag to enable this support. Since
+ConfidentialGuestSupport is already used to track some
+guest_memfd-related functionality (e.g.  whether it is required for the
+configured machine), similarly introduce this flag as a member of
+the ConfidentialGuestSupport object.
+
+Also add the KVM-specific checks to enable this support, but leave the
+option disabled so that required changes can first be implemented for
+CGS variants that intend to make use of KVM's in-place conversion
+support.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c                         | 18 ++++++++++++++++++
+ hw/core/machine.c                           |  5 +++++
+ include/hw/core/boards.h                    |  1 +
+ include/system/confidential-guest-support.h | 12 ++++++++++++
+ 4 files changed, 36 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 06/19] [NOT-FOR-MERGE] linux-headers: Update headers for v13 of in-place conversion kernel support
+Author: Michael Roth <michael.roth@amd.com>
+
+v13 of kernel support for in-place conversion is now in kvm-x86 staging,
+but not yet fully upstream, so pull in just the header definitions
+needed for in-place conversion for now.
+
+This patch should be replaced with a full kernel header sync once the
+kernel support fully lands.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ linux-headers/linux/kvm.h | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 05/19] accel/kvm: Use dedicated helper for creating private-only gmem instances
+Author: Michael Roth <michael.roth@amd.com>
+
+Currently QEMU supports using guest_memfd internally (separately from
+user-specified memory backends) to handle private memory for
+confidential VMs. While KVM can switch between guest_memfd-backed
+private memory and non-guest_memfd-backed shared memory via
+KVM_SET_MEMORY_ATTRIBUTES, the memory in the guest_memfd inode can only
+ever be private memory.
+
+This is distinct from upcoming in-place conversion support, where
+guest_memfd inodes can contain both private/shared memory and can
+convert between the 2 in-place.
+
+To help distinguish between these 2 uses of guest_memfd, add a dedicated
+helper to handle the private-only uses of guest_memfd, and add some
+additional sanity checks with that use-case in mind.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c    | 15 +++++++++++++++
+ accel/stubs/kvm-stub.c |  6 ++++++
+ include/system/kvm.h   |  1 +
+ system/physmem.c       |  6 +++---
+ 4 files changed, 25 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 04/19] accel/kvm: Fix handling of conversion ranges with multiple MMIO holes
+Author: Michael Roth <michael.roth@amd.com>
+
+The current handling will properly handle MMIO checks for holes anchored
+at the beginning of the conversion range, but misses subsequent holes.
+The current handle_memory_hole() helper already processes all MMIO
+ranges up to and including the sections found at each iteration, so
+handle this by simply calling handle_memory_hole() for each additional
+section/sub-range.
+
+Fixes: c5d9425ef4da ("kvm/tdx: Don't complain when converting vMMIO region to shared")
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 03/19] accel/kvm: Fix handling of MMIO holes at start of conversion ranges
+Author: Michael Roth <michael.roth@amd.com>
+
+Currently MMIO checks are done for ranges where memory_region_find()
+finds no regions within the entire range, or for cases where
+non-RAM/ROM regions at the beginning of the range.
+
+However, if the first region in the range is a normal RAM/ROM region,
+then the portion of the conversion range that overlaps the region is
+processed normally, but any MMIO holes that might be present at the
+beginning are ignored, so the checks are bypassed for those ranges.
+
+Plumb the 'start' GPA that was used to query memory_region_find(), and
+pass that into the MMIO-processing helper so that these gaps can be
+detected and MMIO checks can be applied appropriately.
+
+Fixes: c5d9425ef4da ("kvm/tdx: Don't complain when converting vMMIO region to shared")
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 02/19] accel/kvm: Fix kvm_convert_memory() calls crossing memory regions
+Author: Michael Roth <michael.roth@amd.com>
+
+
+Page conversion calls can span multiple memory regions, potentially
+resulting in a conversion failure if the memory range being converted
+extends beyond the boundaries of the referenced memory region.
+
+Handle the case of page conversion calls straddling across memory
+regions by looping through the subregions and handling conversions and
+related work section by section.
+
+Fixes: c15e5684071d ("kvm: handle KVM_EXIT_MEMORY_FAULT")
+Signed-off-by: Ashish Kalra <ashish.kalra@amd.com>
+Co-developed-by: Michael Roth <michael.roth@amd.com>
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 94 ++++++++++++++++++++++++++++++---------------
+ 1 file changed, 63 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 01/19] accel/kvm: Add helper for handling conversions of MMIO holes
+Author: Michael Roth <michael.roth@amd.com>
+
+When converting GPA ranges containing MMIO holes, the general intended
+logic is to skip MMIO ranges as long as it is a private->shared
+conversion, and to fail otherwise.
+
+To better enable some future refactorings to address bugs in the current
+code, go ahead and consolidate all of the MMIO handling to a
+self-contained helper.
+
+The only intended functional change is that the error message for
+shared->private conversion of MMIO ranges corresponding to a
+non-RAM/non-ROM region now report the range of the region that
+specifically caused the failure, as opposed to reporting the entire
+conversion range. There is also a stray "," in the error message which
+is fixed up as part of this refactoring.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 96 ++++++++++++++++++++++++++++++---------------
+ 1 file changed, 64 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 19/19] hostmem: Automatically select set guest-memfd=on for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+When in-place conversion is enabled, both the shared memory and private
+memory must come from the same guest_memfd instance. Thus, the
+memory-backend-memfd options must in turn correspond to a guest_memfd
+instance, e.g. guest-memfd=on must be specified. Since there is no
+use-case for enabling in-place conversion without setting
+guest-memfd=on, just set it automatically if in-place conversion is
+enabled (unless guest-memfd has been explicitly set to 'off', in which
+case generate an informative error message).
+
+Also update the 'guest-memfd' documentation to note this behavior.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ backends/hostmem-memfd.c    | 13 ++++++++++++-
+ docs/system/guest-memfd.rst | 21 +++++++++++++++++++++
+ qapi/qom.json               |  5 +++--
+ 3 files changed, 36 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 18/19] i386/sev: Add sev-snp-guest parameter to enable in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+The sev-snp-guest object is currently used to provide confidential guest
+by using guest_memfd for private GPA ranges, and for shared GPA ranges
+the normal memory backend is used, i.e. "out-of-place" conversion
+between shared/private.
+
+Now that "in-place" conversion support is available in QEMU, add a
+parameter to select between these 2 modes of utilizing guest_memfd (it
+cannot be enabled transparently due to noticeable differences in
+behavior (e.g. memory usage accounting and lack of hugetlb support for
+shared GPA ranges) that userspace needs to be aware of when selecting
+the mode).
+
+Note that the actual capability checks for in-place conversion support
+in the host kernel will happen later in kvm_arch_init().
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ qapi/qom.json     |  8 +++++++-
+ target/i386/sev.c | 17 +++++++++++++++++
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 17/19] accel/kvm: Disable discard for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+When using in-place conversion, there is no need to discard memory after
+conversion because the same memory will continue to be used after the
+conversion to back the same GPA. Discarding it would only cause
+unnecessary reallocation of memory after each conversion. Instead, only
+enable it for non-in-place conversions.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 24 +++++++++++++-----------
+ 1 file changed, 13 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 16/19] i386/sev: Update CPUID failure handling for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+When SNP_LAUNCH_UPDATE fails to update the CPUID page, the CPUID page
+data passed in will be re-written with metadata about what CPUID fields
+didn't match with what trusted firmware expected. In the case of
+in-place conversion, this will have been the same page that was
+initially passed to SNP_LAUNCH_UPDATE, and so it will have been put in
+a private state prior to making the call.
+
+Make sure to switch it back to shared before accessing it for
+error-reporting, otherwise this path will generate a bus error.
+
+While here, sneak in a typo fixup for the error message that gets
+printed immediately afterward.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ target/i386/sev.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 15/19] i386/sev: Update SNP_LAUNCH_UPDATE for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+For in-place conversion, the source pointer is expected to be NULL since
+the data has already been written directly to guest memory and doesn't
+need to be copied in prior to encrypting it in-place for initial guest
+memory payload.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ target/i386/sev.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 14/19] accel/kvm: Don't default to private attributes for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+Without in-place conversion, QEMU can still access shared memory to load
+initial state into guest memory prior to launch even if the GPA's memory
+attributes default to private, since userspace is accessing a completely
+separate pool of memory. With in-place conversion, all these accesses
+would need to first be converted to shared, then back to private, since
+the memory all comes from guest_memfd and only shared memory can be
+accessed by userspace.
+
+Additionally, with in-place conversion, the most efficient way to set
+the default memory attribute state is via the presence/absence of the
+GUEST_MEMFD_FLAG_INIT_SHARED flag, which is handled in the guest_memfd
+creation routine, so if future in-place conversion implementations wish
+to set the default to something otherwise then doing so using that flag
+would be ideal rather than changing the default after guest_memfd
+creation by issuing a guest_memfd ioctl.
+
+To account for that and avoid sprinkling these differences in behavior
+throughout QEMU when in-place conversion is enabled, just default to
+shared. This does not compromise guest security, since Confidential VMs
+will necessarily enforce this via trusted entities, and simply generate
+implicit page state changes if their default expectations don't match
+KVM's. However, in most cases a guest will explicitly convert memory to
+a particular state before actually using it, so even these implicit
+conversion requests should be rare. If this ends up needing to be
+changed for other reasons in the future, the guest_memfd creation is the
+right place to handle it for in-place conversions.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 13/19] accel/kvm: Support shared/private conversions via guest_memfd ioctls
+Author: Michael Roth <michael.roth@amd.com>
+
+When using guest_memfd with support for shared memory / in-place
+conversion, it is necessary to use the guest_memfd ioctls to handle
+conversions instead of KVM ioctls. Implement support for this by looping
+through all the sections within a converison range. Implement everything
+in terms of the kvm_convert_memory() loop, which already deals with some
+special considerations regarding various holes / region types that might
+be encountered.
+
+Also update kvm_set_memory_attributes_*() to use the same common path
+when convert-in-place=false. This potentially results in a small change
+in behavior due to the additional MMIO checks/skips now being applied in
+that case (generally qemu-triggered during setup) rather than only for
+kvm_convert_memory() (generally guest-triggered), but this is arguably
+safer, and it provides similar behavior between convert-in-place=false
+vs. convert-in-place=true, the latter of which *must* skip MMIO holes
+because the regions (and associated guest_memfds) themselves track
+shared/private state internally and passing the whole conversion range
+through to KVM is not an option in that case.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 131 ++++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 114 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 12/19] accel/kvm: Re-order attribute notifications for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+ram-block-attribute update notifications are currently sent after
+conversions from/to private pages to trigger DMA maps/unmaps of shared
+GPA ranges (respectively). However, with in-place conversion additional
+requirements on the kernel side come into play which require this
+behavior to be adjusted.
+
+For shared->private conversions: the attributes need to be set to
+private *after* the notification, since when using VFIO it may not be
+possible to update the attribute while it remains pinned due to the
+IOMMU mapping, so issue the notification first to ensure unmappings are
+done in advance.
+
+For private->shared conversions: the attributes need to be set to shared
+*before* the notification, since it will possibly result in the page
+being mapped into an IOMMU and trigger guest_memfd's fault handler,
+which will expect the page to have its attributes set to shared or
+otherwise SIGBUS.
+
+Implement this to enable passthrough support for CoCo guests with
+in-place conversion support enabled. For non-inplace conversion, pages
+mapped into the IOMMU are not the same physical pages as the one used
+for private accesses by the guest, so neither order risks DMA accesses
+to private memory and that path can be consolidated to use the same
+handling as well.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 60 +++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 58 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 11/19] accel/kvm: Move post-conversion updates to a separate helper
+Author: Michael Roth <michael.roth@amd.com>
+
+Currently memory attribute conversions are followed up by other
+bookkeeping tasks like discarding unused memory or issuing iommufd
+notifications. Move these tasks to a separate post-conversions helper to
+better compartmentalize and track these tasks, and in doing so lay the
+groundwork for a pre-conversion helper which will be needed in the
+future.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c | 28 ++++++++++++++++++++--------
+ 1 file changed, 20 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 00/19] guest_memfd: support in-place memory conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+v1: https://lore.kernel.org/qemu-devel/20260528000416.8161-1-michael.roth@amd.com/
+v2: https://lore.kernel.org/qemu-devel/20260908205236.838281-1-michael.roth@amd.com/
+v3:
+  - rebase on top of master, which now includes prerequisite guest-memfd support
+    for non-confidential VMs
+  - make CGS option implementation-specific (Markus)
+  - beef up conf/guest-memfd rst docs and reference in qapi changes (Markus)
+  - rename _SHARED flag to _SHAREABLE (David)
+  - refactor/reorder patches so that SNP QAPI definitions to enable in-place
+    conversion are deferred until all the required code is in place rather
+    than relying on the new removed 'allow_convert_in_place' CGS flag
+    
+This patchset is also available at:
+
+  https://github.com/amdese/qemu/commits/snp-inplace-v3
+
+The first 5 patches are bug-fixes for code that was added for TDX to deal with
+private MMIO ranges. Since much of that needed to be refactored as part of this
+series, they are included here for context/review. Testing of those patches
+would also be appreciated since I don't have access to TDX hardware and am
+unable to check for regressions.
+
+
+OVERVIEW
+--------
+
+This series adds guest_memfd support for in-place conversion of memory
+between private/shared, and enables it for SEV-SNP guests. It is based
+on recently-added kernel support for mmap()-able guest_memfd
+instances[1], which allow it to be used for shared memory, and the
+following patchset[2], which adds additional guest_memfd interfaces to
+allow it to be used to perform in-place conversion:
+
+  [PATCH v13 00/44] guest_memfd: In-place conversion support
+  https://lore.kernel.org/kvm/20260910-gmem-inplace-conversion-v13-0-dd6fbf94f4e1@google.com/
+
+That series also introduces a new 'gmem_in_place_conversion' KVM
+module option that controls setting this mode vs. non-in-place
+behavior. Currently in-place mode is planned to eventually deprecate
+non-in-place mode.
+
+
+MOTIVATION
+----------
+
+Today, SEV-SNP guests (and other CoCo VM types using guest_memfd) keep
+shared and private memory on separate physical backings: a userspace
+memory-backend object for shared pages, and a kernel-allocated
+guest_memfd file descriptor for private pages. KVM_SET_MEMORY_ATTRIBUTES
+flips which backing the guest sees for a given GPA range, and the old
+backing is typically discarded / hole-punched on conversion to avoid
+doubled memory usage.
+
+That model works, but has a number of downsides that impact certain
+use-cases:
+
+  - Each conversion involves discarding pages on one side and faulting
+    them in on the other, which incurs allocation overheads in the
+    host kernel for every conversion.
+
+  - Some use-cases, like pKVM[3], rely on memory isolation rather than
+    encryption and rely on in-place conversion to pass through things
+    like secured framebuffer memory without needing to bounce data
+    through separate shared/private HPAs, which would introduce
+    unacceptable latency for that sort of workload.
+
+  - Hugetlb support[4] for guest_memfd will rely on it, since things like
+    1GB hugepages with a mix of shared/private sub-ranges would generally
+    require 2 1GB hugetlb pages to remain available to handle shared vs.
+    private accesses, which quickly causes doubling of guest memory usage.
+
+Recent kernel work[2] makes guest_memfd mmap()-able and lets the *same*
+physical pages be used for both shared and private states for a given
+GPA range, allowing the above pitfalls to be naturally avoided.
+
+This series wires that support up in QEMU.
+
+
+DESIGN
+------
+
+For confidential VMs, a new 'convert-in-place' flag is added to switch
+on in-place conversion support. When running in this mode, the user
+*MUST* use memory-backend-guest-memfd for backing guest RAM. A new
+RAM_GUEST_MEMFD_SHARED RAMBlock flag is added to track/enforce the
+dependency. Additionally, QEMU is modified to use mmap()-able
+guest_memfd and set this flag for other cases where it allocates RAM
+internally. As a result, block->fd will generally always be a
+guest_memfd, and when RAM_GUEST_MEMFD_SHARED is set then that block->fd
+will be qemu_dup()'d as the FD handle for private memory as well. This
+allows the prior non-in-place handling around block->guest_memfd_private
+to be kept mostly unchanged for the in-place case.
+
+When running with convert-in-place=true, shared/private conversions
+are no longer handled directly by KVM, but instead by a new guest_memfd
+ioctl, KVM_SET_MEMORY_ATTRIBUTES2, which purposely provides similar
+naming/implementation to the KVM_SET_MEMORY_ATTRIBUTES KVM ioctl that
+it replaces. This series adds handling to route conversion requests to
+the appropriate ioctls based on whether or not in-place conversion is
+enabled.
+
+This support also relies on the memory-backend-memfd,guest-memfd=on
+option, since it is necessary to use guest_memfd for both the shared
+and private memory. This is set automatically based on whether or
+not in-place conversion is enabled.
+
+Since guest_memfd ioctls need to be called against the specific
+guest_memfd inode associated with each memory slot/region, some
+refactoring is needed to handle conversions on a per-region basis. Much
+of that is inherited from the bugfix series this patchset is based on
+top of, which adds the initial logic for handling multiple sections
+within a range.
+
+
+USAGE
+-----
+
+After applying this series against a kernel with the RFC patches above
+present, an SEV-SNP guest can be started with in-place conversion via:
+
+    qemu-system-x86_64 \
+        -machine q35,confidential-guest-support=sev0,memory-backend=ram0 \
+        -object memory-backend-memfd,id=ram0,size=8G,share=on \
+        -object sev-snp-guest,id=sev0,cbitpos=51,reduced-phys-bits=1,\
+                convert-in-place=on \
+        ...
+
+
+NOTES/TODO
+----------
+
+  - TDX testing would be great, in theory it can be enabled with this
+    series (similarly to patch #18) but I'm not sure if there are
+    other special requirements before we can switch it on.
+  - kernel patches are still in-flight, but are now in kvm-x86/next and
+    nearing upstream
+
+
+REFERENCES
+----------
+
+[1] https://lore.kernel.org/kvm/20250729225455.670324-1-seanjc@google.com/
+[2] https://lore.kernel.org/kvm/20260910-gmem-inplace-conversion-v13-0-dd6fbf94f4e1@google.com/
+[3] https://www.youtube.com/watch?v=MMfAGNW9RVg
+[4] https://lore.kernel.org/kvm/cover.1747264138.git.ackerleytng@google.com/
+
+
+Thoughts, feedback, and testing are very much appreciated.
+
+Thanks,
+
+Mike
+
+
+----------------------------------------------------------------
+Ashish Kalra (1):
+      accel/kvm: Fix kvm_convert_memory() calls crossing memory regions
+
+Michael Roth (18):
+      accel/kvm: Add helper for handling conversions of MMIO holes
+      accel/kvm: Fix handling of MMIO holes at start of conversion ranges
+      accel/kvm: Fix handling of conversion ranges with multiple MMIO holes
+      accel/kvm: Use dedicated helper for creating private-only gmem instances
+      [NOT-FOR-MERGE] linux-headers: Update headers for v13 of in-place conversion kernel support
+      accel/kvm: Add CGS flag to control in-place conversion support
+      system/memory: Re-use memory-backend-guest-memfd inode for private memory
+      accel/kvm: Handle guest_memfd flags internally when creating instances
+      system/memory: Default to guest_memfd for RAM for in-place conversion
+      accel/kvm: Move post-conversion updates to a separate helper
+      accel/kvm: Re-order attribute notifications for in-place conversion
+      accel/kvm: Support shared/private conversions via guest_memfd ioctls
+      accel/kvm: Don't default to private attributes for in-place conversion
+      i386/sev: Update SNP_LAUNCH_UPDATE for in-place conversion
+      i386/sev: Update CPUID failure handling for in-place conversion
+      accel/kvm: Disable discard for in-place conversion
+      i386/sev: Add sev-snp-guest parameter to enable in-place conversion
+      hostmem: Automatically select set guest-memfd=on for in-place conversion
+
+ accel/kvm/kvm-all.c                         | 449 ++++++++++++++++++++++++----
+ accel/stubs/kvm-stub.c                      |   8 +-
+ backends/hostmem-memfd.c                    |  19 +-
+ docs/system/guest-memfd.rst                 |  21 ++
+ hw/core/machine.c                           |   5 +
+ include/hw/core/boards.h                    |   1 +
+ include/system/confidential-guest-support.h |  12 +
+ include/system/kvm.h                        |   3 +-
+ include/system/memory.h                     |   7 +
+ linux-headers/linux/kvm.h                   |  16 +
+ qapi/qom.json                               |  13 +-
+ system/memory.c                             |  23 +-
+ system/physmem.c                            |  54 +++-
+ target/i386/sev.c                           |  36 ++-
+ 14 files changed, 585 insertions(+), 82 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 10/19] system/memory: Default to guest_memfd for RAM for in-place conversion
+Author: Michael Roth <michael.roth@amd.com>
+
+memory_region_init_ram_guest_memfd_private() is called in some cases
+(legacy BIOS regions / IGVM regions) to allocate a new RAM region with a
+guest_memfd FD under the covers to handle private memory since the GPA
+range can be converted between shared/private guest RAM.
+
+When in-place conversion is enabled, the conversions happen with the
+guest_memfd inode itself, so the same inode must be used for both shared
+and private memory. Handle this accordingly when convert-in-place=true.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ system/memory.c | 23 ++++++++++++++++++++---
+ 1 file changed, 20 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 09/19] accel/kvm: Handle guest_memfd flags internally when creating instances
+Author: Michael Roth <michael.roth@amd.com>
+
+Current hostmem code (which is callable even outside of KVM) specifies
+guest_memfd flags directly, which requires pulling in kernel headers.
+Additionally, it will eventually require additional knowledge that is
+more suitable for KVM-aware code (e.g. whether or not to default to
+private memory for confidential VMs).
+
+Instead, push the determination for what flags are needed down into the
+KVM/guest_memfd code so they can be handled internally based on VM
+type/configuration and avoid further potential leakage of KVM-specific
+code to general code.
+
+Signed-off-by: Michael Roth <michael.roth@amd.com>
+---
+ accel/kvm/kvm-all.c      | 26 ++++++++++++++++++++++++--
+ accel/stubs/kvm-stub.c   |  2 +-
+ backends/hostmem-memfd.c |  5 +----
+ include/system/kvm.h     |  2 +-
+ 4 files changed, 27 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] KVM: arm64: selftests: Test a timer set past the counter's wrap
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Program an unmasked timer whose cval sits within long_wait_ms of the
+counter's wrap while the guest's counter is at wait_ms, and expect no
+interrupt. The guest's counter can't reach it, but a host that applies
+the timer's offset by adding it to cval wraps the sum into the past,
+and the timer fires at once. The one existing case with a cval past the
+wrap, in the sanity checks, runs with the timer masked, so it gets no
+interrupt either way.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ .../kvm/arm64/arch_timer_edge_cases.c         | 25 +++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] KVM: arm64: nv: Read a guest hypervisor's CNTV_CVAL_EL0 from memory on x1e
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+On x1e KVM keeps CNTVOFF_EL2 at zero, traps the virtual timer whenever
+it has an offset and programs the hardware with the offset applied.
+kvm_hyp_handle_timer() returns that hardware value for a VHE guest
+hypervisor's read of its own CNTV_CVAL_EL0, instead of the CVAL it
+wrote. Its writes trap to the kernel and land in CNTHV_CVAL_EL2, so
+return that, as the physical timer's read does without CNTPOFF_EL2.
+
+Fixes: 0bc9a9e85fcf ("KVM: arm64: Work around x1e's CNTVOFF_EL2 bogosity")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/vhe/switch.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] KVM: arm64: timers: Compute an offset-applied CVAL from the current count
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+When the hardware won't apply a timer's offset, KVM programs CVAL +
+offset and lets it compare that against the raw counter. The compare is
+unsigned (IsTimerConditionMet, DDI0487M_c J1.4.3.29):
+
+  condition_met = (UInt(PhysicalCountInt() - offset) -
+                   UInt(compare_value)) >= 0;
+
+so adding the offset to both sides holds only while both sums wrap or
+neither does. A guest whose counter is ahead of the host's by more than
+CVAL has an expired timer that never fires, and one behind it can have
+a far-future timer fire at once.
+
+On a CNTPOFF_EL2 host the first case livelocks: each entry reloads the
+guest's CVAL, the timer fires, and the exit rewrites it as CVAL + offset
+before the host can take the interrupt. Without CNTPOFF_EL2 the timer
+hangs until the vCPU is next loaded, which is what Zenghui reported on
+a Kunpeng920.
+
+Program the value from the current count instead: CVAL + offset while
+the deadline is ahead, 0 once the timer has expired for the guest, ~0
+past the counter's wrap. KVM recomputes it at load, at exit and on a
+trapped CVAL write, and an expired timer stays expired in between. The
+value can't be inverted, so with an offset timer_save_state() keeps the
+memory copy, and kvm_hyp_handle_timer() returns that copy for a guest
+hypervisor's read of its physical CVAL rather than subtracting the
+offset back out.
+
+Fixes: c605ee245097 ("KVM: arm64: timers: Allow physical offset without CNTPOFF_EL2")
+Fixes: 9404673293b0 ("KVM: arm64: timers: Correctly handle TGE flip with CNTPOFF_EL2")
+Fixes: 0bc9a9e85fcf ("KVM: arm64: Work around x1e's CNTVOFF_EL2 bogosity")
+Reported-by: Zenghui Yu <yuzenghui@huawei.com>
+Closes: https://lore.kernel.org/r/460258be-0102-e922-c342-4e87cd94b9e5@huawei.com
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/arch_timer.c     | 27 ++++++++++++---------------
+ arch/arm64/kvm/hyp/vhe/switch.c | 11 ++++++-----
+ include/kvm/arm_arch_timer.h    | 15 +++++++++++++++
+ 3 files changed, 33 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] KVM: arm64: timers: Program CVAL from the current count when the hardware won't apply the offset
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - Patch 3 programs the new case's CVAL as an absolute value near the
+    wrap instead of a negative TVAL, so a host stall between the
+    counter and timer writes can't make it fire. (Sashiko)
+
+A guest timer can fail to fire, or fire early, once the guest's counter
+is far enough from the host's. Where the hardware won't apply the
+offset itself (the physical timer without CNTPOFF_EL2, a CNTPOFF_EL2
+host while TGE is set, the virtual timer on x1e), KVM adds it to CVAL
+and lets the hardware compare the sum against the raw counter. The
+timer condition is an unsigned compare, and adding the offset to both
+sides of it preserves it only while both sums wrap or neither does: a
+guest whose counter is ahead of the host's by more than CVAL has an
+expired timer that never fires, and one behind it can have a far-future
+timer fire at once.
+
+Patch 1 computes the programmed value from the current count instead,
+and returns a guest hypervisor's own physical CVAL from memory where it
+used to subtract the offset from the hardware value. Patch 2 does the
+same for the virtual CVAL read on x1e, which has returned CVAL + offset
+since the workaround landed. Patch 3 adds the second case, a guest
+behind the host with a far-future timer, to arch_timer_edge_cases.
+
+So far it has only shown up in the selftest, which moves the guest
+counter half its range away from the host's. On a VHE host without
+CNTPOFF_EL2 arch_timer_edge_cases hangs in its physical cval = 0 cases
+until the vCPU is next loaded, which is what Zenghui saw on a
+Kunpeng920 [2]. On a CNTPOFF_EL2 host (QEMU, here) the same cases
+livelock instead. Both go away with patch 1. The arithmetic is wrong
+for any offset once one sum wraps and the other doesn't, and the fix
+for the selftest's case should be the fix for all of them.
+
+Tested with arch_timer_edge_cases on QEMU with [3], which has since been
+merged, under VHE, nVHE and pKVM, and under VHE with CNTPOFF_EL2 removed
+by id_aa64mmfr0.ecv=1, the host class Zenghui hit. Under VHE with patch
+1 reverted the new case fails. QEMU's TCG had a separate bug with the
+same offsets, which [3] fixes. Without it the test stalls under nVHE and
+pKVM as well, where KVM emulates the physical timer and patch 1 changes
+nothing. Not exercised here: patch 1's x1e paths in timer_save_state()
+and timer_restore_state() and all of patch 2, since nothing here runs on
+an x1e, and patch 1's CNTP_CVAL_EL0 read in kvm_hyp_handle_timer(),
+which only a guest hypervisor with a physical offset on a host without
+CNTPOFF_EL2 reaches.
+
+Patch 1 carries Cc: stable for the hang and the livelock.
+
+Based on Linux 7.3-rc3 (fd73f4a665989; also applies to kvmarm/next
+f91b534e81f23).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260921140427.2211373-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/r/460258be-0102-e922-c342-4e87cd94b9e5@huawei.com
+[3] https://lore.kernel.org/r/20260921074451.3158645-1-fuad.tabba@linux.dev
+
+Fuad Tabba (3):
+  KVM: arm64: timers: Compute an offset-applied CVAL from the current
+    count
+  KVM: arm64: nv: Read a guest hypervisor's CNTV_CVAL_EL0 from memory on
+    x1e
+  KVM: arm64: selftests: Test a timer set past the counter's wrap
+
+ arch/arm64/kvm/arch_timer.c                   | 27 +++++++++----------
+ arch/arm64/kvm/hyp/vhe/switch.c               | 21 +++++++++------
+ include/kvm/arm_arch_timer.h                  | 15 +++++++++++
+ .../kvm/arm64/arch_timer_edge_cases.c         | 25 +++++++++++++++++
+ 4 files changed, 65 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 14/14] KVM: arm64: Prevent unsupported vcpu features for VM types
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Prevent unsupported VCPU features for the protected VCPUs. Realms and pVMs
+not support 32bit EL1 or NV yet. pKVM doesn't rely on the host vcpu
+features for protected VMs and hand picks features while hyp_vcpu is
+initialised. Block the features early in the vcpu init if we detect
+incompatible features.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v22:
+ - Start off with the base features supported per VM type
+---
+ arch/arm64/include/asm/kvm_host.h |  7 +++++++
+ arch/arm64/kvm/arm.c              | 11 ++++++++---
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 13/14] KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+pKVM does not trust the host. Realm VMs follow a similar trust model, with
+the Realm Management Monitor owning the protected state instead of the
+host. Add a helper to identify VMs that run under a host-distrusting
+hypervisor.
+
+Use this for blocking ioremap of vgic-v2 into stage2 and prevent creation
+of VGIC other than v3.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 4 ++++
+ arch/arm64/kvm/mmu.c              | 2 +-
+ arch/arm64/kvm/vgic/vgic-init.c   | 2 ++
+ 3 files changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 12/14] KVM: arm64: Abstract out memory abort handling
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Move the memory abort handling under VM specific s2 operation.
+
+Tested-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Rename protected_vm_mem_abort => protected_pkvm_mem_abort for consistency
+   with the other callbacks.
+---
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/mmu.c              | 33 ++++++++++++++++++-------------
+ 2 files changed, 21 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 11/14] KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+kvm_handle_guest_abort() repeatedly obtains the VM from vcpu->kvm.
+
+Introduce a local kvm pointer and use it throughout the function. While
+touching the code, fix the missing whitespace in the
+kvm_is_nested_s2_mmu() call.
+
+Suggested-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 10/14] KVM: arm64: Add VM specific callback for S2 MMU operations
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM type specific S2 MMU operation backends which can be initialized per
+VM flavor, to keep the handling cleaner.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v22:
+ - Add '()' around flavor in KVM_VM_S2_OPS
+Change since v21:
+ - Define all vm_s2_ops call back. All calls are mandatory.
+ - Define callback for each flavor, disjointing the non-protetcted pKVM and
+   normal KVM (VHE & nVHE) and remove the KVM_PGT_FN() hacks.
+ - Dropped Reviews due to the changes.
+ - Add "no_age_gfn" and "no_stage2_unmap_range" for pKVM callbacks, no_age_*
+   to be also reused by Realms later.
+ - Move kvm_vm_s2_ops field to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h |  14 +++
+ arch/arm64/kvm/mmu.c              | 173 +++++++++++++++++++++++++-----
+ 2 files changed, 160 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 09/14] KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+In preparation for adding VM specific backends for stage2 operations,
+nuke __unmap_stage2_range() and fold the logic into
+kvm_stage2_unmap_range(). Also, make kvm_unmap_gfn_range(), the only other
+user of the __unmap_stage2_range() call the kvm_stage2_unmap_range(). Also,
+while at it fix the comment to make it clear that mmu_lock must always be
+held while unmapping. The code already mandates that and the two call paths
+do have the write mmu_lock held.
+
+Later we would replace the logic in kvm_stage2_unmap_range() with VM
+specific backends.
+
+No functional changes intended.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Change since v21:
+ - Nuke __unmap_stage2_range and consolidate the stage2_unmap_range logic
+   into kvm_stage2_unmap_range(), in preparation for removing the KVM_PGT_FN()
+   for stage2_unmap
+---
+ arch/arm64/kvm/mmu.c | 38 ++++++++++++++++----------------------
+ 1 file changed, 16 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 08/14] KVM: arm64: Add vcpu load/put call backs for flavors
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM flavor specific handlers for VCPU load/put, in an effort to make it
+easier to follow the code. pauth traps were removed from VMs running PKVM
+as it is a no-op for them.
+
+Based on a patch by Marc Zyngier
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Add '&' into the KVM_VCPU_OPS() macro
+---
+ arch/arm64/include/asm/kvm_host.h |   6 ++
+ arch/arm64/kvm/arm.c              | 138 +++++++++++++++++++++++-------
+ 2 files changed, 114 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 07/14] KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+To keep the VCPU load/put handling cleaner with the different kinds of VM
+types, we are about to introduce VM specific callbacks to do just the right
+thing. In preparation for that, make some refactoring to add the change
+easier by mainly feature specific configurations to individual wrappers,
+so that different callbacks could reuse the helpers.
+
+Adds vcpu_prepare_mmu()/vcpu_put_mmu() wrappers to load/put MMU related
+configurations for !pKVM guests. Additionally makes it explicit that
+kvm_arm_vmid_clear_active() is not required for pKVM host.
+
+Add vcpu_load_pvtime(), vcpu_set_wfx_traps() wrappers for handling the
+corresponding configurations.
+
+While at it, also make it clear that the timer loading constraints only
+apply for the VHE.
+
+No functional changes intended. Based on a work by Marc Zyngier.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Add vcpu_put_mmu() to pair with the vcpu_prepare_mmu() and make the
+   call conditional on !is_protected_kvm_enabled(). Preparing the path
+   for per-flavor callbacks
+ - Update the timer load constraints comment to reflect that it only applies
+   for VHE
+ - Wrap kvm_arm_vmid_clear_active() to vcpu_put_mmu() to compliement
+   with the vcpu_prepare_mmu(). Also only clear the VMID for non-pKVM
+   guests
+---
+ arch/arm64/kvm/arm.c | 59 ++++++++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 06/14] KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+vcpu_set_pauth_traps() bails out and does nothing for pKVM hosts.
+Clean this up by moving the is_protected_kvm_enabled() check to the
+caller, in preparation for adding VM specific vcpu load/put callbacks.
+
+While at it, do an early return if the vcpu doesn't have ptrauth.
+
+No functional changes
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - New patch, since addition of this to the Refactoring patch makes it a bit
+   more bigger and harder to review
+---
+ arch/arm64/kvm/arm.c | 52 +++++++++++++++++++++++---------------------
+ 1 file changed, 27 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 05/14] KVM: arm64: Track the type of VM in kvm_arch
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+KVM arm64 has different types of VMs with all the different modes in which
+the hypervisor code can be run. e.g., VHE, nVHE, pKVM etc. Then there is
+protected VM and normal VMs with pKVM. We might soon add other types,
+e.g., Arm CCA Realm. So in an effort to make the handling of these
+different types of VMs a bit more friendly to the eyes, add a VM flavor to
+the kvm_arch and we could then add handlers for different operations based
+on the VM type.
+
+Keep the flavor initialisation at the beginning to allow for the detection
+early enough and fail out on any unsupported requests.
+
+With that, add wrappers for checking the "type" of a VM and replace the
+existing users with the new wrappers.
+
+Given we already have the construct of "kvm_vm_is_protected" in the core
+KVM code, use that for all confidential compute guests including Realms
+that we are about to add. Adds __VM_PROTECTED marker vm flavor to draw the
+boundary for "protected VMs". In later patches, we would add Realm VMs,
+ which would also be classified as protected.
+
+While adding the vm_flavor, move the psci_version around to keep the structure
+packed.
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v22:
+ - Drop BUILD_BUG_ON and redefine {kvm_vm,vcpu}_is_protected() for nVHE
+ - Drop {kvm_vm,vcpu}_is_protected_pkvm() macros
+Changes since v21:
+ - Drop kern_hyp_va() and restrict nvhe code to always use vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() and open code the check
+ - Move psci_version field in kvm_arch around to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h | 38 +++++++++++++++++++++++++++----
+ arch/arm64/include/asm/kvm_pkvm.h |  4 ++--
+ arch/arm64/kvm/arm.c              | 33 ++++++++++++++++++++++-----
+ arch/arm64/kvm/hyp/nvhe/pkvm.c    |  6 ++++-
+ arch/arm64/kvm/mmio.c             |  1 +
+ arch/arm64/kvm/pkvm.c             |  6 ++---
+ 6 files changed, 70 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 04/14] KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+To avoid future include cycles, drop the linux/kvm_host.h include in
+kvm_pgtable.h and include the lightweight headers required for the types
+and inline helpers used there. Additionally provide a forward
+declaration for struct kvm_s2_mmu as it's only used as a pointer in this
+file.
+
+Both pgtable.c and kvm_pkvm.h relied on the indirect inclusion of
+kvm_host.h, so make that explicit.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Include asm/memory.h, asm/page.h , linux/bitfield.h in asm/kvm_pgtable.h
+   (Sashiko)
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 10 +++++++++-
+ arch/arm64/include/asm/kvm_pkvm.h    |  2 +-
+ arch/arm64/kvm/hyp/pgtable.c         |  1 +
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 03/14] KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Fix a potential build error (like below, when asm/kvm_emulate.h gets
+included after the kvm/arm_psci.h) by including the missing header file
+in kvm/arm_psci.h:
+
+./include/kvm/arm_psci.h: In function ‘kvm_psci_version’:
+./include/kvm/arm_psci.h:29:13: error: implicit declaration of function
+   ‘vcpu_has_feature’; did you mean ‘cpu_have_feature’? [-Werror=implicit-function-declaration]
+   29 |         if (vcpu_has_feature(vcpu, KVM_ARM_VCPU_PSCI_0_2)) {
+	         |             ^~~~~~~~~~~~~~~~
+			       |             cpu_have_feature
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ include/kvm/arm_psci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v23 02/14] KVM: arm64: Disable Steal time accounting for protected guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+PVTIME support is advertised by KVM_CAP_STEAL_TIME, which doesn't take into
+account the kvm instance. Even with that, a VMM could skip the CAP check
+and proceed to configure the PVTIME as we don't do further check on the
+DEVICE_CTRL. Tighten this up by passing the KVM instance around wherever
+possible and catch things early.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +-
+ arch/arm64/kvm/arm.c              |  2 +-
+ arch/arm64/kvm/pvtime.c           | 14 +++++++-------
+ 3 files changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 01/14] KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Protected VMs doesn't allow setting offsets for virtual and physical
+counters, as the offset is always fixed to 0. The VM ioctl is filtered
+out based on the cap. However we don't prevent the userspace from trying
+to write to the CNTVCT/CNTPCT registers. This would lead to KVM triggering
+a WARN() in timer_set_offset() as the vm_offset pointer is set to NULL.
+
+Fix this by always "fixing" the timer offsets to 0 and marking that the
+timer offset is set in the kvm->arch.flags at KVM init time for protected
+VMs. This prevents the access to the VM specific vm_offset at low cost.
+A userspace writing to the CNT*CT_EL0 would observe success, without
+any real effect. This is cleaner over spilling "*_is_protected()"
+checks and "matches" what we really do in practise. i.e., always run
+with "fixed counter offset of 0".
+
+Reported by Sashiko
+
+Link: https://lore.kernel.org/all/20260908164641.416911F00A3A@smtp.kernel.org
+Fixes: f7d05ee84a6a ("KVM: arm64: Prevent host from managing timer offsets for protected VMs")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ Changes since v19:
+  - Fix typos in commit description and explain why we choose the approach.
+  - Improve comment in the code
+ Changes since v18:
+  - Retain NULL vm_offset for protected VMs to avoid host tampering with the
+    offset.
+  - Moved the flag setting into kvm_timer_init_vm(), where it should have been
+    in the first place
+---
+ arch/arm64/kvm/arch_timer.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 00/14] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This is a trimmed down and updated version of the v22 of Arm CCA basic
+plumbing series [0]. I have dropped the CCA specific bits for the sake keeping
+them separate. This series now only contains the framework for handling
+different VM types and lay down the path for adding Realm as one of the
+protected VMs. The full support for running Realms under KVM is available as
+an integration branch at [1].
+
+The integration branch has been tested with the following components:
+
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git tag:cca-kvm-v20
+
+[0] Arm CCA KVM basic plumbing v22
+    https://lore.kernel.org/all/20261005090754.2140522-1-suzuki.poulose@arm.com
+[1] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v23/integration
+
+Changes since v22:
+ https://lore.kernel.org/all/20261005090754.2140522-1-suzuki.poulose@arm.com
+  - Drop the CCA specific patches for now, they are on the integration branch
+  - system_supported_vcpu_features() - Start off with a base set of features for
+    the type of VM
+  - Add () around 'flavor' in KVM_VM_S2_OPS() macro
+  - Drop BUILD_BUG_ON and redefine {kvm_vm,vcpu}_is_protected() for nVHE
+  - Drop {kvm_vm,vcpu}_is_protected_pkvm() macros
+
+Changes since v21:
+ https://lore.kernel.org/all/20261001210703.1597150-1-suzuki.poulose@arm.com
+ - Keep the kvm_arch struct packed, by moving psci_version, closer to vm_flavor and also moving the vm_s2_ops, closer to vm_flavor.
+ - Drop the kern_hyp_va() for vcpu_is_protected() in nVHE, instead ban nVHE
+   code from using vcpu_is_protected() (by using BUILD_BUG_ON()) and convert
+   all users to vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() in favor of open coded check against VM_PKVM
+ - Drop WARN_ON_ONCE() in the kvm_vm_ioctl_allowed() to match Fuad's fix merged in v7.3-rc5
+ - Move '&' to the KVM_*_OPS macros
+ - Nuke __unmap_stage2_range() and define per-VM callback for stage2_unmap_range, removing the KVM_PGT_FN() hack for the call, and also for the others
+ - Drop NULL check for vm_s2_ops callbacks and always define everything.
+ - Add no_age_gfn() which plugs in for pVMs and Realms for the vm_age_*gfn callbacks
+
+Steven Price (1):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+
+Suzuki K Poulose (13):
+  KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+  KVM: arm64: Disable Steal time accounting for protected guests
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+  KVM: arm64: Abstract out memory abort handling
+  KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+  KVM: arm64: Prevent unsupported vcpu features for VM types
+
+ arch/arm64/include/asm/kvm_host.h    |  73 ++++++-
+ arch/arm64/include/asm/kvm_pgtable.h |  10 +-
+ arch/arm64/include/asm/kvm_pkvm.h    |   6 +-
+ arch/arm64/kvm/arch_timer.c          |  12 +-
+ arch/arm64/kvm/arm.c                 | 275 ++++++++++++++++++++-------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c       |   6 +-
+ arch/arm64/kvm/hyp/pgtable.c         |   1 +
+ arch/arm64/kvm/mmio.c                |   1 +
+ arch/arm64/kvm/mmu.c                 | 247 +++++++++++++++++-------
+ arch/arm64/kvm/pkvm.c                |   6 +-
+ arch/arm64/kvm/pvtime.c              |  14 +-
+ arch/arm64/kvm/vgic/vgic-init.c      |   2 +
+ include/kvm/arm_psci.h               |   2 +
+ 13 files changed, 493 insertions(+), 162 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 5c529f82f to 8e006645b
+KVM mailing list update from 5c529f82f to 8e006645b
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     15 arm.com
+      5 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+     14  Suzuki K Poulose <suzuki.poulose@arm.com>
+      5  Fuad Tabba <fuad.tabba@linux.dev>
+      1  Steven Price <steven.price@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v3] KVM: arm64: Only emulate an SError's entry for vCPUs with NV
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+kvm_inject_serror_esr() emulates an SError's exception entry when the
+host's copy of PSTATE says SErrors are unmasked, although only NV needs
+this, for a nested context whose guest hypervisor owns the vSError. A
+protected vCPU's PSTATE lives at EL2, and the VMM can unmask SErrors in
+the host's copy before the first run, so KVM emulates the entry on that
+copy and the guest never takes the SError.
+
+Emulate the entry only for a vCPU with NV, which protected VMs don't
+support, and otherwise pend the SError through HCR_EL2.VSE, as KVM did
+before commit ce66109cec867 ("KVM: arm64: nv: Take "masked" aborts to
+EL2 when HCRX_EL2.TMEA is set").
+
+Fixes: 872383bd12e11 ("KVM: arm64: Add per-EC entry/exit state marshalling for protected guests")
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/20261001142109.794CA1F000FF@smtp.kernel.org/
+Suggested-by: Oliver Upton <oupton@kernel.org>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+v3:
+ - Gate the emulated entry in kvm_inject_serror_esr() on vcpu_has_nv(),
+   instead of masking SErrors in the host copy at first run (Oliver).
+
+v2:
+ - Set PSTATE.A and clear SCTLR2_EL1.NMEA in the host copy when the hyp
+   vCPU is created, instead of testing vcpu_is_protected() in
+   kvm_inject_serror_esr() (Marc).
+
+Applies on kvmarm/next. A follow-up to "KVM: arm64: Confine protected VM
+vCPU state to EL2" [1], from Sashiko's review of its v4 patch 12.
+
+v2: https://lore.kernel.org/r/20261006092826.2201763-1-fuad.tabba@linux.dev/
+v1: https://lore.kernel.org/r/20261005050352.836980-1-fuad.tabba@linux.dev/
+[1] https://lore.kernel.org/all/20261001135711.1640520-1-fuad.tabba@linux.dev/
+
+ arch/arm64/kvm/inject_fault.c | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/3] KVM: arm64: selftests: Test a timer set past the counter's wrap
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Program an unmasked timer whose cval sits within long_wait_ms of the
+counter's wrap while the guest's counter is at wait_ms, and expect no
+interrupt. The guest's counter can't reach it, but a host that applies
+the timer's offset by adding it to cval wraps the sum into the past,
+and the timer fires at once. The one existing case with a cval past the
+wrap, in the sanity checks, runs with the timer masked, so it gets no
+interrupt either way.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ .../kvm/arm64/arch_timer_edge_cases.c         | 25 +++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/3] KVM: arm64: nv: Read a guest hypervisor's CNTV_CVAL_EL0 from memory on x1e
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+On x1e KVM keeps CNTVOFF_EL2 at zero, traps the virtual timer whenever
+it has an offset and programs the hardware with the offset applied.
+kvm_hyp_handle_timer() returns that hardware value for a VHE guest
+hypervisor's read of its own CNTV_CVAL_EL0, instead of the CVAL it
+wrote. Its writes trap to the kernel and land in CNTHV_CVAL_EL2, so
+return that, as the physical timer's read does without CNTPOFF_EL2.
+
+Fixes: 0bc9a9e85fcf ("KVM: arm64: Work around x1e's CNTVOFF_EL2 bogosity")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/vhe/switch.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/3] KVM: arm64: timers: Compute an offset-applied CVAL from the current count
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+When the hardware won't apply a timer's offset, KVM programs CVAL +
+offset and lets it compare that against the raw counter. The compare is
+unsigned (IsTimerConditionMet, DDI0487M_c J1.4.3.29):
+
+  condition_met = (UInt(PhysicalCountInt() - offset) -
+                   UInt(compare_value)) >= 0;
+
+so adding the offset to both sides holds only while both sums wrap or
+neither does. A guest whose counter is ahead of the host's by more than
+CVAL has an expired timer that never fires, and one behind it can have
+a far-future timer fire at once.
+
+On a CNTPOFF_EL2 host the first case livelocks: each entry reloads the
+guest's CVAL, the timer fires, and the exit rewrites it as CVAL + offset
+before the host can take the interrupt. Without CNTPOFF_EL2 the timer
+hangs until the vCPU is next loaded, which is what Zenghui reported on
+a Kunpeng920.
+
+Program the value from the current count instead: CVAL + offset while
+the deadline is ahead, 0 once the timer has expired for the guest, ~0
+past the counter's wrap. KVM recomputes it at load, at exit and on a
+trapped CVAL write, and an expired timer stays expired in between. The
+value can't be inverted, so with an offset timer_save_state() keeps the
+memory copy, and kvm_hyp_handle_timer() returns that copy for a guest
+hypervisor's read of its physical CVAL rather than subtracting the
+offset back out.
+
+Fixes: c605ee245097 ("KVM: arm64: timers: Allow physical offset without CNTPOFF_EL2")
+Fixes: 9404673293b0 ("KVM: arm64: timers: Correctly handle TGE flip with CNTPOFF_EL2")
+Fixes: 0bc9a9e85fcf ("KVM: arm64: Work around x1e's CNTVOFF_EL2 bogosity")
+Reported-by: Zenghui Yu <yuzenghui@huawei.com>
+Closes: https://lore.kernel.org/r/460258be-0102-e922-c342-4e87cd94b9e5@huawei.com
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/arch_timer.c     | 27 ++++++++++++---------------
+ arch/arm64/kvm/hyp/vhe/switch.c | 11 ++++++-----
+ include/kvm/arm_arch_timer.h    | 15 +++++++++++++++
+ 3 files changed, 33 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/3] KVM: arm64: timers: Program CVAL from the current count when the hardware won't apply the offset
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - Patch 3 programs the new case's CVAL as an absolute value near the
+    wrap instead of a negative TVAL, so a host stall between the
+    counter and timer writes can't make it fire. (Sashiko)
+
+A guest timer can fail to fire, or fire early, once the guest's counter
+is far enough from the host's. Where the hardware won't apply the
+offset itself (the physical timer without CNTPOFF_EL2, a CNTPOFF_EL2
+host while TGE is set, the virtual timer on x1e), KVM adds it to CVAL
+and lets the hardware compare the sum against the raw counter. The
+timer condition is an unsigned compare, and adding the offset to both
+sides of it preserves it only while both sums wrap or neither does: a
+guest whose counter is ahead of the host's by more than CVAL has an
+expired timer that never fires, and one behind it can have a far-future
+timer fire at once.
+
+Patch 1 computes the programmed value from the current count instead,
+and returns a guest hypervisor's own physical CVAL from memory where it
+used to subtract the offset from the hardware value. Patch 2 does the
+same for the virtual CVAL read on x1e, which has returned CVAL + offset
+since the workaround landed. Patch 3 adds the second case, a guest
+behind the host with a far-future timer, to arch_timer_edge_cases.
+
+So far it has only shown up in the selftest, which moves the guest
+counter half its range away from the host's. On a VHE host without
+CNTPOFF_EL2 arch_timer_edge_cases hangs in its physical cval = 0 cases
+until the vCPU is next loaded, which is what Zenghui saw on a
+Kunpeng920 [2]. On a CNTPOFF_EL2 host (QEMU, here) the same cases
+livelock instead. Both go away with patch 1. The arithmetic is wrong
+for any offset once one sum wraps and the other doesn't, and the fix
+for the selftest's case should be the fix for all of them.
+
+Tested with arch_timer_edge_cases on QEMU with [3], which has since been
+merged, under VHE, nVHE and pKVM, and under VHE with CNTPOFF_EL2 removed
+by id_aa64mmfr0.ecv=1, the host class Zenghui hit. Under VHE with patch
+1 reverted the new case fails. QEMU's TCG had a separate bug with the
+same offsets, which [3] fixes. Without it the test stalls under nVHE and
+pKVM as well, where KVM emulates the physical timer and patch 1 changes
+nothing. Not exercised here: patch 1's x1e paths in timer_save_state()
+and timer_restore_state() and all of patch 2, since nothing here runs on
+an x1e, and patch 1's CNTP_CVAL_EL0 read in kvm_hyp_handle_timer(),
+which only a guest hypervisor with a physical offset on a host without
+CNTPOFF_EL2 reaches.
+
+Patch 1 carries Cc: stable for the hang and the livelock.
+
+Based on Linux 7.3-rc3 (fd73f4a665989; also applies to kvmarm/next
+f91b534e81f23).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260921140427.2211373-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/r/460258be-0102-e922-c342-4e87cd94b9e5@huawei.com
+[3] https://lore.kernel.org/r/20260921074451.3158645-1-fuad.tabba@linux.dev
+
+Fuad Tabba (3):
+  KVM: arm64: timers: Compute an offset-applied CVAL from the current
+    count
+  KVM: arm64: nv: Read a guest hypervisor's CNTV_CVAL_EL0 from memory on
+    x1e
+  KVM: arm64: selftests: Test a timer set past the counter's wrap
+
+ arch/arm64/kvm/arch_timer.c                   | 27 +++++++++----------
+ arch/arm64/kvm/hyp/vhe/switch.c               | 21 +++++++++------
+ include/kvm/arm_arch_timer.h                  | 15 +++++++++++
+ .../kvm/arm64/arch_timer_edge_cases.c         | 25 +++++++++++++++++
+ 4 files changed, 65 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 14/14] KVM: arm64: Prevent unsupported vcpu features for VM types
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Prevent unsupported VCPU features for the protected VCPUs. Realms and pVMs
+not support 32bit EL1 or NV yet. pKVM doesn't rely on the host vcpu
+features for protected VMs and hand picks features while hyp_vcpu is
+initialised. Block the features early in the vcpu init if we detect
+incompatible features.
+
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v22:
+ - Start off with the base features supported per VM type
+---
+ arch/arm64/include/asm/kvm_host.h |  7 +++++++
+ arch/arm64/kvm/arm.c              | 11 ++++++++---
+ 2 files changed, 15 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 13/14] KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+pKVM does not trust the host. Realm VMs follow a similar trust model, with
+the Realm Management Monitor owning the protected state instead of the
+host. Add a helper to identify VMs that run under a host-distrusting
+hypervisor.
+
+Use this for blocking ioremap of vgic-v2 into stage2 and prevent creation
+of VGIC other than v3.
+
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h | 4 ++++
+ arch/arm64/kvm/mmu.c              | 2 +-
+ arch/arm64/kvm/vgic/vgic-init.c   | 2 ++
+ 3 files changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 12/14] KVM: arm64: Abstract out memory abort handling
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Move the memory abort handling under VM specific s2 operation.
+
+Tested-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Rename protected_vm_mem_abort => protected_pkvm_mem_abort for consistency
+   with the other callbacks.
+---
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/mmu.c              | 33 ++++++++++++++++++-------------
+ 2 files changed, 21 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 11/14] KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+kvm_handle_guest_abort() repeatedly obtains the VM from vcpu->kvm.
+
+Introduce a local kvm pointer and use it throughout the function. While
+touching the code, fix the missing whitespace in the
+kvm_is_nested_s2_mmu() call.
+
+Suggested-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/kvm/mmu.c | 13 +++++++------
+ 1 file changed, 7 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 10/14] KVM: arm64: Add VM specific callback for S2 MMU operations
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM type specific S2 MMU operation backends which can be initialized per
+VM flavor, to keep the handling cleaner.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v22:
+ - Add '()' around flavor in KVM_VM_S2_OPS
+Change since v21:
+ - Define all vm_s2_ops call back. All calls are mandatory.
+ - Define callback for each flavor, disjointing the non-protetcted pKVM and
+   normal KVM (VHE & nVHE) and remove the KVM_PGT_FN() hacks.
+ - Dropped Reviews due to the changes.
+ - Add "no_age_gfn" and "no_stage2_unmap_range" for pKVM callbacks, no_age_*
+   to be also reused by Realms later.
+ - Move kvm_vm_s2_ops field to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h |  14 +++
+ arch/arm64/kvm/mmu.c              | 173 +++++++++++++++++++++++++-----
+ 2 files changed, 160 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 09/14] KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+In preparation for adding VM specific backends for stage2 operations,
+nuke __unmap_stage2_range() and fold the logic into
+kvm_stage2_unmap_range(). Also, make kvm_unmap_gfn_range(), the only other
+user of the __unmap_stage2_range() call the kvm_stage2_unmap_range(). Also,
+while at it fix the comment to make it clear that mmu_lock must always be
+held while unmapping. The code already mandates that and the two call paths
+do have the write mmu_lock held.
+
+Later we would replace the logic in kvm_stage2_unmap_range() with VM
+specific backends.
+
+No functional changes intended.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Change since v21:
+ - Nuke __unmap_stage2_range and consolidate the stage2_unmap_range logic
+   into kvm_stage2_unmap_range(), in preparation for removing the KVM_PGT_FN()
+   for stage2_unmap
+---
+ arch/arm64/kvm/mmu.c | 38 ++++++++++++++++----------------------
+ 1 file changed, 16 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 08/14] KVM: arm64: Add vcpu load/put call backs for flavors
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Add VM flavor specific handlers for VCPU load/put, in an effort to make it
+easier to follow the code. pauth traps were removed from VMs running PKVM
+as it is a no-op for them.
+
+Based on a patch by Marc Zyngier
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v21:
+ - Add '&' into the KVM_VCPU_OPS() macro
+---
+ arch/arm64/include/asm/kvm_host.h |   6 ++
+ arch/arm64/kvm/arm.c              | 138 +++++++++++++++++++++++-------
+ 2 files changed, 114 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 07/14] KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+To keep the VCPU load/put handling cleaner with the different kinds of VM
+types, we are about to introduce VM specific callbacks to do just the right
+thing. In preparation for that, make some refactoring to add the change
+easier by mainly feature specific configurations to individual wrappers,
+so that different callbacks could reuse the helpers.
+
+Adds vcpu_prepare_mmu()/vcpu_put_mmu() wrappers to load/put MMU related
+configurations for !pKVM guests. Additionally makes it explicit that
+kvm_arm_vmid_clear_active() is not required for pKVM host.
+
+Add vcpu_load_pvtime(), vcpu_set_wfx_traps() wrappers for handling the
+corresponding configurations.
+
+While at it, also make it clear that the timer loading constraints only
+apply for the VHE.
+
+No functional changes intended. Based on a work by Marc Zyngier.
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Add vcpu_put_mmu() to pair with the vcpu_prepare_mmu() and make the
+   call conditional on !is_protected_kvm_enabled(). Preparing the path
+   for per-flavor callbacks
+ - Update the timer load constraints comment to reflect that it only applies
+   for VHE
+ - Wrap kvm_arm_vmid_clear_active() to vcpu_put_mmu() to compliement
+   with the vcpu_prepare_mmu(). Also only clear the VMID for non-pKVM
+   guests
+---
+ arch/arm64/kvm/arm.c | 59 ++++++++++++++++++++++++++++++--------------
+ 1 file changed, 40 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 06/14] KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+vcpu_set_pauth_traps() bails out and does nothing for pKVM hosts.
+Clean this up by moving the is_protected_kvm_enabled() check to the
+caller, in preparation for adding VM specific vcpu load/put callbacks.
+
+While at it, do an early return if the vcpu doesn't have ptrauth.
+
+No functional changes
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - New patch, since addition of this to the Refactoring patch makes it a bit
+   more bigger and harder to review
+---
+ arch/arm64/kvm/arm.c | 52 +++++++++++++++++++++++---------------------
+ 1 file changed, 27 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 05/14] KVM: arm64: Track the type of VM in kvm_arch
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+KVM arm64 has different types of VMs with all the different modes in which
+the hypervisor code can be run. e.g., VHE, nVHE, pKVM etc. Then there is
+protected VM and normal VMs with pKVM. We might soon add other types,
+e.g., Arm CCA Realm. So in an effort to make the handling of these
+different types of VMs a bit more friendly to the eyes, add a VM flavor to
+the kvm_arch and we could then add handlers for different operations based
+on the VM type.
+
+Keep the flavor initialisation at the beginning to allow for the detection
+early enough and fail out on any unsupported requests.
+
+With that, add wrappers for checking the "type" of a VM and replace the
+existing users with the new wrappers.
+
+Given we already have the construct of "kvm_vm_is_protected" in the core
+KVM code, use that for all confidential compute guests including Realms
+that we are about to add. Adds __VM_PROTECTED marker vm flavor to draw the
+boundary for "protected VMs". In later patches, we would add Realm VMs,
+ which would also be classified as protected.
+
+While adding the vm_flavor, move the psci_version around to keep the structure
+packed.
+
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v22:
+ - Drop BUILD_BUG_ON and redefine {kvm_vm,vcpu}_is_protected() for nVHE
+ - Drop {kvm_vm,vcpu}_is_protected_pkvm() macros
+Changes since v21:
+ - Drop kern_hyp_va() and restrict nvhe code to always use vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() and open code the check
+ - Move psci_version field in kvm_arch around to keep the structure packed
+---
+ arch/arm64/include/asm/kvm_host.h | 38 +++++++++++++++++++++++++++----
+ arch/arm64/include/asm/kvm_pkvm.h |  4 ++--
+ arch/arm64/kvm/arm.c              | 33 ++++++++++++++++++++++-----
+ arch/arm64/kvm/hyp/nvhe/pkvm.c    |  6 ++++-
+ arch/arm64/kvm/mmio.c             |  1 +
+ arch/arm64/kvm/pkvm.c             |  6 ++---
+ 6 files changed, 70 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 04/14] KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+
+To avoid future include cycles, drop the linux/kvm_host.h include in
+kvm_pgtable.h and include the lightweight headers required for the types
+and inline helpers used there. Additionally provide a forward
+declaration for struct kvm_s2_mmu as it's only used as a pointer in this
+file.
+
+Both pgtable.c and kvm_pkvm.h relied on the indirect inclusion of
+kvm_host.h, so make that explicit.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Steven Price <steven.price@arm.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+Changes since v19:
+ - Include asm/memory.h, asm/page.h , linux/bitfield.h in asm/kvm_pgtable.h
+   (Sashiko)
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 10 +++++++++-
+ arch/arm64/include/asm/kvm_pkvm.h    |  2 +-
+ arch/arm64/kvm/hyp/pgtable.c         |  1 +
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 03/14] KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Fix a potential build error (like below, when asm/kvm_emulate.h gets
+included after the kvm/arm_psci.h) by including the missing header file
+in kvm/arm_psci.h:
+
+./include/kvm/arm_psci.h: In function ‘kvm_psci_version’:
+./include/kvm/arm_psci.h:29:13: error: implicit declaration of function
+   ‘vcpu_has_feature’; did you mean ‘cpu_have_feature’? [-Werror=implicit-function-declaration]
+   29 |         if (vcpu_has_feature(vcpu, KVM_ARM_VCPU_PSCI_0_2)) {
+	         |             ^~~~~~~~~~~~~~~~
+			       |             cpu_have_feature
+
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Jonathan Cameron <jonathan.cameron@oss.qualcomm.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ include/kvm/arm_psci.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v23 02/14] KVM: arm64: Disable Steal time accounting for protected guests
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+PVTIME support is advertised by KVM_CAP_STEAL_TIME, which doesn't take into
+account the kvm instance. Even with that, a VMM could skip the CAP check
+and proceed to configure the PVTIME as we don't do further check on the
+DEVICE_CTRL. Tighten this up by passing the KVM instance around wherever
+possible and catch things early.
+
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +-
+ arch/arm64/kvm/arm.c              |  2 +-
+ arch/arm64/kvm/pvtime.c           | 14 +++++++-------
+ 3 files changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 01/14] KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+Protected VMs doesn't allow setting offsets for virtual and physical
+counters, as the offset is always fixed to 0. The VM ioctl is filtered
+out based on the cap. However we don't prevent the userspace from trying
+to write to the CNTVCT/CNTPCT registers. This would lead to KVM triggering
+a WARN() in timer_set_offset() as the vm_offset pointer is set to NULL.
+
+Fix this by always "fixing" the timer offsets to 0 and marking that the
+timer offset is set in the kvm->arch.flags at KVM init time for protected
+VMs. This prevents the access to the VM specific vm_offset at low cost.
+A userspace writing to the CNT*CT_EL0 would observe success, without
+any real effect. This is cleaner over spilling "*_is_protected()"
+checks and "matches" what we really do in practise. i.e., always run
+with "fixed counter offset of 0".
+
+Reported by Sashiko
+
+Link: https://lore.kernel.org/all/20260908164641.416911F00A3A@smtp.kernel.org
+Fixes: f7d05ee84a6a ("KVM: arm64: Prevent host from managing timer offsets for protected VMs")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Reviewed-by: Gavin Shan <gshan@redhat.com>
+Tested-by: Gavin Shan <gshan@redhat.com>
+Signed-off-by: Suzuki K Poulose <suzuki.poulose@arm.com>
+---
+ Changes since v19:
+  - Fix typos in commit description and explain why we choose the approach.
+  - Improve comment in the code
+ Changes since v18:
+  - Retain NULL vm_offset for protected VMs to avoid host tampering with the
+    offset.
+  - Moved the flag setting into kvm_timer_init_vm(), where it should have been
+    in the first place
+---
+ arch/arm64/kvm/arch_timer.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v23 00/14] KVM: arm64: CCA: Add basic plumbing for Realms
+Author: Suzuki K Poulose <suzuki.poulose@arm.com>
+
+This is a trimmed down and updated version of the v22 of Arm CCA basic
+plumbing series [0]. I have dropped the CCA specific bits for the sake keeping
+them separate. This series now only contains the framework for handling
+different VM types and lay down the path for adding Realm as one of the
+protected VMs. The full support for running Realms under KVM is available as
+an integration branch at [1].
+
+The integration branch has been tested with the following components:
+
+  tf-RMM:   main branch (commit 5e6e2acd) compliant to RMM-v2.0-beta3
+  kvmtool: git@git.gitlab.arm.com:linux-arm/kvmtool-cca.git tag:cca-kvm-v20
+
+[0] Arm CCA KVM basic plumbing v22
+    https://lore.kernel.org/all/20261005090754.2140522-1-suzuki.poulose@arm.com
+[1] https://git.gitlab.arm.com/linux-arm/linux-cca/ cca/cca-host/kvm-v23/integration
+
+Changes since v22:
+ https://lore.kernel.org/all/20261005090754.2140522-1-suzuki.poulose@arm.com
+  - Drop the CCA specific patches for now, they are on the integration branch
+  - system_supported_vcpu_features() - Start off with a base set of features for
+    the type of VM
+  - Add () around 'flavor' in KVM_VM_S2_OPS() macro
+  - Drop BUILD_BUG_ON and redefine {kvm_vm,vcpu}_is_protected() for nVHE
+  - Drop {kvm_vm,vcpu}_is_protected_pkvm() macros
+
+Changes since v21:
+ https://lore.kernel.org/all/20261001210703.1597150-1-suzuki.poulose@arm.com
+ - Keep the kvm_arch struct packed, by moving psci_version, closer to vm_flavor and also moving the vm_s2_ops, closer to vm_flavor.
+ - Drop the kern_hyp_va() for vcpu_is_protected() in nVHE, instead ban nVHE
+   code from using vcpu_is_protected() (by using BUILD_BUG_ON()) and convert
+   all users to vcpu_is_protected_pkvm()
+ - Drop kvm_vm_is_unprotected_pkvm() in favor of open coded check against VM_PKVM
+ - Drop WARN_ON_ONCE() in the kvm_vm_ioctl_allowed() to match Fuad's fix merged in v7.3-rc5
+ - Move '&' to the KVM_*_OPS macros
+ - Nuke __unmap_stage2_range() and define per-VM callback for stage2_unmap_range, removing the KVM_PGT_FN() hack for the call, and also for the others
+ - Drop NULL check for vm_s2_ops callbacks and always define everything.
+ - Add no_age_gfn() which plugs in for pVMs and Realms for the vm_age_*gfn callbacks
+
+Steven Price (1):
+  KVM: arm64: Avoid including linux/kvm_host.h in kvm_pgtable.h
+
+Suzuki K Poulose (13):
+  KVM: arm64: protected VM: Handle user writes to CNTVCT_EL0/CNTPCT_EL0
+  KVM: arm64: Disable Steal time accounting for protected guests
+  KVM: arm64: Include kvm_emulate.h in kvm/arm_psci.h
+  KVM: arm64: Track the type of VM in kvm_arch
+  KVM: arm64: Don't call vcpu_set_pauth_traps for pKVM host
+  KVM: arm64: Refactor the vcpu_load to allow for VM specific callbacks
+  KVM: arm64: Add vcpu load/put call backs for flavors
+  KVM: arm64: Consolidate stage2 unmap range into kvm_stage2_unmap_range
+  KVM: arm64: Add VM specific callback for S2 MMU operations
+  KVM: arm64: Use a local kvm pointer in kvm_handle_guest_abort()
+  KVM: arm64: Abstract out memory abort handling
+  KVM: arm64: Mandate VGIC v3 for pKVM VMs and Realms
+  KVM: arm64: Prevent unsupported vcpu features for VM types
+
+ arch/arm64/include/asm/kvm_host.h    |  73 ++++++-
+ arch/arm64/include/asm/kvm_pgtable.h |  10 +-
+ arch/arm64/include/asm/kvm_pkvm.h    |   6 +-
+ arch/arm64/kvm/arch_timer.c          |  12 +-
+ arch/arm64/kvm/arm.c                 | 275 ++++++++++++++++++++-------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c       |   6 +-
+ arch/arm64/kvm/hyp/pgtable.c         |   1 +
+ arch/arm64/kvm/mmio.c                |   1 +
+ arch/arm64/kvm/mmu.c                 | 247 +++++++++++++++++-------
+ arch/arm64/kvm/pkvm.c                |   6 +-
+ arch/arm64/kvm/pvtime.c              |  14 +-
+ arch/arm64/kvm/vgic/vgic-init.c      |   2 +
+ include/kvm/arm_psci.h               |   2 +
+ 13 files changed, 493 insertions(+), 162 deletions(-)
+
+----------------------------------------------------------------------
+
