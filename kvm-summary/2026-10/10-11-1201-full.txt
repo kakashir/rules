@@ -1,0 +1,1752 @@
+
+On /root/mail/repo:
+From 9c5702c3d to c65066931
+KVM mailing list update from 9c5702c3d to c65066931
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      7 kernel.org
+      7 gmail.com
+      3 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+      7  Jia Jia <physicalmtea@gmail.com>
+      7  "Aneesh Kumar K.V (Arm)" <aneesh.kumar@kernel.org>
+      3  Maxim Levitsky <mlevitsk@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2] vhost-scsi: do not count PI bytes in the data length
+Author: Jia Jia <physicalmtea@gmail.com>
+
+vhost_scsi_handle_vq() moves pi_bytesout or pi_bytesin into the
+protection sgl and subtracts those bytes from exp_data_len.  The length
+passed to TCM is still exp_data_len + prot_bytes.
+
+prot_bytes comes from virtio_scsi_cmd_req_pi.  With
+VIRTIO_SCSI_F_T10_PI negotiated, vhost reads that header and does not
+check that the CDB is a READ or WRITE.  sbc_check_prot() replaces
+data_length from the CDB only when the protect field is non-zero.
+target_cmd_size_check() leaves a write's data_length unchanged when the
+CDB size is smaller, so a command that does not get that replacement
+keeps a data_length larger than the data sgl.
+
+The KASAN report is a MODE SELECT whose header had pi_bytesout set.
+The data sgl held only the parameter list.  spc_emulate_modeselect()
+walked data_length and read the next physical page.
+
+Pass the data sgl length.  Protected READ and WRITE still take their
+length from the CDB in sbc_check_prot().
+
+KASAN reports:
+
+  BUG: KASAN: use-after-free in spc_emulate_modeselect+0x145/0x380 [target_core_mod]
+  Read of size 1
+
+  spc_emulate_modeselect
+  __target_execute_cmd
+  target_execute_cmd
+  vhost_scsi_write_pending
+  transport_generic_new_cmd
+  __target_submit
+  target_queued_submit_work
+  process_one_work
+  worker_thread
+  kthread
+  ret_from_fork
+  ret_from_fork_asm
+
+Fixes: 9f977ef7b671 ("vhost-scsi: Include prot_bytes into expected data transfer length")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+v2:
+  - Drop the claim that target used to subtract prot_length.
+    9f977ef7b671 cites 14ef9200, which is not in the tree
+  - prot_bytes comes from virtio_scsi_cmd_req_pi
+
+ drivers/vhost/scsi.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/2] KVM: nVMX: avoid losing the posted notification interrupt when exiting L2
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+While delivering a nested posted interrupt notification
+(see vmx_deliver_nested_posted_interrupt), KVM assumes that,
+as long as the target vCPU is in the guest mode, KVM can send the
+special POSTED_INTR_NESTED_VECTOR, which will either trigger APICv ucode
+to inject all interrupts into L2 or cause a VM exit, after which
+vmx_complete_nested_posted_interrupt is supposed to finish the job.
+
+However if the target vCPU was about to exit the L2 when
+nested posted interrupt notification was delivered in this way,
+it is possible that it will be lost.
+
+Fix this by running vmx_complete_nested_posted_interrupt just before
+nested VM exit.
+
+Detect this case in the nested VM exit path and act accordingly.
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 7 +++++++
+ arch/x86/kvm/vmx/vmx.c    | 5 +++++
+ 2 files changed, 12 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/2] KVM: nVMX: don't check PIR.ON when processing nested posted interrupts
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+Despite the suggestion to test and set the PIR.ON and avoid sending
+a posted interrupt if it is already set, there is no requirement
+for this bit to be set for posted interrupt processing to happen
+when the target CPU receives the posted notification vector.
+
+See section 30.6 POSTED-INTERRUPT PROCESSING:
+
+   "The processor clears the outstanding-notification bit in
+    the posted-interrupt descriptor. This is done atomically so as to leave
+    the remainder of the descriptor unmodified
+    (e.g., with a locked AND operation)."
+
+Apparently Windows' implementation of APICv does exactly this:
+it sets bits in PIR, without bothering to also set the PIR.ON.
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/2] KVM: nVMX: fix nested APICv emulation for windows guests
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+Fix two problems that were recently discovered that cause nested APICv=0D
+to malfunction on windows with hyperv enabled.=0D
+=0D
+The first problem is that unlike KVM, windows doesn't set PIR.ON when=0D
+sending posted interrupts. X86 spec actually allows this.=0D
+=0D
+The second problem is that unlilke KVM, which mostly ignores them,=0D
+windows depends on accurate delivery of the posted notification=0D
+interrupts, and currently it is possible for a posted notification=0D
+to get lost it it arrives at the same time as the nested VM exit.=0D
+=0D
+V2: to avoid spurious notification in L1, process the posted=0D
+notification in L2, just before VM exit.=0D
+=0D
+PS: I am not 100% sure if I got the barriers right, plus I am not sure=0D
+about what to do if vmx_complete_nested_posted_interrupt can't write=0D
+to the nested PIR, in this it calls kvm_handle_memory_failure, and=0D
+I don't know 100% its interactions with nested VM exit.=0D
+=0D
+Best regards,=0D
+	Maxim Levitsky=0D
+=0D
+Maxim Levitsky (2):=0D
+  KVM: nVMX: don't check PIR.ON when processing nested posted interrupts=0D
+  KVM: nVMX: avoid losing the posted notification interrupt when exiting=0D
+    L2=0D
+=0D
+ arch/x86/kvm/vmx/nested.c | 22 ++++++++++++++++++----=0D
+ arch/x86/kvm/vmx/vmx.c    |  5 +++++=0D
+ 2 files changed, 23 insertions(+), 4 deletions(-)=0D
+
+----------------------------------------------------------------------
+
+[PATCH net-next v2 5/5] vsock/virtio: defer RX readable notifications until batch unlock
+Author: Jia Jia <physicalmtea@gmail.com>
+
+An RX batch can make a socket readable while the worker still owns its
+socket lock. Waking a reader at that point can make it immediately wait
+for the same lock.
+
+For the callback installed by sock_init_data(), record when the existing
+low-watermark condition is met and issue one notification after the batch
+releases the lock. Save the initial sock_def_readable() callback when the
+AF_VSOCK socket is created because virtio_transport_common can be built as
+a module and cannot refer to that unexported symbol directly.
+
+When sk_data_ready or sk_write_space no longer matches that initial
+callback, pass queued skbs to the current callback one skb at a time. The
+handoff stops if the callback is the default again or the queue does not
+shrink. After 64 successful callbacks, queue another bounded handoff if
+data remains. vsock_bpf_update_proto() schedules the same handoff so an
+attach or detach outside the worker still drains skbs already queued.
+
+Always deliver a coalesced write-space event to the saved default callback
+before sampling the callback state. A current replacement is invoked by
+the handoff as well, so a callback change cannot hide the native writer
+wakeup or pending sockmap work.
+
+Sampling at batch finish takes sk_callback_lock once. The per-packet fast
+path still uses READ_ONCE() and does not take that lock. Control packets,
+state transitions, transport changes and non-batched sockets keep their
+existing behavior.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |   1 +
+ include/net/af_vsock.h                  |   8 +-
+ net/vmw_vsock/af_vsock.c                | 103 ++++++++++++++++++++++++
+ net/vmw_vsock/virtio_transport_common.c |  73 ++++++++++++++---
+ net/vmw_vsock/vsock_bpf.c               |   2 +
+ 5 files changed, 174 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v2 4/5] vsock/virtio: coalesce RX write-space notifications in lock batches
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Each received packet updates peer credit and calls sk_write_space() when
+send space is available. A writer cannot use the newly advertised credit
+until the socket lock is released, so repeated callbacks within one lock
+batch cannot let it make progress sooner.
+
+For the callback installed by sock_init_data(), record one pending
+write-space notification and deliver it through the saved default callback
+before release_sock(). If the callback has been replaced by batch finish,
+invoke the replacement as well. This keeps the native writer wakeup from
+being lost across a sockmap callback change while still notifying sockmap.
+
+Save the initial sock_def_write_space() callback when the AF_VSOCK socket
+is created because it is not visible to virtio_transport_common when built
+as a module. The fast path uses READ_ONCE() and adds no callback lock.
+
+Set the batch socket before processing its first packet so a batch ending
+on that packet cannot lose the notification.
+
+Packets outside the eligible STREAM/RW batch path retain per-packet
+notification behavior. The 64-packet and 64K limits cap the packets whose
+notifications can be coalesced.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |  1 +
+ include/net/af_vsock.h                  |  2 ++
+ net/vmw_vsock/af_vsock.c                |  1 +
+ net/vmw_vsock/virtio_transport_common.c | 42 ++++++++++++++++++++++---
+ 4 files changed, 41 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v2 3/5] vsock/virtio: reuse same-flow socket lookup in RX batches
+Author: Jia Jia <physicalmtea@gmail.com>
+
+An RX lock batch still looks up the socket for every packet and takes a
+temporary lookup reference, even though the batch already holds a reference
+to the locked socket.
+
+Record the network namespace and packet address tuple when a batch starts.
+Reuse the batch socket for later STREAM/RW packets with the same tuple, and
+release the batch before looking up a different flow.
+
+The cached path still traces every packet, takes an skb owner reference,
+validates socket state, source and transport, updates credit, and runs the
+receive state machine. Only the socket table lookup and its temporary
+reference are skipped.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |  3 ++
+ net/vmw_vsock/virtio_transport_common.c | 58 +++++++++++++++----------
+ 2 files changed, 38 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v2 2/5] vsock/virtio: amortize RX socket locking for stream packets
+Author: Jia Jia <physicalmtea@gmail.com>
+
+The virtio-vsock RX worker currently acquires and releases the socket lock
+for every received packet. Keep the lock held while processing a bounded
+run of packets that belongs to the same socket.
+
+Only ordinary RW packets for an established STREAM socket whose transport
+and protocol remain unchanged are eligible. Control packets, SEQPACKET
+traffic, state or transport changes, malformed packets, and sockets whose
+protocol has been replaced end the active batch and retain their existing
+handling.
+
+Serialize the initial eligibility check with sk_callback_lock because
+sockmap removal restores the protocol without taking the socket lock.
+
+Limit each batch to 64 packets or 64KB of payload, bounding the work under
+one socket lock. Keep the lookup reference until the batch finishes.
+
+Keep a batch only while another skb metadata charge fits in the receive
+buffer. Share this predicate with virtio_transport_inc_rx_pkt(). When an
+enqueued skb consumes the final metadata slot, finish the batch and release
+the socket lock before processing another packet, restoring the reader's
+scheduling opportunity from the per-packet path.
+
+The virtqueue callback remains a queue_work() callback. Batching runs only
+in the process-context RX worker.
+
+Introduce virtio_transport_rx_batch_finish() to tear down the batch and
+release the socket lock and lookup reference.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ include/linux/virtio_vsock.h            |  11 ++
+ net/vmw_vsock/virtio_transport.c        |  29 ++++-
+ net/vmw_vsock/virtio_transport_common.c | 147 +++++++++++++++++++++++-
+ 3 files changed, 183 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v2 1/5] vsock/virtio: split socket lookup from locked RX processing
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Split virtio_transport_recv_pkt() so socket lookup is separate from the
+receive state machine that runs under the socket lock.
+
+Keep virtio_transport_recv_pkt() on its existing per-packet locking path.
+Pass the source and destination addresses used for lookup to the locked
+receive path so they are decoded only once.
+
+Pass the network namespace and decoded address tuple through a packet
+context to the locked receive path.
+
+Preserve source validation and failure handling. Keep the lookup reference
+separate from the skb owner reference so the locked receive path can manage
+the two lifetimes independently.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 139 ++++++++++++++++--------
+ 1 file changed, 96 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v2 0/5] vsock/virtio: reduce RX per-packet socket overhead
+Author: Jia Jia <physicalmtea@gmail.com>
+
+This series reduces per-packet socket overhead in the virtio-vsock RX
+worker.
+
+Patch 1: separate socket lookup from locked packet processing.
+
+Patch 2: keep one socket lock across a bounded run of established
+STREAM/RW packets for the same native socket.
+
+Patch 3: reuse the locked socket for later packets with the same
+address tuple.
+
+Patch 4: coalesce default write-space notifications while that
+lock is held.
+
+Patch 5: defer the default readable callback until after the batch
+unlocks.
+
+Performance:
+
+Tested on a single-stream vsock connection (one Guest receiver thread on
+CPU0, virtio-vsock IRQ on Guest CPU1, fresh QEMU Guest per state, 16
+balanced AB/BA pairs per payload). The host uses vhost-vsock.
+
+For throughput, vsock_perf runs on the host as the
+sender, with a custom single-threaded Guest receiver pinned to Guest CPU0
+using blocking recv(). The fixed-64K table uses a 64K buffer; the matched
+table uses the sender's request size. The virtio-vsock IRQ/RX worker is
+pinned to Guest CPU1. To normalize run times across payloads into a
+bounded, deterministic window and avoid long runs being skewed by host
+background noise or virtualization scheduling jitter, transfer sizes scale
+proportionally with the request size (64B/64M, 256B/256M, etc.), capped at
+2G for 4K–64K. The custom receiver keeps the recv() size and count
+explicit; vsock_perf's receiver uses poll()+read().
+
+Latency uses a custom user-space vsock ping-pong tool.
+
+The measurements below were collected for the RX batching series.
+
+This benchmark does not run vsock_perf on both ends. Instead, it uses
+vsock_perf as the sender on the host (vhost-vsock) side and a custom
+blocking recv() program without poll() on the Guest side, with the receiver
+thread pinned to Guest CPU0 (and the virtio-vsock RX worker pinned to Guest
+CPU1). Plain blocking recv() combined with strict core pinning gives
+audit-level determinism for tracing a single-threaded TID.
+
+I think it is necessary to do further testing on the large I/O throughput
+peak observed at 4K to find the root cause (and rule out anything
+introduced by the measurement method). I used kprobe and temporary
+trace_printk in the source for mechanism diagnostics. The diagnostic
+data shows that lock wait time and contention at 4K both decrease strictly
+monotonically as payload size increases;
+wire-level tracing also confirms that 4K is split into two packets, and
+that all sizes can reach the 64K batching limit.
+
+The nature of the prominent 4K throughput gain most likely lies in it
+sitting exactly at the end-to-end pipeline sweet spot between host and
+guest:
+
+Compared with 1K and smaller payloads: 4K halves the packet intensity, so
+upstream host-side syscall and interrupt injection overhead is no longer
+the bottleneck across the whole path, allowing the host to supply data
+adequately.
+
+Compared with larger 8K to 64K payloads: 4K keeps the payload size
+moderate, and combined with the observed syscall reduction and cycle
+improvement, the batch-draining benefit from notification coalescing is
+fully realized.
+
+As payload size increases further from 8K to 64K, the overall gain shrinks
+smoothly, consistent with Amdahl's law, because system execution time
+shifts toward page copying and VQ processing.
+
+With all patches applied:
+
+End-to-end RX throughput (64K Guest recv() size, SO_RCVLOWAT=1; Gbit/s):
+
+  payload  baseline RX  PATCH RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B      0.1065       0.2503    +135.00% [+130.35%, +139.74%]
+  256B     0.5722       1.0286     +79.76% [+75.40%, +84.23%]
+  512B     1.1464       1.9779     +72.53% [+69.50%, +75.63%]
+  1K       2.2714       3.6368     +60.12% [+56.92%, +63.37%]
+  4K       3.9095       7.7160     +97.37% [+92.09%, +102.79%]
+  8K       3.3436       5.3111     +58.84% [+53.49%, +64.38%]
+  16K      3.8876       5.7456     +47.80% [+45.45%, +50.18%]
+  64K      4.0056       5.3590     +33.79% [+29.37%, +38.36%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+Gbit/s):
+
+  payload baseline PATCH    throughput change (95% CI)    recv()
+          RX       RX                                     (base/patch)
+          (Gbit/s) (Gbit/s)
+  64B     0.1259   0.2651   +110.52% [+99.08%, +122.62%]  1048577/1048577
+  256B    0.3790   0.9444   +149.20% [+134.70%, +164.60%] 1048577/1048577
+  512B    0.7768   1.7009   +118.97% [+103.94%, +135.11%] 1048577/1048577
+  1K      1.4886   2.9477   +98.02% [+84.82%, +112.17%]   1048577/1048577
+  4K      2.1129   4.7331   +124.01% [+115.40%, +132.96%] 537436/525524
+  8K      2.8698   5.3683   +87.06% [+80.96%, +93.37%]    276448/264109
+  16K     3.5156   5.8463   +66.30% [+63.10%, +69.55%]    147849/132267
+  64K     4.2459   5.8576   +37.96% [+35.26%, +40.71%]    48447/33144
+
+Request-response latency (Ping-Pong RTT, 10,000 requests):
+
+  payload  baseline mean RTT (us)  PATCH mean RTT (us)  change (95% CI)
+  64B      221.968                  218.144              -1.72%
+                                                        [-4.23%, +0.85%]
+  256B     126.968                  124.541              -1.91%
+                                                        [-3.35%, -0.45%]
+  4K       130.362                  126.664              -2.84%
+                                                        [-5.12%, -0.50%]
+
+Diagnostic Guest CPU1 system-wide cycles (fixed-64K receiver, with perf):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  64B      62.032            52.370          -15.58% [-17.16%, -13.96%]
+  256B     15.287            13.630          -10.84% [-12.51%, -9.14%]
+  512B      7.306             6.611           -9.51% [-10.92%, -8.08%]
+  1K        3.811             3.458           -9.25% [-10.96%, -7.50%]
+  4K        1.850             1.669           -9.75% [-11.78%, -7.67%]
+  8K        1.504             1.363           -9.36% [-12.97%, -5.60%]
+  16K       1.321             1.210           -8.37% [-10.61%, -6.07%]
+  64K       1.342             1.227           -8.57% [-10.87%, -6.21%]
+
+Patch-scope measurements and attribution:
+
+The series was tested cumulatively in two ranges, using the same
+single-stream setup and paired AB/BA runs. The table below shows results
+from patches 1–3 only, before the notification changes in patches 4–5.
+
+  payload  baseline RX  PATCH RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B      0.1211       0.2534    +109.26% [+106.34%, +112.23%]
+  256B     0.5671       0.9989     +76.15% [+70.63%, +81.85%]
+  512B     1.1334       1.9000     +67.64% [+64.64%, +70.69%]
+  1K       2.2650       3.5610     +57.22% [+50.91%, +63.79%]
+  4K       3.8331       7.2888     +90.15% [+83.46%, +97.09%]
+  8K       4.8244       7.6636     +58.85% [+53.71%, +64.16%]
+  16K      5.4979       8.2469     +50.00% [+45.57%, +54.57%]
+  64K      3.8875       4.7588     +22.41% [+17.77%, +27.24%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+no perf; Gbit/s):
+
+  payload baseline PATCH    throughput change (95% CI)    recv()
+          RX       RX                                     (base/patch)
+          (Gbit/s) (Gbit/s)
+  64B     0.1397   0.2646   +89.40% [+80.92%, +98.27%]    1048577/1048577
+  256B    0.3960   0.9516   +140.34% [+117.48%, +165.60%] 1048577/1048577
+  512B    0.7541   1.6496   +118.74% [+101.42%, +137.55%] 1048577/1048577
+  1K      1.4903   2.8793   +93.21% [+77.06%, +110.82%]   1048577/1048577
+  4K      2.9466   6.2284   +111.37% [+97.52%, +126.20%]  538192/525220
+  8K      4.0043   6.9249   +72.94% [+60.18%, +86.71%]    276313/263852
+  16K     4.8981   7.5599   +54.34% [+49.77%, +59.06%]    147576/131600
+  64K     5.9294   7.7897   +31.37% [+27.18%, +35.70%]    50207/33014
+
+Ping-Pong RTT (10,000 requests; no perf):
+
+  payload  baseline mean RTT (us)  PATCH mean RTT (us)  change (95% CI)
+  64B      119.688                  119.739              +0.04%
+                                                        [-2.61%, +2.77%]
+  256B     120.603                  124.485              +3.22%
+                                                        [-0.44%, +7.01%]
+  4K       121.921                  122.491              +0.47%
+                                                        [-3.51%, +4.61%]
+
+Guest CPU1 system-wide aggregate cycles (fixed-64K receiver, with perf;
+cycles/byte):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  64B      66.838             60.012           -10.21% [-13.03%, -7.30%]
+  256B     13.446             12.305            -8.49% [-11.23%, -5.66%]
+  512B      6.833              6.317            -7.54% [ -9.52%, -5.52%]
+  1K        3.558              3.434            -3.48% [ -6.02%, -0.87%]
+  4K        1.806              1.686            -6.64% [ -8.69%, -4.54%]
+  8K        1.457              1.403            -3.73% [ -5.64%, -1.78%]
+  16K       1.295              1.279            -1.24% [ -5.21%, +2.89%]
+  64K       1.214              1.198            -1.30% [ -4.06%, +1.53%]
+
+The split-patch tests show that PATCH 2 and PATCH 3 mainly contribute to
+the improvement in I/O Throughput, while PATCH 4 and PATCH 5 mainly
+contribute to the improvements in cycles and RTT latency (although PATCH
+2-3 show no obvious regression here).
+
+---
+v2:
+  - stop a batch after it consumes the last skb metadata slot, sharing the
+    admission predicate with virtio_transport_inc_rx_pkt()
+  - move replacement-callback handoff into vsock, process queued skbs one
+    at a time, and trigger the handoff from vsock_bpf_update_proto() on
+    attach and detach
+  - reduce the packet-context diff in the locked receive helper
+  - keep RX batch counters in the batch state and reset them in the finish
+    path
+  - use the vsock/virtio subject prefix and add the requested measurements
+v1: https://lore.kernel.org/virtualization/20261002074551.318789-1-physicalmtea@gmail.com/
+
+Jia Jia (5):
+  vsock/virtio: split socket lookup from locked RX processing
+  vsock/virtio: amortize RX socket locking for stream packets
+  vsock/virtio: reuse same-flow socket lookup in RX batches
+  vsock/virtio: coalesce RX write-space notifications in lock batches
+  vsock/virtio: defer RX readable notifications until batch unlock
+
+ include/linux/virtio_vsock.h            |  16 ++
+ include/net/af_vsock.h                  |   8 +
+ net/vmw_vsock/af_vsock.c                | 104 +++++++++
+ net/vmw_vsock/virtio_transport.c        |  29 ++-
+ net/vmw_vsock/virtio_transport_common.c | 389 +++++++++++++++++++++++++++-----
+ net/vmw_vsock/vsock_bpf.c               |   2 +
+ 6 files changed, 496 insertions(+), 52 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 6/6] KVM: Invalidate guest_memfd mappings before removing memslot bindings
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Unmap guest_memfd ranges before deleting their memslot bindings. Remove
+private device mappings before committing deletion, and invalidate
+remaining mappings while holding the inode invalidate lock.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ virt/kvm/guest_memfd.c | 70 ++++++++++++++++++++++++++++++++++++++++--
+ virt/kvm/guest_memfd.h |  6 ++++
+ virt/kvm/kvm_main.c    |  4 +++
+ 3 files changed, 77 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 5/6] KVM/VFIO: Remove device mappings during guest_memfd teardown
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+On final guest_memfd close, stop new provider access and callbacks
+before removing private device mappings and releasing the provider. Keep
+slot bindings available until the mappings have been removed.
+
+Serialize teardown with conversion using the inode invalidate lock. VFIO
+takes the vDEVICE MMIO mutex and its memory lock when disabling access
+and callbacks, preventing concurrent faults or device operations from
+using provider state being torn down.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/vfio/pci/vfio_pci_gmem.c        | 27 +++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  6 ++++++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 12 +++++++----
+ include/linux/guest_memfd.h             |  1 +
+ virt/kvm/guest_memfd.c                  | 21 +++++++++++++++++++
+ 5 files changed, 63 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 4/6] vfio/pci: Provide guest_memfd backing for PCI BARs
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow an ordinary VFIO PCI device fd to supply BAR memory to
+guest_memfd. Validate eligible BAR ranges and provide their PFNs for
+shared guest mappings. Keep the VFIO file and its IOMMUFD vDEVICE alive
+while the provider is attached.
+
+Revoke host and shared guest mappings before private conversion, and
+check guest_memfd attributes before allowing host BAR access. Exclude
+independent dma-buf exports while attached because their mappings bypass
+these access checks.
+
+Hold the vDEVICE MMIO mutex across conversion and attribute updates.
+Use the VFIO memory lock to serialize BAR access and revocation. Host
+access checks try the inode invalidate lock without waiting, avoiding
+deadlock with conversion, which acquires that lock first.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: linux-kernel@vger.kernel.org
+Cc: kvm@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/vfio/device_cdev.c              |   3 +-
+ drivers/vfio/group.c                    |   4 +-
+ drivers/vfio/pci/Kconfig                |  11 +
+ drivers/vfio/pci/Makefile               |   2 +
+ drivers/vfio/pci/vfio_pci.c             |   3 +
+ drivers/vfio/pci/vfio_pci_core.c        |  13 +
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  10 +
+ drivers/vfio/pci/vfio_pci_gmem.c        | 322 ++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  30 +++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 134 ++++++++++
+ drivers/vfio/pci/vfio_pci_rdwr.c        |  13 +-
+ drivers/vfio/vfio.h                     |   8 +
+ drivers/vfio/vfio_main.c                |  34 ++-
+ include/linux/guest_memfd.h             |   3 +
+ include/linux/vfio.h                    |   3 +
+ include/linux/vfio_pci_core.h           |  23 ++
+ virt/kvm/guest_memfd.c                  | 105 ++++++++
+ 17 files changed, 702 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 3/6] iommufd: Support MMIO provider attachment to vDEVICEs
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow a device MMIO provider to attach to the existing vDEVICE after the
+backend validates its association with the VM. Keep the vDEVICE and
+IOMMUFD context alive until the provider detaches.
+
+Add a per-vDEVICE MMIO mutex to serialize provider attachment and
+detachment, and allow providers and backends to use the same lock for
+memory conversion and device state changes. Provide callbacks to
+invalidate MMIO mappings and query whether private ranges remain.
+
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: "Joerg Roedel (AMD)" <joro@8bytes.org>
+Cc: Will Deacon <will@kernel.org>
+Cc: Robin Murphy <robin.murphy@arm.com>
+Cc: iommu@lists.linux.dev
+Cc: linux-kernel@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/iommu/iommufd/viommu.c | 90 ++++++++++++++++++++++++++++++++++
+ include/linux/iommufd.h        | 33 +++++++++++++
+ 2 files changed, 123 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 2/6] KVM: guest_memfd: Support private/shared conversion of device memory
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow architectures to convert device-backed guest_memfd ranges to
+private memory. Coordinate conversion with the device provider and
+update guest_memfd attributes only after the architecture operation
+succeeds.
+
+Hold the inode invalidate lock across conversion and the attribute
+update. Provider callbacks allow a device conversion lock to cover the
+same operation, with the inode lock acquired first. This prevents faults
+and competing device operations from observing an incomplete conversion.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: linux-kernel@vger.kernel.org
+Cc: kvm@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  12 +++
+ include/linux/kvm_host.h    |   5 +
+ virt/kvm/guest_memfd.c      | 186 +++++++++++++++++++++++++++++++++++-
+ 3 files changed, 201 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 1/6] KVM: guest_memfd: attach and bind device resources
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Introduce the device resource flag and registration of a provider file
+operations identity. KVM checks file->f_op before interpreting
+private_data as guest_memfd_device_operations.
+
+Add attach() to establish the provider, bind() to associate eligible
+file offsets with memslots, get_pfn() for shared device PFNs, release()
+for the provider lifetime.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst |   4 +
+ include/linux/guest_memfd.h    |  34 +++++++
+ include/linux/kvm_host.h       |   9 +-
+ include/uapi/linux/kvm.h       |   1 +
+ virt/kvm/guest_memfd.c         | 167 ++++++++++++++++++++++++++++++---
+ 5 files changed, 202 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v1 0/6] KVM/VFIO: guest_memfd support for device MMIO resources
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+This series adds a guest_memfd device-resource framework for exposing PCI
+BAR memory to guests. The intended use is confidential device assignment,
+where KVM needs to coordinate private device mappings with shared access
+through VFIO. The Arm CCA backend is provided separately; these patches
+contain the guest_memfd, VFIO and IOMMUFD interfaces it uses.
+
+The guest_memfd framework and Arm CCA backend are available together at:
+
+  https://git.gitlab.arm.com/linux-arm/linux-cca.git cca/topics/cca-da-gmem-backend
+
+Userspace creates a device-backed guest_memfd using the ordinary VFIO
+device fd as resource_fd, with GUEST_MEMFD_FLAG_USE_RESOURCE,
+GUEST_MEMFD_FLAG_DEVICE and GUEST_MEMFD_FLAG_INIT_SHARED. Eligible BAR
+intervals are registered as guest_memfd memslots. File offsets use the
+existing VFIO region-offset namespace, allowing one guest_memfd to cover
+multiple BAR intervals. Device-backed guest_memfd rejects mmap and
+fallocate; shared guest faults obtain bare BAR PFNs from the provider
+instead of resolving the memslot HVA or allocating folios.
+
+IOMMUFD resolves and pins the device's existing vDEVICE for the VM and
+serializes MMIO conversion through its MMIO mutex. VFIO supplies BAR PFNs,
+checks eligible ranges and excludes independent dma-buf exports while a
+guest_memfd provider is attached. VFIO host mmap faults, read/write and
+ioeventfd accesses check the requested range's guest_memfd attributes.
+Conversion revokes cached host mappings and shared guest mappings before
+installing private mappings. Other shared intervals remain accessible.
+
+This series depends on:
+* Ackerley Tng's "Allow guest_memfd to be created using a resource (pool)
+  fd" RFC, which provides the tmpfs resource-provider API:
+  https://lore.kernel.org/all/20260925-gmem-tmpfs-backend-v1-0-d36159822d18@google.com/
+* The IOMMUFD/TSM series, which provides the vIOMMU and vDEVICE interfaces:
+  https://lore.kernel.org/all/20261008055955.4014342-1-aneesh.kumar@kernel.org/
+
+Notes:
+* While developing this framework, I looked at David Woodhouse's
+  guest_memfd provider work, including the gmem-provider-v3 branch. It
+  was used for comparison and was not merged. The posted RFC v2 is here:
+  https://lore.kernel.org/all/20260720111259.122911-1-dwmw2@infradead.org/
+* Codex assisted with implementation, review and series organization.
+
+Cc: Ackerley Tng <ackerleytng@google.com>
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: David Woodhouse <dwmw2@infradead.org>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: "Joerg Roedel (AMD)" <joro@8bytes.org>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Robin Murphy <robin.murphy@arm.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Will Deacon <will@kernel.org>
+Cc: Alexey Kardashevskiy <aik@amd.com>
+Cc: Xu Yilun <yilun.xu@linux.intel.com>
+Cc: Catalin Marinas <catalin.marinas@arm.com> 
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Steven Price <steven.price@arm.com>
+Cc: Fred Griffoul <griffoul@gmail.com> 
+Cc: iommu@lists.linux.dev
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+
+Aneesh Kumar K.V (Arm) (6):
+  KVM: guest_memfd: attach and bind device resources
+  KVM: guest_memfd: Support private/shared conversion of device memory
+  iommufd: Support MMIO provider attachment to vDEVICEs
+  vfio/pci: Provide guest_memfd backing for PCI BARs
+  KVM/VFIO: Remove device mappings during guest_memfd teardown
+  KVM: Invalidate guest_memfd mappings before removing memslot bindings
+
+ Documentation/virt/kvm/api.rst          |   4 +
+ drivers/iommu/iommufd/viommu.c          |  90 ++++
+ drivers/vfio/device_cdev.c              |   3 +-
+ drivers/vfio/group.c                    |   4 +-
+ drivers/vfio/pci/Kconfig                |  11 +
+ drivers/vfio/pci/Makefile               |   2 +
+ drivers/vfio/pci/vfio_pci.c             |   3 +
+ drivers/vfio/pci/vfio_pci_core.c        |  13 +
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  10 +
+ drivers/vfio/pci/vfio_pci_gmem.c        | 349 +++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  36 ++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 138 ++++++
+ drivers/vfio/pci/vfio_pci_rdwr.c        |  13 +-
+ drivers/vfio/vfio.h                     |   8 +
+ drivers/vfio/vfio_main.c                |  34 +-
+ include/linux/guest_memfd.h             |  50 +++
+ include/linux/iommufd.h                 |  33 ++
+ include/linux/kvm_host.h                |  14 +-
+ include/linux/vfio.h                    |   3 +
+ include/linux/vfio_pci_core.h           |  23 +
+ include/uapi/linux/kvm.h                |   1 +
+ virt/kvm/guest_memfd.c                  | 545 +++++++++++++++++++++++-
+ virt/kvm/guest_memfd.h                  |   6 +
+ virt/kvm/kvm_main.c                     |   4 +
+ 24 files changed, 1362 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 4faf4c862 to cc915e272
+KVM mailing list update from 4faf4c862 to cc915e272
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     26 redhat.com
+      1 nutanix.com
+
+Top 15 contributors (Based on Email Body)
+
+     23  Eric Auger <eric.auger@redhat.com>
+      3  Cornelia Huck <cohuck@redhat.com>
+      1  Shaju Abraham <shaju.abraham@nutanix.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v10 26/26] arm/cpu-features: Document ID reg properties
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Add some documentation for how individual ID registers can be
+configured with the host cpu model.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+9 -> 10:
+- document the fact some props may be willingly hidden because they
+  conflict with legacy composite options
+- mention max model too
+---
+ docs/system/arm/cpu-features.rst | 111 ++++++++++++++++++++++++++++---
+ 1 file changed, 102 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 25/26] arm-qmp-cmds: introspection for ID register props
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Enhance the current host model query-cpu-model-expansion with the
+capability to return SYSREG_* options and also test possible
+values.
+
+If no SYSREG prop is set, query-cpu-model-expansion returns the
+default host values for all SYSREG properties. They are extracted
+from a scratch vcpu featuring all the KVM advertised capabilities.
+
+Here is a qmp-shell example:
+
+(QEMU) query-cpu-model-expansion type=full model={"name":"host"}
+{"return": {"model": {"name": "host", "props": {"SYSREG_ID_AA64PFR0_EL1_EL3": 1,
+"SYSREG_ID_AA64ISAR2_EL1_CLRBHB": 0, "SYSREG_CTR_EL0_L1Ip": 3,
+"SYSREG_MIDR_EL1_PartNum": 3407, "SYSREG_CTR_EL0_DminLine": 4,
+"SYSREG_ID_AA64MMFR0_EL1_PARange": 5, "SYSREG_ID_AA64MMFR1_EL1_ECBHB": 0
+../..
+
+It becomes also possible to test new SYSREG property values.
+
+With Full expansion of the host model, the SYSREG props are tested
+against a scratch vcpu. With static expansion, no check is performed
+against KVM but only against qemu code (the value does not exceed the
+field size and if the field is associated to enum values, the set
+value belongs to the list of arch enum values.
+
+Examples
+(QEMU) query-cpu-model-expansion type=full model={"name":"host","props":{"SYSREG_ID_AA64ISAR0_EL1_DP":0x13}}
+{"error": {"class": "GenericError", "desc": "idreg SYSREG_ID_AA64ISAR0_EL1_DP set value (0x13) exceeds length of field (4)!"}}
+
+(QEMU) query-cpu-model-expansion type=full model={"name":"host","props":{"SYSREG_ID_AA64ISAR0_EL1_DP":0x2}}
+{"error": {"class": "GenericError", "desc": "idreg SYSREG_ID_AA64ISAR0_EL1_DP set value (0x2) does not match any arch valid enum value!"}}
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+v9 -> v10:
+- use new proto for kvm_arm_create_init_scratch_vcpu, rework error path
+  and fix visit_type_uint64 call
+
+v8 -> v9:
+- fix the leak reported by Khushit
+- implement static mode for host
+
+v7 -> v8:
+- do not check if the prop exists (this is checked elsewhere with a
+  different error message)
+- clarify that examples given in the commit msg are based on qmp-shell
+
+v5 -> v6:
+- add the write capability
+---
+ target/arm/arm-qmp-cmds.c | 130 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 118 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 24/26] target/arm/kvm: Introduce kvm_arm_create_init_scratch_vcpu()
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce kvm_arm_create_init_scratch_vcpu() that allows to create
+and initialize a scratch vcpu from cpu settings. We want to use
+this in arm-qmp-cmds code as well as kvm_arm_destroy_scratch_host_vcpu
+so export them.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v9 -> v10:
+- pass the fdarray as a param
+---
+ target/arm/kvm_arm.h  | 19 ++++++++++++++++++-
+ target/arm/kvm-stub.c | 10 ++++++++++
+ target/arm/kvm.c      | 13 +++++++++++++
+ 3 files changed, 41 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 23/26] target/arm/kvm: Introduce kvm_arm_vcpu_prepare_init_features helper
+Author: Eric Auger <eric.auger@redhat.com>
+
+Factorize the code that initializes the kvm init features from the
+cpu settings in a helper. Use it kvm_arch_init_vcpu(). Soon it will
+be used by another function.
+
+The only change in the code relates to the check of kvm_state. The
+future caller won't have the VM created when calling the helper and
+for this caller it is OK ignoring PSCI version setting.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c | 36 ++++++++++++++++++++++--------------
+ 1 file changed, 22 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 22/26] target/arm/kvm: Add an error handle to kvm_arm_create_scratch_host_vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+This allows to report a precise error message if any error occurs.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm_arm.h |  3 ++-
+ target/arm/kvm.c     | 15 ++++++++++++---
+ 2 files changed, 14 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 21/26] target/arm/cpu64: Add helper to test SYSREG props against a scratch vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+Add kvm_idreg_write_scratch_vcpu helper that will be used
+by qmp_query_cpu_model_expansion code to test SYSREG settings
+against a scratch vcpu. Indeed when the expansion code is called
+the actual vcpu has not been initialized so we use a scratch vcpu.
+This latter has been initialized with features taken from
+legacy compositive options (EL2, SVE, ...). So the trial is
+very close to the final setup.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm_arm.h    |  4 ++++
+ target/arm/kvm-stub.c   |  7 +++++++
+ target/arm/kvm.c        | 21 +++++++++++++++++++++
+ target/arm/trace-events |  1 +
+ 4 files changed, 33 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 20/26] target/arm/kvm: Add consistency checking for SYSREG props
+Author: Eric Auger <eric.auger@redhat.com>
+
+Since legacy composite options (such as SVE, virtualization, ...)
+and new SYSREG props coexist, add some basic consistency checks.
+
+Those checks are performed in kvm_arch_init_vcpu() before
+applying the SYSREG props at the end of the initialization chain.
+
+Some ID reg fields corresponding to legacy composite option scope
+are not (yet) writable (EL3, MTE, SVE, ...). As such they are not
+supposed to be exposed through SYSREG properties. However in the
+hypothesis they would become writable, and thus would be exposed
+and attempted to be set, we need to reject any setting because no
+consistency check is implemented yet.
+
+The function is exported because it will be used on the qmp
+expansion path too.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v9 -> v10
+- improve commit description
+- fix return in !arm_feature(&cpu->env, ARM_FEATURE_AARCH64) block
+- removed cpu_isar_feature(aa64_sve, cpu) && value == 0 check
+---
+ target/arm/cpu-idregs.h | 17 ++++++++
+ target/arm/cpu64.c      | 94 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 111 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 18/26] target/arm/cpu64: Introduce arm_cpu_apply_sysreg_props
+Author: Eric Auger <eric.auger@redhat.com>
+
+This helper walks through all stored SYSREG field values and
+apply them on the vcpu. It uses an accelerator specific callback
+to apply the field value on the vcpu. If the value is successfully
+applied, the cpu->isar.idregs[] value is updated accordingly.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu-idregs.h | 18 +++++++++++++
+ target/arm/cpu64.c      | 57 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 75 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 19/26] target/arm/kvm: Apply SYSREG props
+Author: Eric Auger <eric.auger@redhat.com>
+
+Now the infrastructure is in place let's trigger the
+SYSREG prop update in the KVM code. This is done in both
+kvm_arch_init_vcpu() and kvm_arm_reset_vcpu() after the final
+vcpu has been initialized with the proper kvm init settings and
+before kvmstate is synced back to the cpreg list.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v9 -> v10
+- use ValueRange
+---
+ target/arm/cpu64.c |  9 +++++----
+ target/arm/kvm.c   | 20 +++++++++++++++++++-
+ 2 files changed, 24 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 17/26] target/arm/kvm: Introduce kvm_arm_override_idreg_field helper
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce kvm_arm_override_idreg_field() helper that allows
+to read an ID register value from a vcpu fd, override a
+given field value and reinject the new register value in the
+guest vcpu.
+
+The helper is not used yet, hence the G_GNUC_UNUSED marker.
+It will be used in subsequent patch to apply a new field
+value set through SYSREG property.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c        | 48 ++++++++++++++++++++++++++++++++++++++++-
+ target/arm/trace-events |  1 +
+ 2 files changed, 48 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 16/26] target/arm/kvm: Pass an Error handle to kvm_arch_init_vcpu
+Author: Eric Auger <eric.auger@redhat.com>
+
+The 2 callers of kvm_arch_init_vcpu(), namely kvm_rebind_vcpus()
+and kvm_init_vcpu() are passed an Error handle. So it is a pity
+not using it in kvm_arch_init_vcpu(). Also some functions called
+within kvm_arch_init_vcpu() could get benefit from it, especially
+on ARM. This will happen in subsequent patches.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ include/system/kvm.h       |  2 +-
+ accel/kvm/kvm-all.c        | 15 +++++++--------
+ target/arm/kvm.c           | 14 +++++++++-----
+ target/i386/kvm/kvm.c      | 22 ++++++++++++----------
+ target/loongarch/kvm/kvm.c | 27 +++++++++------------------
+ target/ppc/kvm.c           |  6 +++---
+ target/riscv/kvm/kvm-cpu.c |  3 ++-
+ target/s390x/kvm/kvm.c     |  2 +-
+ 8 files changed, 44 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 15/26] target/arm/kvm: Let kvm_arm_init_cpreg_list propagate an error handle
+Author: Eric Auger <eric.auger@redhat.com>
+
+Subsequent patch will add an error handle to kvm_arch_init_vcpu(). So all
+errors must come with an error handle.
+
+kvm_arm_init_cpreg_list does not propogate any, add this capability.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/kvm.c | 16 +++++++++++-----
+ 1 file changed, 11 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 14/26] target/arm/kvm: Implement SYSREG property setter and getter
+Author: Eric Auger <eric.auger@redhat.com>
+
+When the setter is called, the final vcpu is not created yet.
+
+Applying the override on vcpu.isar initialized with the max scratch
+vcpu would not be correct because the final vcpu may have some features
+turned off (for instance virtualization) while the scratch vcpu
+features all available ones. So we need to postpone the actual
+override until the final vcpu has been initialized.
+
+Set values are recorded in a hash table and will be applied to the
+guest in a subsequent patch. At this point the only checks that can
+be done on the input value are checking against field length and
+arch enum value if any.
+
+With regards to the getter, if the sysreg prop was set, we return the
+set value, otherwise, we return the value in cpu->isar.idregs[].
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Reviewed-by: Khushit Shah <khushit.shah@nutanix.com>
+
+---
+
+v9 -> v10:
+- renamed MAKE_IDREG_KEY into IDREG_FIELD_KEY
+- rebase on new implementation in cpu64.c
+---
+ target/arm/cpu.h   |  2 ++
+ target/arm/cpu.c   |  5 ++--
+ target/arm/cpu64.c | 65 ++++++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 68 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 13/26] target/arm/cpu64: Add properties for writable IDReg fields
+Author: Eric Auger <eric.auger@redhat.com>
+
+For KVM vcpu models, we add properties for all writable
+ID reg fields. This relies on the idreg writable mask retrieved
+from KVM, which is matched aginst the register description
+found in target/arm/cpu-idregs.h.inc.
+
+The code is prepared to extend this capability to all ID
+register fields independently on their writability. This will
+be needed for named vcpu models which may want to relax some
+values to the host supported one.
+
+REVIDR_EL1 and AIDR_EL1 are writable but they do not expose any
+field. So they will need to be handled separately.
+
+The setter and getter are not yet implemented and currently
+return an error.
+
+Note in the future, other acceleration types may benefit from
+those properties.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+v9 -> v10
+- instead of parsing the writable mask, scroll through the fields
+  but still do some sanity checks. Add the writable param
+- move the code to cpu64.c Do not pass any ARM64SysReg handle
+  anymore. Rename the functions
+
+v7 -> v8
+- scratch the '!' in the error_setg
+- addapt to the removal of struct ArmIdRegArchVal
+
+v5 -> v6
+- for enum values, check against value value when setting the prop
+- do not check writable_map flag anymore
+
+v4 -> v5:
+- free prop_name
+- check cpu->writable_map as a preamble in kvm_arm_expose_idreg_properties
+---
+ target/arm/cpu64.c      | 113 ++++++++++++++++++++++++++++++++++++++++
+ target/arm/trace-events |   6 +++
+ 2 files changed, 119 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 12/26] arm/kvm: Initialize isar.idregs[] with all writable host ID regs
+Author: Eric Auger <eric.auger@redhat.com>
+
+kvm_arm_get_host_cpu_features() already retrieves the values of some
+host id registers to analyze the available vcpu features.
+
+Eventually we want to be able to allow the user to change the value
+of writable ID reg fields. So we need to store the initial value of all
+writable ID regs into isar.idregs[].
+
+Introduce a new get_host_cpu_idregs() helper that populates isar.idregs[]
+and call it from kvm_arm_get_host_cpu_features.
+
+This patch has no impact on cpreg values. isar.idregs[] is only
+used as a temporary storage for register values to be updated in place
+later.  Also it does not handle the writeback of isar.idregs[] into cpreg
+value list after user update. This will be handled separately.
+
+Note the host values are retrieved from the scratch vcpu initialized with
+all the available capabilities exposed by KVM, independently on the
+final vcpu features made by the user through the legacy composite
+options such as sve, pauth, virtualization, ...
+
+At the moment, the only caller sets writable to true. Named vcpu models
+will use the writable=false mode. Note this will require some extra
+handling for ID regs that cannot be read from KVM.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+v9 -> v10:
+- get rid of spurious kvm_arm_writable_idregs_to_cpreg_list trace point
+- add a writable parameter to get_host_cpu_idregs
+- some code cleanup
+
+v8 -> v9:
+- improve the commit msg. Only initialize in this patch and move the
+  write back to cpreg value list in a different patch.
+- Do not hack CLIDR here. The correct way to fix that temporarily is to
+  do that in the machine instead.
+
+v7 -> v8
+- fix indent and added Khushit's R-b
+
+v6 -> v7
+- remove vcpu from prototypes (Khushit)
+
+v5 -> v6
+- do not check writable_map anymore
+---
+ target/arm/kvm.c        | 44 ++++++++++++++++++++++++++++++++++++++++-
+ target/arm/trace-events |  1 +
+ 2 files changed, 44 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 11/26] hw/arm/virt: Make sure virt_get_caches() keeps on reading CLIDR_EL1 as 0
+Author: Eric Auger <eric.auger@redhat.com>
+
+In KVM mode, virt_get_caches() currently gets a zero value for the
+CLIDR_EL1 register. This is due to the fact CLIDR is never read from
+host. This is a bug.
+
+Soon we will initialize all writable isar.idreg[] from host and this
+includes CLIDR_EL1. However we cannot directly fix the initialization,
+first because it would change the way the guest is exposed caches in
+DT/ACPI descriptions and because some host values would be rejected
+by the current QEMU code, expecially in the case host has a unified
+L1 cache which is currently not supported and triggers the following
+errod: "Unified type is not implemented at level 1" error.
+
+So this issue will be fixed separately.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Reviewed-by: Khushit Shah <khushit.shah@nutanix.com>
+
+---
+
+v9 -> v10
+- add a comment explaining why we oveeride the clidr value
+---
+ hw/arm/virt.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 10/26] target/arm/kvm: Retrieve writable ID reg map
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Add a helper to retrieve the writable id reg bitmask.
+
+then retrieve the writable_mask array and dispatch it in the writable_map
+field of arm64_id_regs[] elements.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+v9 -> v10:
+- removed if (idx < 0 || idx > ARRAY_SIZE(arm64_id_regs)) check
+- commit description cleanup
+
+v7 -> v8
+- added kvm_enabled()
+
+v5 -> v6
+- use arm64_id_regs[].writable_map
+- squashed 2 commits (helper + user)
+- removed stub
+---
+ target/arm/kvm.c | 55 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 55 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 09/26] target/arm/cpu_idregs: Generate tables for Arm64 ID registers and fields
+Author: Eric Auger <eric.auger@redhat.com>
+
+
+Include cpu-idregs.h.inc multiple times with different definitions for the
+X-macros. This will generate tables for all Arm64 ID registers and their
+fields. Additionally, initialize the tables with all architecturally defined
+values. These tables will be consumed by the property layer in future
+patches.
+
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Shaju Abraham <shaju.abraham@nutanix.com>
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v9 -> v10
+- fix tabs
+- initialize writable_mask
+- Use ValueRange instead of Value
+
+v7 -> v8
+Adaptation after removal of struct ArmIdRegArchVal
+
+v5 -> v6
+- restored support of enum values
+---
+ target/arm/cpu-idregs.c | 93 +++++++++++++++++++++++++++++++++++++++++
+ target/arm/meson.build  |  1 +
+ 2 files changed, 94 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 07/26] target/arm/cpu-idregs.h.inc: Generate enum values
+Author: Eric Auger <eric.auger@redhat.com>
+
+Modify the python script so that enum values are also
+extracted from Registers.json.
+
+Single Values and ValueRange are wrapped as
+
+IDREG_FIELD_ENUM(REG, FIELD, SHIFT, LENGTH,
+                 IDREG_ARCH_VALUE_RANGE(LO, HI), ...).
+
+Consecutive values are merged.
+
+Using ranges even for single values produces a more compact
+header, which generally have at least 2 values and brings the
+benefice to have direct compact support for ValueRange.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu-idregs.h.inc                   | 1685 +++++++++++++----
+ .../update-aarch64-cpu-sysreg-properties.py   |  125 +-
+ 2 files changed, 1395 insertions(+), 415 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 08/26] target/arm/cpu-idregs.h.inc: Generate reserved fields
+Author: Eric Auger <eric.auger@redhat.com>
+
+Extract reserved fields: RES0, RES1, RAZ, ...
+
+The extra complexity comes from the fact several reserved
+fields may exist in the register, as opposed to named fields.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+
+---
+
+v7 -> v8:
+- fix WithShifts issue
+---
+ target/arm/cpu-idregs.h.inc                   | 65 ++++++++++++++
+ .../update-aarch64-cpu-sysreg-properties.py   | 85 +++++++++++++++----
+ 2 files changed, 134 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 06/26] target/arm/cpu-idregs.h.inc: Generate with script
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce a script that takes as input the Registers.json file
+delivered in the AARCHMRS Features Model downloadable from the
+Arm Developer A-Profile Architecture Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+and automates the generation of system register properties definitions.
+
+generates target/arm/cpu-idregs.h.inc containing definitions for
+feature ID registers. Current generation is based on
+AARCHMRS_OPENSOURCE_A_profile_FAT-2026-03.
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+Generate ID reg definitions with the scripts/update-aarch64-cpu-sysreg-properties.py
+based on AARCHMRS_OPENSOURCE_A_profile_FAT-2026-03 Registers.json
+
+Each register and fields are described with this pattern:
+
+IDREG_START(REG)
+IDREG_FIELD(REG, FIELD, SHIFT, LENGTH)
+...
+IDREG_END(REG)
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Suggested-by: Khushit Shah <khushit.shah@nutanix.com>
+Suggested-by: Shaju Abraham <shaju.abraham@nutanix.com>
+
+---
+
+v9 -> v10:
+- squashed the script and the generated header.
+- improved comments
+- some minor code rework like sorting inside the helper
+
+v5 -> v6
+- add ident
+---
+ target/arm/cpu-idregs.h.inc                   | 617 ++++++++++++++++++
+ .../update-aarch64-cpu-sysreg-properties.py   | 165 +++++
+ 2 files changed, 782 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 05/26] arm/cpu: Add infra to handle generated ID register definitions
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce an infrastructure to store the definition of all ID regs:
+This include their name, index array of named fields and enum values
+if any.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+Co-authored-by: Khushit Shah <khushit.shah@nutanix.com>
+Signed-off-by: Khushit Shah <khushit.shah@nutanix.com>
+
+---
+v9 -> v10:
+- commit description and comment slight rewording
+- store RangeValues instead of Values
+
+v7 -> v8:
+- remove typedef struct ArmIdRegArchVal
+
+v5 -> v6:
+- add ArmIdRegArchVal
+---
+ target/arm/cpu-idregs.h | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 04/26] target/arm/cpu-sysregs.h.inc: Update with automatic generation
+Author: Eric Auger <eric.auger@redhat.com>
+
+Introduce scripts/update-aarch64-cpu-sysregs-header.py that takes
+as input the Registers.json file delivered in the AARCHMRS Features
+Model downloadable from the Arm Developer A-Profile Architecture
+Exploration Tools page:
+https://developer.arm.com/Architectures/A-Profile%20Architecture#Downloads
+
+and outputs the list of ID regs in target/arm/cpu-sysregs.h.inc
+under the form of DEF(<name>, <op0>, <op1>, <crn>, <crm>, <op2>) or
+DEF_MUX(<name>, <op0>, <op1>, <crn>, <crm>, <op2>, <length>)
+
+We only care about IDregs with opcodes satisfying:
+op0 = 3, op1 = {0,1,3}, crn = 0, crm within [0, 7], op2 within [0, 7]
+
+As we plan to reuse get_opcode() and extract_idregs_from_registers_json()
+functions in another script, put them in a separate module.
+
+Update target/arm/cpu-sysregs.h.inc with the script.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+Signed-off-by: Cornelia Huck <cohuck@redhat.com>
+
+---
+
+v9 -> v10:
+- squashed 3 patches: main script, module and generated file
+- improve the comment related to skipped registers. Move is_demux in
+  the loop. Fix indent.
+- sort by reg name inside the helper
+- add support for DEMUX register
+---
+ target/arm/cpu-sysregs.h.inc                 |  10 ++
+ scripts/aarch64_sysreg_helpers.py            | 118 +++++++++++++++++++
+ scripts/update-aarch64-cpu-sysregs-header.py |  59 ++++++++++
+ 3 files changed, 187 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v10 03/26] target/arm: Enforce MPIDR into isar.idregs[] storage
+Author: Eric Auger <eric.auger@redhat.com>
+
+At the moment MPIDR_EL1 has no real storage. Instead cpu
+mp_affinity field stores the Aff0-Aff2 bits only and the
+ID register is reconstructed when needed. There is also
+an mp-affinity property used for TCG only.
+
+Keep the mp-affinity property and its associated storage
+while making sure the MPIDR_EL1 full register is stored
+in cpu->isar.idregs[] as other ID registers.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu.h             |  8 +++++++-
+ target/arm/cpu-sysregs.h.inc |  1 +
+ target/arm/cpu.c             | 17 +++++++++++++++++
+ target/arm/helper.c          | 14 +-------------
+ target/arm/hvf/hvf.c         |  2 +-
+ target/arm/kvm.c             |  1 +
+ target/arm/whpx/whpx-all.c   |  2 +-
+ 7 files changed, 29 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 02/26] target/arm: Move MIDR into isar.idregs[] storage
+Author: Eric Auger <eric.auger@redhat.com>
+
+Move MIDR into the isar.idregs[] array as other ID registers.
+This will allow to overwrite it as others.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu.h             |  1 -
+ target/arm/cpu-sysregs.h.inc |  1 +
+ hw/intc/armv7m_nvic.c        |  2 +-
+ target/arm/cpu-max.c         |  2 +-
+ target/arm/cpu.c             |  2 +-
+ target/arm/cpu64.c           |  2 +-
+ target/arm/helper.c          | 13 +++++++------
+ target/arm/hvf/hvf.c         |  4 ++--
+ target/arm/tcg/cpu-v7m.c     | 14 +++++++-------
+ target/arm/tcg/cpu32.c       | 33 +++++++++++++++++----------------
+ target/arm/tcg/cpu64.c       | 22 +++++++++++-----------
+ target/arm/whpx/whpx-all.c   |  4 ++--
+ 12 files changed, 51 insertions(+), 49 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 01/26] target/arm: Move REVIDR into isar.idregs[] storage
+Author: Eric Auger <eric.auger@redhat.com>
+
+Move REVIDR into the isar.idregs[] array as other ID registers.
+This will allow to overwrite it as others.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu.h             |  1 -
+ target/arm/cpu-sysregs.h.inc |  1 +
+ hw/intc/armv7m_nvic.c        |  2 +-
+ target/arm/cpu-max.c         |  2 +-
+ target/arm/cpu64.c           |  2 +-
+ target/arm/helper.c          |  2 +-
+ target/arm/tcg/cpu-v7m.c     |  4 ++--
+ target/arm/tcg/cpu32.c       |  4 ++--
+ target/arm/tcg/cpu64.c       | 20 ++++++++++----------
+ 9 files changed, 19 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v10 00/26] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields.
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+  
+The end goal is to get more flexibility when migrating guests
+between different host hardware. This series is a prerequisite for
+aarch64 named vcpu models.
+
+QEMU retrieves the writable ID fields from KVM UAPI and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file. It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction.
+  
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+SYSREG properties are applied at the end of the initialization
+chain, after legacy composite options (sve, pauth, ...). They
+do not substitute to them because legacy options do more than
+just changing the value of ID registers. They may also interact
+with KVM to init the vcpu with specific features or set some
+VM capabilities. SYSREG properties just affect the corresponding
+ID register field. Some checks are performed to make sure their
+value is not inconsistent with legacy composite options.
+
+The list of SYSREG properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion. They return the current
+value for the corresponding field. The qmp command also allows to
+test  setting new values. In static mode, they are tested at qemu
+level only, against field length, arch enum values if any and
+consistency with legacy composite options. With full expansion,
+the values are tested against KVM using a scratch vcpu initialized
+with the right legacy composite property values.
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v10
+
+History:
+--------
+v9 -> v10:
+addressed all Khushit's comments/suggestions. Here is the
+list of main changes.
+
+- MIDR, REVIDIR, MPIDR storage move (this may be sent as a
+  separate prerequisite series)
+- rebase on demux register handler that has just landed
+  - update the json extractor accordingly
+- Generate conditional enum values
+- reorganize script patches to have the generated header
+  in the same patch which is much easier to maintain
+- New macro to encode arch enum value and ValueRanges which
+  gives a much more compact header. Also enabled to remove
+  check-patch error
+- Put a maximum of code in cpu64.c instead of kvm.c to
+  pave the way for other acceleration support. Also
+  changed the consistency check handling by skipping potential
+  new props that are known to collide with legacy composite options
+- add writable_only param to pave the way for exposing all fields
+  as props
+- fixes in the qmp expansion code
+
+
+Cornelia Huck (3):
+  target/arm/kvm: Retrieve writable ID reg map
+  arm-qmp-cmds: introspection for ID register props
+  arm/cpu-features: Document ID reg properties
+
+Eric Auger (22):
+  target/arm: Move REVIDR into isar.idregs[] storage
+  target/arm: Move MIDR into isar.idregs[] storage
+  target/arm: Enforce MPIDR into isar.idregs[] storage
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  target/arm/cpu-idregs.h.inc: Generate with script
+  target/arm/cpu-idregs.h.inc: Generate enum values
+  target/arm/cpu-idregs.h.inc: Generate reserved fields
+  hw/arm/virt: Make sure virt_get_caches() keeps on reading CLIDR_EL1 as
+    0
+  arm/kvm: Initialize isar.idregs[] with all writable host ID regs
+  target/arm/cpu64: Add properties for writable IDReg fields
+  target/arm/kvm: Implement SYSREG property setter and getter
+  target/arm/kvm: Let kvm_arm_init_cpreg_list propagate an error handle
+  target/arm/kvm: Pass an Error handle to kvm_arch_init_vcpu
+  target/arm/kvm: Introduce kvm_arm_override_idreg_field helper
+  target/arm/cpu64: Introduce arm_cpu_apply_sysreg_props
+  target/arm/kvm: Apply SYSREG props
+  target/arm/kvm: Add consistency checking for SYSREG props
+  target/arm/cpu64: Add helper to test SYSREG props against a scratch
+    vcpu
+  target/arm/kvm: Add an error handle to
+    kvm_arm_create_scratch_host_vcpu
+  target/arm/kvm: Introduce kvm_arm_vcpu_prepare_init_features helper
+  target/arm/kvm: Introduce kvm_arm_create_init_scratch_vcpu()
+
+Shaju Abraham (1):
+  target/arm/cpu_idregs: Generate tables for Arm64 ID registers and
+    fields
+
+ docs/system/arm/cpu-features.rst              |  111 +-
+ include/system/kvm.h                          |    2 +-
+ target/arm/cpu-idregs.h                       |   76 +
+ target/arm/cpu.h                              |   12 +-
+ target/arm/kvm_arm.h                          |   26 +-
+ target/arm/cpu-idregs.h.inc                   | 1549 +++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |   13 +
+ accel/kvm/kvm-all.c                           |   15 +-
+ hw/arm/virt.c                                 |   11 +
+ hw/intc/armv7m_nvic.c                         |    4 +-
+ target/arm/arm-qmp-cmds.c                     |  130 +-
+ target/arm/cpu-idregs.c                       |   93 +
+ target/arm/cpu-max.c                          |    4 +-
+ target/arm/cpu.c                              |   24 +-
+ target/arm/cpu64.c                            |  330 +++-
+ target/arm/helper.c                           |   29 +-
+ target/arm/hvf/hvf.c                          |    6 +-
+ target/arm/kvm-stub.c                         |   17 +
+ target/arm/kvm.c                              |  277 ++-
+ target/arm/tcg/cpu-v7m.c                      |   18 +-
+ target/arm/tcg/cpu32.c                        |   37 +-
+ target/arm/tcg/cpu64.c                        |   42 +-
+ target/arm/whpx/whpx-all.c                    |    6 +-
+ target/i386/kvm/kvm.c                         |   22 +-
+ target/loongarch/kvm/kvm.c                    |   27 +-
+ target/ppc/kvm.c                              |    6 +-
+ target/riscv/kvm/kvm-cpu.c                    |    3 +-
+ target/s390x/kvm/kvm.c                        |    2 +-
+ scripts/aarch64_sysreg_helpers.py             |  118 ++
+ .../update-aarch64-cpu-sysreg-properties.py   |  331 ++++
+ scripts/update-aarch64-cpu-sysregs-header.py  |   59 +
+ target/arm/meson.build                        |    1 +
+ target/arm/trace-events                       |    9 +
+ 33 files changed, 3232 insertions(+), 178 deletions(-)
+
+----------------------------------------------------------------------
+

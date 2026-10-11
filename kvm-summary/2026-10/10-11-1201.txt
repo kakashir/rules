@@ -1,0 +1,651 @@
+
+On /root/mail/repo:
+From 9c5702c3d to c65066931
+KVM mailing list update from 9c5702c3d to c65066931
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      7 kernel.org
+      7 gmail.com
+      3 redhat.com
+
+Top 15 contributors (Based on Email Body)
+
+      7  Jia Jia <physicalmtea@gmail.com>
+      7  "Aneesh Kumar K.V (Arm)" <aneesh.kumar@kernel.org>
+      3  Maxim Levitsky <mlevitsk@redhat.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: nVMX: don't check PIR.ON when processing nested posted interrupts
+[PATCH v2 1/2] KVM: nVMX: don't check PIR.ON when processing nested posted interrupts
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+Despite the suggestion to test and set the PIR.ON and avoid sending
+a posted interrupt if it is already set, there is no requirement
+for this bit to be set for posted interrupt processing to happen
+when the target CPU receives the posted notification vector.
+
+See section 30.6 POSTED-INTERRUPT PROCESSING:
+
+   "The processor clears the outstanding-notification bit in
+    the posted-interrupt descriptor. This is done atomically so as to leave
+    the remainder of the descriptor unmodified
+    (e.g., with a locked AND operation)."
+
+Apparently Windows' implementation of APICv does exactly this:
+it sets bits in PIR, without bothering to also set the PIR.ON.
+
+Signed-off-by: Maxim Levitsky <mlevitsk@redhat.com>
+---
+ arch/x86/kvm/vmx/nested.c | 15 +++++++++++----
+ 1 file changed, 11 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: fix nested APICv emulation for windows guests
+[PATCH v2 0/2] KVM: nVMX: fix nested APICv emulation for windows guests
+Author: Maxim Levitsky <mlevitsk@redhat.com>
+
+Fix two problems that were recently discovered that cause nested APICv=0D
+to malfunction on windows with hyperv enabled.=0D
+=0D
+The first problem is that unlike KVM, windows doesn't set PIR.ON when=0D
+sending posted interrupts. X86 spec actually allows this.=0D
+=0D
+The second problem is that unlilke KVM, which mostly ignores them,=0D
+windows depends on accurate delivery of the posted notification=0D
+interrupts, and currently it is possible for a posted notification=0D
+to get lost it it arrives at the same time as the nested VM exit.=0D
+=0D
+V2: to avoid spurious notification in L1, process the posted=0D
+notification in L2, just before VM exit.=0D
+=0D
+PS: I am not 100% sure if I got the barriers right, plus I am not sure=0D
+about what to do if vmx_complete_nested_posted_interrupt can't write=0D
+to the nested PIR, in this it calls kvm_handle_memory_failure, and=0D
+I don't know 100% its interactions with nested VM exit.=0D
+=0D
+Best regards,=0D
+	Maxim Levitsky=0D
+=0D
+Maxim Levitsky (2):=0D
+  KVM: nVMX: don't check PIR.ON when processing nested posted interrupts=0D
+  KVM: nVMX: avoid losing the posted notification interrupt when exiting=0D
+    L2=0D
+=0D
+ arch/x86/kvm/vmx/nested.c | 22 ++++++++++++++++++----=0D
+ arch/x86/kvm/vmx/vmx.c    |  5 +++++=0D
+ 2 files changed, 23 insertions(+), 4 deletions(-)=0D
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: split socket lookup from locked RX processing
+[PATCH net-next v2 1/5] vsock/virtio: split socket lookup from locked RX processing
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Split virtio_transport_recv_pkt() so socket lookup is separate from the
+receive state machine that runs under the socket lock.
+
+Keep virtio_transport_recv_pkt() on its existing per-packet locking path.
+Pass the source and destination addresses used for lookup to the locked
+receive path so they are decoded only once.
+
+Pass the network namespace and decoded address tuple through a packet
+context to the locked receive path.
+
+Preserve source validation and failure handling. Keep the lookup reference
+separate from the skb owner reference so the locked receive path can manage
+the two lifetimes independently.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 139 ++++++++++++++++--------
+ 1 file changed, 96 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: reduce RX per-packet socket overhead
+[PATCH net-next v2 0/5] vsock/virtio: reduce RX per-packet socket overhead
+Author: Jia Jia <physicalmtea@gmail.com>
+
+This series reduces per-packet socket overhead in the virtio-vsock RX
+worker.
+
+Patch 1: separate socket lookup from locked packet processing.
+
+Patch 2: keep one socket lock across a bounded run of established
+STREAM/RW packets for the same native socket.
+
+Patch 3: reuse the locked socket for later packets with the same
+address tuple.
+
+Patch 4: coalesce default write-space notifications while that
+lock is held.
+
+Patch 5: defer the default readable callback until after the batch
+unlocks.
+
+Performance:
+
+Tested on a single-stream vsock connection (one Guest receiver thread on
+CPU0, virtio-vsock IRQ on Guest CPU1, fresh QEMU Guest per state, 16
+balanced AB/BA pairs per payload). The host uses vhost-vsock.
+
+For throughput, vsock_perf runs on the host as the
+sender, with a custom single-threaded Guest receiver pinned to Guest CPU0
+using blocking recv(). The fixed-64K table uses a 64K buffer; the matched
+table uses the sender's request size. The virtio-vsock IRQ/RX worker is
+pinned to Guest CPU1. To normalize run times across payloads into a
+bounded, deterministic window and avoid long runs being skewed by host
+background noise or virtualization scheduling jitter, transfer sizes scale
+proportionally with the request size (64B/64M, 256B/256M, etc.), capped at
+2G for 4K–64K. The custom receiver keeps the recv() size and count
+explicit; vsock_perf's receiver uses poll()+read().
+
+Latency uses a custom user-space vsock ping-pong tool.
+
+The measurements below were collected for the RX batching series.
+
+This benchmark does not run vsock_perf on both ends. Instead, it uses
+vsock_perf as the sender on the host (vhost-vsock) side and a custom
+blocking recv() program without poll() on the Guest side, with the receiver
+thread pinned to Guest CPU0 (and the virtio-vsock RX worker pinned to Guest
+CPU1). Plain blocking recv() combined with strict core pinning gives
+audit-level determinism for tracing a single-threaded TID.
+
+I think it is necessary to do further testing on the large I/O throughput
+peak observed at 4K to find the root cause (and rule out anything
+introduced by the measurement method). I used kprobe and temporary
+trace_printk in the source for mechanism diagnostics. The diagnostic
+data shows that lock wait time and contention at 4K both decrease strictly
+monotonically as payload size increases;
+wire-level tracing also confirms that 4K is split into two packets, and
+that all sizes can reach the 64K batching limit.
+
+The nature of the prominent 4K throughput gain most likely lies in it
+sitting exactly at the end-to-end pipeline sweet spot between host and
+guest:
+
+Compared with 1K and smaller payloads: 4K halves the packet intensity, so
+upstream host-side syscall and interrupt injection overhead is no longer
+the bottleneck across the whole path, allowing the host to supply data
+adequately.
+
+Compared with larger 8K to 64K payloads: 4K keeps the payload size
+moderate, and combined with the observed syscall reduction and cycle
+improvement, the batch-draining benefit from notification coalescing is
+fully realized.
+
+As payload size increases further from 8K to 64K, the overall gain shrinks
+smoothly, consistent with Amdahl's law, because system execution time
+shifts toward page copying and VQ processing.
+
+With all patches applied:
+
+End-to-end RX throughput (64K Guest recv() size, SO_RCVLOWAT=1; Gbit/s):
+
+  payload  baseline RX  PATCH RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B      0.1065       0.2503    +135.00% [+130.35%, +139.74%]
+  256B     0.5722       1.0286     +79.76% [+75.40%, +84.23%]
+  512B     1.1464       1.9779     +72.53% [+69.50%, +75.63%]
+  1K       2.2714       3.6368     +60.12% [+56.92%, +63.37%]
+  4K       3.9095       7.7160     +97.37% [+92.09%, +102.79%]
+  8K       3.3436       5.3111     +58.84% [+53.49%, +64.38%]
+  16K      3.8876       5.7456     +47.80% [+45.45%, +50.18%]
+  64K      4.0056       5.3590     +33.79% [+29.37%, +38.36%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+Gbit/s):
+
+  payload baseline PATCH    throughput change (95% CI)    recv()
+          RX       RX                                     (base/patch)
+          (Gbit/s) (Gbit/s)
+  64B     0.1259   0.2651   +110.52% [+99.08%, +122.62%]  1048577/1048577
+  256B    0.3790   0.9444   +149.20% [+134.70%, +164.60%] 1048577/1048577
+  512B    0.7768   1.7009   +118.97% [+103.94%, +135.11%] 1048577/1048577
+  1K      1.4886   2.9477   +98.02% [+84.82%, +112.17%]   1048577/1048577
+  4K      2.1129   4.7331   +124.01% [+115.40%, +132.96%] 537436/525524
+  8K      2.8698   5.3683   +87.06% [+80.96%, +93.37%]    276448/264109
+  16K     3.5156   5.8463   +66.30% [+63.10%, +69.55%]    147849/132267
+  64K     4.2459   5.8576   +37.96% [+35.26%, +40.71%]    48447/33144
+
+Request-response latency (Ping-Pong RTT, 10,000 requests):
+
+  payload  baseline mean RTT (us)  PATCH mean RTT (us)  change (95% CI)
+  64B      221.968                  218.144              -1.72%
+                                                        [-4.23%, +0.85%]
+  256B     126.968                  124.541              -1.91%
+                                                        [-3.35%, -0.45%]
+  4K       130.362                  126.664              -2.84%
+                                                        [-5.12%, -0.50%]
+
+Diagnostic Guest CPU1 system-wide cycles (fixed-64K receiver, with perf):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  64B      62.032            52.370          -15.58% [-17.16%, -13.96%]
+  256B     15.287            13.630          -10.84% [-12.51%, -9.14%]
+  512B      7.306             6.611           -9.51% [-10.92%, -8.08%]
+  1K        3.811             3.458           -9.25% [-10.96%, -7.50%]
+  4K        1.850             1.669           -9.75% [-11.78%, -7.67%]
+  8K        1.504             1.363           -9.36% [-12.97%, -5.60%]
+  16K       1.321             1.210           -8.37% [-10.61%, -6.07%]
+  64K       1.342             1.227           -8.57% [-10.87%, -6.21%]
+
+Patch-scope measurements and attribution:
+
+The series was tested cumulatively in two ranges, using the same
+single-stream setup and paired AB/BA runs. The table below shows results
+from patches 1–3 only, before the notification changes in patches 4–5.
+
+  payload  baseline RX  PATCH RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B      0.1211       0.2534    +109.26% [+106.34%, +112.23%]
+  256B     0.5671       0.9989     +76.15% [+70.63%, +81.85%]
+  512B     1.1334       1.9000     +67.64% [+64.64%, +70.69%]
+  1K       2.2650       3.5610     +57.22% [+50.91%, +63.79%]
+  4K       3.8331       7.2888     +90.15% [+83.46%, +97.09%]
+  8K       4.8244       7.6636     +58.85% [+53.71%, +64.16%]
+  16K      5.4979       8.2469     +50.00% [+45.57%, +54.57%]
+  64K      3.8875       4.7588     +22.41% [+17.77%, +27.24%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+no perf; Gbit/s):
+
+  payload baseline PATCH    throughput change (95% CI)    recv()
+          RX       RX                                     (base/patch)
+          (Gbit/s) (Gbit/s)
+  64B     0.1397   0.2646   +89.40% [+80.92%, +98.27%]    1048577/1048577
+  256B    0.3960   0.9516   +140.34% [+117.48%, +165.60%] 1048577/1048577
+  512B    0.7541   1.6496   +118.74% [+101.42%, +137.55%] 1048577/1048577
+  1K      1.4903   2.8793   +93.21% [+77.06%, +110.82%]   1048577/1048577
+  4K      2.9466   6.2284   +111.37% [+97.52%, +126.20%]  538192/525220
+  8K      4.0043   6.9249   +72.94% [+60.18%, +86.71%]    276313/263852
+  16K     4.8981   7.5599   +54.34% [+49.77%, +59.06%]    147576/131600
+  64K     5.9294   7.7897   +31.37% [+27.18%, +35.70%]    50207/33014
+
+Ping-Pong RTT (10,000 requests; no perf):
+
+  payload  baseline mean RTT (us)  PATCH mean RTT (us)  change (95% CI)
+  64B      119.688                  119.739              +0.04%
+                                                        [-2.61%, +2.77%]
+  256B     120.603                  124.485              +3.22%
+                                                        [-0.44%, +7.01%]
+  4K       121.921                  122.491              +0.47%
+                                                        [-3.51%, +4.61%]
+
+Guest CPU1 system-wide aggregate cycles (fixed-64K receiver, with perf;
+cycles/byte):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  64B      66.838             60.012           -10.21% [-13.03%, -7.30%]
+  256B     13.446             12.305            -8.49% [-11.23%, -5.66%]
+  512B      6.833              6.317            -7.54% [ -9.52%, -5.52%]
+  1K        3.558              3.434            -3.48% [ -6.02%, -0.87%]
+  4K        1.806              1.686            -6.64% [ -8.69%, -4.54%]
+  8K        1.457              1.403            -3.73% [ -5.64%, -1.78%]
+  16K       1.295              1.279            -1.24% [ -5.21%, +2.89%]
+  64K       1.214              1.198            -1.30% [ -4.06%, +1.53%]
+
+The split-patch tests show that PATCH 2 and PATCH 3 mainly contribute to
+the improvement in I/O Throughput, while PATCH 4 and PATCH 5 mainly
+contribute to the improvements in cycles and RTT latency (although PATCH
+2-3 show no obvious regression here).
+
+---
+v2:
+  - stop a batch after it consumes the last skb metadata slot, sharing the
+    admission predicate with virtio_transport_inc_rx_pkt()
+  - move replacement-callback handoff into vsock, process queued skbs one
+    at a time, and trigger the handoff from vsock_bpf_update_proto() on
+    attach and detach
+  - reduce the packet-context diff in the locked receive helper
+  - keep RX batch counters in the batch state and reset them in the finish
+    path
+  - use the vsock/virtio subject prefix and add the requested measurements
+v1: https://lore.kernel.org/virtualization/20261002074551.318789-1-physicalmtea@gmail.com/
+
+Jia Jia (5):
+  vsock/virtio: split socket lookup from locked RX processing
+  vsock/virtio: amortize RX socket locking for stream packets
+  vsock/virtio: reuse same-flow socket lookup in RX batches
+  vsock/virtio: coalesce RX write-space notifications in lock batches
+  vsock/virtio: defer RX readable notifications until batch unlock
+
+ include/linux/virtio_vsock.h            |  16 ++
+ include/net/af_vsock.h                  |   8 +
+ net/vmw_vsock/af_vsock.c                | 104 +++++++++
+ net/vmw_vsock/virtio_transport.c        |  29 ++-
+ net/vmw_vsock/virtio_transport_common.c | 389 +++++++++++++++++++++++++++-----
+ net/vmw_vsock/vsock_bpf.c               |   2 +
+ 6 files changed, 496 insertions(+), 52 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: attach and bind device resources
+[RFC PATCH v1 1/6] KVM: guest_memfd: attach and bind device resources
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Introduce the device resource flag and registration of a provider file
+operations identity. KVM checks file->f_op before interpreting
+private_data as guest_memfd_device_operations.
+
+Add attach() to establish the provider, bind() to associate eligible
+file offsets with memslots, get_pfn() for shared device PFNs, release()
+for the provider lifetime.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Assisted-by: Codex
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst |   4 +
+ include/linux/guest_memfd.h    |  34 +++++++
+ include/linux/kvm_host.h       |   9 +-
+ include/uapi/linux/kvm.h       |   1 +
+ virt/kvm/guest_memfd.c         | 167 ++++++++++++++++++++++++++++++---
+ 5 files changed, 202 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM/VFIO: guest_memfd support for device MMIO resources
+[RFC PATCH v1 0/6] KVM/VFIO: guest_memfd support for device MMIO resources
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+This series adds a guest_memfd device-resource framework for exposing PCI
+BAR memory to guests. The intended use is confidential device assignment,
+where KVM needs to coordinate private device mappings with shared access
+through VFIO. The Arm CCA backend is provided separately; these patches
+contain the guest_memfd, VFIO and IOMMUFD interfaces it uses.
+
+The guest_memfd framework and Arm CCA backend are available together at:
+
+  https://git.gitlab.arm.com/linux-arm/linux-cca.git cca/topics/cca-da-gmem-backend
+
+Userspace creates a device-backed guest_memfd using the ordinary VFIO
+device fd as resource_fd, with GUEST_MEMFD_FLAG_USE_RESOURCE,
+GUEST_MEMFD_FLAG_DEVICE and GUEST_MEMFD_FLAG_INIT_SHARED. Eligible BAR
+intervals are registered as guest_memfd memslots. File offsets use the
+existing VFIO region-offset namespace, allowing one guest_memfd to cover
+multiple BAR intervals. Device-backed guest_memfd rejects mmap and
+fallocate; shared guest faults obtain bare BAR PFNs from the provider
+instead of resolving the memslot HVA or allocating folios.
+
+IOMMUFD resolves and pins the device's existing vDEVICE for the VM and
+serializes MMIO conversion through its MMIO mutex. VFIO supplies BAR PFNs,
+checks eligible ranges and excludes independent dma-buf exports while a
+guest_memfd provider is attached. VFIO host mmap faults, read/write and
+ioeventfd accesses check the requested range's guest_memfd attributes.
+Conversion revokes cached host mappings and shared guest mappings before
+installing private mappings. Other shared intervals remain accessible.
+
+This series depends on:
+* Ackerley Tng's "Allow guest_memfd to be created using a resource (pool)
+  fd" RFC, which provides the tmpfs resource-provider API:
+  https://lore.kernel.org/all/20260925-gmem-tmpfs-backend-v1-0-d36159822d18@google.com/
+* The IOMMUFD/TSM series, which provides the vIOMMU and vDEVICE interfaces:
+  https://lore.kernel.org/all/20261008055955.4014342-1-aneesh.kumar@kernel.org/
+
+Notes:
+* While developing this framework, I looked at David Woodhouse's
+  guest_memfd provider work, including the gmem-provider-v3 branch. It
+  was used for comparison and was not merged. The posted RFC v2 is here:
+  https://lore.kernel.org/all/20260720111259.122911-1-dwmw2@infradead.org/
+* Codex assisted with implementation, review and series organization.
+
+Cc: Ackerley Tng <ackerleytng@google.com>
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: David Woodhouse <dwmw2@infradead.org>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: "Joerg Roedel (AMD)" <joro@8bytes.org>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Robin Murphy <robin.murphy@arm.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Will Deacon <will@kernel.org>
+Cc: Alexey Kardashevskiy <aik@amd.com>
+Cc: Xu Yilun <yilun.xu@linux.intel.com>
+Cc: Catalin Marinas <catalin.marinas@arm.com> 
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Steven Price <steven.price@arm.com>
+Cc: Fred Griffoul <griffoul@gmail.com> 
+Cc: iommu@lists.linux.dev
+Cc: kvm@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+
+Aneesh Kumar K.V (Arm) (6):
+  KVM: guest_memfd: attach and bind device resources
+  KVM: guest_memfd: Support private/shared conversion of device memory
+  iommufd: Support MMIO provider attachment to vDEVICEs
+  vfio/pci: Provide guest_memfd backing for PCI BARs
+  KVM/VFIO: Remove device mappings during guest_memfd teardown
+  KVM: Invalidate guest_memfd mappings before removing memslot bindings
+
+ Documentation/virt/kvm/api.rst          |   4 +
+ drivers/iommu/iommufd/viommu.c          |  90 ++++
+ drivers/vfio/device_cdev.c              |   3 +-
+ drivers/vfio/group.c                    |   4 +-
+ drivers/vfio/pci/Kconfig                |  11 +
+ drivers/vfio/pci/Makefile               |   2 +
+ drivers/vfio/pci/vfio_pci.c             |   3 +
+ drivers/vfio/pci/vfio_pci_core.c        |  13 +
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  10 +
+ drivers/vfio/pci/vfio_pci_gmem.c        | 349 +++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  36 ++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 138 ++++++
+ drivers/vfio/pci/vfio_pci_rdwr.c        |  13 +-
+ drivers/vfio/vfio.h                     |   8 +
+ drivers/vfio/vfio_main.c                |  34 +-
+ include/linux/guest_memfd.h             |  50 +++
+ include/linux/iommufd.h                 |  33 ++
+ include/linux/kvm_host.h                |  14 +-
+ include/linux/vfio.h                    |   3 +
+ include/linux/vfio_pci_core.h           |  23 +
+ include/uapi/linux/kvm.h                |   1 +
+ virt/kvm/guest_memfd.c                  | 545 +++++++++++++++++++++++-
+ virt/kvm/guest_memfd.h                  |   6 +
+ virt/kvm/kvm_main.c                     |   4 +
+ 24 files changed, 1362 insertions(+), 35 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 4faf4c862 to cc915e272
+KVM mailing list update from 4faf4c862 to cc915e272
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     26 redhat.com
+      1 nutanix.com
+
+Top 15 contributors (Based on Email Body)
+
+     23  Eric Auger <eric.auger@redhat.com>
+      3  Cornelia Huck <cohuck@redhat.com>
+      1  Shaju Abraham <shaju.abraham@nutanix.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  storage
+[PATCH v10 01/26] target/arm: Move REVIDR into isar.idregs[] storage
+Author: Eric Auger <eric.auger@redhat.com>
+
+Move REVIDR into the isar.idregs[] array as other ID registers.
+This will allow to overwrite it as others.
+
+Signed-off-by: Eric Auger <eric.auger@redhat.com>
+---
+ target/arm/cpu.h             |  1 -
+ target/arm/cpu-sysregs.h.inc |  1 +
+ hw/intc/armv7m_nvic.c        |  2 +-
+ target/arm/cpu-max.c         |  2 +-
+ target/arm/cpu64.c           |  2 +-
+ target/arm/helper.c          |  2 +-
+ target/arm/tcg/cpu-v7m.c     |  4 ++--
+ target/arm/tcg/cpu32.c       |  4 ++--
+ target/arm/tcg/cpu64.c       | 20 ++++++++++----------
+ 9 files changed, 19 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  kvm/arm: Introduce a customizable aarch64 KVM host model
+[PATCH v10 00/26] kvm/arm: Introduce a customizable aarch64 KVM host model
+Author: Eric Auger <eric.auger@redhat.com>
+
+This series enhances the current host KVM model with capability to
+set writable ID reg fields.
+
+Since v6.7 kernel, KVM/arm allows the userspace to overwrite the values
+of a subset of ID regs. The list of writable fields continues to grow.
+The feature ID range is defined as the AArch64 System register space
+with op0==3, op1=={0, 1, 3}, CRn==0, CRm=={0-7}, op2=={0-7}.
+  
+The end goal is to get more flexibility when migrating guests
+between different host hardware. This series is a prerequisite for
+aarch64 named vcpu models.
+
+QEMU retrieves the writable ID fields from KVM UAPI and
+match them against a generated description of ID regs and their
+named fields that stem from AARCHMRS Registers.json file.
+Current description is based on latest 2026-03 edition.
+The content of the generated files was compared against kernel
+linux/arch/arm64/tools/sysreg file. It is not straightforward
+to have unit tests for python scripts as there are many cases for
+field extraction.
+  
+For each writable named field a uint64 property is created
+following the "SYSREG_<REG>_<FIELD>" naming convention. REG and
+FIELD names are those described in ARM ARM Reference manual.
+
+SYSREG properties are applied at the end of the initialization
+chain, after legacy composite options (sve, pauth, ...). They
+do not substitute to them because legacy options do more than
+just changing the value of ID registers. They may also interact
+with KVM to init the vcpu with specific features or set some
+VM capabilities. SYSREG properties just affect the corresponding
+ID register field. Some checks are performed to make sure their
+value is not inconsistent with legacy composite options.
+
+The list of SYSREG properties can be retrieved through the qmp
+monitor using query-cpu-model-expansion. They return the current
+value for the corresponding field. The qmp command also allows to
+test  setting new values. In static mode, they are tested at qemu
+level only, against field length, arch enum values if any and
+consistency with legacy composite options. With full expansion,
+the values are tested against KVM using a scratch vcpu initialized
+with the right legacy composite property values.
+
+Connie & Eric
+
+This series can be found at:
+https://github.com/eauger/qemu/tree/arm-cpu-model-v10
+
+History:
+--------
+v9 -> v10:
+addressed all Khushit's comments/suggestions. Here is the
+list of main changes.
+
+- MIDR, REVIDIR, MPIDR storage move (this may be sent as a
+  separate prerequisite series)
+- rebase on demux register handler that has just landed
+  - update the json extractor accordingly
+- Generate conditional enum values
+- reorganize script patches to have the generated header
+  in the same patch which is much easier to maintain
+- New macro to encode arch enum value and ValueRanges which
+  gives a much more compact header. Also enabled to remove
+  check-patch error
+- Put a maximum of code in cpu64.c instead of kvm.c to
+  pave the way for other acceleration support. Also
+  changed the consistency check handling by skipping potential
+  new props that are known to collide with legacy composite options
+- add writable_only param to pave the way for exposing all fields
+  as props
+- fixes in the qmp expansion code
+
+
+Cornelia Huck (3):
+  target/arm/kvm: Retrieve writable ID reg map
+  arm-qmp-cmds: introspection for ID register props
+  arm/cpu-features: Document ID reg properties
+
+Eric Auger (22):
+  target/arm: Move REVIDR into isar.idregs[] storage
+  target/arm: Move MIDR into isar.idregs[] storage
+  target/arm: Enforce MPIDR into isar.idregs[] storage
+  target/arm/cpu-sysregs.h.inc: Update with automatic generation
+  arm/cpu: Add infra to handle generated ID register definitions
+  target/arm/cpu-idregs.h.inc: Generate with script
+  target/arm/cpu-idregs.h.inc: Generate enum values
+  target/arm/cpu-idregs.h.inc: Generate reserved fields
+  hw/arm/virt: Make sure virt_get_caches() keeps on reading CLIDR_EL1 as
+    0
+  arm/kvm: Initialize isar.idregs[] with all writable host ID regs
+  target/arm/cpu64: Add properties for writable IDReg fields
+  target/arm/kvm: Implement SYSREG property setter and getter
+  target/arm/kvm: Let kvm_arm_init_cpreg_list propagate an error handle
+  target/arm/kvm: Pass an Error handle to kvm_arch_init_vcpu
+  target/arm/kvm: Introduce kvm_arm_override_idreg_field helper
+  target/arm/cpu64: Introduce arm_cpu_apply_sysreg_props
+  target/arm/kvm: Apply SYSREG props
+  target/arm/kvm: Add consistency checking for SYSREG props
+  target/arm/cpu64: Add helper to test SYSREG props against a scratch
+    vcpu
+  target/arm/kvm: Add an error handle to
+    kvm_arm_create_scratch_host_vcpu
+  target/arm/kvm: Introduce kvm_arm_vcpu_prepare_init_features helper
+  target/arm/kvm: Introduce kvm_arm_create_init_scratch_vcpu()
+
+Shaju Abraham (1):
+  target/arm/cpu_idregs: Generate tables for Arm64 ID registers and
+    fields
+
+ docs/system/arm/cpu-features.rst              |  111 +-
+ include/system/kvm.h                          |    2 +-
+ target/arm/cpu-idregs.h                       |   76 +
+ target/arm/cpu.h                              |   12 +-
+ target/arm/kvm_arm.h                          |   26 +-
+ target/arm/cpu-idregs.h.inc                   | 1549 +++++++++++++++++
+ target/arm/cpu-sysregs.h.inc                  |   13 +
+ accel/kvm/kvm-all.c                           |   15 +-
+ hw/arm/virt.c                                 |   11 +
+ hw/intc/armv7m_nvic.c                         |    4 +-
+ target/arm/arm-qmp-cmds.c                     |  130 +-
+ target/arm/cpu-idregs.c                       |   93 +
+ target/arm/cpu-max.c                          |    4 +-
+ target/arm/cpu.c                              |   24 +-
+ target/arm/cpu64.c                            |  330 +++-
+ target/arm/helper.c                           |   29 +-
+ target/arm/hvf/hvf.c                          |    6 +-
+ target/arm/kvm-stub.c                         |   17 +
+ target/arm/kvm.c                              |  277 ++-
+ target/arm/tcg/cpu-v7m.c                      |   18 +-
+ target/arm/tcg/cpu32.c                        |   37 +-
+ target/arm/tcg/cpu64.c                        |   42 +-
+ target/arm/whpx/whpx-all.c                    |    6 +-
+ target/i386/kvm/kvm.c                         |   22 +-
+ target/loongarch/kvm/kvm.c                    |   27 +-
+ target/ppc/kvm.c                              |    6 +-
+ target/riscv/kvm/kvm-cpu.c                    |    3 +-
+ target/s390x/kvm/kvm.c                        |    2 +-
+ scripts/aarch64_sysreg_helpers.py             |  118 ++
+ .../update-aarch64-cpu-sysreg-properties.py   |  331 ++++
+ scripts/update-aarch64-cpu-sysregs-header.py  |   59 +
+ target/arm/meson.build                        |    1 +
+ target/arm/trace-events                       |    9 +
+ 33 files changed, 3232 insertions(+), 178 deletions(-)
+
+----------------------------------------------------------------------
+
