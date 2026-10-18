@@ -1,0 +1,3109 @@
+
+On /root/mail/repo:
+From b7457e456 to 3bf012389
+KVM mailing list update from b7457e456 to 3bf012389
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     54 amazon.co.uk
+     14 kernel.org
+      6 gmail.com
+      4 cispa.de
+      1 redhat.com
+      1 amazon.de
+
+Top 15 contributors (Based on Email Body)
+
+     45  David Woodhouse <dwmw@amazon.co.uk>
+     14  "Aneesh Kumar K.V (Arm)" <aneesh.kumar@kernel.org>
+      9  Mushahid Hussain <hmushi@amazon.co.uk>
+      6  Tharit Tangkijwanichakul <tharitt97@gmail.com>
+      4  Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+      1  Nikolas Wipper <nikwip@amazon.de>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[RFC PATCH 20/55] KVM: x86: allow KVM_TRANSLATE on plane vCPU fds
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The VMM needs to translate guest virtual addresses in the context of a
+specific plane to implement HvCallTranslateVirtualAddress, which a
+higher VTL uses to resolve a lower VTL's buffer addresses.
+KVM_TRANSLATE already works on any vCPU; permit it on plane fds too.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/x86.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 24/55] WIP: KVM: x86: deliver events to suspended higher planes
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A suspended plane's events must preempt the lower plane running on the
+same vCPU, but nothing told the running twin:
+
+- An interrupt, local-APIC timer or Hyper-V stimer landing on a
+  stopped twin only kicked the twin itself — a no-op while it is
+  parked. Kick the lower twins too, with KVM_REQ_UNBLOCK so a sibling
+  already past its event checks aborts the in-flight vmentry.
+- A parked plane's lapic timer rode the VMX preemption timer, which
+  only counts in guest mode, so it never fired while the plane was
+  suspended. Hand it to the hrtimer when a non-zero plane's KVM_RUN
+  ends.
+- KVM_REQ_HV_STIMER was a shared request, so the running plane
+  consumed the twin's request without processing the twin's stimers.
+  Make it per-plane.
+- kvm_higher_plane_with_event() now also reports a
+  pending-but-not-injected apic timer.
+- Suppress KVM_EXIT_HYPERV_SYNIC for non-zero planes: userspace's
+  SynIC device models plane 0 only, and treated a twin's SIMP move as
+  a plane-0 overlay relocation, carrying stale overlay contents to the
+  new GPA.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/hyperv.c           | 27 +++++++++++++++++++
+ arch/x86/kvm/lapic.c            | 46 ++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/x86.c              | 19 ++++++++++++--
+ 4 files changed, 90 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 30/55] KVM: planes: Unwind published state on KVM_CREATE_PLANE failure
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+kvm_create_plane() publishes the new plane in kvm->planes[] and takes
+the APICV_INHIBIT_REASON_PLANES inhibit before
+kvm_vm_ioctl_create_plane() can still fail at anon_inode_getfile(),
+and the error path freed the plane without unpublishing it: a VMM
+retrying plane setup after such a failure wrote overlays through the
+freed plane via KVM_SET_PLANE_MEMORY_OVERLAY, and VM teardown
+destroyed the plane a second time. The VM also kept APICv inhibited
+with no nonzero plane left to justify it.
+
+Clear the kvm->planes[] slot before freeing, and drop the APICv
+inhibit in kvm_arch_plane_destroy() when the last nonzero plane of a
+live VM goes away (at VM teardown plane 0 is already gone, which skips
+the update). Make the overlay ioctl read kvm->planes[] under
+kvm->lock, which the create path holds across publish and unpublish,
+so a plane pointer it observes stays valid until VM teardown; publish
+with smp_store_release() for the remaining lock-free readers.
+
+Found by Sashiko review.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/x86.c  | 32 ++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c | 25 ++++++++++++++++++++++---
+ 2 files changed, 54 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 23/55] WIP: userspace VTL interrupt entry and register intercepts
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Windows VSM boot stalls and PatchGuard-induced triple faults traced to
+missing host behaviours, all confirmed against the reference VSM host:
+
+- A pending interrupt for a suspended higher VTL must preempt the
+  lower VTL. In userspace-switch mode, report it as a new
+  KVM_EXIT_HYPERV_VTL_INTERRUPT exit — from the halted/block path too,
+  since a halted lower VTL never reaches vcpu_enter_guest() — so
+  userspace enters the higher VTL itself and its view of the active
+  VTL stays in sync. kvm_higher_plane_with_event() tests raw
+  pending-ness (kvm_apic_has_interrupt), because a suspended plane
+  carries a stale apicv_active that makes
+  kvm_cpu_has_injectable_intr() report false.
+
+- The in-kernel forced entry, like the in-kernel VTL switch, writes
+  the entered VTL's control area through the *entered* plane's
+  context, since the assist page may be protected against the lower
+  VTL; on failure a VTL call forwards to userspace and a forced entry
+  stays pending. The refusal conditions live in
+  kvm_hv_vtl_entry_blocked(), which also gates
+  kvm_higher_plane_with_event() in in-kernel mode: an armed event on a
+  plane that cannot be entered (never run, stopped by userspace,
+  parked on a non-hypercall completion owning the shared run union)
+  must not keep waking a halted lower VTL that has no way to consume
+  it. A plane which has never entered the guest holds reset state and
+  userspace owns the HvCallEnableVpVtl tracking (the reference host
+  fails such calls with HV_STATUS_INVALID_VP_STATE), so hand it the
+  switch and leave the event pending. The resume value is
+  guest-derived in every switch flavour, so
+  KVM_HV_HCALL_RESULT_RAISE_UD is masked out of it, and a target with
+  no completion armed receives it directly in RAX, as the TLFS
+  register-restore contract on VTL return requires.
+
+- RAX/RCX of the lower VTL are captured at in-kernel VTL entry and
+  restored on an assist-less, non-fast return; vtl_entry_regs_valid
+  tracks whether the capture is live. A return finding it clear (the
+  entry was performed by userspace, or predates a migration — the
+  capture has no GET/SET exposure) is forwarded to userspace, which
+  owns restoring the lower VTL's registers.
+
+- plane_user_stopped is a pure userspace-policy latch: only
+  KVM_SET_PLANE_RUN_STATE writes it, and no runnable plane can carry
+  it (it is cleared at the single RUNNABLE choke point). In-kernel
+  suspensions get their own plane_kernel_stopped flag, reported and
+  restorable as KVM_PLANE_RUN_STATE_KERNEL_STOPPED, with the same
+  plane-0 event gating. The in-kernel VTL switch and the forced entry
+  refuse a user-stopped target (forwarding the switch to userspace or
+  leaving the event pending), and the kvm_vcpu_select_plane() fallback
+  refuses a user-stopped plane 0: KVM_RUN fails with -EINVAL,
+  surfacing the VMM's ordering bug instead of resuming a plane the VMM
+  parked mid-hypercall.
+
+- The secure kernel arms HvRegisterCrInterceptControl
+  descriptor-table write intercepts for VTL0, then PatchGuard runs its
+  protected patching window under an intercepted lidt. The write must
+  *not* be applied — the window would execute with a genuinely null
+  IDT and the first event triple-faults the guest. Add a per-vCPU
+  KVM_CAP_HYPERV_REG_INTERCEPT that arms the control word, trap the
+  descriptor-table instructions (SECONDARY_EXEC_DESC, dropped again
+  when the intercepts disarm), and divert armed writes into a
+  KVM_EXIT_HYPERV_REG_INTERCEPT exit with RIP rewound to the
+  intercepted instruction: the higher VTL owns completion, and
+  Windows' patch-protection probe matches its reflected #GP(0) against
+  the probe RIP.
+
+- HvCallSendSyntheticClusterIpi(Ex) honours the input's in_vtl field
+  (both the memory and fast forms carry it after the vector),
+  delivering to the resolved plane's twins; reserved bits 7:5 are
+  rejected with HV_STATUS_INVALID_HYPERCALL_INPUT before anything is
+  delivered, as on the reference host.
+
+- hv_inkernel_vtl_switch is written under kvm->lock but read
+  locklessly from vCPU context; the accesses carry
+  WRITE_ONCE/READ_ONCE so each individual check reads a coherent
+  value. A VMM that flips the cap while vCPUs run owns the
+  consequences of catching a transition in flight.
+
+Also includes debug instrumentation, to be stripped before posting.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst  |  31 ++--
+ arch/x86/hyperv/hv_apic.c       |   3 +-
+ arch/x86/include/asm/kvm_host.h |  21 ++-
+ arch/x86/kvm/hyperv.c           | 257 +++++++++++++++++++++++++++++---
+ arch/x86/kvm/hyperv.h           |   3 +
+ arch/x86/kvm/vmx/vmx.c          |  23 ++-
+ arch/x86/kvm/x86.c              | 210 +++++++++++++++++++++++++-
+ include/hyperv/hvgdk_mini.h     |   3 +-
+ include/hyperv/hvhdk_mini.h     |   3 +-
+ include/linux/kvm_host.h        |  12 ++
+ include/uapi/linux/kvm.h        |  13 ++
+ virt/kvm/kvm_main.c             |  35 ++++-
+ 12 files changed, 571 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 21/55] KVM: x86: hyper-v: handle VTL call/return in the kernel
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Every VTL transition exits to userspace, which performs the switch
+with a dozen cross-thread vCPU ioctls. A Windows guest boots VSM with
+hundreds of thousands of transitions, so boot takes *minutes* of
+wall-clock time in switch overhead alone.
+
+Handle HvCallVtlCall and HvCallVtlReturn in kvm_hv_hypercall() when
+userspace opts in with KVM_CAP_HYPERV_VTL_SWITCH. The switch copies
+the VTL-shared state directly between the plane vCPUs (GPRs except
+RSP, CR2), maintains the entered VTL's assist-page control area (entry
+reason, caller's RAX/RCX), and restores RAX/RCX on a non-fast VTL
+return. The suspended plane keeps its deferred hypercall completion
+pending, RIP still at the vmcall, exactly as userspace-driven
+switching leaves it.
+
+The shared guest FPU is carried across in the plane run loop, once the
+outgoing plane's FPU has been saved, by copying the legacy FXSAVE area
+between the twins. The source's FP and SSE XSTATE_BV bits are
+propagated set-or-clear: when those components are in init state,
+XSAVES skipped them and the vzalloc'ed legacy area is zeroes, and
+blindly marking them valid would load MXCSR=0 (every SIMD exception
+unmasked) and FCW=0 into the other VTL as architectural state.
+
+Transitions the kernel cannot handle (no twin plane vCPU) still go to
+userspace, with the vmcall retired and the completion dropped before
+the exit. A completion left armed across the suspension fires on
+whatever entry next resumes the plane — after a forced higher-VTL
+entry that is an arbitrary interrupted instruction, which must not
+have RAX overwritten and RIP skipped. The reference hypervisor
+likewise retires the instruction before switching, which also makes
+the suspended RIP a higher VTL observes through GetVpRegisters point
+past the vmcall. An hv_vtl_switch_limit module parameter caps how many
+transitions the kernel handles, with the rest forwarded; that is the
+bisection knob for behavioural divergence between the two switch
+paths.
+
+Also report the originating plane of every forwarded hypercall in a
+previously-padding field of struct kvm_hyperv_exit, so userspace can
+tell which VTL issued a hypercall without tracking every switch
+itself.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst  |  59 +++++++++-
+ arch/x86/include/asm/kvm_host.h |  14 +++
+ arch/x86/kvm/hyperv.c           | 193 ++++++++++++++++++++++++++++++++
+ arch/x86/kvm/x86.c              |  69 ++++++++++++
+ include/hyperv/hvgdk_mini.h     |   2 +
+ include/linux/kvm_host.h        |  21 ++++
+ include/uapi/linux/kvm.h        |   3 +-
+ virt/kvm/kvm_main.c             |   1 +
+ 8 files changed, 360 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 39/55] KVM: x86: hyperv: Harden the per-plane reference TSC page updates
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The per-plane reference TSC pages were updated through
+kvm_write_guest_unprotected(), which bypasses the memory attribute
+checks entirely: a plane writing HV_X64_MSR_REFERENCE_TSC had KVM
+write the first 24 bytes of an arbitrary gfn of its choosing even
+where that plane's own attributes forbid it, which is precisely the
+protection a higher VTL counts on.  The sequence stream was also
+seeded from the lowest enabled plane's page — guest-writable memory,
+normally VTL0's — so VTL0 could stage S-1 on its own page (S being the
+sequence live on VTL1's page), force a rewrite with an MSR write and
+have a VTL1 reader which sampled S accept a torn body: guest-steered
+time in a higher trust level.  And a failed update marked the whole
+partition HV_TSC_PAGE_BROKEN, leaving every page at sequence zero for
+the rest of the guest's life although the previous parameters still
+described a valid clock.
+
+Access each plane's page as the plane that owns it, with
+kvm_plane_write_guest() and kvm_plane_read_guest() checking the given
+plane's attributes (not exported to vendor modules: their only
+callers live in kvm.ko, and the helpers bypass the usual "as the
+vCPU's own plane" accessors).  Author the sequence host-side
+(hv_tsc_sequence: monotonic, never read back from a page), invalidate
+a page with a discrete zero-sequence write before touching its body,
+invalidate synchronously on guest enables, make a guest MSR write
+under TSC emulation take the recompute path, and invalidate any
+enabled page whose content does not match the adopted parameters.
+
+A refused access or a failed parameter computation now degrades only
+the affected plane: its page is tracked in a per-plane
+hv_tsc_page_broken bitmap and skipped until the plane writes its MSR
+again or the next clock update retries, while the other planes' pages
+are still maintained.  The pages are left invalid rather than
+republishing the previous parameters: that fallback (TIME_REF_COUNT
+answering from kvmclock) is always correct, and the previous
+scale/offset would advertise a clock that had just stopped being
+TSC-based.  Nothing marks the partition broken any more.
+
+Assisted-by: LLM
+[dwmw2: folded in the plane-aware accessor conversion, the host-side
+ sequence authorship and invalidation protocol, the per-plane broken
+ tracking replacing the partition-wide HV_TSC_PAGE_BROKEN restore
+ logic, and the removal of the helper exports; the original keep-the-
+ previous-values restore was dropped because parameters read back from
+ the plane-0 page (tsc_ref_from_guest) written to a higher plane's
+ page with hypervisor authority would let VTL0 forge its clock.]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  14 ++-
+ arch/x86/kvm/hyperv.c           | 216 ++++++++++++++++++++++++--------
+ include/linux/kvm_host.h        |   6 +-
+ virt/kvm/kvm_main.c             |  48 +++++--
+ 4 files changed, 218 insertions(+), 66 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 03/55] KVM: selftests: Add VM plane infrastructure and tests
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Add plane and plane-vCPU wrappers to the selftest library and two tests:
+plane_test (plane and plane vCPU creation, sibling rules, register state
+isolation) and plane_x86_test (per-plane FPU, MSRs and LAPIC; MSI
+delivery to a plane). Planes require a split IRQ chip, so the tests
+create their VM with vm_create_barebones_irqchip(true).
+
+The code is from the planes RFC's selftest work, already adapted to
+the KVM_CREATE_VCPU on a plane fd shape of the posted series.
+
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[hmushi: ported onto the posted series on kvm/next]
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+
+[dwmw2: ported to this stack's uAPI: KVM_CAP_PLANES is a VM-level
+ opt-in taking the plane count and must precede vCPU creation, so the
+ tests enable it with 2 planes right after VM creation. The main()
+ probe uses a split-irqchip VM, because kvm_arch_max_planes() reports
+ 1 without one, and skips when the opt-in is refused. Two subtest
+ groups of the later planes series are not carried: the foreign-thread
+ EBUSY test (this kernel does not restrict vCPU ioctls to the vCPU's
+ own thread) and the userspace plane-switch group (this kernel drives
+ plane switches through the Hyper-V VSM hypercalls).
+ kvm_force_split_irqchip already exists here; all seven remaining
+ subtests pass on this kernel.]
+(re-done by hand from Mushahid's port)
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   2 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  73 ++++
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  74 +++-
+ .../testing/selftests/kvm/lib/x86/processor.c |  15 +
+ tools/testing/selftests/kvm/plane_test.c      | 137 ++++++++
+ .../selftests/kvm/x86/plane_x86_test.c        | 325 ++++++++++++++++++
+ 7 files changed, 622 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 00/55] KVM: x86: Hyper-V VSM (Virtual Trust Levels) on VM planes
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Windows uses Virtualization Based Security for Credential Guard and
+friends, and enables it by default in current releases. A guest with
+VBS enabled runs its secure kernel in VTL1, a higher privilege level
+which the hypervisor has to keep isolated from the normal kernel in
+VTL0. KVM has no concept of that today, so Windows guests either lose
+VBS or emulate it with nested virtualization, which is slower and
+loses features.
+
+There have been completely in-kernel implementations of VBS, which
+did unnatural things all within a single kvm_vcpu (four APICs, etc.)
+
+This is an attempt to build it more cleanly, more in userspace, based
+on KVM planes (https://lwn.net/Articles/1087590/).
+
+The behavioural reference was the in-kernel VSM implementation in the
+Nitro Hypervisor, complete with its latest compatibility fixes since
+it was last posted — largely turned into a bunch of kvm unit
+tests. The result boots Windows Server 2016 through 2025 with
+Credential Guard active, on both Intel and AMD hosts, with VTL1
+protecting its memory from VTL0. With hibernate/resume tested, since
+that part has always been extra fun.
+
+For now I've structured the userspace part as a separable library
+which can be pulled into QEMU or other VMMs. Partly because QEMU
+doesn't want it when AI did the typing (but *might* tolerate it as an
+external library), and partly because I think it might make sense to
+have a more permissively licensed standard implementation for how
+KVM-based VMMs implement VSM, and have some input from the Microsoft
+side and some improved expectation that it'll *keep* working with
+Windows and not keep breaking for every new release. But that's a
+future conversation. For now I'm just preempting the question, "why
+does it look like that?".
+
+ • https://git.infradead.org/?p=users/dwmw2/linux.git;a=shortlog;h=refs/heads/vsm
+ • https://git.infradead.org/?p=users/dwmw2/qemu.git;a=shortlog;h=refs/heads/vsm
+ • https://git.infradead.org/?p=users/dwmw2/kvm-unit-tests.git;a=shortlog;h=refs/heads/vsm
+
+Pulled into my base tree on v7.1-rc7 (not reposted here):
+
+ • KVM planes itself (Jörg's latest from June)
+   https://lore.kernel.org/kvm/20260608144252.351443-1-joro@8bytes.org/
+   https://github.com/joergroedel/linux/tree/kvm-planes-v7.1
+ • Paolo's memory protection attributes v3
+   https://lore.kernel.org/kvm/20260918135030.171564-1-pbonzini@redhat.com/
+ • Melody Wang's SEV-SNP #HV doorbell / Restricted Injection series
+   https://lore.kernel.org/all/cover.1777048608.git.huibo.wang@amd.com/
+ • A few fixes to the above ride just above them in the git tree,
+   each citing the report it addresses; not part of this posting
+
+Generic fixes and features in KVM before we get to VSM itself:
+
+ • Userspace opt-in (KVM_CAP_PLANES) and plane run-state ioctls;
+   MP state, guest-debug, KVM_TRANSLATE, SETUP_MCE and a filtered
+   KVM_ENABLE_CAP on plane vCPU fds; unwind of a failed
+   KVM_CREATE_PLANE
+ • Plane mechanics: per-plane request fan-out, kicking the twin
+   that is actually running, XCR0 and TSC matching shared across
+   twins, runtime CPUID per plane, APICv inhibited while planes
+   are enabled (for now).
+ • Per-plane memory attributes and overlays, and instruction state
+   on the memory-fault exit, for the VMM to build intercept
+   messages from
+ • Fixes found along the way: KVM_TRANSLATE reporting a real
+   write-access walk, SVM keeping TPR[3:0] across exits without a
+   guest CR8 write
+
+Finally we get to the actual Hyper-V VSM bits:
+
+ • Hypercall forwarding to userspace (KVM_CAP_HYPERV_FORWARD_HCALL),
+   with completion or injected #UD, for the VSM hypercalls KVM
+   doesn't handle itself
+ • HvCallVtlCall/HvCallVtlReturn switching between planes in the
+   kernel; forced VTL entry gated on interrupt deliverability and
+   re-armed when a plane suspends with IRR set
+ • Per-plane Hyper-V state: GUEST_OS_ID/HYPERCALL MSRs, the
+   reference TSC page, SynIC and event routing, TLB flushes
+ • VTL register intercepts, including the descriptor-table load
+   traps Credential Guard requires
+ • The suspended-VP state (from Nikolas Wipper's series), refusal of
+   SendIpi to a higher VTL, XMM fast hypercall output
+ • Selftests for both halves; a hyperv_vsm suite for kvm-unit-tests
+   covering VTL call/return, protections, intercepts and eventing
+   follows separately
+
+The four WIP-marked patches need finishing and splitting; they are
+included because the series does not function without them. This is
+very much an RFC.
+
+Held back in the git tree for a follow-up posting:
+
+ • KVM_TRANSLATE2 and the page-walker flags/status work (also
+   Nikolas's), and the HvCallTranslateVirtualAddress handling built
+   on it
+ • TLB flush inhibit (TlbLocked)
+
+Not done at all yet: VINA, and migration of mid-VTL-switch state
+(the forced-entry and captured-register state has no GET/SET
+exposure). The interaction with SEV-SNP VMPLs, the other consumer of
+planes, is untested from this side.
+
+Mushahid also has a version which boots Windows 11 on arm64, which
+we'll reconcile when some of the dust settles.
+
+I think this will take a while to reconcile and merge, even after
+the base dependencies (planes, memattrs, etc.) are in. I'd like to
+start settling the basic functionality so we can start preparing
+to merge it in little pieces, if we can reach a general consensus.
+
+
+David Woodhouse (44):
+  KVM: x86/mmu: Move ACC_* masks from spte.h to mmu.h
+  KVM: x86: Let userspace opt in to multiple planes with KVM_CAP_PLANES
+  KVM: selftests: Add x86 planes lifecycle test
+  KVM: x86: hyper-v: Add KVM_CAP_HYPERV_FORWARD_HCALL
+  KVM: selftests: Add Hyper-V hypercall forwarding test
+  KVM: Add KVM_GET/SET_PLANE_RUN_STATE vCPU ioctls
+  KVM: selftests: Cover plane run-state ioctls in planes_test
+  KVM: x86: hyper-v: Let userspace fault a forwarded hypercall
+  KVM: x86: Allow MP state ioctls on plane vCPU fds
+  KVM: x86: Filter KVM_ENABLE_CAP on plane vCPU fds
+  KVM: x86: initialise Hyper-V state on every plane vCPU
+  KVM: implement per-plane memory attributes
+  KVM: x86: hyper-v: bank GUEST_OS_ID and HYPERCALL MSRs per plane
+  KVM: x86: hyper-v: bank the reference TSC page per plane
+  KVM: x86: allow KVM_SET_GUEST_DEBUG on plane vCPU fds
+  KVM: x86: hyper-v: flush the calling plane's TLB on flush hypercalls
+  KVM: x86/mmu: free obsolete roots of all planes
+  KVM: x86: hyperv: don't arm PV EOI for a higher plane's VP assist page
+  KVM: x86: allow KVM_TRANSLATE on plane vCPU fds
+  KVM: x86: hyper-v: handle VTL call/return in the kernel
+  KVM: x86: load each plane twin while updating it after KVM_SET_CPUID
+  WIP: userspace VTL interrupt entry and register intercepts
+  WIP: KVM: x86: deliver events to suspended higher planes
+  WIP: KVM: per-plane memory overlays, richer protection-fault exits
+  WIP: KVM: x86: VSM event-delivery parity fixes from Windows boot
+    triage
+  KVM: planes: fan out per-plane requests to twin vCPUs
+  KVM: x86: inhibit APICv when VM planes are enabled
+  KVM: x86: hyperv: divert LLDT and LTR into register intercepts
+  KVM: planes: Unwind published state on KVM_CREATE_PLANE failure
+  KVM: planes: Kick the running twin's pCPU, not the request target's
+  KVM: planes: Keep current_vcpu in sync in vcpu_load()
+  KVM: x86: Report a real write-access walk from KVM_TRANSLATE
+  KVM: planes: Share XCR0 across plane twins
+  KVM: x86: hyperv: Refuse a synthetic IPI to a higher VTL
+  KVM: x86: Gate forced VTL entry on interrupt deliverability
+  KVM: selftests: Test a plane suspending with an undelivered interrupt
+  KVM: x86: hyperv: Advertise XMM fast hypercall output
+  KVM: SVM: Carry instruction state on reflected plane-protection faults
+  KVM: SVM: Trap descriptor-table loads for VTL register intercepts
+  KVM: SVM: Keep TPR[3:0] across exits without a guest CR8 write
+  KVM: selftests: Add Hyper-V reference TSC page memory attribute test
+  KVM: SVM: Hedge the v_tpr_entry comment
+  KVM: Check every plane's protections before caching a gfn->hva
+  KVM: planes: Annotate the lockless twin-publication protocol
+
+Mushahid Hussain (9):
+  KVM: x86: Leave TSC matching to the plane 0 vCPUs
+  KVM: x86: hyperv: Track the reference TSC page per plane
+  KVM: x86: hyperv: Update the reference TSC page past protections
+  KVM: x86: hyperv: Publish an added reference TSC page at once
+  KVM: x86: hyperv: Harden the per-plane reference TSC page updates
+  KVM: x86: Derive runtime CPUID bits from the executing plane
+  KVM: selftests: Test hugepage sizing over mixed protection attributes
+  KVM: x86: hyperv: Do not skip a moved vCPU when completing a hypercall
+  KVM: x86: Allow KVM_X86_SETUP_MCE on plane vCPUs
+
+Nikolas Wipper (1):
+  KVM: x86: Implement Hyper-V's vCPU suspended state
+
+Paolo Bonzini (1):
+  KVM: selftests: Add VM plane infrastructure and tests
+
+ Documentation/virt/kvm/api.rst                | 241 ++++-
+ arch/x86/hyperv/hv_apic.c                     |   3 +-
+ arch/x86/include/asm/kvm-x86-ops.h            |   1 +
+ arch/x86/include/asm/kvm_host.h               | 140 ++-
+ arch/x86/kvm/cpuid.c                          | 139 ++-
+ arch/x86/kvm/cpuid.h                          |   6 +-
+ arch/x86/kvm/emulate.c                        |  21 +
+ arch/x86/kvm/hyperv.c                         | 995 ++++++++++++++++--
+ arch/x86/kvm/hyperv.h                         |  37 +-
+ arch/x86/kvm/kvm_emulate.h                    |  10 +
+ arch/x86/kvm/lapic.c                          |  85 +-
+ arch/x86/kvm/mmu.h                            |  14 +
+ arch/x86/kvm/mmu/mmu.c                        | 131 ++-
+ arch/x86/kvm/mmu/paging_tmpl.h                |   7 +-
+ arch/x86/kvm/mmu/spte.h                       |  14 -
+ arch/x86/kvm/mmu/tdp_mmu.c                    |  23 +-
+ arch/x86/kvm/svm/nested.c                     |  16 +
+ arch/x86/kvm/svm/svm.c                        | 143 ++-
+ arch/x86/kvm/svm/svm.h                        |  16 +-
+ arch/x86/kvm/vmx/main.c                       |  13 +-
+ arch/x86/kvm/vmx/nested.c                     |   1 +
+ arch/x86/kvm/vmx/vmx.c                        | 118 ++-
+ arch/x86/kvm/vmx/x86_ops.h                    |   1 +
+ arch/x86/kvm/x86.c                            | 668 +++++++++++-
+ include/hyperv/hvgdk_mini.h                   |   5 +-
+ include/hyperv/hvhdk_mini.h                   |   3 +-
+ include/linux/kvm_host.h                      | 149 ++-
+ include/uapi/linux/kvm.h                      |  63 +-
+ tools/include/uapi/linux/kvm.h                |  54 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   7 +
+ .../testing/selftests/kvm/include/kvm_util.h  |  74 ++
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  85 +-
+ .../testing/selftests/kvm/lib/x86/processor.c |  15 +
+ .../testing/selftests/kvm/memory_attributes.c |   6 +-
+ tools/testing/selftests/kvm/plane_test.c      | 137 +++
+ .../selftests/kvm/x86/hyperv_forward_hcall.c  | 144 +++
+ .../selftests/kvm/x86/hyperv_tsc_page_attrs.c | 129 +++
+ .../selftests/kvm/x86/memattr_hugepage_test.c | 132 +++
+ .../selftests/kvm/x86/plane_x86_test.c        | 325 ++++++
+ tools/testing/selftests/kvm/x86/planes_test.c | 142 +++
+ .../selftests/kvm/x86/planes_vtl_entry_test.c | 188 ++++
+ virt/kvm/kvm_main.c                           | 699 +++++++++++-
+ virt/kvm/pfncache.c                           |   3 +-
+ 44 files changed, 4956 insertions(+), 248 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 53/55] KVM: SVM: Hedge the v_tpr_entry comment
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The comment claimed V_TPR "differs, i.e. when the guest wrote CR8":
+differing implies a write, but a write does not imply differing. A
+same-value CR8 write is invisible to the back-sync, so TPR[3:0]
+survives where the architectural write would clear it — a documented
+tradeoff of commit f34c595cb8a5 ("KVM: SVM: Keep TPR[3:0] across
+exits without a guest CR8 write"), which deserves stating at the
+field rather than only in that commit's message. No functional
+change.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/svm/svm.h | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 45/55] KVM: selftests: Test a plane suspending with an undelivered interrupt
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Pin the forced-VTL-entry re-arm: a plane-1 twin self-IPIs with IF
+clear, runs on (consuming its single-shot hv_apic_event_pending
+marker), and is then suspended by KVM_SET_PLANE_RUN_STATE exactly like
+a userspace VTL switch.  Running plane 0 must report the suspended
+twin's deliverable interrupt as a KVM_EXIT_HYPERV_VTL_INTERRUPT exit,
+and the re-entered twin must receive the vector once it sets IF.  On a
+kernel without the re-arm, plane 0 reaches its guest code and the
+twin's interrupt is stranded in its IRR, which is the Windows VSM
+hibernate deadlock in miniature.
+
+The default selftest VM owns a fully in-kernel irqchip, which planes
+refuse; add a kvm_force_split_irqchip override to the library (as in
+the public planes tree) so a planes test can use the stock VM setup.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/include/kvm_util.h  |   1 +
+ tools/testing/selftests/kvm/lib/kvm_util.c    |  11 +
+ .../selftests/kvm/x86/planes_vtl_entry_test.c | 188 ++++++++++++++++++
+ 4 files changed, 201 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 55/55] KVM: planes: Annotate the lockless twin-publication protocol
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Plane twins are published with a plain store to common->vcpus[] plus an
+smp_wmb() that pairs with online_vcpus, not with twin initialisation,
+while the lockless readers grown across the series (the twin-kick
+paths, the Hyper-V TLB-flush and stimer twin lookups, the SEND_IPI
+target lookup, vcpu_for_each_plane) read the slots with a mixture of
+READ_ONCE and bare loads.  x86-TSO hides the lot, but the protocol is
+unannotated generic code: KCSAN reports it, and nothing stops a
+reordered publication from exposing a half-initialised twin to a kick.
+
+Publish the slot with smp_store_release(), make every lockless reader
+use READ_ONCE (vcpu_for_each_plane included), and document the pairing
+at the iterator.  Mutex-serialised lookups (the in-kernel VTL switch
+runs under the shared vCPU mutex that twin creation also takes) stay
+plain.  Also document KVM_REQUEST_PER_PLANE's two scopes at its
+definition: the fan-out to twins happens in kvm_make_vcpu_request(),
+while a direct kvm_make_request() marks only the twin it was given - a
+distinction a future direct-raise caller would otherwise trip over.
+
+No functional change on x86.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/hyperv.c    |  6 +++---
+ include/linux/kvm_host.h | 13 ++++++++++++-
+ virt/kvm/kvm_main.c      |  8 +++++++-
+ 3 files changed, 22 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 11/55] KVM: x86: Filter KVM_ENABLE_CAP on plane vCPU fds
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The plane-fd ioctl allowlist admits KVM_ENABLE_CAP wholesale, so a
+plane twin's fd reaches every vCPU cap handler: enlightened VMCS,
+direct TLB flush, register intercepts.  The nested paths behind the
+first two have never been audited for plane_level > 0, the register
+intercept only ever diverts plane 0 (hv_divert_dt_write() skips higher
+planes, so arming it on a twin buys native-emulation overhead and no
+diversion), and any future vCPU cap would become plane-enabled by
+default without anyone deciding that.
+
+Accept only the audited caps on a plane fd: the per-plane SynIC pair
+and the two CPUID-enforcement toggles, which mutate state the planes
+genuinely bank per twin.  Everything else fails with -EINVAL, matching
+how non-allowlisted ioctls already behave on plane fds.
+
+The exposure is widened by our per-plane Hyper-V state: the VTL code
+assumes per-vCPU capability state is uniform across a vCPU's twins
+unless a cap is explicitly plane-aware.
+
+Found by a local Sashiko review:
+
+  ### M17 — whole KVM_ENABLE_CAP surface admitted on plane fds
+  kvm_arch_is_vcpu_plane_ioctl() (x86.c) lists KVM_ENABLE_CAP with no
+  per-cap filter in kvm_vcpu_ioctl_enable_cap(), so plane fds reach
+  enable_evmcs, enable_l2_tlb_flush, ENFORCE_CPUID, REG_INTERCEPT etc.
+  No demonstrated bug (all mutate per-vCPU state), but the vendor
+  nested paths are unaudited for plane_level>0 and any future vCPU cap
+  becomes plane-enabled implicitly.
+  Fix shape: per-cap allowlist for plane vCPUs, or a comment recording
+  the audit.
+
+Fixes: 21d7ad7e2ba8 ("KVM: Implement KVM_CREATE_VCPU ioctl for planes")
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/x86.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 18/55] KVM: x86/mmu: free obsolete roots of all planes
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+KVM_REQ_MMU_FREE_OBSOLETE_ROOTS lives in the request set shared by all
+planes of a vCPU. A fast zap (e.g. memslot deletion) invalidates
+*every* plane's TDP roots and raises the request once per vCPU, but
+whichever plane enters the guest next consumes the shared bit and
+frees only its own obsolete roots. The other planes keep an obsolete
+root with a valid-looking root.hpa, kvm_mmu_reload() does nothing for
+them, and every page fault bails out in is_page_fault_stale() with
+RET_PF_RETRY: the vCPU livelocks taking the same EPT violation
+forever. Observed with a Windows VSM guest spinning at ~18k EPT
+violations/s after a memslot update during boot, the root obsolete
+(inv=1 obs=1) and the request already consumed (req=0).
+
+Service every plane twin in kvm_mmu_free_obsolete_roots(). The
+inactive twins cannot be running (all planes of a vCPU share one
+thread), so their MMUs are stable.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/mmu/mmu.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 32/55] KVM: planes: Keep current_vcpu in sync in vcpu_load()
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The preempt notifiers save and restore common->current_vcpu
+(kvm_sched_out()/kvm_sched_in()), but vcpu_load() does not update it.
+kvm_vcpu_ioctl_set_cpuid() swaps the loaded vCPU to each twin around
+kvm_vcpu_after_set_cpuid(), a window that is preemptible and sleeps
+(kvm_pmu_refresh, mmu_lock): a reschedule there arch-put the
+already-put caller a second time, never saved the twin, and reloaded
+the caller's VMCS, so the vendor callback wrote the twin's controls
+into the caller's VMCS and the trailing vcpu_put() unloaded a
+non-resident vCPU, corrupting the per-pCPU loaded_vmcs tracking. Any
+KVM_SET_CPUID2 on a multi-plane VM reaches this; ioctls taken on a
+plane-N fd while current_vcpu pointed at another plane had the same
+exposure, as do the kick paths that now read current_vcpu->cpu.
+
+Set common->current_vcpu in vcpu_load(), making every load path (run
+loop, vcpu ioctls, the cpuid twin swap) agree with what the preempt
+notifiers will operate on. kvm_vcpu_select_plane() keeps its own
+assignment; both stores use WRITE_ONCE to pair with the lock-free
+readers in the kick paths.
+
+Found by Sashiko review.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ virt/kvm/kvm_main.c | 31 ++++++++++++++++++++++++++++++-
+ 1 file changed, 30 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 01/55] KVM: x86/mmu: Move ACC_* masks from spte.h to mmu.h
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The memory-attributes backport uses the ACC_* masks in mmu_internal.h,
+which cannot include spte.h because spte.h includes *it*. Anything
+pulling in mmu_internal.h without spte.h (debugfs.c, page_track.c) now
+fails to build.
+
+Move the ACC_* definitions to mmu.h, next to the PT_WRITABLE_MASK and
+PT_USER_MASK definitions they are built from. Both headers already
+include it.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/mmu.h      | 14 ++++++++++++++
+ arch/x86/kvm/mmu/spte.h | 14 --------------
+ 2 files changed, 14 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 12/55] KVM: x86: initialise Hyper-V state on every plane vCPU
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When userspace sets a Hyper-V CPUID, kvm_set_cpuid() walks the vCPU's
+planes to allocate the per-plane kvm_vcpu_hv, but passes the plane-0
+vCPU to kvm_hv_vcpu_init() on every iteration. Non-zero plane vCPUs
+are left without hv_vcpu, which trips the
+WARN_ON_ONCE(vcpu->arch.hyperv_enabled) in kvm_hv_set_cpuid() and
+leaves their vp_index and SynIC state uninitialised until a lazy init
+path happens to run. Pass the plane vCPU being iterated.
+
+A twin created after KVM_SET_CPUID never passes through
+kvm_set_cpuid() at all: it shares the common CPUID, and
+kvm_arch_vcpu_create() syncs it through kvm_vcpu_after_set_cpuid(),
+so that walk cannot cover it and the twin hits the same WARN with an
+empty cpuid_cache. Allocate the context in kvm_vcpu_after_set_cpuid()
+when the CPUID has the Hyper-V signature and the vCPU doesn't have
+one yet. The allocation is idempotent, so the kvm_set_cpuid() path is
+unaffected; if it fails, treat Hyper-V as disabled for the vCPU
+exactly as a failing kvm_set_cpuid() would have.
+
+Also admit KVM_ENABLE_CAP on plane vCPU fds, so userspace can enable
+per-vCPU capabilities such as KVM_CAP_HYPERV_SYNIC2 on a plane vCPU
+before it first runs.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/cpuid.c | 18 +++++++++++++++---
+ arch/x86/kvm/cpuid.h |  1 +
+ arch/x86/kvm/x86.c   | 20 +++++++++++++++++++-
+ 3 files changed, 35 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 17/55] KVM: x86: hyper-v: flush the calling plane's TLB on flush hypercalls
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The Hyper-V TLB flush hypercalls resolve their target vCPUs through
+the plane-0 array, so a flush issued from a non-zero plane flushed
+only the plane-0 vCPUs and the caller's own plane kept stale
+translations. The Windows secure kernel repopulated a PFN-database
+page table entry, flushed, then took a fatal page fault on the very
+address it had just mapped, because VTL1's TLB still held the old
+read-only zero-page translation.
+
+Resolve each flush target to the vCPU of the calling plane (falling
+back to plane 0 where no such plane vCPU exists — it then has no TLB
+to flush either) and raise the flush request on that vCPU directly.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/hyperv.c | 34 ++++++++++++++++++++++++++++++++--
+ 1 file changed, 32 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 35/55] KVM: x86: Leave TSC matching to the plane 0 vCPUs
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+KVM enables the master clock when every vCPU has a matching TSC, judged
+by nr_vcpus_matched_tsc + 1 == online_vcpus.  online_vcpus counts a vCPU
+once, but each of its plane vCPUs synchronizes its TSC at creation and
+counts as another matching vCPU.  With one higher plane the count can
+never equal the number of vCPUs again, the master clock stays off and
+kvmclock loses PVCLOCK_TSC_STABLE_BIT.  Among other things the Hyper-V
+reference TSC page then breaks: KVM writes sequence 0 to it, finds the
+clock unstable and leaves it that way.
+
+The planes of a vCPU share its TSC.  Give a plane vCPU the current
+generation and leave the matching count and generation changes to its
+plane 0 sibling.
+
+Assisted-by: LLM
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/x86.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 04/55] KVM: selftests: Add x86 planes lifecycle test
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Cover KVM_CAP_PLANES argument validation and ordering, plane creation
+bounds, plane vCPU creation, and per-plane isolation of vCPU register
+state.
+
+The tools copy of linux/kvm.h is synced to pick up the VM planes
+definitions the test builds against.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ tools/include/uapi/linux/kvm.h                |  40 +++++-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ tools/testing/selftests/kvm/x86/planes_test.c | 120 ++++++++++++++++++
+ 3 files changed, 156 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 51/55] KVM: SVM: Keep TPR[3:0] across exits without a guest CR8 write
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+V_TPR holds only TPR[7:4], and sync_cr8_to_lapic() pushed it back into
+the APIC after every VMRUN.  A guest that sets TASKPRI through the
+APIC page or MSR loses the low nibble at the next exit: VTL1 in the
+hyperv_vsm KUT writes 0xff and reads back 0xf0 ("VTL1 TASKPRI write
+sticks"), and interrupts in the sub-class the guest meant to mask are
+let through.  VMX keeps all eight TPR bits in the virtual-APIC page
+and does not have this problem.
+
+Hardware changes V_TPR only on a guest CR8 write.  Record the value
+sync_lapic_to_cr8() loads on entry and push V_TPR back into the APIC
+only when it differs, i.e. only when the guest actually wrote CR8.  A
+CR8 write whose value matches the loaded TPR[7:4] is indistinguishable
+from no write and now preserves TPR[3:0], where architecturally it
+would clear it; the previous behaviour cleared TPR[3:0] on every exit
+regardless.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/svm/svm.c | 11 ++++++++++-
+ arch/x86/kvm/svm/svm.h |  9 +++++++++
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 27/55] KVM: planes: fan out per-plane requests to twin vCPUs
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A request raised on one plane's vCPU for a VM-wide reason — TLB flush
+after a host-side zap, APIC page reload, obsolete-roots release — is
+consumed by whichever twin runs first; the planes series does not yet
+fan requests out to twins, so the other planes keep stale
+translations. The plane-1 twin of a Windows VSM guest then runs on a
+zapped root and the guest bugchecks.
+
+Mark those three requests per-plane and make kvm_make_vcpu_request()
+replicate any KVM_REQUEST_PER_PLANE request to every twin of the
+target vCPU. Mode, pCPU and wait live in the shared common, so the
+existing kick logic already reaches the twins.
+
+Move the Hyper-V TLB-flush hypercalls onto the same fan-out. The
+reference hypervisor's TLB is VTL-blind: both VTLs share one hardware
+translation context, a flush from either VTL covers both, and the
+hypercall does not return until the targets have left guest mode. The
+secure kernel relies on all of that when it edits mappings the normal
+kernel also uses — with per-plane TLB tags and the previous unwaited
+kvm_make_request() plus kick for non-zero-plane callers, VTL0 read
+stale PTEs and Windows bugchecked 0x1A (MEMORY_MANAGEMENT, 0x6102)
+minutes into an SMP boot. Enqueue the flush entries for every twin of
+each target VP and dispatch KVM_REQ_HV_TLB_FLUSH through the waiting
+fan-out for callers in either VTL.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h |  6 ++-
+ arch/x86/kvm/hyperv.c           | 65 ++++++++++++++++-----------------
+ arch/x86/kvm/mmu/mmu.c          | 13 ++++---
+ include/linux/kvm_host.h        |  3 +-
+ virt/kvm/kvm_main.c             | 22 ++++++++++-
+ 5 files changed, 66 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 15/55] KVM: x86: hyper-v: bank the reference TSC page per plane
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+HV_X64_MSR_REFERENCE_TSC is a per-VTL instance like GUEST_OS_ID and
+HYPERCALL. With a single partition-wide copy, the secure kernel
+enabling its own reference TSC page from VTL1 invalidated VTL0's, and
+the normal kernel fell back to a TIME_REF_COUNT MSR read — a VM exit —
+on every clock read.
+
+Keep the masterclock-maintained page bound to plane 0, and give
+non-zero planes a banked MSR whose page gets a one-shot copy of the
+current parameters; those stay valid while the masterclock is stable,
+which is enough for VTL1's bounded execution windows.
+
+The copy is made only when hv->tsc_ref is host-computed. With
+HV_X64_MSR_TSC_EMULATION_CONTROL set (reenlightenment, restored across
+migration), kvm_hv_setup_tsc_page() repopulates hv->tsc_ref from the
+plane-0 page in guest RAM, which the lowest VTL can write; handing a
+copy of that to a higher plane with hypervisor authority would let
+VTL0 forge the sequence/scale/offset the secure kernel computes time
+from. In that case write the plane's page with a zero sequence, making
+it fall back to the TIME_REF_COUNT MSR. The reference VSM host keeps
+fully separate per-VTL pages and never crosses VTLs here.
+
+The copy uses the same zero-sequence/body/sequence protocol as the
+plane-0 path, so a concurrent reader never sees torn parameters, and
+the MSR write fails when the guest write faults, as the
+HV_X64_MSR_HYPERCALL case does.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst  |  7 ++++
+ arch/x86/include/asm/kvm_host.h |  8 +++++
+ arch/x86/kvm/hyperv.c           | 58 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 72 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 33/55] KVM: x86: Report a real write-access walk from KVM_TRANSLATE
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+KVM_TRANSLATE hardcodes writeable = 1, so userspace answering
+HvCallTranslateVirtualAddress from this ioctl cannot honour the
+hypercall's write-validation flag: validating write access against a
+read-only PTE succeeds instead of reporting the address unmapped, and
+the Windows secure kernel's page verification trusts a mapping it
+cannot write.
+
+Walk the address a second time with PFERR_WRITE_MASK at supervisor
+level and report the outcome, matching the reference hypervisor's
+validation walk.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/x86.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 43/55] KVM: x86: Derive runtime CPUID bits from the executing plane
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Some CPUID bits follow registers of the vCPU: CPUID.1:ECX.OSXSAVE
+follows CR4.OSXSAVE, CPUID.7:ECX.OSPKE follows CR4.PKE, CPUID.1:EDX.APIC
+follows the APIC enable, CPUID.1:ECX.MWAIT follows MISC_ENABLE, and the
+XSAVE area sizes in leaf 0xD follow XCR0 and XSS. KVM keeps the CPUID
+table of a vCPU in the state its planes share, and refreshes those bits
+into the table from the state of whichever vCPU runs when the table is
+dirty. The planes of a vCPU have their own control registers, so after
+one plane sets CR4.OSXSAVE, CPUID on every plane of that vCPU reports
+OSXSAVE until a plane with it clear refreshes the table, and the other
+way round. The architecture requires CPUID to describe the processor
+that executes it, and for a plane that is the plane's own registers.
+
+A Windows guest with Virtual Secure Mode shows the leak. Its secure
+kernel runs on a plane whose CR4.OSXSAVE is clear while the normal
+kernel on the other plane has set it. The secure kernel executes the
+usual probe, CPUID.1 followed by a test of OSXSAVE, reads the bit set
+and executes XGETBV, which raises #UD because its own CR4 does not
+permit it.
+
+Compute the bits that follow vCPU registers when CPUID is emulated,
+from the registers of the vCPU that executes it, and no longer refresh
+the shared table on that path. The table keeps the view of plane 0 for
+KVM_GET_CPUID2 and KVM_SET_CPUID2, which act on the plane 0 vCPU, and
+their refresh stays as it is.
+
+Assisted-by: LLM
+
+(re-done by hand from the reference VSM implementation)
+[dwmw2: dropped the plane selftest hunk; this branch has no
+ plane_x86_test.c.  The per-VTL OSXSAVE contract is pinned by the VSM
+ conformance suite instead.]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ Documentation/virt/kvm/api.rst |   7 +++
+ arch/x86/kvm/cpuid.c           | 108 +++++++++++++++++++++++----------
+ arch/x86/kvm/cpuid.h           |   5 +-
+ 3 files changed, 87 insertions(+), 33 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 38/55] KVM: x86: hyperv: Publish an added reference TSC page at once
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When a plane enables its reference TSC page while another plane's page
+is valid, KVM marks the partition's parameters changed and requests a
+master clock update. The update writes sequence zero to every enabled
+page, computes the parameters again, and writes them to every page. The
+parameters have not changed, so the valid pages lose their validity for
+nothing, and a guest that reads the time in that window falls back to
+the time reference count register.
+
+Write the current parameters to the page the plane enables, the struct
+first and the sequence last, and leave the other pages and the status as
+they are. Only the first page of the partition, or a change of the
+parameters, takes the full update.
+
+Assisted-by: LLM
+[dwmw2: keep the tsc_ref_from_guest guard from fbdffa08a242: parameters
+  read back from the plane-0 page never seed a higher plane's page; it
+  gets a zero sequence instead, as the one-shot copy used to do. ]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/hyperv.c | 44 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 05/55] KVM: x86: hyper-v: Add KVM_CAP_HYPERV_FORWARD_HCALL
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A VMM implementing Hyper-V hypercalls that KVM does not know about,
+such as the VSM set, has no way to receive them: kvm_hv_hypercall()
+fails unknown codes with HV_STATUS_INVALID_HYPERCALL_CODE, and only
+syndbg and slow-form extended hypercalls ever exit to userspace.
+
+Add a VM capability which routes any hypercall KVM would have failed
+as unknown out through the existing KVM_EXIT_HYPERV_HCALL exit, fast
+forms included. The exit already carries the control value and both
+parameters (RDX and R8 for fast calls), and XMM state is reachable
+through the ordinary vCPU ioctls, so no new exit format is needed.
+A future in-kernel accelerator for a specific hypercall can still
+claim its code behind its own capability, with userspace handling as
+the fallback.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst  | 26 ++++++++++++++++++++++++++
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/hyperv.c           |  5 ++++-
+ arch/x86/kvm/x86.c              | 10 ++++++++++
+ include/uapi/linux/kvm.h        |  1 +
+ 5 files changed, 42 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 50/55] KVM: SVM: Trap descriptor-table loads for VTL register intercepts
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A higher VTL arms register intercepts on IDTR/GDTR/LDTR/TR writes
+(KVM_CAP_HYPERV_REG_INTERCEPT), and the emulator diverts an
+intercepted load into a KVM_EXIT_HYPERV_REG_INTERCEPT exit instead of
+applying it (hv_divert_dt_write()).  Only VMX armed the hardware exits
+(SECONDARY_EXEC_DESC), so on AMD a VTL0 lidt/lgdt/lldt/ltr executed
+unintercepted and the higher VTL never received its register intercept
+messages: some twenty hyperv_vsm KUT register-intercept tests fail,
+and a VTL1 that relies on the intercepts for kernel patch protection
+silently loses them.
+
+Arm the four VMCB descriptor-table load intercepts whenever
+reg_intercept_control is non-zero, mirroring the all-or-nothing VMX
+control, and route the exits into kvm_emulate_instruction(): a load
+the divert check declines is applied by the emulator as before.
+Store intercepts stay untrapped; the control has no bits for them.
+
+The (dis)arming gets a dedicated kvm_x86_ops.update_hv_reg_intercepts()
+op touching only the L1 controls, instead of riding on hooks with
+lifecycles of their own: vmx_set_cr4() owned SECONDARY_EXEC_DESC for
+UMIP emulation and a VTL0 set-then-clear of CR4.UMIP disarmed the very
+lidt/lgdt trap hv_divert_dt_write() exists to catch; enabling the cap
+through vcpu_after_set_cpuid() after an exit from L2 rewrote vmcs02
+state that the next nested VM-exit threw away.  On VMX the op defers
+while vmcs02 is loaded and nested_vmx_vmexit() refreshes vmcs01 after
+switching back; on SVM it arms vmcb01, and
+nested_vmcb02_recalc_intercepts() strips the LOAD_* bits from vmcb02
+unless vmcb12 wants them, matching the VMX DESC strip.  The CR4 path
+preserves the control while the intercepts are armed, and
+hv_divert_dt_write() bails in guest mode so an L2 descriptor exit
+which still reaches the emulator (UMIP emulation, for example) applies
+the load normally.
+
+Arming is refused with -EINVAL on SEV guests, failing KVM_ENABLE_CAP
+before anything is armed (disarming still succeeds): the diverted
+load needs full emulation, which encrypted guests cannot have.  On
+SEV-ES desc_interception() hits svm_check_emulate_instruction()
+returning X86EMUL_RETRY_INSTR, resuming at the same RIP with the
+intercept still armed, so one descriptor-table load spins a vCPU (and
+a host CPU) forever; on plain SEV the emulator has no instruction
+bytes and injects #UD on an architecturally valid lgdt.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm-x86-ops.h |  1 +
+ arch/x86/include/asm/kvm_host.h    |  7 ++++
+ arch/x86/kvm/hyperv.h              | 16 ++++++++
+ arch/x86/kvm/svm/nested.c          | 16 ++++++++
+ arch/x86/kvm/svm/svm.c             | 66 ++++++++++++++++++++++++++++++
+ arch/x86/kvm/vmx/main.c            | 10 +++++
+ arch/x86/kvm/vmx/nested.c          |  1 +
+ arch/x86/kvm/vmx/vmx.c             | 65 ++++++++++++++++++++++-------
+ arch/x86/kvm/vmx/x86_ops.h         |  1 +
+ arch/x86/kvm/x86.c                 | 19 ++++++---
+ 10 files changed, 183 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 48/55] KVM: x86: hyperv: Advertise XMM fast hypercall output
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The Hyper-V VSM register hypercalls return data in XMM registers when
+the guest uses their fast forms, and the userspace handler answering
+them writes those registers through the vCPU FPU state. Report
+HV_X64_HYPERCALL_XMM_OUTPUT_AVAILABLE in KVM_GET_SUPPORTED_HV_CPUID so
+the VMM can expose it; the reference hypervisor advertises it, and the
+Windows secure kernel only uses the fast forms when it is present.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/hyperv.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 54/55] KVM: Check every plane's protections before caching a gfn->hva
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The gfn_to_hva_cache init and the pfncache refresh refuse to cache a
+range carrying NR/NW attributes, but consulted only plane 0's array.
+Cached accesses made in vCPU context for a non-zero plane vCPU (steal
+time, PV EOI, pvclock) therefore enforced plane 0's protections only: a
+plane-N guest could point a PV MSR at a gfn its own plane marked NW and
+kvm_write_guest_offset_cached() wrote through it, while the uncached
+paths correctly use the vCPU's own plane.
+
+A cached translation has no plane context at use time, so refuse the
+cache when ANY plane protects the range.  The attribute generation that
+invalidates these caches is already partition-wide, so updates on any
+plane force a re-check.  The plane array walk follows the existing
+lock-free kvm->planes[] reader pattern (acquire paired with the
+publishing release).
+
+Fixes: a407d03e5697 ("KVM: Take memory protections into account for accesses with cached gfn->hva")
+Fixes: dc506e2ff987 ("KVM: pfncache: Fail to refresh if it contains memory protections")
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ include/linux/kvm_host.h |  8 ++++++++
+ virt/kvm/kvm_main.c      | 31 ++++++++++++++++++++++++++++++-
+ virt/kvm/pfncache.c      |  3 ++-
+ 3 files changed, 40 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 37/55] KVM: x86: hyperv: Update the reference TSC page past protections
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The reference TSC page is a page the hypervisor maintains for the guest.
+A higher Virtual Trust Level keeps its own page, and it protects the
+memory that holds that page against the lower levels. KVM writes the
+page through kvm_write_guest(), which refuses a write to protected
+memory. The refusal aborts the update of every page: KVM has written
+sequence zero to all of them and leaves them that way for the rest of
+the guest's life, so the guest falls back to the time reference count
+register for every read of time.
+
+Memory protections restrict the guest. They do not restrict the
+hypervisor's update of a page the hypervisor owns. Add
+kvm_write_guest_unprotected() for such a page and use it for the
+reference TSC page.
+
+Assisted-by: LLM
+[dwmw2: the original message called the function kvm_write_guest_hv();
+  it is kvm_write_guest_unprotected() in the code, say so. ]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/hyperv.c    |  2 +-
+ include/linux/kvm_host.h |  2 ++
+ virt/kvm/kvm_main.c      | 27 +++++++++++++++++++++++++++
+ 3 files changed, 30 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 41/55] KVM: x86: hyperv: Refuse a synthetic IPI to a higher VTL
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+HvCallSendSyntheticClusterIpi(Ex) honours the target VTL in its input
+but does not check it against the caller's VTL. A guest running in a
+lower VTL can therefore assert any fixed interrupt in a higher VTL on
+any VP, which crosses the boundary that VTLs exist to enforce.
+
+Refuse a target VTL above the caller's with HV_STATUS_ACCESS_DENIED.
+A VTL may still interrupt its own level and lower ones.  The old
+upper-bound check on the target plane goes away: a target at or below
+the caller's level is below KVM_MAX_PLANES by construction.
+
+Matches the equivalent fix in the reference VSM implementation.  The
+production Nitro Hypervisor permits the injection; the conformance
+suite probes for either behaviour.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/hyperv.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 46/55] KVM: x86: hyperv: Do not skip a moved vCPU when completing a hypercall
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A Hyper-V hypercall that exits to userspace is completed on the next
+KVM_RUN of the vCPU, and the completion skips the VMCALL. With planes,
+the lower plane is not run again until the secure kernel returns, and
+userspace applies the registers the secure kernel sets for it in
+between. On a resume from hibernation the secure kernel sets VTL0's
+RIP to the hibernate continuation. The deferred completion then skips
+an instruction on top of that RIP.
+
+The two vendors fail differently. SVM writes the stale next_rip of the
+old VMCALL exit, so the VP resumes at the hypercall page's RET with
+the new RSP, pops a zero and faults at RIP 0: Windows Server 2025
+with Credential Guard bugchecks 0xD1 (0, 0xff, 0, 0) on every resume
+on AMD. VMX adds the VMCALL length to the new RIP and lands three
+bytes into PopSaveHiberContextWrapper+0x35, where the bytes happen to
+decode as a harmless instruction before resynchronising, so Intel
+passes by luck.
+
+Record the RIP of the hypercall when exiting to userspace and complete
+without skipping when the vCPU is no longer there. Applies to both
+the VTL switch completion and the generic userspace completion. The
+generic KVM_EXIT_HYPERCALL and Xen completions have the same shape
+but userspace does not move the vCPU there; on arm64 the HVC is
+skipped at exit time, so the planes series is unaffected there.
+
+Measured on an m6a.metal (AMD) planes bench, WS2025 CG hibernate:
+SK SETs VTL0 RIP = wrapper+0x35, RSP = cont; first plane-0 exits after
+the return are at hypercall page+3, then RIP 0; KiBugCheckData 0xD1.
+
+Assisted-by: LLM
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+
+[dwmw2: this stack retires a forwarded VtlCall/VtlReturn eagerly at
+ exit time with no pending completion, so that path is unexposed; the
+ exposures are the FORWARD_HCALL completion and the plane an in-kernel
+ VTL switch suspends at its vmcall, whose RIP the higher VTL rewrites
+ via HvCallSetVpRegisters. Both resume through
+ kvm_hv_hypercall_complete_userspace(), so one moved-check there
+ covers both; the RIP is recorded in kvm_hv_hypercall_userspace_exit()
+ and kvm_hv_vtl_switch(). The check yields to the TLB-flush
+ suspension retry (a suspended vCPU re-executes the instruction, so
+ there is no skip to suppress).]
+(re-done by hand)
+[dwmw2: folded in the RAISE_UD completion-contract tightening: the
+ KVM_CAP_HYPERV_FORWARD_HCALL extension check returns 2 to advertise
+ that the kernel honours KVM_HV_HCALL_RESULT_RAISE_UD, the bit is
+ honoured only while forwarding is enabled (the legacy syndbg and
+ slow-form completions treat bit 63 as part of the result) and only
+ after the suspended and moved guards, and an in-kernel-armed
+ completion is tagged with hcall_resume_pending so it re-executes the
+ hypercall instead of consuming stale run-union bytes left by an
+ unrelated exit.]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ Documentation/virt/kvm/api.rst  |  6 +++
+ arch/x86/include/asm/kvm_host.h | 17 ++++++++
+ arch/x86/kvm/hyperv.c           | 77 ++++++++++++++++++++++++++++++---
+ arch/x86/kvm/x86.c              | 11 ++++-
+ include/uapi/linux/kvm.h        |  4 +-
+ 5 files changed, 106 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 13/55] KVM: implement per-plane memory attributes
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Memory attributes lived solely on struct kvm and the page role carried
+no plane identity, so every plane shared one attribute array and one
+set of TDP roots. A VTL1 guest protecting VTL0 pages therefore revoked
+its *own* access too: the Windows secure kernel's first
+HvCallModifyVtlProtectionMask made its own hypercall page
+non-executable, and the next VTL transition died on an unhandled
+protection fault.
+
+Give each non-zero plane its own attribute xarray (plane 0 keeps
+kvm->mem_attrs, which also carries partition-wide attributes such as
+KVM_MEMORY_ATTRIBUTE_PRIVATE), accept KVM_SET_MEMORY_ATTRIBUTES on
+plane fds restricted to the NR/NW/NX protection bits, and add the
+plane to kvm_mmu_page_role so each plane builds its own roots with its
+own protections applied at fault time.
+
+Guest accesses are checked against the attributes of the plane doing
+the accessing, not plane 0's: the vCPU-context hva lookups,
+kvm_vcpu_map(), the guest page read/write helpers (which gain a
+kvm_plane argument; the VM-level variants keep checking plane 0), and
+the software page walker's PTE reads. Without that, a higher plane is
+refused access to pages it has itself protected against plane 0 — the
+secure kernel's VP assist page registration and the page walks through
+its own protected page tables both fail exactly there.
+
+Hugepage mixed-attribute tracking still follows plane 0 only; faults
+on other planes clamp to 4KiB whenever the plane carries any attribute
+within the maximal mapping range.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h |   2 +-
+ arch/x86/kvm/mmu/mmu.c          |  78 +++++++++++----
+ arch/x86/kvm/mmu/paging_tmpl.h  |   4 +-
+ include/linux/kvm_host.h        |  52 ++++++++++
+ virt/kvm/kvm_main.c             | 172 +++++++++++++++++++++++++-------
+ 5 files changed, 251 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 49/55] KVM: SVM: Carry instruction state on reflected plane-protection faults
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A plane-protection fault reflected to userspace becomes a TLFS GPA
+intercept message, which carries the faulting instruction's length,
+its bytes (for data accesses), and the fault-adjusted RFLAGS.  The
+VMX exit handler harvests all of that from the VMCS, but
+npf_interception() reflected the bare fault: on AMD the higher VTL
+received intercept messages with instruction length 0, no instruction
+bytes and RFLAGS.RF clear, failing the hyperv_vsm KUT
+intercept-message tests ("Seen an expected read/write intercept
+message").
+
+Decode assists stash the raw fetch window (up to 15 bytes, not the
+decoded length) in the VMCB for data accesses; run it through the
+instruction decoder and report the decoded length and that many
+bytes.  Set RFLAGS.RF before exiting: fault delivery gives the
+restarted instruction RF=1, and VMX saves that fault-adjusted value
+in guest RFLAGS on fault-type exits while SVM saves RF as it was
+during execution.
+
+An execute fault stores no bytes, and the length of the branch that
+fetched the faulting page is not architecturally available on SVM
+(VMX hardware reports it), so execute intercepts carry length 0.
+
+The validity of the harvested state gets its own flag,
+KVM_MEMORY_EXIT_FLAG_INSN_VALID, set by the VMX and SVM harvests only
+when they populated the fields: VM_EXIT_INSTRUCTION_LEN is undefined
+for EPT violations, all-zero insn_bytes is itself a valid x86
+encoding, and kvm_prepare_memory_fault_exit() now clears
+gva/insn_len/insn_bytes so no other memory-fault exit carries stale
+values.  The flag bit (and PLANE_PROT before it) is enumerated by the
+plane memory overlay capability, which also covers the extended
+memory_fault layout.  The memory_attributes selftest asserted strict
+equality on the exit flags; it now masks the informational flags out
+and compares only the access that faulted.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/mmu/mmu.c                        |  2 +
+ arch/x86/kvm/mmu/paging_tmpl.h                |  3 +
+ arch/x86/kvm/svm/svm.c                        | 66 +++++++++++++++++++
+ arch/x86/kvm/vmx/vmx.c                        | 13 ++--
+ include/linux/kvm_host.h                      | 12 ++++
+ include/uapi/linux/kvm.h                      | 17 ++++-
+ .../testing/selftests/kvm/memory_attributes.c |  6 +-
+ 7 files changed, 112 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 08/55] KVM: selftests: Cover plane run-state ioctls in planes_test
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Assert the initial stopped state of a new plane-1 vCPU, a runnable and
+back-to-stopped round trip, and rejection of out-of-range states.
+
+The tools copy of linux/kvm.h picks up the plane run-state ioctl
+definitions.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ tools/include/uapi/linux/kvm.h                |  4 ++++
+ tools/testing/selftests/kvm/x86/planes_test.c | 22 +++++++++++++++++++
+ 2 files changed, 26 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 25/55] WIP: KVM: per-plane memory overlays, richer protection-fault exits
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The pieces the VSM contract tests need:
+
+- KVM_SET_PLANE_MEMORY_OVERLAY maps one page of userspace memory over
+  a GPA for a single plane. TLFS overlay pages (SynIC SIMP in
+  particular) show each VTL a private page while the other VTLs keep
+  seeing the guest RAM underneath; per-plane EPT roots make a
+  per-plane pfn override in the fault path sufficient. Mappings for a
+  plane with overlays stay 4KiB so a neighbouring fault's huge page
+  cannot span an overlaid gfn, and kvm_tdp_mmu_recover_huge_pages()
+  skips nonzero-plane roots so a later promotion cannot widen the
+  plane's attribute or overlay clamps back out (planes keep no lpage
+  tracking by design; their fault path rebuilds each mapping at the
+  largest level the plane allows). The overlay update runs under the
+  kvm_mmu_invalidate_begin()/end() protocol with the gfn registered,
+  as the mmu notifiers do, so a concurrent lockless fault cannot
+  install an SPTE for the old backing after the zap.
+
+- SynIC message delivery reads and writes the overlay through the same
+  lookup, and fails with -EFAULT when a higher plane's SIMP page has
+  no overlay installed yet, rather than falling through to
+  kvm_vcpu_write_guest_page() and corrupting underlay RAM that plane 0
+  owns; the sender retries once the overlay appears. A non-zero
+  plane's SynIC exits carry the plane instead of being suppressed, so
+  the VMM can keep its plane-0 device state separate.
+
+- A plane-protection fault reflected as KVM_EXIT_MEMORY_FAULT now
+  carries the guest-linear address and the faulting instruction's
+  length and bytes (via VM_EXIT_INSTRUCTION_LEN and a guest-virt
+  read), which the TLFS GPA-intercept message requires. LLDT joins
+  LGDT/LIDT in the descriptor-write divert, reporting the written
+  selector.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst |  62 ++++++++
+ arch/x86/kvm/hyperv.c          |  82 +++++++---
+ arch/x86/kvm/mmu/mmu.c         |  29 +++-
+ arch/x86/kvm/mmu/tdp_mmu.c     |  23 ++-
+ arch/x86/kvm/vmx/vmx.c         |  51 ++++++-
+ arch/x86/kvm/x86.c             |  14 ++
+ include/linux/kvm_host.h       |  17 +++
+ include/uapi/linux/kvm.h       |  17 +++
+ virt/kvm/kvm_main.c            | 271 +++++++++++++++++++++++++++++++++
+ 9 files changed, 541 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 31/55] KVM: planes: Kick the running twin's pCPU, not the request target's
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The remote kick paths (kvm_make_vcpus_request_mask(),
+kvm_make_all_cpus_request(), __kvm_vcpu_kick()) read
+READ_ONCE(vcpu->cpu) of the plane-0 vCPU. But vcpu->cpu is per plane
+vCPU — kvm_arch_vcpu_load() refreshes only the loaded twin's copy —
+while vcpu->mode is shared in kvm_vcpu_common. When the vCPU thread
+has migrated pCPUs while a non-zero plane was loaded, the shared mode
+reads IN_GUEST_MODE but the IPI goes to plane 0's stale pCPU: a flush
+hypercall returns HV_STATUS_SUCCESS while the twin keeps running on
+stale translations, breaking the TLFS guarantee that the flush covers
+the whole VP.
+
+Read the pCPU from common->current_vcpu, whose cpu field every
+kvm_arch_vcpu_load() refreshes, in both kick paths. Also read the twin
+array with READ_ONCE in the per-plane request fan-out and correct the
+comment there: mode and wait are shared with the common, the pCPU is
+not.
+
+Found by Sashiko review.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ virt/kvm/kvm_main.c | 25 +++++++++++++++++++------
+ 1 file changed, 19 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 29/55] KVM: x86: hyperv: divert LLDT and LTR into register intercepts
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+When a higher VTL arms the ldtr_write or tr_write bits of
+HvRegisterCrInterceptControl, hv_divert_dt_write() covers GDTR and
+IDTR writes, but an LTR in the lower VTL retires natively, and the
+LDTR divert sat in emulator_set_segment(), which task-switch emulation
+also reaches via __load_segment_descriptor(). A protected-mode task
+switch with the intercept armed — reachable by a malicious lower VTL,
+even though 64-bit Windows takes no task switches — had its LDTR load
+silently dropped, and the higher VTL received a bogus mid-task-switch
+intercept carrying the wrong RIP and instruction length. The TLFS
+intercepts cover the LLDT and LTR instructions only.
+
+Add a divert_seg_write(ctxt, selector, seg) emulator op and call it
+from em_lldt() and em_ltr() before load_segment_descriptor().
+Diverting from the instruction handlers, before any architectural
+effect, keeps hardware task switches out of the intercept; for LTR it
+also matters that __load_segment_descriptor() marks the TSS descriptor
+busy in the GDT first, and a busy descriptor would #GP the LTR when it
+re-executes after a cooperative VTL return. emulator_set_segment() no
+longer diverts anything.
+
+No vmx change is needed: SECONDARY_EXEC_DESC already exits on LTR
+(handle_desc covers EXIT_REASON_LDTR_TR) whenever any
+reg_intercept_control bit is set.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/emulate.c     | 21 +++++++++++++++++++++
+ arch/x86/kvm/kvm_emulate.h | 10 ++++++++++
+ arch/x86/kvm/x86.c         | 33 +++++++++++++++++++++------------
+ 3 files changed, 52 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 42/55] KVM: x86: Gate forced VTL entry on interrupt deliverability
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A fixed vector posted to a higher plane forces a VTL entry even when
+the higher VTL's TPR masks it, so the secure kernel is entered with
+reason INTERRUPT and nothing to deliver.  The TLFS (15.9, "VTL
+Interrupt Management") holds such an interrupt pending without
+switching: only a deliverable interrupt preempts the lower VTL.
+
+Gate the forced-entry evaluation on the higher plane's APIC reporting
+a deliverable vector under its PPR.  A masked vector keeps its posted
+marker instead of consuming the single entry attempt, so the entry
+fires if a later VTL round trip leaves the vector deliverable; the
+higher plane still consumes its own marker when it runs.  Each marker
+is consumed only by its own approved clause, in both the userspace
+exit and the in-kernel refusal paths: an exit triggered by extint, a
+stimer or the LAPIC timer while the posted vector is still masked
+leaves the APIC marker armed.
+
+NMIs move to a marker of their own, hv_nmi_event_pending, and keep
+forcing entry unconditionally: the NMI is folded back to plane 0 at
+acceptance, so the higher plane's APIC carries nothing the PPR gate
+could see.  The marker is armed wherever NMI state is posted to a
+non-zero plane (kvm_inject_nmi() and the vCPU-events ioctl, which is
+allowlisted on plane fds), and the level-triggered NMI state
+(KVM_REQ_NMI, nmi_queued, nmi_pending) does not feed the gate: a
+posting earns exactly one wakeup, like the APIC event path, instead
+of keeping the gate permanently true for a parked higher plane.
+
+The in-kernel switch consumes the markers on a refused entry attempt
+too.  The only refusal left on that path is a failing VTL-control
+write (blocked planes are filtered in kvm_higher_plane_with_event()),
+which stays failed until an overlay or memory-attribute change; the
+event remains latched in the plane's own pending state for its next
+entry, rather than repeating the failing guest write on every exit of
+the lower plane and keeping the vCPU from ever blocking.
+
+Matches the deliverability gating of the reference VSM
+implementation (its kvm_plane_has_interrupt); the production Nitro
+Hypervisor remains PPR-blind, and the conformance suite's TPR-masked
+test probes for either behaviour.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h |  21 +++++--
+ arch/x86/kvm/lapic.c            |   2 +-
+ arch/x86/kvm/x86.c              | 104 ++++++++++++++++++++++++--------
+ 3 files changed, 96 insertions(+), 31 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 52/55] KVM: selftests: Add Hyper-V reference TSC page memory attribute test
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The reference TSC page is written by the host, not by the guest, so
+the guest-side memory attribute tests never cover it.  Add a test
+that a page at an unprotected gfn is maintained as usual, that
+pointing HV_X64_MSR_REFERENCE_TSC at a gfn carrying
+KVM_MEMORY_ATTRIBUTE_NW leaves the page contents untouched — on the
+MSR write itself and on a subsequent KVM_SET_CLOCK-forced update —
+and that re-pointing the MSR at a writable page recovers.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/hyperv_tsc_page_attrs.c | 129 ++++++++++++++++++
+ 2 files changed, 130 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 40/55] KVM: x86: Implement Hyper-V's vCPU suspended state
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Introduce a suspension state for Hyper-V enlightened vCPUs. Microsoft's
+"Hypervisor Top Level Functional Specification" (TLFS) introduces this
+state as a "vCPU that is stopped on a instruction guest boundary, either
+explicitly or implicitly due to an intercept". The only documented
+explicit suspension is caused in response to a TLB Flush hypercall, which
+will use the state switching API in subsequent patches.
+
+Each Hyper-V vCPU now has a 'suspended' boolean field, which is checked
+before entering the guest. When set, it forces the vCPU to block. Once in
+that state, the vCPU ignores any events. The vCPU is unsuspended by
+clearing 'suspend' and issuing a request to force the vCPU out of sleep.
+
+Suspensions are issued as a mechanism to halt execution until state change
+is observed on a remote vCPU. Hyper-V vCPUs track this with 'waiting_on',
+which holds the 'vcpu_id' of the remote vCPU that forced the vCPU to enter
+the suspended state. It's the remote vCPU's responsibility to wake up the
+suspended vCPUs when ready. 'waiting_on' ensures the remote vCPU can
+selectively unsuspend vCPUs that blocked on its behalf while leaving other
+suspended vCPUs undisturbed. One vCPU can only be suspended due to a
+single remote vCPU, but different vCPUs can be suspended on behalf of
+different or the same remote vCPU(s). The guest is responsible for
+avoiding circular dependencies between suspended vCPUs.
+
+Callers of the suspend API are responsible for ensuring that suspend and
+unsuspend aren't called in parallel while targeting the same pair of
+vCPUs. Otherwise kvm_hv_vcpu_{un}suspend_tlb_flush() ensure 'waiting_on'
+and 'suspended' are updated and accessed in the correct order. This, for
+example, avoids races where the unsuspended vCPU re-suspends before
+kvm_hv_vcpu_unsuspend_tlb_flush() is done updating 'waiting_on'.
+
+Signed-off-by: Nikolas Wipper <nikwip@amazon.de>
+
+(cherry picked from the posted series, re-done by hand)
+[hmushi: struct kvm_vcpu_hv now lives in arch/x86/kvm/hyperv.h;
+ bitmap_zero(vcpu_mask) added (the original used an uninitialised stack
+ bitmap)]
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+(re-done by hand from the reference VSM implementation)
+[dwmw2: struct kvm_vcpu_hv is in arch/x86/include/asm/kvm_host.h on
+ this branch.  Unsuspend walks the suspended waiters' own plane and
+ kicks each one directly: kvm_make_vcpus_request_mask() resolves
+ indices against plane 0, which is the wrong twin for a waiter in a
+ higher plane.]
+Assisted-by: LLM
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |  3 +++
+ arch/x86/kvm/hyperv.c           | 28 ++++++++++++++++++++++++++++
+ arch/x86/kvm/hyperv.h           | 15 +++++++++++++++
+ arch/x86/kvm/x86.c              |  2 +-
+ 4 files changed, 47 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 44/55] KVM: selftests: Test hugepage sizing over mixed protection attributes
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Back a 2 MiB-aligned region with a transparent hugepage and give it
+alternating NX and NW protection attributes on its 4 KiB pages.  The
+guest reads an NX page, which maps the region, then writes the NW page
+next to it: the write must exit with KVM_EXIT_MEMORY_FAULT and leave
+the page unchanged, instead of going through a 2 MiB leaf that
+inherited the NX page's permissions.  Clearing the attribute lets the
+write through.
+
+This pins the hugepage side of the VSM memory protection boundary: a
+single 4 KiB protection set by a higher VTL must not be widened away
+by a neighbouring gfn's fault installing a hugepage whose access was
+computed from the neighbour alone.  The host refuses that hugepage via
+the KVM_LPAGE_MIXED_FLAG tracking which
+kvm_arch_post_set_memory_attributes() maintains over the whole
+attribute word, NR/NW/NX included.
+
+[dwmw2: re-done by hand from Mushahid's original, adapted from the
+ KVM_SET_PLANE_MEMORY_ATTRIBUTES uAPI to the per-plane memory
+ attributes design: plane 0 attributes are set through
+ KVM_SET_MEMORY_ATTRIBUTES with the NR/NW/NX protection bits, no
+ plane runtime is needed, and the fault exit carries no plane field]
+
+Assisted-by: LLM
+Signed-off-by: Mushahid Hussain <hmushi@amazon.co.uk>
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/memattr_hugepage_test.c | 132 ++++++++++++++++++
+ 2 files changed, 133 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 09/55] KVM: x86: hyper-v: Let userspace fault a forwarded hypercall
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The architectural failure mode for an invalid VTL transition is #UD at
+the VMCALL, not a hypercall status — a status would advance RIP and
+complete the call. Define a result flag for the forwarded-hypercall
+completion which queues #UD at the unadvanced RIP and ignores the rest
+of the result.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/hyperv.c          | 14 +++++++++++++-
+ include/uapi/linux/kvm.h       |  8 ++++++++
+ tools/include/uapi/linux/kvm.h |  9 +++++++++
+ 3 files changed, 30 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 36/55] KVM: x86: hyperv: Track the reference TSC page per plane
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+HV_X64_MSR_REFERENCE_TSC is private to each Virtual Trust Level: the
+secure VTL maps its own page.  The reference time behind the pages is
+one clock per partition, so every page must show the same scale, offset
+and sequence.
+
+KVM keeps a single page address per VM.  A write from another plane
+replaces it, the old page stops being updated and the new page starts a
+sequence of its own.  Keep the MSR value per plane and write the shared
+page contents to every enabled page.  The lowest enabled plane owns the
+sequence number; disabling one plane's page keeps the others updated.
+
+Assisted-by: LLM
+[dwmw2: our tree already banks the MSR per plane (fbdffa08a242) with a
+  one-shot copy for higher planes; replace that with the maintained
+  pages, keeping the bank in kvm_hv rather than kvm_arch_plane. ]
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/include/asm/kvm_host.h |   6 +-
+ arch/x86/kvm/hyperv.c           | 118 +++++++++++++++-----------------
+ 2 files changed, 58 insertions(+), 66 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 34/55] KVM: planes: Share XCR0 across plane twins
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+XCR0/XFEM is shared between VTLs: the TLFS banks no vector state and
+the reference host keeps a single XCR0 (its store_vtl/load_vtl carry
+no XSAVE state). The planes series shares the FPU payload between
+twins but keeps arch.xcr0 per-vCPU, so an XSETBV in one VTL was
+invisible in the other: VTL1 read a stale XFEM, and state enabled by
+VTL0 (AVX, for the Windows secure kernel) silently vanished across a
+VTL switch.
+
+Propagate the validated value to every plane twin in __kvm_set_xcr(),
+covering both guest XSETBV and the KVM_SET_XCRS ioctl path. The CPUID
+dynamic-bits dirty marker lives in the shared common state, so the
+existing single set covers the twins.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/x86.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 14/55] KVM: x86: hyper-v: bank GUEST_OS_ID and HYPERCALL MSRs per plane
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The TLFS makes HV_X64_MSR_GUEST_OS_ID and HV_X64_MSR_HYPERCALL
+separate instances per VTL; KVM kept a single partition-wide copy, so
+the Windows secure kernel enabling its own hypercall page from VTL1
+clobbered VTL0's.
+
+Index both MSRs by the vCPU's plane. The hypercall page contents are
+still written into guest RAM on enable, now once per plane's page.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h |  9 +++++++--
+ arch/x86/kvm/hyperv.c           | 19 ++++++++++---------
+ arch/x86/kvm/hyperv.h           |  3 ++-
+ 3 files changed, 19 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 26/55] WIP: KVM: x86: VSM event-delivery parity fixes from Windows boot triage
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+All derived from the reference host's behaviour, and verified against
+its VSM unit-test suite (still green) and Windows Server 2025 VBS
+boot:
+
+- Forced entry into a higher plane is edge-triggered, as on the
+  reference host, which attempts one forced entry per posted
+  interrupt. Delivery of a fixed vector or NMI to a suspended higher
+  plane sets hv_apic_event_pending; the evaluation triggers on that
+  marker and the consumable requests (stimer, NMI, APIC timer), not
+  on a scan of the plane's IRR — a vector still latched after a
+  refused entry waits for the target's next cooperative entry or next
+  posted event instead of retrying on every run of the lower plane.
+  The marker is cleared only by a run that actually reaches event
+  evaluation; a run aborted by the VTL-exit or KVM_REQ_PLANE_RESCHED
+  bail-outs leaves it set, since delivery never re-arms it. A vector
+  masked by the higher VTL's TPR still forces exactly one entry.
+- One exception to single-shot: a plane that suspends (VtlReturn or
+  the run-state ioctl) with a vector still latched in its IRR re-arms
+  its marker, via kvm_arch_vcpu_plane_stopped() from
+  kvm_vcpu_set_plane_stopped(). Evaluating does not imply delivering:
+  Windows hibernation posts vector 0xE0 to a twin mid-run with IF
+  clear, the run consumes the marker without injecting, and the
+  suspended twin's vector is stranded — VTL0 freezes all processors,
+  spins on the secure kernel and wedges the VM at 100% host CPU. A
+  re-armed marker cannot storm: the deliverability gate still applies,
+  and a plane that reached suspension has run before, so userspace can
+  enter it again.
+- NMIs aimed at a higher plane fold back to plane 0 for delivery
+  after the VTL returns; the higher plane only sees the forced entry.
+  A real NMI inside VTL1 bugchecks the secure kernel (0x18B).
+- VTL1 exempted from the reserved-bits check on Hyper-V vAPIC MSR
+  writes: the secure kernel writes HV_X64_MSR_EOI with stale upper
+  bits, and the reference host truncates for VTL1.
+- KVM_REQ_HV_TLB_FLUSH made per-plane: a shared request could be
+  consumed by the running twin, leaving the targeted plane's TLB
+  stale.
+- Lower-twin kicks on the stimer retry (vcpu_kick=false) paths.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h | 12 ++++-
+ arch/x86/kvm/hyperv.c           |  3 +-
+ arch/x86/kvm/lapic.c            | 39 ++++++++++++++-
+ arch/x86/kvm/x86.c              | 89 +++++++++++++++++++++++++++++----
+ include/linux/kvm_host.h        |  1 +
+ virt/kvm/kvm_main.c             |  5 ++
+ 6 files changed, 135 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 47/55] KVM: x86: Allow KVM_X86_SETUP_MCE on plane vCPUs
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+mcg_cap is per vCPU. kvm_arch_vcpu_create() gives every vCPU the
+KVM_MAX_MCE_BANKS default, plane twins included, but KVM_X86_SETUP_MCE
+was only accepted on the plane-0 fd: userspace programs plane 0 and a
+higher plane keeps running with the default, so the MCG view diverges
+across planes. Hyper-V defines the MCG state as shared across Virtual
+Trust Levels, so userspace needs to program the same value on every
+plane: accept the ioctl on plane vCPUs.
+
+Assisted-by: LLM
+
+[dwmw2: ours gates plane vCPU fd ioctls in kvm_arch_is_vcpu_plane_ioctl()
+ in the same shape; same one-line addition.]
+(re-done by hand)
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ Documentation/virt/kvm/api.rst | 2 +-
+ arch/x86/kvm/x86.c             | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 07/55] KVM: Add KVM_GET/SET_PLANE_RUN_STATE vCPU ioctls
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A VMM doing VSM in userspace has to switch the executing plane when
+the guest asks for a privilege transition, but a vCPU's plane run
+state is kernel-internal — set only by the SEV-SNP VMPL switch,
+plane-0 event delivery, and vCPU creation. A VTL call forwarded to
+userspace is a dead end.
+
+Add ioctls to read and write the run state as stopped/runnable.
+KVM_RUN already executes the lowest-numbered runnable plane, so a
+userspace plane switch is just: mark the target plane's vCPU runnable,
+mark the current one stopped, re-enter KVM_RUN.
+
+A plane 0 stopped this way *stays* stopped. Forcing it runnable on a
+pending event fits the SEV-SNP model, but under a userspace privilege
+model plane 0 would preempt the higher VTL on any interrupt and resume
+mid-hypercall with whatever completion value the shared kvm_run last
+held; the events stay pending until the VMM switches back. In-kernel
+transitions never set the stopped-by-userspace flag, so SNP behaviour
+is unchanged.
+
+The ioctls return -EINVAL unless kvm_arch_max_planes() reports plane
+support, the same condition KVM_CREATE_PLANE enforces: only x86
+consumes KVM_REQ_PLANE_RESCHED, and on the other architectures a stray
+request bit would abort every subsequent entry attempt, leaving KVM_RUN
+spinning at 100% with no way for the VMM to recover the vCPU.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst | 26 ++++++++++++++++++++
+ arch/x86/kvm/x86.c             |  3 ++-
+ include/linux/kvm_host.h       |  6 +++++
+ include/uapi/linux/kvm.h       |  4 ++++
+ virt/kvm/kvm_main.c            | 44 ++++++++++++++++++++++++++++++++++
+ 5 files changed, 82 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 22/55] KVM: x86: load each plane twin while updating it after KVM_SET_CPUID
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+kvm_vcpu_ioctl_set_cpuid() runs kvm_vcpu_after_set_cpuid() on every
+plane twin, but only the calling vCPU is loaded. The vendor callback
+writes VMCS/VMCB controls, and on VMX those writes go to whatever VMCS
+is loaded on the current pCPU: the caller's, not the twin's. The
+twin's controls shadow is updated anyway, so the stale values in its
+real VMCS can never be corrected later; a twin created before
+KVM_SET_CPUID2 keeps its empty-CPUID controls (RDSEED/RDRAND exiting
+among them), and the guest's higher VTL takes a spurious #UD on its
+first RDSEED.
+
+Swap the twin in as the loaded vCPU around its update. Plane ioctls
+all share the common vCPU mutex, so the twin cannot be loaded
+elsewhere concurrently.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/cpuid.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 28/55] KVM: x86: inhibit APICv when VM planes are enabled
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+With APICv live on plane-0 vCPUs while their plane-1 twins use
+software injection, the twins trip the APICv coherency checks: stale
+vcpu-vs-VM activation state at vcpu_enter_guest(), and timer interrupt
+injection against a vCPU that is not the running one. Cross-plane
+event delivery (forced VTL entry, twin kicks, NMI folding) depends on
+software-injection bookkeeping that hardware acceleration bypasses.
+
+Add APICV_INHIBIT_REASON_PLANES, set it when a plane above 0 is
+created, and include it in the VMX and AVIC required-inhibit masks;
+__kvm_set_or_clear_apicv_inhibit() silently ignores a reason the
+vendor mask does not carry. The reference VSM hypervisor likewise
+force-disables APICv when VTLs are enabled.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/include/asm/kvm_host.h | 10 +++++++++-
+ arch/x86/kvm/svm/svm.h          |  3 ++-
+ arch/x86/kvm/vmx/main.c         |  3 ++-
+ arch/x86/kvm/x86.c              | 10 ++++++++++
+ 4 files changed, 23 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 19/55] KVM: x86: hyperv: don't arm PV EOI for a higher plane's VP assist page
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Registering the VP assist page arms the PV EOI / APIC assist
+optimisation through a gfn_to_hva cache, and that cache refuses ranges
+carrying RW memory protections in plane 0's view. The Windows secure
+kernel places its VTL1 assist page in memory it has protected against
+VTL0, so the MSR write failed and VTL1 had no assist page at all: no
+VTL entry reasons, no VTL-return register control, no boot.
+
+Register the page without arming PV EOI when the vCPU is in a plane
+above 0. KVM then never sets the no-EOI-required bit for that plane,
+so the guest always performs a real EOI; only the fast path is lost.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/hyperv.c | 24 ++++++++++++++++++++----
+ 1 file changed, 20 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 06/55] KVM: selftests: Add Hyper-V hypercall forwarding test
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Drive an unimplemented hypercall code through the three interesting
+shapes: forwarding disabled (the guest sees
+HV_STATUS_INVALID_HYPERCALL_CODE from KVM itself), a slow-form call
+(the exit carries the control value and GPAs, and the userspace-chosen
+result reaches the guest), and a fast-form call (RDX and R8 in the
+exit parameters, XMM0 visible through KVM_GET_FPU).
+
+The tools copy of linux/kvm.h picks up the KVM_CAP_HYPERV_FORWARD_HCALL
+capability number for the test.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ tools/include/uapi/linux/kvm.h                |   1 +
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/x86/hyperv_forward_hcall.c  | 144 ++++++++++++++++++
+ 3 files changed, 146 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 16/55] KVM: x86: allow KVM_SET_GUEST_DEBUG on plane vCPU fds
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Debugging a non-zero plane needs single-step and breakpoint control on
+the plane vCPU. The debug exits surface through the plane-0 KVM_RUN
+loop like any other plane exit.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst | 6 +++---
+ arch/x86/kvm/x86.c             | 1 +
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 02/55] KVM: x86: Let userspace opt in to multiple planes with KVM_CAP_PLANES
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A VMM implementing a software privilege model such as Hyper-V VSM
+needs more than one plane, but kvm_arch_max_planes() returns the
+vendor ceiling — 1 everywhere except SEV-SNP, where VMPLs are
+guest-architectural — so KVM_CREATE_PLANE rejects every id above zero.
+
+Make KVM_CAP_PLANES a VM enable capability taking the number of planes
+userspace is going to manage, up to KVM_MAX_PLANES. It must be set
+before any vCPU or extra plane exists, so nothing is sized against the
+old limit, and cannot be changed once set. Non-default VM types are
+rejected: SEV-SNP keeps deriving its count from the supported VMPLs,
+and protected-state VM types need their own audit first. A VM that
+does not enable the capability keeps reporting a single plane.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ Documentation/virt/kvm/api.rst  | 27 +++++++++++++++++++++
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/kvm/x86.c              | 42 ++++++++++++++++++++++++++++++++-
+ 3 files changed, 69 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 10/55] KVM: x86: Allow MP state ioctls on plane vCPU fds
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+A new plane vCPU for an AP starts, like any non-boot x86 vCPU, in the
+uninitialised wait-for-INIT state, and nothing ever sends INIT/SIPI to
+the higher plane of an AP. The VMM placing an initial VTL context on
+it has to mark it runnable itself.
+
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+Assisted-by: LLM
+---
+ arch/x86/kvm/x86.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 5/5] KVM: selftests: Test protection of the ucall MMIO region
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Verify that creating a memslot overlapping the ucall MMIO region
+fails with EEXIST and that ucalls work before and after the
+attempt. Skip when MMIO ucalls or read-only memory are unsupported.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../selftests/kvm/reserved_slot_test.c        | 61 +++++++++++++++++++
+ 2 files changed, 62 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 4/5] KVM: selftests: Reserve memslot 1 for the ucall MMIO address
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Back the ucall MMIO address with a read-only region in slot 1
+when KVM_CAP_READONLY_MEM is available. Writes still exit as
+MMIO, while overlapping memslot creation is rejected.
+
+Start test memslots at slot 2, leaving slot 1 reserved by
+convention even when read-only memory is unsupported.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 19 +++++++++++++------
+ 2 files changed, 14 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/5] KVM: selftests: Use the shared memslot base in memstress
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Define MEMSTRESS_MEM_SLOT_INDEX using TEST_MEM_SLOT_BASE so
+memstress and its users follow the library's reserved-slot
+convention.
+
+The tests affected but require no change are:
+	dirty_log_perf_test.c
+	demand_paging_test.c
+	access_tracking_perf_test.c
+	memslot_modification_stress_test.c
+	x86/dirty_log_page_splitting_test.c
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ tools/testing/selftests/kvm/include/memstress.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/5] KVM: selftests: Use the shared memslot base in memslot_perf_test
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Use TEST_MEM_SLOT_BASE for test memslot IDs and account for the
+reserved slots when calculating the available slot count. This
+prepares memslot_perf_test for reserving slot 1 for library use.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ .../testing/selftests/kvm/memslot_perf_test.c | 62 +++++++++++--------
+ 1 file changed, 35 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/5] KVM: selftests: Introduce a shared base for test memslots
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Replace hardcoded slot 1 assignments with TEST_MEM_SLOT_BASE
+This prepares tests for reserving slot 1 for library use.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ tools/testing/selftests/kvm/arm64/hypercalls.c               | 3 ++-
+ tools/testing/selftests/kvm/arm64/sea_to_user.c              | 2 +-
+ tools/testing/selftests/kvm/arm64/stage2_block_transitions.c | 2 +-
+ tools/testing/selftests/kvm/arm64/vgic_its_save.c            | 2 +-
+ tools/testing/selftests/kvm/arm64/vgic_lpi_stress.c          | 2 +-
+ tools/testing/selftests/kvm/dirty_log_test.c                 | 2 +-
+ tools/testing/selftests/kvm/guest_memfd_test.c               | 2 +-
+ tools/testing/selftests/kvm/include/kvm_util.h               | 1 +
+ tools/testing/selftests/kvm/kvm_page_table_test.c            | 2 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c                | 2 +-
+ tools/testing/selftests/kvm/riscv/sbi_pmu_test.c             | 3 ++-
+ tools/testing/selftests/kvm/steal_time.c                     | 3 ++-
+ tools/testing/selftests/kvm/x86/nested_dirty_log_test.c      | 2 +-
+ tools/testing/selftests/kvm/x86/nested_vmsave_vmload_test.c  | 2 +-
+ 14 files changed, 17 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/5] KVM: selftests: Reserve memslot 1 for ucall MMIO
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+This series addresses the TODO in __vm_create() to reserve memslot 1
+for the ucall MMIO region. It introduces a shared base for test
+memslots, migrates existing test users, and adds a read-only region to
+prevent overlapping allocations.
+
+A regression test verifies overlap rejection and continued ucall
+operation.
+
+Testing:
+- Intel Core i5-10210U and Rockchip RK3588 (arm64).
+
+These tests are changed but not tested: 
+- arm64/sea_to_user.c: not enough memory allocation.
+- x86/nested_vmsave_vmload_test.c: requires X86_FEATURE_SVM.
+- riscv/sbi_pmu_test.c: riscv hardware unavailability.
+
+The following test failures reproduce on both the unmodified base
+<8edffbc1f6272db167037e1a8c49b99e9cd04803> with host kernel 
+7.3.0-rc1-gd4b7fb647204 on RK3588 and with this series applied:
+- arm64/vgic_its_save.c
+- arm64/hypercalls.c
+
+These failures are unchanged by this series.
+
+Tharit Tangkijwanichakul (5):
+  KVM: selftests: Introduce a shared base for test memslots
+  KVM: selftests: Use the shared memslot base in memslot_perf_test
+  KVM: selftests: Use the shared memslot base in memstress
+  KVM: selftests: Reserve memslot 1 for the ucall MMIO address
+  KVM: selftests: Test protection of the ucall MMIO region
+
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../testing/selftests/kvm/arm64/hypercalls.c  |  3 +-
+ .../testing/selftests/kvm/arm64/sea_to_user.c |  2 +-
+ .../kvm/arm64/stage2_block_transitions.c      |  2 +-
+ .../selftests/kvm/arm64/vgic_its_save.c       |  2 +-
+ .../selftests/kvm/arm64/vgic_lpi_stress.c     |  2 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |  2 +-
+ .../testing/selftests/kvm/guest_memfd_test.c  |  2 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |  1 +
+ .../testing/selftests/kvm/include/memstress.h |  2 +-
+ .../selftests/kvm/kvm_page_table_test.c       |  2 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 19 ++++--
+ .../testing/selftests/kvm/memslot_perf_test.c | 62 +++++++++++--------
+ tools/testing/selftests/kvm/mmu_stress_test.c |  2 +-
+ .../selftests/kvm/reserved_slot_test.c        | 61 ++++++++++++++++++
+ .../selftests/kvm/riscv/sbi_pmu_test.c        |  3 +-
+ tools/testing/selftests/kvm/steal_time.c      |  3 +-
+ .../selftests/kvm/x86/nested_dirty_log_test.c |  2 +-
+ .../kvm/x86/nested_vmsave_vmload_test.c       |  2 +-
+ 19 files changed, 128 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Ratelimit guest-triggerable IOAPIC/LAPIC log messages
+Author: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+
+A guest can drive these kernel log writes at will -- the IOAPIC MMIO
+read/write handlers log every access with an unsupported length, and the
+LAPIC IRQ-delivery path logs each physical-broadcast lowest-priority IPI --
+so a guest can flood the host dmesg/journal.  Use the _ratelimited()
+variants, matching the ratelimited logging already used elsewhere in the
+LAPIC.
+
+Signed-off-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+---
+ arch/x86/kvm/ioapic.c | 4 ++--
+ arch/x86/kvm/lapic.c  | 2 +-
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: VMX: Add array_index_nospec() to evmcs_field_offset()
+Author: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+
+evmcs_field_offset() bounds-checks the guest-supplied field index against
+nr_evmcs_1_fields and then indexes vmcs_field_to_evmcs_1[] without an
+array_index_nospec() clamp, unlike its vmcs12 counterpart
+get_vmcs12_field_offset().  An enlightened VMREAD/VMWRITE from the guest
+can therefore speculatively read out of bounds of vmcs_field_to_evmcs_1[]
+past the bound check (Spectre v1).
+
+Clamp the index with array_index_nospec(), mirroring
+get_vmcs12_field_offset().
+
+Signed-off-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+---
+ arch/x86/kvm/vmx/hyperv_evmcs.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: VMX: Load the EOI-exit bitmap into vmcs01, not the active VMCS
+Author: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+
+vmx_load_eoi_exitmap() writes EOI_EXIT_BITMAP0..3 directly with
+vmcs_write64() and, unlike its siblings vmx_hwapic_isr_update() and
+vmx_sync_pir_to_irr(),
+does not take guard(vmx_vmcs01).  The EOI-exit bitmap belongs to L1's APIC,
+but with nested virtual-interrupt-delivery an L2 can be active when KVM
+refreshes it (e.g. via kvm_vcpu_reload_apic_access_page() /
+vcpu_scan_ioapic()), so the writes land in vmcs02 instead of vmcs01: L2's
+EOI-exit bitmap is corrupted and vmcs01's is left stale until the next L1
+refresh.
+
+Add guard(vmx_vmcs01), matching the sibling APICv callbacks.
+
+Signed-off-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+---
+ arch/x86/kvm/vmx/vmx.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nVMX: Clear nested.smm.guest_mode on a failed RSM-to-L2
+Author: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+
+vmx_leave_smm() consumes nested.smm.vmxon into nested.vmxon up front, but
+clears nested.smm.guest_mode only on the success path.  On either failure
+arm (nested_vmx_check_restored_vmcs12() < 0, or
+nested_vmx_enter_non_root_mode() != NVMX_VMENTRY_SUCCESS) it returns early
+with nested.smm.guest_mode still true while nested.smm.vmxon is already
+false.
+
+em_rsm() turns that non-zero return into a triple fault, but the vCPU is
+left with the internal pair (smm.guest_mode=true, smm.vmxon=false).  That
+pair is not representable in migration state: vmx_get_nested_state()
+serializes KVM_STATE_NESTED_SMM_GUEST_MODE without
+KVM_STATE_NESTED_SMM_VMXON, and vmx_set_nested_state() rejects exactly
+SMM_GUEST_MODE && !SMM_VMXON with -EINVAL.  KVM thus serializes a state it
+refuses to restore -- a save/restore (live-migration) round-trip break.
+
+The leak is sticky: free_nested() and vCPU reset do not clear
+nested.smm.guest_mode (kvm_vcpu_reset() gates the nested unwind on
+is_guest_mode(), false here), so a later VMXON re-exposes the bad
+KVM_GET_NESTED_STATE with no SMI/RSM involved, for the life of the vCPU.
+
+Clear nested.smm.guest_mode before the consistency check and re-entry, so
+it is cleared on every exit from the block.  nested.vmxon is left true,
+which is correct (L1 does have VMX on) and round-trips cleanly on its own.
+Not a memory-safety issue; fidelity / migration only.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+---
+ arch/x86/kvm/vmx/vmx.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 13/13] vfio/pci: Allow VFIO BAR mmap with an attached guest_memfd
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow existing and new VFIO BAR VMAs when the attached guest_memfd was
+created with GUEST_MEMFD_FLAG_MMAP. Keep BAR VMA exclusion when the flag
+is absent. CPU mappings use the VFIO fd; mmap on the PFN-backed
+guest_memfd fd remains disabled.
+
+Invalidate existing BAR mappings, including huge mappings, during
+attachment. Subsequent faults use base-page mappings so each page's
+shared-range attributes are checked separately. Hold memory_lock from
+the attribute check through PTE insertion.
+
+Invalidate BAR mappings before private conversion and on provider
+detach. Taking memory_lock for writing waits for active
+faults, BAR read/write and ioeventfd accesses before invalidation.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst          | 29 +++++++++++-----
+ drivers/vfio/pci/vfio_pci_core.c        | 16 ++++++---
+ drivers/vfio/pci/vfio_pci_gmem.c        | 46 ++++++++++++++++---------
+ drivers/vfio/pci/vfio_pci_gmem.h        |  2 ++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 31 +++++++++++++++++
+ include/linux/vfio_pci_core.h           |  5 +++
+ 6 files changed, 99 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 12/13] KVM: Invalidate guest_memfd mappings before removing memslot bindings
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Unmap guest_memfd ranges before deleting the memslot. Remove private
+device mappings before committing deletion, and invalidate remaining
+mappings while holding the inode invalidate lock.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ virt/kvm/guest_memfd.c | 70 ++++++++++++++++++++++++++++++++++++++++--
+ virt/kvm/guest_memfd.h |  6 ++++
+ virt/kvm/kvm_main.c    |  4 +++
+ 3 files changed, 77 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 11/13] KVM: guest_memfd: Remove device mappings on final close
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+On final guest_memfd close, detach the device provider before removing
+private device mappings. Keep memslot bindings available so cleanup can
+resolve device ranges to guest addresses.
+
+Hold the inode invalidate lock across detach and conversion cleanup, and
+clear the core file pointer before releasing the file-owned VM reference.
+Require PFN providers to supply detach() and reject it for folio providers.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst |  3 ++-
+ virt/kvm/guest_memfd.c         | 27 ++++++++++++++++++++++++---
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 10/13] vfio/pci: Detach guest_memfd access before teardown
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Implement the guest_memfd detach callback and forward it through the VFIO
+filesystem provider. Require the backing driver to supply the callback.
+
+Mark the provider detached under the vDEVICE MMIO mutex and VFIO memory
+lock, draining in-flight access and invalidation callbacks. Reject further
+host accesses, PFN lookups, bindings and private conversions while allowing
+shared cleanup.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/vfio/pci/vfio_pci_gmem.c        | 25 +++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  6 ++++++
+ drivers/vfio/pci/vfio_pci_gmem_access.c |  7 +++++--
+ drivers/vfio/vfio_main.c                | 10 ++++++++--
+ 4 files changed, 44 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 09/13] KVM: guest_memfd: Add a provider detach callback
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Add detach() to the guest_memfd provider operations. Providers must disable
+new bindings and private requests and stop and drain callbacks that access
+the VM before returning.
+
+This separates quiescing VM access from release(), which may run after
+the guest_memfd file and its VM reference have been released.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 08/13] vfio/pci: Provide guest_memfd backing for PCI BARs
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow an ordinary VFIO PCI device fd to supply BAR memory to
+guest_memfd. Validate eligible BAR ranges and provide their PFNs for
+shared guest mappings. Keep the VFIO file and its IOMMUFD vDEVICE alive
+while the provider is attached.
+
+Reject attachment while VFIO BAR mappings or dma-buf exports exist.
+
+Hold the vDEVICE MMIO mutex across conversion and attribute updates.
+Before private conversion, take the VFIO memory lock for writing to wait
+for ongoing BAR reads and writes to finish. Host access checks try
+inode invalidate lock without waiting, avoiding deadlock with
+conversion, which acquires that lock first.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst   |   6 +
+ drivers/vfio/pci/Makefile        |   1 +
+ drivers/vfio/pci/vfio_pci.c      |   3 +
+ drivers/vfio/pci/vfio_pci_gmem.c | 325 +++++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h |   3 +
+ include/linux/vfio_pci_core.h    |   1 +
+ 6 files changed, 339 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 07/13] vfio/pci: Restrict host BAR access for guest_memfd providers
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Add the access and invalidation helpers needed by a PCI guest_memfd
+provider. Check shared-range attributes for BAR read/write and ioeventfd
+access, and revoke shared guest mappings when VFIO changes device state.
+
+Reject new VFIO mmap and dma-buf exports while a provider is attached.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/vfio/pci/Kconfig                |  11 +++
+ drivers/vfio/pci/Makefile               |   1 +
+ drivers/vfio/pci/vfio_pci_core.c        |   9 ++-
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  10 +++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  15 ++++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 101 ++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_rdwr.c        |  13 ++-
+ include/linux/vfio_pci_core.h           |  22 ++++++
+ 8 files changed, 178 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 06/13] vfio: Dispatch guest_memfd provider operations through the filesystem
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Expose guest_memfd provider operations through the VFIO mapping
+superblock and forward them to the device driver. Validate the driver
+callbacks before attachment and keep the source file pinned through
+provider release.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/vfio/vfio_main.c | 115 ++++++++++++++++++++++++++++++++++++++-
+ include/linux/vfio.h     |   4 ++
+ 2 files changed, 118 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 05/13] vfio/pci: Track userspace BAR mappings
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Track userspace mappings of PCI BARs so a later patch can reject
+guest_memfd attachment while such mappings exist.
+
+Count the initial mmap explicitly because vm_ops->open() is not called
+for it. Use the VMA open and close callbacks to track duplication and
+unmapping, keeping the count nonzero until the last mapping is unmapped.
+
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 19 +++++++++++++++++++
+ include/linux/vfio_pci_core.h    |  2 ++
+ 2 files changed, 21 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 04/13] KVM: guest_memfd: Add device provider access callbacks
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Expose callbacks for device providers to check whether a range is shared,
+query whether private ranges remain, and invalidate shared guest mappings.
+
+Use a nonblocking acquisition of the inode invalidate lock for host
+access checks, avoiding deadlock with conversion while a provider holds
+its memory lock. Invalidate shared mappings under SRCU and the KVM MMU
+lock, advancing the MMU invalidation sequence so concurrent faults retry.
+
+Initialize callback state before attaching the provider and publish the
+guest_memfd file after creation completes.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |   6 ++
+ virt/kvm/guest_memfd.c      | 117 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 123 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 03/13] iommufd: Support MMIO provider attachment to vDEVICEs
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow a device MMIO provider to attach to the existing vDEVICE after the
+backend validates its association with the VM. Keep the vDEVICE and
+IOMMUFD context alive until the provider detaches.
+
+Add a per-vDEVICE MMIO mutex to serialize provider attachment and
+detachment, and allow providers and backends to use the same lock for
+memory conversion and device state changes. Provide a callback to query
+whether private MMIO ranges remain.
+
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: "Joerg Roedel (AMD)" <joro@8bytes.org>
+Cc: Will Deacon <will@kernel.org>
+Cc: Robin Murphy <robin.murphy@arm.com>
+Cc: iommu@lists.linux.dev
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ drivers/iommu/iommufd/viommu.c | 86 ++++++++++++++++++++++++++++++++++
+ include/linux/iommufd.h        | 26 ++++++++++
+ 2 files changed, 112 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 02/13] KVM: guest_memfd: Support private/shared conversion of device memory
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow architectures to convert device-backed guest_memfd ranges to
+private memory. Coordinate conversion with the device provider and
+update guest_memfd attributes only after the architecture operation
+succeeds.
+
+Hold the inode invalidate lock across conversion and the attribute
+update. Provider callbacks allow a device conversion lock to cover the
+same operation, with the inode lock acquired first. This prevents faults
+and competing device operations from observing an incomplete conversion.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  12 +++
+ include/linux/kvm_host.h    |   5 +
+ virt/kvm/guest_memfd.c      | 201 +++++++++++++++++++++++++++++++++++-
+ 3 files changed, 213 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 01/13] KVM: guest_memfd: Support PFN-backed resource providers
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Device resources such as PCI BARs supply PFNs directly and cannot use
+the folio allocation path. Extend guest_memfd provider operations with
+bind() and get_pfn() callbacks and identify the backing type from the
+callbacks supplied by the provider.
+
+Require providers to supply either folio allocation or PFN lookup,
+along with the callbacks appropriate to that backing type. PFN providers
+require INIT_SHARED and architecture support for protected device
+mappings.
+
+Pass creation flags to providers so they can control mappings through
+the resource fd. Keep mmap on PFN-backed guest_memfd files disabled.
+
+Resolve shared faults through get_pfn() without taking folio references.
+Reject dirty logging and read-only device memslots.
+
+Provider release may run after file release and must not access the VM.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst |   4 +
+ include/linux/guest_memfd.h    |  39 ++++++--
+ include/linux/kvm_host.h       |   6 ++
+ mm/shmem.c                     |   3 +-
+ virt/kvm/guest_memfd.c         | 165 +++++++++++++++++++++++++++------
+ 5 files changed, 180 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v2 00/13] KVM/VFIO: guest_memfd support for device MMIO resources
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+This series adds a guest_memfd device-resource framework for exposing PCI
+BAR memory to guests. The intended use is confidential device assignment,
+where KVM needs to coordinate private device mappings with shared access
+through VFIO. The Arm CCA backend is provided separately; these patches
+contain the guest_memfd, VFIO and IOMMUFD interfaces it uses.
+
+The guest_memfd framework and Arm CCA backend are available together at:
+
+  https://git.gitlab.arm.com/linux-arm/linux-cca.git cca/topics/cca-da-gmem-backend
+
+Userspace creates a device-backed guest_memfd using the ordinary VFIO
+device fd as resource_fd, with GUEST_MEMFD_FLAG_USE_RESOURCE and
+GUEST_MEMFD_FLAG_INIT_SHARED. The resource mapping superblock selects its
+provider; get_pfn identifies PFN-backed memory. Eligible BAR intervals are
+registered as guest_memfd memslots. File offsets use the existing VFIO
+region-offset namespace, allowing one guest_memfd to cover multiple BAR
+intervals. The device-backed guest_memfd fd rejects mmap and fallocate;
+shared guest faults obtain bare BAR PFNs from the provider instead of
+resolving the memslot HVA or allocating folios.
+
+IOMMUFD resolves and pins the device's existing vDEVICE after its backend
+validates the VM association. Its MMIO mutex coordinates conversion and
+device state changes. VFIO supplies BAR PFNs, validates eligible ranges
+and excludes dma-buf exports while a guest_memfd provider is attached.
+
+Without GUEST_MEMFD_FLAG_MMAP, attachment rejects existing VFIO BAR VMAs,
+and new VFIO mmap calls. With the flag, existing and new BAR VMAs are
+allowed through the VFIO fd. Attachment invalidates existing BAR mappings,
+including huge mappings. Subsequent faults use base-page mappings so each
+page's shared-range attributes are checked separately. Mapping the
+PFN-backed guest_memfd fd remains disabled (We can decide on this later).
+
+VFIO BAR read/write, ioeventfd and userspace mapping faults check the
+requested range's guest_memfd attributes.
+
+This series depends on:
+* Ackerley Tng's "Allow guest_memfd to be created using a resource (pool)
+  fd" RFC, which provides the tmpfs resource-provider API:
+  https://lore.kernel.org/all/20260925-gmem-tmpfs-backend-v1-0-d36159822d18@google.com/
+* The IOMMUFD/TSM series, which provides the vIOMMU and vDEVICE interfaces:
+  https://lore.kernel.org/all/20261008055955.4014342-1-aneesh.kumar@kernel.org/
+
+Notes:
+* Codex assisted with implementation, review and series organization.
+
+* Changes from v1:
+https://lore.kernel.org/all/20261010072504.536230-1-aneesh.kumar@kernel.org
+* Require GUEST_MEMFD_FLAG_MMAP to allow VFIO BAR mmap while a provider is
+  attached; disable it by default.
+* Use the common guest_memfd_provider_operations for folio and PFN
+  providers. Select operations through the resource mapping superblock
+  and forward VFIO operations to the device driver.
+
+Cc: Ackerley Tng <ackerleytng@google.com>
+Cc: Alex Williamson <alex@shazbot.org>
+Cc: David Woodhouse <dwmw2@infradead.org>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: "Joerg Roedel (AMD)" <joro@8bytes.org>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Robin Murphy <robin.murphy@arm.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Will Deacon <will@kernel.org>
+Cc: Alexey Kardashevskiy <aik@amd.com>
+Cc: Xu Yilun <yilun.xu@linux.intel.com>
+Cc: Catalin Marinas <catalin.marinas@arm.com> 
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Steven Price <steven.price@arm.com>
+Cc: Fred Griffoul <griffoul@gmail.com> 
+Cc: iommu@lists.linux.dev
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+
+Aneesh Kumar K.V (Arm) (13):
+  KVM: guest_memfd: Support PFN-backed resource providers
+  KVM: guest_memfd: Support private/shared conversion of device memory
+  iommufd: Support MMIO provider attachment to vDEVICEs
+  KVM: guest_memfd: Add device provider access callbacks
+  vfio/pci: Track userspace BAR mappings
+  vfio: Dispatch guest_memfd provider operations through the filesystem
+  vfio/pci: Restrict host BAR access for guest_memfd providers
+  vfio/pci: Provide guest_memfd backing for PCI BARs
+  KVM: guest_memfd: Add a provider detach callback
+  vfio/pci: Detach guest_memfd access before teardown
+  KVM: guest_memfd: Remove device mappings on final close
+  KVM: Invalidate guest_memfd mappings before removing memslot bindings
+  vfio/pci: Allow VFIO BAR mmap with an attached guest_memfd
+
+ Documentation/virt/kvm/api.rst          |  26 +-
+ drivers/iommu/iommufd/viommu.c          |  86 ++++
+ drivers/vfio/pci/Kconfig                |  11 +
+ drivers/vfio/pci/Makefile               |   2 +
+ drivers/vfio/pci/vfio_pci.c             |   3 +
+ drivers/vfio/pci/vfio_pci_core.c        |  34 ++
+ drivers/vfio/pci/vfio_pci_dmabuf.c      |  10 +
+ drivers/vfio/pci/vfio_pci_gmem.c        | 362 +++++++++++++++
+ drivers/vfio/pci/vfio_pci_gmem.h        |  26 ++
+ drivers/vfio/pci/vfio_pci_gmem_access.c | 135 ++++++
+ drivers/vfio/pci/vfio_pci_rdwr.c        |  13 +-
+ drivers/vfio/vfio_main.c                | 121 ++++-
+ include/linux/guest_memfd.h             |  60 ++-
+ include/linux/iommufd.h                 |  26 ++
+ include/linux/kvm_host.h                |  11 +
+ include/linux/vfio.h                    |   4 +
+ include/linux/vfio_pci_core.h           |  30 ++
+ mm/shmem.c                              |   3 +-
+ virt/kvm/guest_memfd.c                  | 566 ++++++++++++++++++++++--
+ virt/kvm/guest_memfd.h                  |   6 +
+ virt/kvm/kvm_main.c                     |   4 +
+ 21 files changed, 1492 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From f9b002714 to ab95f0b33
+KVM mailing list update from f9b002714 to ab95f0b33
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 gmail.com
+      1 kernel.org
+
+Top 15 contributors (Based on Email Body)
+
+      6  Tharit Tangkijwanichakul <tharitt97@gmail.com>
+      1  Sasha Levin <sashal@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: arm64: Take a protected vCPU's TWI and TWE only at vCPU load
+Author: Sasha Levin <sashal@kernel.org>
+
+Commit 06499de8f998 ("KVM: arm64: Skip fixed-feature state flush for
+protected vCPUs") moved the copy of the host's TWI and TWE in
+flush_hyp_vcpu() into the non-protected branch: a protected vCPU takes
+them in __pkvm_vcpu_load() instead, and only VSE comes from the host on
+each entry.
+
+Commit 04447b95c62b ("KVM: arm64: Use the host's HCR_EL2 for
+non-protected VMs in pKVM") was written against the old code, where
+both VM types took TWI, TWE and VSE on each entry, and kept that for a
+protected VM as PKVM_HCR_EL2_HOST_PVM. The merge of the two applies
+PKVM_HCR_EL2_HOST_PVM in the common path, so a protected vCPU takes TWI
+and TWE from the host's vCPU on every entry again.
+
+That doesn't change what a protected guest runs with today: once the
+vCPU is initialised, the host only changes TWI and TWE in
+vcpu_set_wfx_traps(), which pkvm_vcpu_load() calls right before
+__pkvm_vcpu_load(). But it undoes part of 06499de8f998, and has EL2
+read a protected vCPU's trap configuration from host memory on every
+entry, which nothing needs.
+
+Make PKVM_HCR_EL2_HOST_PVM VSE alone and add TWI and TWE to
+PKVM_HCR_EL2_HOST_NPVM, so that each mask again lists what EL2 takes
+from the host on each entry for its VM type. A non-protected VM takes
+the same bits as before. Say in the comments that a protected vCPU's
+TWI and TWE come at vCPU load.
+
+llminus, an LLM-assisted merge conflict resolution tool, found the
+difference while resolving the same conflict in an integration tree.
+
+Fixes: 439d8f9cb01c ("Merge tag 'kvmarm-7.4' of git://git.kernel.org/pub/scm/linux/kernel/git/kvmarm/kvmarm into HEAD")
+Assisted-by: LLM
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+With KVM's own host code this changes nothing a guest can observe: the
+per-entry copy writes back the TWI/TWE value __pkvm_vcpu_load() already
+set. It restores the split 06499de8f998 made.
+
+Marc's resolution in kvmarm/fixes, aca73c1d23f1 ("Merge branch
+kvmarm-7.4 into kvmarm-master/fixes"), is the same as the one in
+kvm/next, so this applies to both.
+
+Build-tested only: arm64 defconfig with gcc and clang, W=1, no new
+warnings. The only code generation change is the protected vCPU's
+per-entry mask, 0x6100 to 0x100. Not runtime-tested, as the in-tree
+selftests can't create protected VMs.
+
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h | 13 +++++++------
+ arch/arm64/kvm/hyp/nvhe/pkvm.c         |  5 ++++-
+ 2 files changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5/5] KVM: selftests: Test protection of the ucall MMIO region
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Verify that creating a memslot overlapping the ucall MMIO region
+fails with EEXIST and that ucalls work before and after the
+attempt. Skip when MMIO ucalls or read-only memory are unsupported.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../selftests/kvm/reserved_slot_test.c        | 61 +++++++++++++++++++
+ 2 files changed, 62 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 4/5] KVM: selftests: Reserve memslot 1 for the ucall MMIO address
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Back the ucall MMIO address with a read-only region in slot 1
+when KVM_CAP_READONLY_MEM is available. Writes still exit as
+MMIO, while overlapping memslot creation is rejected.
+
+Start test memslots at slot 2, leaving slot 1 reserved by
+convention even when read-only memory is unsupported.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ .../testing/selftests/kvm/include/kvm_util.h  |  2 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 19 +++++++++++++------
+ 2 files changed, 14 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 3/5] KVM: selftests: Use the shared memslot base in memstress
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Define MEMSTRESS_MEM_SLOT_INDEX using TEST_MEM_SLOT_BASE so
+memstress and its users follow the library's reserved-slot
+convention.
+
+The tests affected but require no change are:
+	dirty_log_perf_test.c
+	demand_paging_test.c
+	access_tracking_perf_test.c
+	memslot_modification_stress_test.c
+	x86/dirty_log_page_splitting_test.c
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ tools/testing/selftests/kvm/include/memstress.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/5] KVM: selftests: Use the shared memslot base in memslot_perf_test
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Use TEST_MEM_SLOT_BASE for test memslot IDs and account for the
+reserved slots when calculating the available slot count. This
+prepares memslot_perf_test for reserving slot 1 for library use.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ .../testing/selftests/kvm/memslot_perf_test.c | 62 +++++++++++--------
+ 1 file changed, 35 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/5] KVM: selftests: Introduce a shared base for test memslots
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+Replace hardcoded slot 1 assignments with TEST_MEM_SLOT_BASE
+This prepares tests for reserving slot 1 for library use.
+
+Signed-off-by: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+---
+ tools/testing/selftests/kvm/arm64/hypercalls.c               | 3 ++-
+ tools/testing/selftests/kvm/arm64/sea_to_user.c              | 2 +-
+ tools/testing/selftests/kvm/arm64/stage2_block_transitions.c | 2 +-
+ tools/testing/selftests/kvm/arm64/vgic_its_save.c            | 2 +-
+ tools/testing/selftests/kvm/arm64/vgic_lpi_stress.c          | 2 +-
+ tools/testing/selftests/kvm/dirty_log_test.c                 | 2 +-
+ tools/testing/selftests/kvm/guest_memfd_test.c               | 2 +-
+ tools/testing/selftests/kvm/include/kvm_util.h               | 1 +
+ tools/testing/selftests/kvm/kvm_page_table_test.c            | 2 +-
+ tools/testing/selftests/kvm/mmu_stress_test.c                | 2 +-
+ tools/testing/selftests/kvm/riscv/sbi_pmu_test.c             | 3 ++-
+ tools/testing/selftests/kvm/steal_time.c                     | 3 ++-
+ tools/testing/selftests/kvm/x86/nested_dirty_log_test.c      | 2 +-
+ tools/testing/selftests/kvm/x86/nested_vmsave_vmload_test.c  | 2 +-
+ 14 files changed, 17 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/5] KVM: selftests: Reserve memslot 1 for ucall MMIO
+Author: Tharit Tangkijwanichakul <tharitt97@gmail.com>
+
+This series addresses the TODO in __vm_create() to reserve memslot 1
+for the ucall MMIO region. It introduces a shared base for test
+memslots, migrates existing test users, and adds a read-only region to
+prevent overlapping allocations.
+
+A regression test verifies overlap rejection and continued ucall
+operation.
+
+Testing:
+- Intel Core i5-10210U and Rockchip RK3588 (arm64).
+
+These tests are changed but not tested: 
+- arm64/sea_to_user.c: not enough memory allocation.
+- x86/nested_vmsave_vmload_test.c: requires X86_FEATURE_SVM.
+- riscv/sbi_pmu_test.c: riscv hardware unavailability.
+
+The following test failures reproduce on both the unmodified base
+<8edffbc1f6272db167037e1a8c49b99e9cd04803> with host kernel 
+7.3.0-rc1-gd4b7fb647204 on RK3588 and with this series applied:
+- arm64/vgic_its_save.c
+- arm64/hypercalls.c
+
+These failures are unchanged by this series.
+
+Tharit Tangkijwanichakul (5):
+  KVM: selftests: Introduce a shared base for test memslots
+  KVM: selftests: Use the shared memslot base in memslot_perf_test
+  KVM: selftests: Use the shared memslot base in memstress
+  KVM: selftests: Reserve memslot 1 for the ucall MMIO address
+  KVM: selftests: Test protection of the ucall MMIO region
+
+ tools/testing/selftests/kvm/Makefile.kvm      |  1 +
+ .../testing/selftests/kvm/arm64/hypercalls.c  |  3 +-
+ .../testing/selftests/kvm/arm64/sea_to_user.c |  2 +-
+ .../kvm/arm64/stage2_block_transitions.c      |  2 +-
+ .../selftests/kvm/arm64/vgic_its_save.c       |  2 +-
+ .../selftests/kvm/arm64/vgic_lpi_stress.c     |  2 +-
+ tools/testing/selftests/kvm/dirty_log_test.c  |  2 +-
+ .../testing/selftests/kvm/guest_memfd_test.c  |  2 +-
+ .../testing/selftests/kvm/include/kvm_util.h  |  1 +
+ .../testing/selftests/kvm/include/memstress.h |  2 +-
+ .../selftests/kvm/kvm_page_table_test.c       |  2 +-
+ tools/testing/selftests/kvm/lib/kvm_util.c    | 19 ++++--
+ .../testing/selftests/kvm/memslot_perf_test.c | 62 +++++++++++--------
+ tools/testing/selftests/kvm/mmu_stress_test.c |  2 +-
+ .../selftests/kvm/reserved_slot_test.c        | 61 ++++++++++++++++++
+ .../selftests/kvm/riscv/sbi_pmu_test.c        |  3 +-
+ tools/testing/selftests/kvm/steal_time.c      |  3 +-
+ .../selftests/kvm/x86/nested_dirty_log_test.c |  2 +-
+ .../kvm/x86/nested_vmsave_vmload_test.c       |  2 +-
+ 19 files changed, 128 insertions(+), 47 deletions(-)
+
+----------------------------------------------------------------------
+
