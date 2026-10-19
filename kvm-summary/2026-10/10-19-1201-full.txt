@@ -1,0 +1,199 @@
+
+On /root/mail/repo:
+From 3bf012389 to e702c21d3
+KVM mailing list update from 3bf012389 to e702c21d3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 gmail.com
+      1 oss.qualcomm.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  Pablo Azuaje <pablo45154@gmail.com>
+      1  =?UTF-8?q?Philippe=20Mathieu-Daud=C3=A9?= <philmd@oss.qualcomm.com>
+      1  mark-ship-it <williamwoodstock79@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] docs: Clarify 'query-kvm' deprecation release
+Author: Philippe Mathieu-Daudé <philmd@oss.qualcomm.com>
+
+'query-kvm' was deprecated in commit 824141dcf48, merged after
+the v11.1.0 release. Correct to prevent too early removal.
+
+Fixes: 824141dcf48 ("hw/core: Deprecate query-kvm")
+Signed-off-by: Philippe Mathieu-Daudé <philmd@oss.qualcomm.com>
+---
+ docs/about/deprecated.rst | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] PCI: Avoid bus reset on NVIDIA GB202 and GB203 GPUs
+Author: mark-ship-it <williamwoodstock79@gmail.com>
+
+NVIDIA GB202 (GeForce RTX 5090, RTX PRO 6000) and GB203 (GeForce RTX
+5080/5070 Ti/5070) GPUs train their link at x16 at boot, but after a
+Secondary Bus Reset the link comes back at x8 and stays there until the
+next cold boot.
+
+The GPU's HD Audio function (e.g. 10de:22e9 on GB203) has no reset method,
+so when both functions are assigned to a VM, vfio-pci falls back to a bus
+reset at VM start and again at release, and the GPU then runs at half
+width. Assigning only function 0 avoids the bus reset because the GPU
+itself supports FLR, which is why the problem is usually reported as
+"passing the audio function breaks x16".
+
+Observed on an RTX 5080 (10de:2c02) behind an AMD Root Port, kernel
+7.0.14, Proxmox VE host with a Windows 11 Pro guest:
+
+  boot:                         LnkSta: Speed 32GT/s, Width x16
+  echo 1 > /sys/bus/pci/devices/<root port>/reset_subordinate
+                                LnkSta: Speed 32GT/s, Width x8 (downgraded)
+
+No VM is involved in that reproduction. Stepping the link speed through
+bwctrl (Gen5 -> Gen4 -> Gen5) retrains the link and the speed follows,
+but the width stays at x8. With a VM started frozen (-S), the link is
+already at x8 before any guest code has run, so the guest driver is not
+involved.
+
+With this patch applied, reset_method for the GPU is "flr" only, both
+functions can be assigned, and the link stays at x16 Gen5 across VM
+start, shutdown and restart, with the Windows guest driver working.
+
+The same symptom has been reported with an RTX 5090 (10de:2b85) on an
+AMD X870E board, where passing only function 0 was the only thing that
+kept x16.
+
+Link: https://forum.proxmox.com/threads/asus-x870e-pcie-x8-bifurcation-bug-with-rtx-5090-vfio-passthrough.178461/
+
+Signed-off-by: mark-ship-it <williamwoodstock79@gmail.com>
+---
+ drivers/pci/quirks.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Initialize the PIO bounce buffer on PIT control-port reads
+Author: Pablo Azuaje <pablo45154@gmail.com>
+
+pit_ioport_read() bails out for reads of the control word register
+(port 0x43) without writing to the PIO bounce buffer.  The read is
+nevertheless reported as successful, so the guest receives whatever the
+buffer happens to hold -- typically its own bytes from a previous OUT
+or IN on the same port -- as the readback value.
+
+Real hardware returns undefined data for reads of the control word
+register, so keep KVM's behavior well-defined and predictable: zero the
+bounce buffer before returning.  The read is still reported as
+successful, and returning the guest's own prior IO bytes as a
+pseudo-readback is observable state with no architectural meaning;
+zeroing is the least-surprise choice.  This is also hardening rather
+than a security fix: the leaked bytes belong to the guest itself, never
+to the host.
+
+Fixes: ee73f656a604 ("KVM: PIT: control word is write-only")
+Signed-off-by: Pablo Azuaje <pablo45154@gmail.com>
+---
+ arch/x86/kvm/i8254.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Clamp guest MAXPHYADDR to the architectural maximum
+Author: Pablo Azuaje <pablo45154@gmail.com>
+
+cpuid_query_maxphyaddr() returns CPUID.0x80000008.EAX[7:0] as the
+guest's physical-address width without any sanity check.  KVM computes
+the reserved GPA bits from that value, e.g.
+kvm_vcpu_reserved_gpa_bits_raw() is rsvd_bits(maxphyaddr, 63), and
+rsvd_bits() returns 0 when the bit range is empty.  A VMM that
+populates CPUID.0x80000008.EAX above 52 therefore makes KVM stop
+treating the upper bits of guest PTEs as reserved: reserved-bit fault
+checking on guest page table walks silently degenerates, and garbage
+nCR3s/PDPTRs are accepted instead of faulting.
+
+A MAXPHYADDR above 52 is architecturally impossible on x86-64; clamp
+the queried value to 52 so that a buggy VMM configuration degrades to a
+(very wide) but still meaningful physical-address width instead of
+disabling KVM's reserved-bit accounting.
+
+This is hardening rather than a security fix: the actor is the VMM,
+which already owns the guest, so an over-wide MAXPHYADDR is not a
+privilege boundary crossing.  The motivation is correctness, not
+containment: a configuration value outside architectural limits should
+not silently change how KVM validates guest page tables, and clamping
+keeps the degenerate case well-defined instead of subtly disabling a
+whole class of fault checks.  The unclamped read predates the
+introduction of the cached value; no Fixes: tag is attached for that
+reason.
+
+Signed-off-by: Pablo Azuaje <pablo45154@gmail.com>
+---
+ arch/x86/kvm/cpuid.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From ab95f0b33 to dd479dc98
+KVM mailing list update from ab95f0b33 to dd479dc98
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      1 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+      1  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2] KVM: arm64: Only enable S1PIE and S1POE with the features they imply
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+The world switch skips PIR_EL1, PIRE0_EL1 and POR_EL1 for a guest
+without TCR2, but KVM doesn't trap them for a guest with S1PIE or
+S1POE. Userspace can hide TCR2 while leaving either visible, and such a
+guest then accesses registers that are neither trapped nor switched.
+
+Under VHE, that leaks values between guests. POR_EL1, which the host
+kernel doesn't use, leaks between guests in every mode. On nVHE and
+hVHE, pKVM included, the host's own EL1 registers are saved and restored
+according to the running guest's features, so the host kernel resumes
+with its stage-1 permissions taken from the guest's PIR_EL1 and
+PIRE0_EL1.
+
+As per the architecture, S1PIE and S1POE imply TCR2 and ATS1A, and
+S1POE also implies HPDS. Only enable each for a guest that has the
+features it implies. A guest that has S1PIE or S1POE without them still
+sees the feature in its ID registers, but its accesses to that
+feature's registers UNDEF.
+
+Fixes: 70ed7238297fb ("KVM: arm64: Sanitise ID_AA64MMFR3_EL1")
+Fixes: d4a89e5aee23e ("KVM: arm64: Expose S1PIE to guests")
+Reported-by: Mark Brown <broonie@kernel.org>
+Link: https://lore.kernel.org/r/20260930-arm64-gcs-v21-2-3556644cd927@kernel.org
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Link: https://lore.kernel.org/r/86fqyn2che.wl-maz@kernel.org
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+Changes in v2:
+- Also require FEAT_HPDS for S1POE (Marc)
+- Link to v1: https://lore.kernel.org/r/20261015153041.3770032-1-fuad.tabba@linux.dev
+
+Based on Linux 7.3-rc3 (fd73f4a665989).
+
+ arch/arm64/kvm/config.c | 28 ++++++++++++++++++++++++----
+ 1 file changed, 24 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
