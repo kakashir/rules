@@ -1,0 +1,1591 @@
+
+On /root/mail/repo:
+From 134283bfd to 77893555b
+KVM mailing list update from 134283bfd to 77893555b
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     14 google.com
+      5 virtuozzo.com
+      5 gmail.com
+      3 redhat.com
+      3 amd.com
+      2 renesas.com
+      2 bp.renesas.com
+      1 xiaopeng.com
+      1 outlook.com
+      1 linux.alibaba.com
+      1 flashbots.net
+
+Top 15 contributors (Based on Email Body)
+
+      9  Sean Christopherson <seanjc@google.com>
+      5  Tarun Sahu <tarunsahu@google.com>
+      5  Konstantin Khorenko <khorenko@virtuozzo.com>
+      3  Mahmoud Abumandour <ma.mandourr@gmail.com>
+      3  Babu Moger <babu.moger@amd.com>
+      2  "Michael S. Tsirkin" <mst@redhat.com>
+      2  Biju Das <biju.das.jz@bp.renesas.com>
+      2  Au Dang <au.dang.jx@renesas.com>
+      1  Xiaochun Yu <yxcnew@outlook.com>
+      1  Moe Mahhouk <moe@flashbots.net>
+      1  Markus Armbruster <armbru@redhat.com>
+      1  Li Jinyue <jinyue.li@linux.alibaba.com>
+      1  Jia Jia <physicalmtea@gmail.com>
+      1  Fang Xieyan <fangxy@xiaopeng.com>
+      1  Biju Das <biju.das.au@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  RISC-V: KVM: Fix double free of the split page cache
+[PATCH] RISC-V: KVM: Fix double free of the split page cache
+Author: Li Jinyue <jinyue.li@linux.alibaba.com>
+
+kvm_riscv_mmu_free_pgd() frees pgd_split_page_cache after dropping
+mmu_lock. It is reached from kvm_arch_flush_shadow_all(), i.e. from the
+MMU notifier ->release() callback, which can run concurrently for the
+same VM from exit_mmap() and from mmu_notifier_unregister() in
+kvm_destroy_vm(). The stage-2 teardown is serialized by mmu_lock and the
+second caller finds kvm->arch.pgd already cleared, but both callers then
+go on to free the cache, and kvm_mmu_free_memory_cache() does not
+tolerate concurrent callers:
+
+  BUG: KASAN: double-free in kvfree+0x28/0x32
+  ...
+   kfree+0xc4/0x428
+   kvfree+0x28/0x32
+   kvm_mmu_free_memory_cache+0x178/0x246
+   kvm_riscv_mmu_free_pgd+0x20e/0x2b4
+   kvm_arch_flush_shadow_all+0x1a/0x24
+   kvm_mmu_notifier_release+0x36/0x7c
+   __mmu_notifier_release+0x182/0x66a
+   exit_mmap+0x7f8/0x8c4
+   mmput+0x7e/0x2fc
+   do_exit+0x57a/0x22b4
+  ...
+  Freed by task 15956 on cpu 3 at 8926.103524s:
+  ...
+   kvm_mmu_free_memory_cache+0x178/0x246
+   kvm_riscv_mmu_free_pgd+0x20e/0x2b4
+   kvm_arch_flush_shadow_all+0x1a/0x24
+   kvm_mmu_notifier_release+0x36/0x7c
+   mmu_notifier_unregister+0xf0/0x328
+   kvm_put_kvm+0x32a/0x7b8
+   kvm_vm_release+0x3a/0x50
+   __fput+0x330/0x974
+
+The cache only feeds huge page splitting from VM ioctls, so it does not
+need to be released together with the page table. Free it from
+kvm_arch_destroy_vm() instead, which runs once after the MMU notifier
+has been unregistered, as arm64 and x86 already do. The error path in
+kvm_arch_init_vm() is not affected because the cache cannot have been
+filled at that point.
+
+Found by syzkaller.
+
+Fixes: 6c7f75ef096a ("RISC-V: KVM: Add the split page cache for ioctl context")
+Cc: stable@vger.kernel.org
+Signed-off-by: Li Jinyue <jinyue.li@linux.alibaba.com>
+---
+ arch/riscv/kvm/mmu.c | 2 --
+ arch/riscv/kvm/vm.c  | 2 ++
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Drop deferred updates of EOI bitmaps
+[PATCH v2 0/2] KVM: x86: Drop deferred updates of EOI bitmaps
+Author: Sean Christopherson <seanjc@google.com>
+
+Stop deferring EOI bitmap updates.  As pointed out by Amirmohammad, I missed
+this one when removing all the other cases where KVM defers an update until
+vmcs01 is active.
+
+v1: https://lore.kernel.org/all/20261017093016.32348-2-amirmohammad.eftekhar@cispa.de
+
+Sean Christopherson (2):
+  KVM: x86: Switch to vmcs01 to update EOI exiting bitmap on-demand if
+    L2 is active
+  KVM: x86: Consolidate invocations of kvm_x86_ops.load_eoi_exitmap()
+
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/regs.h             |  6 ------
+ arch/x86/kvm/vmx/vmx.c          |  2 ++
+ arch/x86/kvm/x86.c              | 27 +++++++--------------------
+ 4 files changed, 10 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86: Switch to vmcs01 to update EOI exiting
+[PATCH v2 1/2] KVM: x86: Switch to vmcs01 to update EOI exiting
+Author: Sean Christopherson <seanjc@google.com>
+
+If KVM needs to update the EOI bitmap while L2 is running, temporarily load
+vmcs01 and immediately refresh the bitmap in vmcs01 instead of deferring
+the update until the next nested VM-Exit.  I.e. give the EOI bitmap the
+same treatment as the many other updates that were previously deferred.
+
+Reported-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+Closes: https://lore.kernel.org/all/20261017093016.32348-2-amirmohammad.eftekhar@cispa.de
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/regs.h             |  6 ------
+ arch/x86/kvm/vmx/vmx.c          |  2 ++
+ arch/x86/kvm/x86.c              | 13 -------------
+ 4 files changed, 3 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: WARN and flush TLBs if TDP MMU replaces present
+[PATCH] KVM: x86/mmu: WARN and flush TLBs if TDP MMU replaces present
+Author: Sean Christopherson <seanjc@google.com>
+
+If KVM is buggy and manages to replace a shadow-present SPTE with an MMIO
+SPTE in the TDP MMU, WARN but emit a TLB flush to prevent a potential use-
+after-free.  It should be impossible for KVM to resolve a GFN to a memslot
+and then later find no memslot, but due to flaws in KVM's handling of GFNs
+that can be generated by the guest[*], KVM can/wrap truncate GFNs when
+walking SPTEs and resolve two different GFNs to the same SPTE.
+
+Note, this is NOT a fix for the GFN truncation issues, it is purely a
+stopgap that also happens to be valuable long-term hardening.
+
+Link: https://lore.kernel.org/all/20260219002241.2908563-1-seanjc@google.com [*]
+Cc: stable@vger.kernel.org
+Reported-by: Stefan Teodorescu <fane@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/mmu/tdp_mmu.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Save shadow VMCS when getting nested state iff
+[PATCH 1/2] KVM: nVMX: Save shadow VMCS when getting nested state iff
+Author: Sean Christopherson <seanjc@google.com>
+
+When getting nested state, copy the shadow VMCS to the userspace buffer if
+and only if the vCPU is in L2, as that is the only scenario where the
+shadow VMCS is "active" and thus needs to be explicitly save/restored via
+KVM_GET_NESTED_STATE.  If the vCPU is in L1, then the shadow VMCS isn't
+active/cached by KVM, i.e. is just a pointer to memory, and doesn't need
+to be saved/restored (userspace is responsible for saving/restore guest
+memory as needed).
+
+This fixes a bug where KVM would save the shadow VMCS, but not account the
+size of the shadow VMCS, as the accounting correctly checks for L2 being
+active.  Note, the restore path also consumes the shadow VMCS payload if
+and only if L2 is active.
+
+In practice, writing more bytes than are reported is likely benign, as KVM
+correctly reports the maximum size for KVM_CAP_NESTED_STATE, and no known
+VMM invokes KVM_GET_NESTED_STATE twice on every save to precisely allocate
+its buffer, e.g. QEMU and Google's VMM both allocate the maximum size when
+the vCPU is first created/allocated.
+
+Fixes: fa58a9fa7497 ("KVM: nVMX: include shadow vmcs12 in nested state")
+Reported-by: Josef Bacik <josef@toxicpanda.com>
+Cc: Chris Mason <mason@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Fix a (benign) overwrite to a userspace buffer
+[PATCH 0/2] KVM: nVMX: Fix a (benign) overwrite to a userspace buffer
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix a bug where KVM writes more bytes for KVM_GET_NESTED_STATE than it reports
+in the output size if L1 is active and has a valid shadow VMCS pointer.  The
+bug is all but guaranteed to be benign in practice, as all VMMs I could find
+that support nested virtualization just preallocate the max buffer size.
+
+Sean Christopherson (2):
+  KVM: nVMX: Save shadow VMCS when getting nested state iff L2 is active
+  KVM: selftests: Add regression test for KVM writing but not reporting
+    vmcs12
+
+ arch/x86/kvm/vmx/nested.c                     |  2 +-
+ .../testing/selftests/kvm/lib/x86/processor.c |  6 +++++
+ tools/testing/selftests/kvm/x86/state_test.c  | 24 ++++++++++---------
+ 3 files changed, 20 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Don't WARN on -EIO return from kvm_arch_vcpu_pre_fault_memory()
+[PATCH] KVM: Don't WARN on -EIO return from kvm_arch_vcpu_pre_fault_memory()
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop the WARN on arch code returning -EIO when pre-faulting memory, as the
+WARN is user-triggerable and completely unwarranted.  In all likelihood,
+the WARN was added due to a misinterpretation of review feedback, and was
+overlooked in subsequent review rounds.
+
+The WARN showed up in v5 of the original pre-faulting series without any
+real explanation.  v5 did add -EIO as a documented error code[1]:
+
+  v4->v5:
+    - add EIO as possible error
+
+in response to Xiaoyao's review[2]:
+
+  > +   case RET_PF_CONTINUE:
+  > +   case RET_PF_INVALID:
+  > +   default:
+  > +           WARN_ON_ONCE(r);
+  > +           return -EIO;
+
+  Need to update patch 1 for -EIO
+
+  > +   }
+
+but that review was just talking about the documentation.  And at the time,
+KVM x86 already WARN()'d when returning -EIO, so having common KVM also
+WARN() added no value, i.e. wasn't at all justified.
+
+Link: https://lore.kernel.org/all/20240710174031.312055-1-pbonzini@redhat.com [1]
+Link: https://lore.kernel.org/all/d5a6e125-bff4-4d82-ae65-b99d9cb10e90@intel.com [2]
+Reported-by: syzbot+db7bd0f41c2a7e82d4ba@syzkaller.appspotmail.com
+Closes: https://lore.kernel.org/all/6ac316c7.01314a6c.556a8.000d.GAE@google.com
+Fixes: bc1a5cd00211 ("KVM: Add KVM_PRE_FAULT_MEMORY vcpu ioctl to pre-populate guest memory")
+Cc: stable@vger.kernel.org
+Tested-by: syzbot+db7bd0f41c2a7e82d4ba@syzkaller.appspotmail.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/kvm_main.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/hyperv: Explicitly reject VP Assist Page reads if
+[PATCH] KVM: x86/hyperv: Explicitly reject VP Assist Page reads if
+Author: Sean Christopherson <seanjc@google.com>
+
+Don't try to read the VP Assist Page if the shared PV EOI cache has been
+reconfigured via KVM's actual PV EOI MSR, as trying to read 624 bytes of
+info when the cache is setup for only 1 byte will trip the sanity check
+WARN in kvm_read_guest_offset_cached().  Ideally, KVM wouldn't use shared
+state to track the VP Assist Page, but in practice no sane guest enables
+both KVM's PV EOI and Hyper-V's Assist Page at different addresses, i.e.
+not allowing both to co-exist independently is "fine".
+
+Fixes: b63cf42fd1d8 ("kvm/x86: implement hv EOI assist")
+Cc: stable@vger.kernel.org
+Reported-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+Closes: https://lore.kernel.org/all/20261017093016.32348-7-amirmohammad.eftekhar@cispa.de
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/hyperv.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  x86/resctrl: Fix ABMC counter programming
+[PATCH v5 1/2] x86/resctrl: Fix ABMC counter programming
+Author: Babu Moger <babu.moger@amd.com>
+
+AMD's Assignable Bandwidth Monitoring Counters (ABMC) are configured via
+MSR_IA32_L3_QOS_ABMC_CFG; MSR_IA32_L3_QOS_ABMC_CFG.cntr_id selects the
+counter the configuration applies to. The number of counters a platform
+supports (the number of possible values written to
+MSR_IA32_L3_QOS_ABMC_CFG.cntr_id) is enumerated separately via CPUID.
+
+On platforms that enumerate more than 32 counters, the current 5-bit
+encoding truncates the counter ID and misprograms ABMC.
+
+The AMD64 Architecture Programmer's Manual [1], available from [2], has
+been updated to widen MSR_IA32_L3_QOS_ABMC_CFG.cntr_id from 5 bits to 12
+bits (the published revision 3.41 does not yet reflect this; a future
+revision will). The CPUID enumeration reports the maximum counter ID in a
+16-bit field and may therefore report more counters than a 12-bit
+MSR_IA32_L3_QOS_ABMC_CFG.cntr_id can address.
+
+Widen MSR_IA32_L3_QOS_ABMC_CFG.cntr_id to 12 bits to match the
+architecture. Cap the enumerated counter count at BIT(12) so every counter
+ID used by resctrl can be written to MSR_IA32_L3_QOS_ABMC_CFG.cntr_id
+without truncation.
+
+[1] AMD64 Architecture Programmer's Manual Volume 2: System Programming,
+    Publication #24593, Revision 3.41, Section 19.3.3.3 "Assignable
+    Bandwidth Monitoring (ABMC)"
+
+Fixes: 84ecefb76674 ("x86/resctrl: Add data structures and definitions for ABMC assignment")
+Signed-off-by: Babu Moger <babu.moger@amd.com>
+Reviewed-by: Reinette Chatre <reinette.chatre@intel.com>
+Cc: stable@vger.kernel.org
+Link: https://bugzilla.kernel.org/show_bug.cgi?id=206537 # [2]
+---
+v5: Added Reviewed-by:(Reinette).
+
+v4: Changelog update(from Reinette's input).
+
+v3: Dropped the fix for truncation on 32-bit x86.
+    Removed the change bw_src field(RMID) width to 15 bits.
+    Added new check to limit the number of counters to 12 bits.
+
+v2: Moved the link tag to the last.
+
+v1: https://lore.kernel.org/lkml/980f39d3a0e0d9f73925e362f835aeef070a1bc5.1784322818.git.babu.moger@amd.com/
+---
+ arch/x86/kernel/cpu/resctrl/internal.h | 4 ++--
+ arch/x86/kernel/cpu/resctrl/monitor.c  | 3 ++-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  x86,fs/resctrl: Keep default MBM mode at boot and fix ABMC programming
+[PATCH v5 0/2] x86,fs/resctrl: Keep default MBM mode at boot and fix ABMC programming
+Author: Babu Moger <babu.moger@amd.com>
+
+
+Hi All,
+
+This series restores default MBM assignment mode at boot, and fixes ABMC
+programming for more than 32 counters.
+
+Commit 0f1576e43adc ("x86/resctrl: Configure mbm_event mode if supported")
+enabled ABMC at boot. That breaks the pqos tool from intel-cmt-cat [1],
+which treats a non-numeric event read as zero bandwidth. pqos creates 16
+or more groups and uses two counters per group. On a platform with 32
+counters per domain, that consumes the pool, so further groups read
+"Unassigned" and pqos reports 0 MB/s.
+
+Leaving the mode at default does not make pqos correct. pqos still
+treats "Unavailable" as zero. Once the default-mode counter pool is
+exceeded, hardware can re-allocate a counter between reads and pqos can
+report that as a wraparound. That shows up only after the pool is
+exceeded. Default mode uses one counter per monitoring group. On existing
+AMD platforms that pool is 64 counters and may be larger on newer
+hardware, so common deployments stay within it. mbm_event mode uses two
+counters per group, so the same 32 counters cover only 16 groups.
+
+mbm_event remains available as an opt-in. Users that need stable
+measurements beyond the default-mode pool should enable it and rotate
+assignments. The limitation of default mode is documented.
+
+Patch 1: widen cntr_id in L3_QOS_ABMC_CFG from 5 bits to 12 bits, and
+limit the enumerated counter count to 4096, which is what that field can
+encode. The APM [2] at [3] will be updated for the expanded cntr_id field.
+
+Patch 2: leave mbm_assign_mode as "default" at boot. Counters are not
+assigned automatically. So, update resctrl documentation to replect that.
+
+Based on tip/master:
+  6b27d3127c05 Merge branch into tip/master: 'x86/tdx'
+
+[1] https://github.com/intel/intel-cmt-cat/issues/311
+[2] AMD64 Architecture Programmer's Manual Volume 2: System Programming,
+    Publication #24593, Revision 3.41, Section 19.3.3.3 "Assignable
+    Bandwidth Monitoring (ABMC)"
+[3] https://bugzilla.kernel.org/show_bug.cgi?id=206537
+
+v5:
+ - Dropped patch 2 from v4, as auto-assignment is not a requirement
+   and should be left to the user.
+ - Patch 1: Added Reviewed-by tag from Reinette.
+ - Patch 2: Fixed a few typos.
+            Auto-assignment is not a requirement based on our discussion.
+            Updated the resctrl documentation to reflect this.
+
+v4:
+ - Patch 1: Updated changelog(from Reinette's input).
+ - Patch 2: Changelog update (Reinette's input).
+            Function comment update for rdtgroup_assign_cntrs().
+            Tag order update.
+ - Patch 3: Introduced mbm_event counter pool and default active counter pool.
+            Removed duplicate texts in resctrl.rst.
+            Re-arranged the tag order.
+v3:
+- Patch 1: drop the 32-bit u64 change and the bw_src widening. Cap the
+  enumerated counter count at 4096 instead of truncating the CPUID field.
+- Patch 2: clean up comments. Add Reported-by, Closes, and Cc: stable.
+- Patch 3: document one counter per group in default mode and two counters
+  per group in mbm_event mode. Describe the default-mode pool and the pqos
+  wraparound once that pool is exceeded.
+
+v2:
+- Added patch 2 to address Sashiko's comment regarding the documentation
+  issue. In fact, it exposed a real issue. When switching to mbm_event mode,
+  existing monitoring groups should be assigned counters whenever counters
+  are available. This provides a smooth transition between modes and aligns
+  the behavior with the existing auto-assignment mechanism.
+  https://sashiko.dev/#/patchset/8cb66e18e32e4087a9712c1e68ee6da614efe244.1784322818.git.babu.moger%40amd.com
+
+- Combine the two v1 patches and add patch 2 (assign existing groups
+  on mbm_event switch; Sashiko review).
+- Keep boot-default separate from the encoding/truncation fixes.
+- Document the default-mode counter-pool limitation.
+
+Previous versions:
+
+v1: https://lore.kernel.org/lkml/980f39d3a0e0d9f73925e362f835aeef070a1bc5.1784322818.git.babu.moger@amd.com/
+v2: https://lore.kernel.org/lkml/cover.1788545152.git.babu.moger@amd.com/
+v3: https://lore.kernel.org/lkml/cover.1790976400.git.babu.moger@amd.com/
+v4: https://lore.kernel.org/lkml/cover.1791589412.git.babu.moger@amd.com/
+
+Thanks
+Babu Moger
+
+
+Babu Moger (2):
+  x86/resctrl: Fix ABMC counter programming
+  x86,fs/resctrl: Keep mbm_assign_mode in default mode at boot
+
+ Documentation/filesystems/resctrl.rst  | 101 +++++++++++++++----------
+ arch/x86/kernel/cpu/resctrl/internal.h |   4 +-
+ arch/x86/kernel/cpu/resctrl/monitor.c  |   4 +-
+ 3 files changed, 67 insertions(+), 42 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  mm/rmap: duplicate a PMD mapping as one in
+[PATCH v4 1/4] mm/rmap: duplicate a PMD mapping as one in
+Author: Konstantin Khorenko <khorenko@virtuozzo.com>
+
+folio_dup_file_rmap_pmd() passes PGTABLE_LEVEL_PTE to
+__folio_dup_file_rmap() for HPAGE_PMD_NR pages, so it adds HPAGE_PMD_NR
+PTE mappings to the folio instead of one PMD mapping. Each unmap of the
+PMD removes one PMD mapping:
+
+- the folio's mapcount never returns to zero, and removing the folio
+  from the page cache reports "Bad page cache", or hits a VM_BUG_ON
+  with CONFIG_DEBUG_VM;
+- the first unmap already counts as the last one and drops the
+  PMD-mapped statistics while the other mm still maps the folio;
+- the second one drives the entire mapcount below zero and drops them
+  again.
+
+The helper has no caller yet, the next patch adds the first one. Pass
+PGTABLE_LEVEL_PMD, as folio_try_dup_anon_rmap_pmd() does.
+
+Fixes: d8ef5e311d7b ("mm/rmap: convert page_dup_file_rmap() to folio_dup_file_rmap_[pte|ptes|pmd]()")
+Signed-off-by: Konstantin Khorenko <khorenko@virtuozzo.com>
+---
+ include/linux/rmap.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  mm/huge_memory: copy PMDs at fork like the PTE path
+[PATCH v4 0/4] mm/huge_memory: copy PMDs at fork like the PTE path
+Author: Konstantin Khorenko <khorenko@virtuozzo.com>
+
+copy_huge_pmd() decides what to copy at fork by its own rules, apart
+from copy_present_ptes(): a lockless check for special PMDs, and a skip
+of every file THP. Following David's review of v3, this series makes it
+decide the way the PTE path does, under the page table lock, with
+vm_normal_page_pmd(). That fixes the two bugs v1-v3 were about. The
+patches:
+
+1. folio_dup_file_rmap_pmd() duplicated a PMD mapping as HPAGE_PMD_NR
+   PTE mappings. It had no caller until patch 2.
+2. File THPs are copied at fork instead of being refaulted by the
+   child, as their PTEs would be.
+3. The special-PMD read moves under the lock. That closes the race with
+   a driver zap (vfio-pci, panthor) and the missing page table deposit
+   on ppc64 hash that Sashiko found in v1.
+4. A selftest for 1 and 2.
+
+Stable
+======
+
+The race (since v6.12) and the ppc64 hash NULL deref (since v7.1) are
+fixed in patch 3, which only works on top of the copy rework in patch
+2. If you want them in stable on their own, I can put a minimal fix in
+front instead: take the locks before the special-PMD check, keep the
+early return for VMAs without VM_PFNMAP or VM_MIXEDMAP, and deposit a
+table where the architecture needs one, with the rework on top. Is
+that worth it?
+
+A related refcount bug in copy_huge_pud() for device DAX is fixed in
+a separate series, as it does not depend on this one:
+https://patch.msgid.link/20261021-vstor-150143-copy_huge_pud-folio-refcount-v1-0-8bd88551f9be@virtuozzo.com
+
+Testing
+=======
+
+All on v7.3-rc7 in a KVM guest with 4 vCPUs, x86_64.
+
+Race with a driver zap. The guest's QXL device is bound to vfio-pci in
+no-IOMMU mode, BAR0 of 64 MB mapped with PMDs. The reproducer below
+forks while a second thread clears PCI_COMMAND_MEMORY through the vfio
+config region after a random delay of up to 1 ms; the child waits for
+the write to finish and reads one byte of each 2 MB of the BAR. A child
+that reads anything without SIGBUS kept a stale mapping. I have not hit
+it without help, so a test-only debugfs knob adds an mdelay(2) between
+copy_pmd_range()'s lockless pmd_is_huge() and the PMD locks:
+
+  kernel                  delay   forks   stale children
+  7.3-rc7                 none    20900   0
+  7.3-rc7                 2 ms    150     128
+  7.3-rc7 + this series   none    3000    0
+  7.3-rc7 + this series   2 ms    400     0
+
+ppc64 hash is not tested on hardware. On x86 a test-only hack makes
+arch_needs_pgtable_deposit() true and mremap move the table, as on
+ppc64 hash. Without the series the first child of the reproducer oopses
+at exit in pgtable_trans_huge_withdraw(); with it the reproducer and
+the selftests below pass.
+
+Selftests, with CONFIG_DEBUG_VM:
+
+- fork_file_thp (patch 4) skips on 7.3-rc7, where fork leaves file
+  THPs to a refault, and fails on patches 2-3 without patch 1, where
+  ShmemPmdMapped drops when the child exits and the kernel reports
+  "Bad page cache";
+- cow, guard-regions, uffd-unit-tests, uffd-wp-mremap,
+  split_huge_page_test, mremap_test, soft-dirty, pagemap_ioctl,
+  migration, madv_populate, transhuge-stress and khugepaged pass as on
+  7.3-rc7.
+
+Cost
+====
+
+fork() now copies file THPs instead of leaving them to a refault, which
+costs fork() a reference, an rmap update and a counter per huge PMD and
+saves the child a fault per huge PMD it touches. fork() of a process
+with 4 GB of shmem THPs mapped MAP_PRIVATE and an anon_vma on the VMA,
+medians of 2000 forks:
+
+  kernel                  fork()        fork(), child reads all
+  7.3-rc7                 86-129 us     2380-2620 us
+  7.3-rc7 + this series   230-355 us    820-930 us
+
+Notes
+=====
+
+- drm_gem_shmem and mshv_vtl map special PMDs with
+  vmf_insert_pfn_pmd() as well.
+- copy_huge_pud() still differs from the PMD tail in that it does not
+  mark a shared PUD clean in the child or handle uffd bits.
+
+Reproducer. It writes the BAR as a control and reads it with the
+memory disabled, which is harmless for QXL VRAM in a guest; do not
+point it at a BAR that holds device registers. Build with
+  gcc -O2 -pthread -o fork_revoke fork_revoke.c
+
+run as root with the device bound to vfio-pci; arguments: BDF,
+iterations, BAR index, max revoke delay in microseconds, e.g.
+  ./fork_revoke 0000:00:02.0 100 0 3000
+
+    // SPDX-License-Identifier: GPL-2.0
+    /*
+     * Fork while vfio-pci revokes a BAR mapped with huge PMDs.
+     *
+     * The parent maps a BAR of a vfio-pci device and faults it in. A second
+     * thread disables the device memory through the command register, which
+     * makes vfio-pci zap all BAR mappings, while the main thread forks. Once
+     * the memory is disabled, every access to the BAR must raise SIGBUS. A
+     * child that can still read a BAR chunk kept a mapping the zap removed.
+     *
+     * usage: fork_revoke <domain:bus:dev.fn> [iterations [bar [max_delay_us]]]
+     *
+     * The revoke starts after a random delay of up to max_delay_us, so that it
+     * lands at different points of fork.
+     */
+    #define _GNU_SOURCE
+    #include <errno.h>
+    #include <fcntl.h>
+    #include <limits.h>
+    #include <pthread.h>
+    #include <sched.h>
+    #include <setjmp.h>
+    #include <signal.h>
+    #include <stdint.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <unistd.h>
+    #include <sys/ioctl.h>
+    #include <sys/mman.h>
+    #include <sys/wait.h>
+    #include <linux/pci_regs.h>
+    #include <linux/vfio.h>
+
+    #define SZ_2M	(2UL << 20)
+
+    static int dev;
+    static off_t cfg_off;
+    static int go_pipe[2], done_pipe[2];
+    static volatile uint32_t *shared;	/* [0]: iteration whose revoke finished */
+    static unsigned long iter;
+    static unsigned int max_delay_us;
+    static sigjmp_buf jb;
+
+    static void die(const char *what)
+    {
+    	fprintf(stderr, "%s: %s\n", what, strerror(errno));
+    	exit(2);
+    }
+
+    static int device_fd(const char *bdf)
+    {
+    	char path[PATH_MAX], link[PATH_MAX], *group_id;
+    	int container, group, noiommu;
+    	ssize_t len;
+
+    	snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/iommu_group", bdf);
+    	len = readlink(path, link, sizeof(link) - 1);
+    	if (len < 0)
+    		die("iommu_group");
+    	link[len] = 0;
+    	group_id = strrchr(link, '/') + 1;
+    	snprintf(path, sizeof(path), "/dev/vfio/%s", group_id);
+    	noiommu = access(path, F_OK);
+    	if (noiommu)
+    		snprintf(path, sizeof(path), "/dev/vfio/noiommu-%s", group_id);
+    	container = open("/dev/vfio/vfio", O_RDWR);
+    	group = open(path, O_RDWR);
+    	if (container < 0 || group < 0)
+    		die(path);
+    	if (ioctl(group, VFIO_GROUP_SET_CONTAINER, &container) ||
+    	    ioctl(container, VFIO_SET_IOMMU,
+    		  noiommu ? VFIO_NOIOMMU_IOMMU : VFIO_TYPE1v2_IOMMU))
+    		die("vfio container");
+    	return ioctl(group, VFIO_GROUP_GET_DEVICE_FD, bdf);
+    }
+
+    static void set_memory(int on)
+    {
+    	uint16_t cmd;
+
+    	if (pread(dev, &cmd, 2, cfg_off + PCI_COMMAND) != 2)
+    		die("read PCI_COMMAND");
+    	cmd = on ? cmd | PCI_COMMAND_MEMORY : cmd & ~PCI_COMMAND_MEMORY;
+    	if (pwrite(dev, &cmd, 2, cfg_off + PCI_COMMAND) != 2)
+    		die("write PCI_COMMAND");
+    }
+
+    static void *revoker(void *arg)
+    {
+    	unsigned long i;
+
+    	while (read(go_pipe[0], &i, sizeof(i)) == sizeof(i)) {
+    		if (max_delay_us)
+    			usleep(random() % max_delay_us);
+    		set_memory(0);
+    		shared[0] = i;
+    		if (write(done_pipe[1], &i, sizeof(i)) != sizeof(i))
+    			die("done pipe");
+    	}
+    	return NULL;
+    }
+
+    static void sigbus(int sig)
+    {
+    	siglongjmp(jb, 1);
+    }
+
+    /* Number of 2MB chunks of the BAR that can be read without SIGBUS. */
+    static unsigned long readable(volatile uint8_t *bar, size_t size)
+    {
+    	volatile unsigned long n = 0;
+    	volatile size_t off;
+
+    	for (off = 0; off < size; off += SZ_2M) {
+    		if (sigsetjmp(jb, 1))
+    			continue;
+    		(void)bar[off];
+    		n++;
+    	}
+    	return n;
+    }
+
+    int main(int argc, char **argv)
+    {
+    	unsigned long iterations = argc > 2 ? strtoul(argv[2], NULL, 0) : 1000;
+    	unsigned int index = argc > 3 ? atoi(argv[3]) : 0;
+    	struct vfio_region_info cfg = { .argsz = sizeof(cfg),
+    					.index = VFIO_PCI_CONFIG_REGION_INDEX };
+    	struct vfio_region_info bar = { .argsz = sizeof(bar), .index = index };
+    	unsigned long stale_children = 0, stale_chunks = 0, n;
+    	volatile uint8_t *map;
+    	pthread_t thread;
+    	size_t size, off;
+    	uint8_t *resv;
+    	int status;
+    	pid_t pid;
+
+    	if (argc < 2) {
+    		fprintf(stderr, "usage: %s <bdf> [iterations [bar [max_delay_us]]]\n",
+    			argv[0]);
+    		return 2;
+    	}
+    	max_delay_us = argc > 4 ? atoi(argv[4]) : 0;
+    	signal(SIGBUS, sigbus);
+    	dev = device_fd(argv[1]);
+    	if (dev < 0)
+    		die("device fd");
+    	if (ioctl(dev, VFIO_DEVICE_GET_REGION_INFO, &cfg) ||
+    	    ioctl(dev, VFIO_DEVICE_GET_REGION_INFO, &bar))
+    		die("region info");
+    	if (!(bar.flags & VFIO_REGION_INFO_FLAG_MMAP) || bar.size < SZ_2M) {
+    		fprintf(stderr, "BAR %u: no mmap or smaller than 2MB\n", index);
+    		return 2;
+    	}
+    	cfg_off = cfg.offset;
+    	size = bar.size & ~(SZ_2M - 1);
+
+    	/* A 2MB aligned address lets vfio-pci map the BAR with huge PMDs. */
+    	resv = mmap(NULL, size + SZ_2M, PROT_NONE,
+    		    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    	if (resv == MAP_FAILED)
+    		die("reserve");
+    	resv = (uint8_t *)(((uintptr_t)resv + SZ_2M - 1) & ~(SZ_2M - 1));
+    	map = mmap(resv, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+    		   dev, bar.offset);
+    	if (map == MAP_FAILED)
+    		die("mmap BAR");
+    	shared = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+    		      MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    	if (shared == MAP_FAILED)
+    		die("shared page");
+
+    	/* Control: without a revoke the child reads what the parent wrote. */
+    	set_memory(1);
+    	for (off = 0; off < size; off += SZ_2M)
+    		map[off] = (uint8_t)(off / SZ_2M) ^ 0x5a;
+    	pid = fork();
+    	if (!pid) {
+    		for (off = 0; off < size; off += SZ_2M)
+    			if (map[off] != ((uint8_t)(off / SZ_2M) ^ 0x5a))
+    				_exit(1);
+    		_exit(0);
+    	}
+    	if (pid < 0 || waitpid(pid, &status, 0) != pid ||
+    	    !WIFEXITED(status) || WEXITSTATUS(status)) {
+    		fprintf(stderr, "control: child does not see the parent's BAR\n");
+    		return 2;
+    	}
+    	printf("BAR %u: %zu MB, %lu iterations, revoke delay < %u us\n",
+    	       index, size >> 20, iterations, max_delay_us);
+
+    	/* Premise: with the memory disabled the BAR cannot be read. */
+    	set_memory(0);
+    	n = readable(map, size);
+    	set_memory(1);
+    	if (n) {
+    		fprintf(stderr, "memory disabled, parent still reads %lu chunks\n", n);
+    		return 2;
+    	}
+
+    	if (pipe(go_pipe) || pipe(done_pipe))
+    		die("pipe");
+    	if (pthread_create(&thread, NULL, revoker, NULL))
+    		die("thread");
+
+    	for (iter = 1; iter <= iterations; iter++) {
+    		set_memory(1);
+    		for (off = 0; off < size; off += SZ_2M)
+    			(void)map[off];
+    		if (write(go_pipe[1], &iter, sizeof(iter)) != sizeof(iter))
+    			die("go pipe");
+    		pid = fork();
+    		if (pid < 0)
+    			die("fork");
+    		if (!pid) {
+    			while (shared[0] != iter)
+    				sched_yield();
+    			n = readable(map, size);
+    			_exit(n > 255 ? 255 : n);
+    		}
+    		if (read(done_pipe[0], &n, sizeof(n)) != sizeof(n))
+    			die("done pipe");
+    		if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status))
+    			die("child");
+    		if (WEXITSTATUS(status)) {
+    			stale_children++;
+    			stale_chunks += WEXITSTATUS(status);
+    		}
+    	}
+    	set_memory(1);
+    	printf("children with a stale BAR mapping: %lu of %lu (%lu 2MB chunks)\n",
+    	       stale_children, iterations, stale_chunks);
+    	return stale_children ? 1 : 0;
+    }
+
+Assisted-by: LLM
+Signed-off-by: Konstantin Khorenko <khorenko@virtuozzo.com>
+---
+Changes in v4:
+- Rework after David's review: copy_huge_pmd() decides under the PTL
+  with vm_normal_page_pmd(), like copy_present_ptes(), and copies file
+  THPs (patches 2, 3). The pmd_none() recheck and the separate deposit
+  patch are gone.
+- New patch 1: fix folio_dup_file_rmap_pmd(), whose first caller is
+  patch 2.
+- New selftest, patch 4.
+- Move Assisted-by from the patches to the cover letter, after commit
+  1e035297ffdad ("docs: remove Assisted-by references").
+- Link to v3: https://patch.msgid.link/20261014-b4-prep-vstor-149847-copy_huge_pmd-recheck-special-pmd-v3-0-85eaec8417f6@virtuozzo.com
+
+Changes in v3:
+- Patch 1: recheck the PMD with pmd_none(), as only a zap can change
+  it and a zap leaves it none (Lance Yang).
+- Link to v2: https://patch.msgid.link/20261014-b4-prep-vstor-149847-copy_huge_pmd-recheck-special-pmd-v2-0-e1548488fa68@virtuozzo.com
+
+Changes in v2:
+- Add patch 2, the page table deposit for ppc64 hash, reported by
+  Sashiko.
+- Patch 1: name panthor instead of drm_gem_shmem as the driver whose
+  stale child mapping reaches freed pages: drm_gem_shmem keeps the
+  pages of a purged object until the last mapping goes away.
+- Link to v1: https://patch.msgid.link/20261014-b4-prep-vstor-149847-copy_huge_pmd-recheck-special-pmd-v1-1-d225c60bc316@virtuozzo.com
+
+---
+Konstantin Khorenko (4):
+      mm/rmap: duplicate a PMD mapping as one in folio_dup_file_rmap_pmd()
+      mm/huge_memory: copy file THPs at fork like copy_present_ptes() does
+      mm/huge_memory: read a special PMD under the lock in copy_huge_pmd()
+      selftests/mm: test fork of PMD-mapped shmem THPs
+
+ MAINTAINERS                                |   1 +
+ include/linux/rmap.h                       |   2 +-
+ mm/huge_memory.c                           |  82 +++++------
+ tools/testing/selftests/mm/Makefile        |   1 +
+ tools/testing/selftests/mm/fork_file_thp.c | 227 +++++++++++++++++++++++++++++
+ tools/testing/selftests/mm/run_vmtests.sh  |   1 +
+ 6 files changed, 270 insertions(+), 44 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  RISC-V: KVM: Fix builds without CONFIG_RISCV_ISA_V
+[PATCH] RISC-V: KVM: Fix builds without CONFIG_RISCV_ISA_V
+Author: slack up <yxcnew@outlook.com>
+
+
+Commit b5060a4aa33d ("RISC-V: KVM: fix vcpu vector context
+handling for kernel-mode vector") made the KVM vCPU load and put paths
+call get_cpu_vector_context() and put_cpu_vector_context()
+unconditionally.  It also added an unconditional call to
+__kvm_riscv_vector_restore() on the guest entry path.
+
+The no-op definitions of the first two helpers live in <asm/vector.h>,
+but <asm/kvm_vcpu_vector.h> includes that header only when
+CONFIG_RISCV_ISA_V is enabled.  The KVM header also does not provide a
+no-op __kvm_riscv_vector_restore() in its disabled branch.  As a result,
+a KVM build without CONFIG_RISCV_ISA_V fails with missing helper
+declarations.
+
+Include <asm/vector.h> unconditionally to reuse its existing no-op
+helpers, and provide the missing KVM restore stub when Vector support is
+disabled.  This does not change the Vector-enabled path.
+
+Fixes: b5060a4aa33d ("RISC-V: KVM: fix vcpu vector context handling for kernel-mode vector")
+Cc: stable@vger.kernel.org
+Signed-off-by: Xiaochun Yu <yxcnew@outlook.com>
+---
+This single patch fixes a build regression when KVM is enabled without the
+RISC-V Vector extension.
+
+Tested on base a804c5742bff (Torvalds master):
+
+- CONFIG_RISCV_ISA_V=n, CONFIG_KVM=m: full Image modules build passed.
+- CONFIG_RISCV_ISA_V=y, CONFIG_KVM=m: vcpu.o and vcpu_vector.o rebuilt.
+---
+ arch/riscv/include/asm/kvm_vcpu_vector.h | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  virt: tdx-guest: Poll Quote status with exponential
+[PATCH] virt: tdx-guest: Poll Quote status with exponential
+Author: Moe Mahhouk via B4 Relay <devnull+moe.flashbots.net@kernel.org>
+
+
+wait_for_quote_completion() sleeps for a full second before it first
+checks whether the VMM has completed a GetQuote request, and then
+rechecks once per second. Every Quote request therefore takes at least
+one second, however quickly the host answers.
+
+With a local Quote Generation Service the VMM completes the request in
+a few milliseconds. On an Emerald Rapids host (KVM, QEMU 11.1, Intel
+QGS), 40 back-to-back Quote requests through configfs-tsm took
+1021-1024 ms each; with this change they take 2-3 ms. Since quote_lock
+serializes requests, the one-second floor also caps a TD at about one
+Quote per second, which hurts users that bind a fresh Quote to every
+connection, such as attested TLS.
+
+Poll with an exponential backoff instead: start at 100 us and double the
+interval up to 100 ms. A fast Quote is noticed within a few milliseconds,
+a slow one costs at most ten wakeups per second. The timeout is
+unchanged, and a pending signal still aborts the wait with -EINTR.
+
+The latency was found while measuring TD boot and attestation times.
+The code and this changelog were written with an AI coding assistant,
+Claude (Claude Code, model Claude Opus 5.5), which also ran the tests.
+Tested on mainline a804c5742 in a TDX guest (KVM host v7.0, QEMU 11.1.2,
+TDX module 1.5.34, Intel QGS) with 40 Quote requests per kernel; builds
+with W=1 and passes checkpatch.pl.
+
+Signed-off-by: Moe Mahhouk <moe@flashbots.net>
+---
+The GHCI SetupEventNotifyInterrupt mechanism would avoid polling
+altogether, but it relies on the VMM implementing that service. This
+patch keeps the existing polling model, which works with any VMM, and
+only removes the fixed one-second floor.
+---
+ drivers/virt/coco/tdx-guest/tdx-guest.c | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  liveupdate: Rename handler compatible to name
+[RFC PATCH v2 1/4] liveupdate: Rename handler compatible to name
+Author: Tarun Sahu <tarunsahu@google.com>
+
+File handler and File-Lifecycle-Bound (FLB) identifiers name the
+registered handler or FLB rather than a monolithic compatibility version.
+Rename compatible to name across LUO headers, structures, and consumers:
+- struct liveupdate_file_handler and struct luo_file_ser name field
+- LIVEUPDATE_HNDL_NAME_LENGTH (in include/uapi/linux/liveupdate.h) and
+  MEMFD_LUO_FH_NAME
+- struct liveupdate_flb name field, LIVEUPDATE_FLB_NAME_LENGTH,
+  PCI_LUO_FLB_NAME, and LIVEUPDATE_TEST_FLB_NAME
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ drivers/pci/liveupdate.c        | 10 ++++----
+ include/linux/kho/abi/luo.h     | 26 +++++++++----------
+ include/linux/kho/abi/memfd.h   |  4 +--
+ include/linux/kho/abi/pci.h     |  2 +-
+ include/linux/liveupdate.h      | 18 +++++--------
+ include/uapi/linux/liveupdate.h |  3 +++
+ kernel/liveupdate/luo_file.c    | 45 +++++++++++++++++----------------
+ kernel/liveupdate/luo_flb.c     | 16 ++++++------
+ lib/tests/liveupdate.c          | 22 ++++++++--------
+ mm/memfd_luo.c                  |  2 +-
+ 10 files changed, 73 insertions(+), 75 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  liveupdate: Feature header ABI and named handler
+[RFC PATCH v2 0/4] liveupdate: Feature header ABI and named handler
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Live Update Orchestrator (LUO) and its file handlers currently validate
+handed-over KHO state using monolithic compatibility strings ("luo-v5",
+"memfd-v2"). Any change to a serialized structure, even an optional
+additive field, requires bumping the compatibility string, breaking live
+update between adjacent kernel versions across both forward updates and
+rollbacks. This series introduces the feature flags per serialized
+struct to communicate between the kernel about their active and required
+features. Having feature flags increase the compatibility matching
+granularity.
+
+This series also renames the file-handler and FLB compatible identifier to
+name, extends LIVEUPDATE_SESSION_PRESERVE_FD so userspace can
+optionally select which registered file handler preserves a file
+descriptor by name, and replaces monolithic version strings in serialized
+payloads with a fixed-size 2-bit pair feature header
+(struct luo_feature_hdr). So in future, If a change to a subsystem
+preservation can not be handled with feature flags, we can attach a new
+handler to support the preservation.
+
+This change is motivated by the LPC discussion.
+
+Named File Handler Selection
+============================
+With fine-grained compatibility tracked via feature headers, the
+handler and FLB compatible field is renamed to name. When a subsystem
+needs a genuinely incompatible new handler alongside an existing one for
+the same file type, struct liveupdate_session_preserve_fd now includes
+char handler[LIVEUPDATE_HNDL_NAME_LENGTH] after token (keeping
+min_size at 16 bytes for backward compatibility):
+- Empty handler (or 16-byte struct): selects the first registered
+  handler whose .can_preserve() accepts the fd, keeping default callers
+  on the original rollback-safe handler.
+- Non-empty handler: selects the registered handler with that exact
+  name and verifies .can_preserve() accepts the fd.
+
+2-Bit Pair Feature Header (struct luo_feature_hdr)
+==================================================
+Each serialized ABI structure (struct luo_ser, struct memfd_luo_ser)
+starts with a fixed 128-byte struct luo_feature_hdr containing:
+- size: byte size of the enclosing serialized structure from the source
+  kernel.
+- flags[15]: 15 chained 64-bit feature flags entries. Each entry
+  encodes up to 31 features as 2-bit pair (req, active) states
+  (enum luo_feat_state: LUO_FEAT_DISABLED = 0b00,
+  LUO_FEAT_OPTIONAL = 0b01, LUO_FEAT_REQUIRED = 0b11) plus
+  LUO_FEAT_EXT_MASK (bits[63:62] = 0b11) chaining to the next entry
+  (up to 465 features total). Because the header is fixed at 128 bytes,
+  payload field offsets never shift when extended flags entries are used.
+
+Each subsystem defines its feature states as a static const u8 array
+indexed by its feature enum, which luo_feature_hdr_init() packs into
+the payload feature header. During deserialization,
+luo_feature_hdr_validate() checks the header from the source kernel
+against the feature array in the target kernel according to the
+per-feature (req, active) truth table:
+
+  Source Target Action
+  (1,0)  (x,x)  Reject -EINVAL: invalid source kernel (req without active)
+  (x,x)  (1,0)  Reject -EINVAL + WARN_ON_ONCE: invalid target kernel
+  (0,0)  (0,0)  Accept: feature absent
+  (0,0)  (0,1)  Accept: feature absent
+  (0,0)  (1,1)  Reject -EOPNOTSUPP: target kernel requires the feature
+  (0,1)  (0,0)  Accept: ignore payload data
+  (1,1)  (0,0)  Reject -EOPNOTSUPP: source kernel requires the feature
+  (x,1)  (x,1)  Accept: use payload data
+
+Structure Evolution
+===================
+The relative order and offsets of fields in serialized structures must
+remain unchanged as features are added or retired. New fields are always
+appended at the end of the structure under a new feature flag, and
+retired fields are kept in place so that the offsets of subsequent
+fields never shift. If the type or format of a field needs to change,
+the existing field and feature are kept intact (and retired when no
+longer needed) and a new feature flag with a new appended field of the
+new type is added.
+
+In the target kernel, fields of a LUO_FEAT_REQUIRED feature are
+guaranteed to be present once luo_feature_hdr_validate() succeeds,
+whereas fields of a LUO_FEAT_OPTIONAL feature should be accessed only
+after verifying that the feature is active in the source kernel header:
+
+  if (luo_feature_is_active(&ser->features, FEAT_X))
+          val = ser->x_field;
+
+Changes since RFC v1 [1]:
+- Renamed file-handler and FLB compatible to name and added optional
+  handler selection by name in LIVEUPDATE_SESSION_PRESERVE_FD.
+- Replaced the 3-mask (supp, req, active) + variable-length FDT and
+  feature-section design with a fixed 128-byte struct luo_feature_hdr
+  embedding size and 15 chained 64-bit 2-bit pair (req, active)
+  flags entries directly in struct luo_ser and struct memfd_luo_ser.
+- Replaced compile-time bitmask macros with a static const u8 feature
+  array per subsystem packed by luo_feature_hdr_init() and validated
+  in a single pass by luo_feature_hdr_validate().
+
+[1] https://lore.kernel.org/all/20260903023452.721732-1-loganodell@google.com/
+
+Tarun Sahu (4):
+  liveupdate: Rename handler compatible to name
+  liveupdate: Select file handler by name in the preserve ioctl
+  liveupdate: Replace compatibility string with a 2-bit pair feature
+    header
+  mm: memfd_luo: Add the 2-bit pair feature header
+
+ drivers/pci/liveupdate.c         |  10 +-
+ include/linux/kho/abi/luo.h      | 367 +++++++++++++++++++++++++++----
+ include/linux/kho/abi/memfd.h    |  39 +++-
+ include/linux/kho/abi/pci.h      |   2 +-
+ include/linux/liveupdate.h       |  18 +-
+ include/uapi/linux/liveupdate.h  |  15 +-
+ kernel/liveupdate/luo_core.c     |  27 ++-
+ kernel/liveupdate/luo_file.c     |  64 ++++--
+ kernel/liveupdate/luo_flb.c      |  16 +-
+ kernel/liveupdate/luo_internal.h |   3 +-
+ kernel/liveupdate/luo_session.c  |   7 +-
+ lib/tests/liveupdate.c           |  22 +-
+ mm/memfd_luo.c                   |  16 +-
+ 13 files changed, 481 insertions(+), 125 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  serial: sh-sci: Drop TE disable at end of
+[PATCH v2 1/4] serial: sh-sci: Drop TE disable at end of
+Author: Biju Das <biju.das.au@gmail.com>
+
+
+Commit f06c2a9000eb ("tty: serial: sh-sci: Fix end of transmission on
+SCI") made sci_transmit_chars() clear SCSCR.TE and return early on
+PORT_SCI once the transmit FIFO is empty.
+
+The hardware manual does not describe disabling the transmitter to end
+a transmission, so this special case has no basis in the documented
+programming sequence. Remove it and let SCI follow the same path as the
+other port types. A plain revert no longer applies because the driver
+now uses a kfifo, so the code is removed by hand.
+
+Fixes: f06c2a9000eb ("tty: serial: sh-sci: Fix end of transmission on SCI")
+Signed-off-by: Biju Das <biju.das.jz@bp.renesas.com>
+---
+v1->v2:
+ * No change.
+---
+ drivers/tty/serial/sh-sci.c | 7 -------
+ 1 file changed, 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Fix transmit handling on SCI/RSCI ports
+[PATCH v2 0/4] Fix transmit handling on SCI/RSCI ports
+Author: Biju Das <biju.das.au@gmail.com>
+
+Hi All,
+
+This series fixes several transmit problems on the SCI (PORT_SCI) and
+RSCI ports of the sh-sci driver, seen on Renesas RZ SoCs:
+
+ - Patch 1 removes the code that disables TE at the end of a
+   transmission on SCI, which the hardware manual does not describe.
+ - Patch 2 stops the TEI handler from turning the transmitter off
+   while the xmit kfifo still holds data, which could stall or lose
+   output. It also covers the TE handling that patch 1 no longer does
+   in sci_transmit_chars().
+ - Patch 3 skips the software clear of the TDxE flag on SCI, since
+   hardware clears it on a TDR write and the extra clear caused a
+   spurious TXI and a duplicated last character.
+ - Patch 4 forces a TE toggle when restoring SCSCR in the console
+   write path on SCI, so the TXI that restarts an interrupted drain is
+   generated. Without it the RZ/G2UL console can hang during boot.
+
+To: Greg Kroah-Hartman <gregkh@linuxfoundation.org>
+To: Jiri Slaby <jirislaby@kernel.org>
+To: Kiryl Shutsemau <kas@kernel.org>
+To: Rick Edgecombe <rick.p.edgecombe@intel.com>
+To: Dave Hansen <dave.hansen@linux.intel.com>
+Cc: linux-kernel@vger.kernel.org
+Cc: linux-serial@vger.kernel.org
+CC: linux-renesas-soc@vger.kernel.org
+Cc: x86@kernel.org
+Cc: linux-coco@lists.linux.dev
+Cc: kvm@vger.kernel.org
+Signed-off-by: Biju Das <biju.das.jz@bp.renesas.com>
+
+Changes in v2:
+ * Updated commit header and description for patch#2 and #3.
+ * Take the port lock before reading the control register, so the
+   read-modify-write in sci_tx_end_interrupt() is protected.
+ * Extended the pending-data check in sci_tx_end_interrupt() to cover
+   x_char and a stopped port, not only a non-empty xmit kfifo.
+ * Replaced the PORT_SCI check with a has_tdxe_auto_clear flag in
+   struct sci_port, set from the new tdxe_auto_clear field in
+   struct sci_of_data.
+- Link to v1: https://lore.kernel.org/r/20261019170139.473808-1-biju.das.jz@bp.renesas.com
+
+---
+Au Dang (2):
+      serial: sh-sci: Skip TDxE clear when hardware clears it automatically
+      serial: sh-sci: Toggle TE when restoring SCSCR in console write on SCI
+
+Biju Das (2):
+      serial: sh-sci: Drop TE disable at end of transmission on SCI
+      serial: sh-sci: Keep TX enabled on TEI while data is pending
+
+ drivers/tty/serial/rsci.c          |  2 ++
+ drivers/tty/serial/sh-sci-common.h |  4 ++++
+ drivers/tty/serial/sh-sci.c        | 45 +++++++++++++++++++++++++-------------
+ 3 files changed, 36 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost-scsi: fix page reference leak in misaligned I/O fallback
+[PATCH] vhost-scsi: fix page reference leak in misaligned I/O fallback
+Author: Jia Jia <physicalmtea@gmail.com>
+
+iov_iter_get_pages2() returns a byte count that excludes the offset
+into the first page, but also returns a reference to that page in
+pages[].
+
+On the misaligned-I/O fallback,
+vhost_scsi_revert_map_iov_to_sgl() puts pages already added to the SG
+list.  The cleanup loop starts at pages[npages], but accounts for its
+first page as PAGE_SIZE bytes rather than PAGE_SIZE - offset.  If the
+remaining data starts at a non-zero offset, it can finish one page
+early and leave a page reference behind.
+
+Use PAGE_SIZE - offset for the first remaining page and clear offset
+for later pages, as in the mapping loop.  Without this, each affected
+request leaks one page reference.
+
+Fixes: bca939d5bcd0 ("vhost-scsi: Dynamically allocate scatterlists")
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+Testing:
+
+- Four fileio vhost-scsi test instances repeatedly issued affected
+  writes using recycled backing pages.  After about 1.33 million
+  requests, MemAvailable fell from 5.3 GB to 13 MB and swap was nearly
+  exhausted.
+
+The affected fallback is reachable from guest-issued virtio-scsi I/O.
+
+ drivers/vhost/scsi.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: fall back to platform ROM when
+[PATCH v2 1/2] vfio/pci: fall back to platform ROM when
+Author: Michael S. Tsirkin <mst@redhat.com>
+
+When pci_resource_start() returns non-zero but pci_map_rom() fails
+(ROM BAR exists but content is unreadable), the pdev->rom fallback
+is unreachable because it's behind an else-if that only triggers
+when pci_resource_start() is zero.
+
+Try pdev->rom whenever the ROM BAR didn't produce a mapping, in both
+the region info ioctl and the read path.
+
+Fixes: e021e6cbfb5a ("vfio/pci: Expose setup ROM at ROM bar when needed")
+Cc: Yunxiang Li <Yunxiang.Li@amd.com>
+Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+---
+
+Notes (changelog):
+    v1->v2:
+        bound reads by the ROM image rather than the BAR once the
+        pdev->rom fallback is selected, so reads match the reported
+        region size (a pread spanning the image used to fail with
+        -EINVAL past the BAR size)
+        add Fixes: tag
+
+ drivers/vfio/pci/vfio_pci_core.c |  4 +++-
+ drivers/vfio/pci/vfio_pci_rdwr.c | 32 ++++++++++++++++++++++++--------
+ 2 files changed, 27 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost/vringh: reject zero-length indirect descriptor tables
+[PATCH] vhost/vringh: reject zero-length indirect descriptor tables
+Author: Fang Xieyan <fangxy@xiaopeng.com>
+
+move_to_indirect() accepts an indirect descriptor with a zero length,
+setting desc_max to 0. __vringh_iov() then reads descs[0] before
+checking the descriptor bounds, resulting in an out-of-bounds read.
+
+Reject a zero-length indirect table in move_to_indirect() so the
+caller returns -EINVAL before dereferencing the table. Also use the
+converted length in the warning to report invalid lengths correctly
+when the vring byte order differs from the CPU byte order.
+
+Fixes: f87d0fbb5798 ("vringh: host-side implementation of virtio rings.")
+Cc: stable@vger.kernel.org
+Reviewed-by: Guanglei Zhu <zhugl3@xiaopeng.com>
+Signed-off-by: Fang Xieyan <fangxy@xiaopeng.com>
+---
+ drivers/vhost/vringh.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Don't clobber VM-Entry instruction length when saving soft INTn
+[PATCH 1/2] KVM: nVMX: Don't clobber VM-Entry instruction length when saving soft INTn
+Author: ma.mandourr <ma.mandourr@gmail.com>
+
+
+When a VM-Exit from L2 occurs while vectoring a software interrupt, write
+the instruction length to vmcs12's VM-Exit instruction length field, as is
+done for software exceptions, not to the VM-Entry instruction length field,
+which belongs to L1.
+
+Found with a differential testing harness for VMX isolation.
+
+Fixes: 5f3d5799974b ("KVM: nVMX: Rework event injection and recovery")
+Signed-off-by: Mahmoud Abumandour <ma.mandourr@gmail.com>
+---
+ arch/x86/kvm/vmx/nested.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nVMX: Don't clobber VM-Entry instruction length on soft INTn exits
+[PATCH 0/2] KVM: nVMX: Don't clobber VM-Entry instruction length on soft INTn exits
+Author: ma.mandourr <ma.mandourr@gmail.com>
+
+
+KVM writes the length of a soft INTn that L2 was vectoring at the time of
+a nested VM-Exit into vmcs12's VM-Entry instruction length, an L1-owned
+control, instead of the VM-Exit instruction length.  Patch 1 fixes it and
+patch 2 adds a selftest.
+
+Found with a fuzzer for VMX isolation. The selftest patch was written with
+the help of an LLM coding assistant (Claude Opus 5.5). kvm-x86/next was
+run as a nested hypervisor under QEMU. The selftest passes only with
+patch 1, and other nested VMX selftests are unaffected.
+
+Mahmoud Abumandour (2):
+  KVM: nVMX: Don't clobber VM-Entry instruction length when saving soft
+    INTn
+  KVM: selftests: Add test for nested VM-Exits while vectoring soft INTs
+
+ arch/x86/kvm/vmx/nested.c                     |   2 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/x86/vmx_soft_int_vectoring_test.c     | 105 ++++++++++++++++++
+ 3 files changed, 107 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 5e50b2edc to 9eaac1991
+KVM mailing list update from 5e50b2edc to 9eaac1991
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 google.com
+      5 linux.dev
+      1 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      5  Tarun Sahu <tarunsahu@google.com>
+      5  Fuad Tabba <fuad.tabba@linux.dev>
+      1  Vincent Donnefort <vdonnefort@google.com>
+      1  Sascha Bischoff <sascha.bischoff@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  liveupdate: Rename handler compatible to name
+[RFC PATCH v2 1/4] liveupdate: Rename handler compatible to name
+Author: Tarun Sahu <tarunsahu@google.com>
+
+File handler and File-Lifecycle-Bound (FLB) identifiers name the
+registered handler or FLB rather than a monolithic compatibility version.
+Rename compatible to name across LUO headers, structures, and consumers:
+- struct liveupdate_file_handler and struct luo_file_ser name field
+- LIVEUPDATE_HNDL_NAME_LENGTH (in include/uapi/linux/liveupdate.h) and
+  MEMFD_LUO_FH_NAME
+- struct liveupdate_flb name field, LIVEUPDATE_FLB_NAME_LENGTH,
+  PCI_LUO_FLB_NAME, and LIVEUPDATE_TEST_FLB_NAME
+
+Signed-off-by: Tarun Sahu <tarunsahu@google.com>
+---
+ drivers/pci/liveupdate.c        | 10 ++++----
+ include/linux/kho/abi/luo.h     | 26 +++++++++----------
+ include/linux/kho/abi/memfd.h   |  4 +--
+ include/linux/kho/abi/pci.h     |  2 +-
+ include/linux/liveupdate.h      | 18 +++++--------
+ include/uapi/linux/liveupdate.h |  3 +++
+ kernel/liveupdate/luo_file.c    | 45 +++++++++++++++++----------------
+ kernel/liveupdate/luo_flb.c     | 16 ++++++------
+ lib/tests/liveupdate.c          | 22 ++++++++--------
+ mm/memfd_luo.c                  |  2 +-
+ 10 files changed, 73 insertions(+), 75 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  liveupdate: Feature header ABI and named handler
+[RFC PATCH v2 0/4] liveupdate: Feature header ABI and named handler
+Author: Tarun Sahu <tarunsahu@google.com>
+
+Live Update Orchestrator (LUO) and its file handlers currently validate
+handed-over KHO state using monolithic compatibility strings ("luo-v5",
+"memfd-v2"). Any change to a serialized structure, even an optional
+additive field, requires bumping the compatibility string, breaking live
+update between adjacent kernel versions across both forward updates and
+rollbacks. This series introduces the feature flags per serialized
+struct to communicate between the kernel about their active and required
+features. Having feature flags increase the compatibility matching
+granularity.
+
+This series also renames the file-handler and FLB compatible identifier to
+name, extends LIVEUPDATE_SESSION_PRESERVE_FD so userspace can
+optionally select which registered file handler preserves a file
+descriptor by name, and replaces monolithic version strings in serialized
+payloads with a fixed-size 2-bit pair feature header
+(struct luo_feature_hdr). So in future, If a change to a subsystem
+preservation can not be handled with feature flags, we can attach a new
+handler to support the preservation.
+
+This change is motivated by the LPC discussion.
+
+Named File Handler Selection
+============================
+With fine-grained compatibility tracked via feature headers, the
+handler and FLB compatible field is renamed to name. When a subsystem
+needs a genuinely incompatible new handler alongside an existing one for
+the same file type, struct liveupdate_session_preserve_fd now includes
+char handler[LIVEUPDATE_HNDL_NAME_LENGTH] after token (keeping
+min_size at 16 bytes for backward compatibility):
+- Empty handler (or 16-byte struct): selects the first registered
+  handler whose .can_preserve() accepts the fd, keeping default callers
+  on the original rollback-safe handler.
+- Non-empty handler: selects the registered handler with that exact
+  name and verifies .can_preserve() accepts the fd.
+
+2-Bit Pair Feature Header (struct luo_feature_hdr)
+==================================================
+Each serialized ABI structure (struct luo_ser, struct memfd_luo_ser)
+starts with a fixed 128-byte struct luo_feature_hdr containing:
+- size: byte size of the enclosing serialized structure from the source
+  kernel.
+- flags[15]: 15 chained 64-bit feature flags entries. Each entry
+  encodes up to 31 features as 2-bit pair (req, active) states
+  (enum luo_feat_state: LUO_FEAT_DISABLED = 0b00,
+  LUO_FEAT_OPTIONAL = 0b01, LUO_FEAT_REQUIRED = 0b11) plus
+  LUO_FEAT_EXT_MASK (bits[63:62] = 0b11) chaining to the next entry
+  (up to 465 features total). Because the header is fixed at 128 bytes,
+  payload field offsets never shift when extended flags entries are used.
+
+Each subsystem defines its feature states as a static const u8 array
+indexed by its feature enum, which luo_feature_hdr_init() packs into
+the payload feature header. During deserialization,
+luo_feature_hdr_validate() checks the header from the source kernel
+against the feature array in the target kernel according to the
+per-feature (req, active) truth table:
+
+  Source Target Action
+  (1,0)  (x,x)  Reject -EINVAL: invalid source kernel (req without active)
+  (x,x)  (1,0)  Reject -EINVAL + WARN_ON_ONCE: invalid target kernel
+  (0,0)  (0,0)  Accept: feature absent
+  (0,0)  (0,1)  Accept: feature absent
+  (0,0)  (1,1)  Reject -EOPNOTSUPP: target kernel requires the feature
+  (0,1)  (0,0)  Accept: ignore payload data
+  (1,1)  (0,0)  Reject -EOPNOTSUPP: source kernel requires the feature
+  (x,1)  (x,1)  Accept: use payload data
+
+Structure Evolution
+===================
+The relative order and offsets of fields in serialized structures must
+remain unchanged as features are added or retired. New fields are always
+appended at the end of the structure under a new feature flag, and
+retired fields are kept in place so that the offsets of subsequent
+fields never shift. If the type or format of a field needs to change,
+the existing field and feature are kept intact (and retired when no
+longer needed) and a new feature flag with a new appended field of the
+new type is added.
+
+In the target kernel, fields of a LUO_FEAT_REQUIRED feature are
+guaranteed to be present once luo_feature_hdr_validate() succeeds,
+whereas fields of a LUO_FEAT_OPTIONAL feature should be accessed only
+after verifying that the feature is active in the source kernel header:
+
+  if (luo_feature_is_active(&ser->features, FEAT_X))
+          val = ser->x_field;
+
+Changes since RFC v1 [1]:
+- Renamed file-handler and FLB compatible to name and added optional
+  handler selection by name in LIVEUPDATE_SESSION_PRESERVE_FD.
+- Replaced the 3-mask (supp, req, active) + variable-length FDT and
+  feature-section design with a fixed 128-byte struct luo_feature_hdr
+  embedding size and 15 chained 64-bit 2-bit pair (req, active)
+  flags entries directly in struct luo_ser and struct memfd_luo_ser.
+- Replaced compile-time bitmask macros with a static const u8 feature
+  array per subsystem packed by luo_feature_hdr_init() and validated
+  in a single pass by luo_feature_hdr_validate().
+
+[1] https://lore.kernel.org/all/20260903023452.721732-1-loganodell@google.com/
+
+Tarun Sahu (4):
+  liveupdate: Rename handler compatible to name
+  liveupdate: Select file handler by name in the preserve ioctl
+  liveupdate: Replace compatibility string with a 2-bit pair feature
+    header
+  mm: memfd_luo: Add the 2-bit pair feature header
+
+ drivers/pci/liveupdate.c         |  10 +-
+ include/linux/kho/abi/luo.h      | 367 +++++++++++++++++++++++++++----
+ include/linux/kho/abi/memfd.h    |  39 +++-
+ include/linux/kho/abi/pci.h      |   2 +-
+ include/linux/liveupdate.h       |  18 +-
+ include/uapi/linux/liveupdate.h  |  15 +-
+ kernel/liveupdate/luo_core.c     |  27 ++-
+ kernel/liveupdate/luo_file.c     |  64 ++++--
+ kernel/liveupdate/luo_flb.c      |  16 +-
+ kernel/liveupdate/luo_internal.h |   3 +-
+ kernel/liveupdate/luo_session.c  |   7 +-
+ lib/tests/liveupdate.c           |  22 +-
+ mm/memfd_luo.c                   |  16 +-
+ 13 files changed, 481 insertions(+), 125 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Clear the whole hugetlb folio when sanitising MTE tags
+[PATCH v2 1/4] KVM: arm64: Clear the whole hugetlb folio when sanitising MTE tags
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+sanitise_mte_tags() clears the tags of the pages about to be mapped at
+stage-2 before marking them tagged. For a hugetlb folio the flag covers
+every page in the folio, but the loop only covers the mapping being
+installed. Stage-2 maps a folio in pieces for the contiguous hugetlb
+sizes, and for any size under dirty logging. The first fault then marks
+the whole folio after clearing only its own piece, and the rest keeps
+its previous owner's tags for the guest to read.
+
+Clear the whole folio, as mte_sync_tags() does.
+
+Fixes: 25c17c4b55def ("hugetlb: arm64: add mte support")
+Reviewed-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/mmu.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Fix stale MTE tags reaching a guest
+[PATCH v2 0/4] KVM: arm64: Fix stale MTE tags reaching a guest
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v1 [1]:
+  - Added patch 4, mte_clear_folio_tags(). (Lorenzo)
+  - Moved patch 3's sanitise_mte_tags() call into the
+    kvm_pgtable_stage2_map() branch. (Lorenzo)
+  - Patch 1 loops with folio_page() rather than reusing page, and its
+    comment now matches patch 2's. (Lorenzo)
+  - Collected Reviewed-by from Lorenzo on patches 1-3. (thanks!)
+
+Three fixes for hugetlb and THP pages that reach an MTE guest without
+their tags cleared, so the guest can read whatever tags the pages'
+previous owners left.
+
+The first clears the whole of a hugetlb folio before marking it tagged,
+rather than only the pages being mapped. The second does the same when
+KVM_ARM_MTE_COPY_TAGS copies tags into a page. The third sanitises when
+a permission fault installs a THP block, and runs the VM_MTE_ALLOWED
+check on permission faults too. A VMM that maps guest memory with
+PROT_MTE isn't affected, as faulting that memory into its mapping clears
+the tags first. QEMU and kvmtool map it without.
+
+The fourth is a cleanup: it factors out the first two patches'
+folio-clearing loop into mte_clear_folio_tags(), which mte_sync_tags()
+now uses too.
+
+I have a reproducer that reads the previous owner's tag from 511 of 512
+pages in each case. With this series applied, it reads none.
+
+Based on Linux 7.3-rc3 (fd73f4a665989; also applies to kvmarm/next
+dd0bc00e3e920 with a three-way merge).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20261019132103.3836646-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (4):
+  KVM: arm64: Clear the whole hugetlb folio when sanitising MTE tags
+  KVM: arm64: Clear the whole hugetlb folio when storing MTE tags
+  KVM: arm64: Sanitise MTE tags when a permission fault installs a
+    mapping
+  arm64: mte: Add mte_clear_folio_tags()
+
+ arch/arm64/include/asm/mte.h |  4 ++++
+ arch/arm64/kernel/mte.c      | 15 ++++++++++-----
+ arch/arm64/kvm/guest.c       | 11 +++++++----
+ arch/arm64/kvm/mmu.c         | 13 ++++++-------
+ 4 files changed, 27 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: gic-v5: Drop unused addr variable
+[PATCH] KVM: arm64: gic-v5: Drop unused addr variable
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+vgic_v5_has_attr_regs() assigns reg_attr.addr to addr, but never uses
+addr. Drop the unused local and assignment to avoid a W=1 warning.
+
+Reported-by: kernel test robot <lkp@intel.com>
+Closes: https://lore.kernel.org/oe-kbuild-all/202610210232.uzFGXnjw-lkp@intel.com/
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arch/arm64/kvm/vgic/vgic-irs-v5.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
