@@ -1,0 +1,1298 @@
+
+On /root/mail/repo:
+From 8a872f497 to 05e1b47dd
+KVM mailing list update from 8a872f497 to 05e1b47dd
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     16 google.com
+      7 pengutronix.de
+      3 suse.com
+      2 renesas.com
+      2 bp.renesas.com
+      1 korea.ac.kr
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     10  James Houghton <jthoughton@google.com>
+      7  Steffen Trumtrar <s.trumtrar@pengutronix.de>
+      4  Ackerley Tng <ackerleytng@google.com>
+      3  Juergen Gross <jgross@suse.com>
+      2  Biju Das <biju.das.jz@bp.renesas.com>
+      2  Au Dang <au.dang.jx@renesas.com>
+      1  Vishal Annapurve <vannapurve@google.com>
+      1  Tao Gong <gongtao@google.com>
+      1  Ingyu Jang <ingyujang25@korea.ac.kr>
+      1  Biju Das <biju.das.au@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: x86: Move PIT existence checks into the PIT ioctl helpers
+[PATCH] KVM: x86: Move PIT existence checks into the PIT ioctl helpers
+Author: Ingyu Jang <ingyujang25@korea.ac.kr>
+
+kvm_vm_ioctl_get_pit() and kvm_vm_ioctl_get_pit2() always return 0,
+so the error checks on their return values in kvm_arch_vm_ioctl()
+never trigger.
+
+Move the !kvm->arch.vpit checks from the callers into the PIT ioctl
+helpers, so that these error checks handle the missing PIT case.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Link: https://lore.kernel.org/all/aYFE-tGOPtKlSWhn@google.com
+Signed-off-by: Ingyu Jang <ingyujang25@korea.ac.kr>
+---
+ arch/x86/kvm/i8254.c | 18 +++++++++++++++++-
+ arch/x86/kvm/x86.c   | 17 -----------------
+ 2 files changed, 17 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  uaccess: Refuse and warn on user accesses when
+[RFC PATCH 00/10] uaccess: Refuse and warn on user accesses when
+Author: James Houghton <jthoughton@google.com>
+
+Hi everyone,
+
+This series comes out of a set of bugs that were found in KVM where the
+kernel can sometimes write to a random process's user memory[1]. The KVM
+fixes at [1] are still required, even with this uaccess series, as noted
+by Sean here[2] and below in this cover letter. The beginning of this
+series includes fixes for similar bugs found through static analysis
+with Claude Opus 5.5. I don't think any of these bugs are more severe
+than the KVM bugs[1].
+
+We hit one of the KVM bugs in production, and it was challenging to
+debug. This series makes such bugs, where the kernel is doing uaccess
+without an mm, much more obvious.
+
+The Cc list is wide because the fixes at the start of the series touch
+several subsystems: SCSI (patch 1), btrfs (patch 2), BPF (patch 3),
+tracing (patch 4) and perf (patch 5). They're included because the new
+warning in patches 6-10 would otherwise fire on those paths. The core
+uaccess change is in patches 6-10.
+
+I have a reproducer only for patch 3 (a bpf_wq callback calling
+bpf_copy_from_user(), which triggers the new WARN without the patch and
+fails with -EFAULT with it); some details are in the notes section of
+patch 3.
+
+Patches 1, 2, 4 and 5 are only build-tested (plus syzkaller running on
+the final kernel). Let me know if you'd like to see reproducers (or if
+any of the patches are incorrect and should be dropped).
+
+== Introduction ==
+
+Accessing user memory from a task that has no mm is always a bug. This
+can happen from a kernel thread that is not using kthread_use_mm(), or
+from a task that has already gone through exit_mm(), e.g. when the last
+reference to a file is dropped at exit and its release handler runs
+from exit_task_work(). For example, KVM's nVMX code can write to guest
+memory while a vCPU is being freed during VM destruction[1], and other
+drivers may have similar bugs.
+
+Such an access does not reliably fail. The user portion of the address
+space belongs to whatever mm happens to be lazily loaded, if any. If
+the access faults, the fault handler refuses to handle it and the copy
+fails, but if the page is already mapped, the access silently reads or
+writes another task's memory.
+
+== Fixes ==
+
+Patches 1-5 fix existing places that access current's user memory
+without an mm:
+
+ - Patches 1 and 2 fix io_uring passthrough completions in scsi_bsg and
+   btrfs that copy to the submitter's user memory even when io_uring
+   runs them canceled from a kworker, e.g. after the submitter exited.
+   These are real bugs of the kind this series is meant to catch.
+
+ - Patch 3 makes the sleepable BPF user copy helpers fail when
+   current->mm is NULL, e.g. for bpf_wq callbacks or lsm.s programs
+   running from kernel threads or exiting tasks.
+
+ - Patches 4 and 5 make stack_trace_save_user() (ftrace's
+   userstacktrace option) and get_perf_callchain() (bpf_get_task_stack()
+   on the current task) use is_user_task(), so that they don't unwind
+   the user stack of PID 1 before exec, usermode helpers before exec,
+   or tasks that have gone through exit_mm().
+
+== The New WARN ==
+
+The rest of the series makes the generic uaccess helpers WARN_ON_ONCE()
+and refuse the access when current->mm is NULL:
+
+ - Patch 6 adds uaccess_should_fail(), which combines the existing
+   should_fail_usercopy() fault injection check with the NULL mm check,
+   and uses it in place of should_fail_usercopy(). This covers
+   copy_{to,from}_user() on all architectures (including the masked
+   user access paths, which never call access_ok()), the
+   __copy_{to,from}_user() variants used by KVM's guest memory
+   accessors, the user-backed iov_iter copy routines and
+   strncpy_from_user().
+
+ - Patch 7 makes the user nofault helpers fail quietly when
+   current->mm is NULL. They are meant to be callable from any context
+   (BPF, kprobes, perf), including from kernel threads, where failing
+   is the expected outcome rather than a bug.
+
+ - Patch 8 splits the NULL mm check out into uaccess_without_mm() and
+   adds it to __copy_from_user_inatomic(), without also enabling fault
+   injection there.
+
+ - Patch 9 adds the check to the remaining generic paths: the scoped
+   user access helpers, strnlen_user(), check_zeroed_user(), and the
+   iov_iter routines that call into architecture-specific helpers.
+
+ - Patch 10 is included for reference only. It moves the warning out of
+   line, which removes ~16 KB of __bug_table growth on arm64 (where
+   copy_{to,from}_user() are inlined), at the cost of warning only once
+   system-wide and a slight size regression on x86_64. With defconfig +
+   KVM, patches 6-9 grow vmlinux by +5,884 B (+0.014%) on x86_64 and
+   +40,948 B (+0.10%) on arm64 without it, and by +9,714 B (+0.023%)
+   and +24,609 B (+0.06%) with it.
+
+The checks are deliberately limited to generic code. Accesses
+implemented entirely by architectures (get_user(), put_user(),
+clear_user(), and direct users of user_access_begin() or
+masked_user_access_begin()) are not covered. Please let me know if the
+new check should be placed elsewhere.
+
+The check also cannot catch a valid mm that isn't the one the caller
+expects, e.g. when a file's release or ioctl handlers run in a
+different process than the one that created it. Code that keeps user
+addresses belonging to a specific mm still has to compare current->mm
+against that mm itself. For KVM, Sean's series[1] does exactly that for
+guest memory accesses, and so complements this one: it handles the case
+where the VM is destroyed from another process, which this series cannot
+detect.
+
+Without [1], the nVMX vCPU teardown path described there may trigger
+the new warning when the last reference to a VM is dropped by an
+exiting task or by the delayed fput kworker. The write to guest memory
+is then refused, which is also what [1] does.
+
+For example, running Jim Mattson's selftest for that bug[3] (adapted
+slightly) on a kernel with this series but without [1] gives the
+following warning, and the write to guest memory is refused. The warning
+comes from uaccess_warn_without_mm() because patch 10 was applied;
+without it, it points at the inlined copy helper in the caller instead.
+
+  WARNING: lib/usercopy.c:31 at uaccess_warn_without_mm+0xa/0x12, CPU#2: vmx_shadow_vmcs/5299
+  Call Trace:
+   kvm_write_guest_offset_cached.cold+0xa/0xf
+   __nested_vmx_vmexit+0x1974/0x3fd0
+   nested_vmx_free_vcpu+0xb3/0xd0
+   vmx_vcpu_free+0x96/0x350
+   kvm_arch_vcpu_destroy+0x15c/0x400
+   kvm_destroy_vcpus+0x270/0x3f0
+   kvm_arch_destroy_vm+0xc7/0x230
+   kvm_put_kvm+0x560/0xbf0
+   kvm_vm_release+0x3c/0x50
+   __fput+0x3f8/0xb50
+   fput_close_sync+0x113/0x250
+   filp_close_sync+0x75/0xa0
+   put_files_struct+0x201/0x390
+   exit_files+0x97/0xd0
+   do_exit+0x872/0x2a00
+   do_group_exit+0xd5/0x2a0
+   __x64_sys_exit_group+0x3c/0x50
+
+== Testing ==
+
+Build-tested on x86_64 and arm64. Verified that the KVM reproducer hits
+the new WARN, and that the BPF reproducer hits it without patch 3.
+
+I'm also fuzzing this series with syzkaller on x86_64 (syzbot's
+upstream KASAN config, nested VMX enabled), so far for about a day and
+a half. syzkaller hasn't triggered the new warning yet, i.e. it hasn't
+found any other path that accesses user memory without an mm. Fuzzing
+is ongoing, and I'll report anything it finds in reply to this RFC.
+
+Please let me know what you think. Thank you!
+
+[1] https://lore.kernel.org/kvm/20261001202234.3794060-1-seanjc@google.com
+[2] https://lore.kernel.org/kvm/aqMBidJ_96qroogH@google.com/
+[3] https://lore.kernel.org/kvm/20260911191011.528460-1-jmattson@google.com/
+
+James Houghton (10):
+  scsi: bsg: Don't copy sense data to user memory when canceled
+  btrfs: Don't copy encoded read data to user memory when canceled
+  bpf: Fail sleepable user copy helpers when current->mm is NULL
+  stacktrace: Don't unwind the user stack without an mm
+  perf/core: Don't unwind the user stack without an mm
+  uaccess: Refuse and warn on user copies when current->mm is NULL
+  uaccess: Fail user nofault helpers quietly when current->mm is NULL
+  uaccess: Refuse and warn on __copy_from_user_inatomic() without an mm
+  uaccess: Refuse and warn on more user accesses without an mm
+  uaccess: Move the NULL mm warning out of line
+
+ drivers/scsi/scsi_bsg.c   | 10 +++++++-
+ fs/btrfs/ioctl.c          | 10 ++++++++
+ include/linux/uaccess.h   | 50 +++++++++++++++++++++++++++++++++++----
+ kernel/bpf/helpers.c      | 11 +++++++--
+ kernel/events/callchain.c | 12 ++++++----
+ kernel/stacktrace.c       |  8 +++++--
+ kernel/trace/bpf_trace.c  |  4 ++++
+ lib/iov_iter.c            | 12 ++++++++--
+ lib/strncpy_from_user.c   |  2 +-
+ lib/strnlen_user.c        |  3 +++
+ lib/usercopy.c            |  9 +++++++
+ mm/maccess.c              | 17 +++++++++++++
+ 12 files changed, 131 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  scsi: bsg: Don't copy sense data to user memory
+[RFC PATCH 01/10] scsi: bsg: Don't copy sense data to user memory
+Author: James Houghton <jthoughton@google.com>
+
+scsi_bsg_uring_task_cb() copies the sense data to the submitter's
+response_addr with copy_to_user(). It runs as io_uring task work, but
+io_uring may also run it with tw.cancel set from other contexts when the
+submitting task can't run it: from a kworker when the submitting task
+has exited (io_tctx_fallback_work()), or from io_cancel_local_task_work()
+when a DEFER_TASKRUN ring is torn down.
+
+In a kworker, current->mm is NULL, and the copy does not reliably fail:
+the user half of the address space belongs to whatever mm happens to be
+lazily loaded, if any, so up to max_response_len bytes of sense data may
+be written into an unrelated process.
+
+Don't copy the sense data when the task work is canceled, and complete
+the command with -ECANCELED.
+
+Fixes: 7b6d3255e7f8 ("scsi: bsg: add io_uring passthrough handler")
+Signed-off-by: James Houghton <jthoughton@google.com>
+---
+ drivers/scsi/scsi_bsg.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  x86/msr: Drop 32-bit MSR interfaces
+[PATCH v5 00/12] x86/msr: Drop 32-bit MSR interfaces
+Author: Juergen Gross <jgross@suse.com>
+
+For accessing the MSR registers on the local CPU, there are 2 types of
+interfaces: the "modern" 64-bit ones (rdmsrq() etc.) and the 32-bit
+ones (rdmsr() etc.) which are using the upper and lower 32-bit halves
+of the 64-bit wide MSR register values.
+
+The 32-bit interfaces are not optimal for 3 reasons:
+
+- They are based on primitives using 64-bit sized values anyway.
+
+- Modern x86 CPUs have added support for MSR access instructions using
+  an immediate value instead of a register for addressing the MSR,
+  while the value is in a 64-bit register.
+
+- rdmsr() is a macro storing the upper and lower 32-bit halves in
+  variables specified as macro parameters. This is obscuring variable
+  assignment through a macro. Additionally rdmsrq() is mimicking this
+  pattern by being a macro, too, with the target variable specified as
+  a parameter as well.
+
+For those reasons drop the 32-bit interfaces for accessing the x86 MSR
+registers completely and only use the 64-bit variants.
+
+This allows to switch all "high-level" MSR access macros to inline
+functions in the end.
+
+This series will be used as the base for further reorganisation of the
+MSR access functions, especially for completely inlining the MSR
+access instructions even with paravirtualization being active.
+
+Based on kernel 7.4 as of 2026-10-26.
+
+IMHO at least patches 2 and 3 should be applied rather sooner than later
+in order to avoid new instances of the 32-bit variants of the *_safe()
+functions creeping in again.
+
+Changes in V2:
+- dropped already applied patches
+- added patch 1
+- rebased
+
+Changes in V3:
+- small fixes in patches 4 and 13
+- rebased
+
+Changes in V4:
+- rebased
+
+Changes in V5:
+- patch 9 of V4 has been applied
+- rebased
+
+Juergen Gross (12):
+  x86/cpu: Fix coding style violation
+  x86/msr: Remove wrmsr_safe()
+  x86/msr: Remove rdmsr_safe()
+  drivers/ata: Stop using 32-bit MSR interfaces
+  agp/nvidia: Stop using 32-bit MSR interfaces
+  fbdev/geode: Stop using 32-bit MSR interfaces
+  hw_random/via-rng: Stop using 32-bit MSR interfaces
+  drivers/gpio: Stop using 32-bit MSR interfaces
+  x86/msr: Remove wrmsr()
+  x86/msr: Remove rdmsr()
+  treewide: convert rdmsrq() from a macro to an inline function
+  x86/msr: Simplify some rdmsrq() use cases
+
+ arch/x86/coco/sev/core.c                      |  2 +-
+ arch/x86/events/amd/brs.c                     |  4 +-
+ arch/x86/events/amd/core.c                    |  8 +--
+ arch/x86/events/amd/ibs.c                     | 18 +++----
+ arch/x86/events/amd/lbr.c                     | 16 ++----
+ arch/x86/events/amd/power.c                   |  8 +--
+ arch/x86/events/amd/uncore.c                  |  4 +-
+ arch/x86/events/core.c                        | 20 ++++----
+ arch/x86/events/intel/core.c                  | 15 ++----
+ arch/x86/events/intel/cstate.c                |  5 +-
+ arch/x86/events/intel/ds.c                    |  2 +-
+ arch/x86/events/intel/knc.c                   | 10 ++--
+ arch/x86/events/intel/lbr.c                   | 25 +++-------
+ arch/x86/events/intel/p4.c                    |  6 +--
+ arch/x86/events/intel/p6.c                    |  4 +-
+ arch/x86/events/intel/pt.c                    | 12 ++---
+ arch/x86/events/intel/uncore.c                |  6 +--
+ arch/x86/events/intel/uncore_nhmex.c          |  4 +-
+ arch/x86/events/intel/uncore_snb.c            |  2 +-
+ arch/x86/events/intel/uncore_snbep.c          |  6 +--
+ arch/x86/events/msr.c                         |  2 +-
+ arch/x86/events/perf_event.h                  |  6 +--
+ arch/x86/events/rapl.c                        |  6 +--
+ arch/x86/events/zhaoxin/core.c                | 10 ++--
+ arch/x86/hyperv/hv_apic.c                     |  9 ++--
+ arch/x86/hyperv/hv_init.c                     | 26 +++++-----
+ arch/x86/hyperv/hv_spinlock.c                 |  2 +-
+ arch/x86/include/asm/apic.h                   |  7 +--
+ arch/x86/include/asm/debugreg.h               |  6 +--
+ arch/x86/include/asm/fsgsbase.h               |  2 +-
+ arch/x86/include/asm/kvm_host.h               | 10 ----
+ arch/x86/include/asm/msr.h                    | 39 ++-------------
+ arch/x86/include/asm/paravirt.h               | 26 +---------
+ arch/x86/kernel/apic/apic.c                   | 14 +++---
+ arch/x86/kernel/apic/apic_numachip.c          |  6 +--
+ arch/x86/kernel/cet.c                         |  2 +-
+ arch/x86/kernel/cpu/amd.c                     | 14 +++---
+ arch/x86/kernel/cpu/aperfmperf.c              |  8 +--
+ arch/x86/kernel/cpu/bugs.c                    | 12 ++---
+ arch/x86/kernel/cpu/bus_lock.c                |  8 +--
+ arch/x86/kernel/cpu/centaur.c                 |  8 +--
+ arch/x86/kernel/cpu/common.c                  | 12 ++---
+ arch/x86/kernel/cpu/feat_ctl.c                |  4 +-
+ arch/x86/kernel/cpu/hygon.c                   |  4 +-
+ arch/x86/kernel/cpu/intel.c                   |  6 +--
+ arch/x86/kernel/cpu/intel_epb.c               |  4 +-
+ arch/x86/kernel/cpu/mce/amd.c                 |  4 +-
+ arch/x86/kernel/cpu/mce/core.c                |  8 +--
+ arch/x86/kernel/cpu/mce/inject.c              |  2 +-
+ arch/x86/kernel/cpu/mce/intel.c               | 18 +++----
+ arch/x86/kernel/cpu/mce/p5.c                  |  8 +--
+ arch/x86/kernel/cpu/mce/winchip.c             |  2 +-
+ arch/x86/kernel/cpu/microcode/intel.c         |  2 +-
+ arch/x86/kernel/cpu/mshyperv.c                |  6 +--
+ arch/x86/kernel/cpu/mtrr/amd.c                |  4 +-
+ arch/x86/kernel/cpu/mtrr/cleanup.c            |  4 +-
+ arch/x86/kernel/cpu/mtrr/generic.c            | 32 ++++++------
+ arch/x86/kernel/cpu/mtrr/mtrr.c               |  2 +-
+ arch/x86/kernel/cpu/resctrl/core.c            |  2 +-
+ arch/x86/kernel/cpu/resctrl/monitor.c         |  4 +-
+ arch/x86/kernel/cpu/resctrl/pseudo_lock.c     |  4 +-
+ arch/x86/kernel/cpu/resctrl/rdtgroup.c        |  2 +-
+ arch/x86/kernel/cpu/topology.c                |  2 +-
+ arch/x86/kernel/cpu/topology_amd.c            |  4 +-
+ arch/x86/kernel/cpu/transmeta.c               |  8 +--
+ arch/x86/kernel/cpu/tsx.c                     | 10 ++--
+ arch/x86/kernel/cpu/umwait.c                  |  2 +-
+ arch/x86/kernel/cpu/zhaoxin.c                 |  4 +-
+ arch/x86/kernel/fpu/core.c                    |  2 +-
+ arch/x86/kernel/hpet.c                        |  2 +-
+ arch/x86/kernel/kvm.c                         |  2 +-
+ arch/x86/kernel/mmconf-fam10h_64.c            |  6 +--
+ arch/x86/kernel/process.c                     |  4 +-
+ arch/x86/kernel/process_64.c                  | 14 +++---
+ arch/x86/kernel/shstk.c                       |  8 +--
+ arch/x86/kernel/traps.c                       |  4 +-
+ arch/x86/kernel/tsc.c                         |  2 +-
+ arch/x86/kernel/tsc_msr.c                     |  6 +--
+ arch/x86/kernel/tsc_sync.c                    |  6 +--
+ arch/x86/kvm/msrs.c                           |  2 +-
+ arch/x86/kvm/svm/pmu.c                        |  4 +-
+ arch/x86/kvm/svm/svm.c                        |  6 +--
+ arch/x86/kvm/vmx/main.c                       |  2 +-
+ arch/x86/kvm/vmx/nested.c                     |  4 +-
+ arch/x86/kvm/vmx/pmu_intel.c                  |  8 +--
+ arch/x86/kvm/vmx/sgx.c                        |  6 +--
+ arch/x86/kvm/vmx/tdx.c                        |  2 +-
+ arch/x86/kvm/vmx/vmx.c                        | 40 +++++++--------
+ arch/x86/kvm/x86.c                            |  6 +--
+ arch/x86/lib/insn-eval.c                      |  6 +--
+ arch/x86/lib/msr-smp.c                        |  2 +-
+ arch/x86/mm/pat/memtype.c                     |  2 +-
+ arch/x86/pci/amd_bus.c                        |  8 +--
+ arch/x86/platform/olpc/olpc-xo1-rtc.c         |  6 +--
+ arch/x86/platform/olpc/olpc-xo1-sci.c         |  2 +-
+ arch/x86/power/cpu.c                          | 10 ++--
+ arch/x86/realmode/init.c                      |  2 +-
+ arch/x86/virt/hw.c                            |  8 +--
+ arch/x86/virt/svm/sev.c                       | 22 ++++----
+ arch/x86/virt/vmx/tdx/tdx.c                   |  2 +-
+ arch/x86/xen/suspend.c                        |  2 +-
+ drivers/acpi/processor_perflib.c              |  2 +-
+ drivers/ata/pata_cs5535.c                     | 24 ++++-----
+ drivers/ata/pata_cs5536.c                     | 17 +++----
+ drivers/char/agp/nvidia-agp.c                 | 32 ++++++------
+ drivers/char/hw_random/via-rng.c              | 29 +++++------
+ drivers/cpufreq/acpi-cpufreq.c                |  8 +--
+ drivers/cpufreq/amd-pstate.c                  |  4 +-
+ drivers/cpufreq/e_powersaver.c                | 20 ++++----
+ drivers/cpufreq/intel_pstate.c                | 28 +++++------
+ drivers/cpufreq/longhaul.c                    | 12 ++---
+ drivers/cpufreq/longrun.c                     | 16 +++---
+ drivers/cpufreq/powernow-k7.c                 | 10 ++--
+ drivers/cpufreq/powernow-k8.c                 |  8 +--
+ drivers/cpufreq/speedstep-centrino.c          |  4 +-
+ drivers/cpufreq/speedstep-lib.c               | 14 +++---
+ drivers/edac/amd64_edac.c                     |  6 +--
+ drivers/edac/intel-bff.c                      |  4 +-
+ drivers/gpio/gpio-cs5535.c                    | 10 ++--
+ drivers/hv/mshv_vtl_main.c                    |  2 +-
+ drivers/hwmon/hwmon-vid.c                     |  4 +-
+ drivers/idle/intel_idle.c                     | 26 +++++-----
+ drivers/misc/cs5535-mfgpt.c                   |  6 +--
+ drivers/mtd/nand/raw/cs553x_nand.c            |  6 +--
+ drivers/platform/x86/intel/ifs/load.c         | 10 ++--
+ drivers/platform/x86/intel/ifs/runtest.c      |  8 +--
+ drivers/platform/x86/intel/pmc/cnp.c          |  2 +-
+ .../intel/speed_select_if/isst_if_mbox_msr.c  |  6 +--
+ .../intel/speed_select_if/isst_tpmi_core.c    |  2 +-
+ drivers/platform/x86/intel_ips.c              | 20 ++++----
+ drivers/powercap/intel_rapl_msr.c             |  2 +-
+ drivers/thermal/intel/intel_hfi.c             |  8 +--
+ drivers/thermal/intel/therm_throt.c           | 22 ++++----
+ drivers/thermal/intel/x86_pkg_temp_thermal.c  |  6 +--
+ drivers/video/fbdev/geode/display_gx.c        |  8 +--
+ drivers/video/fbdev/geode/gxfb_core.c         |  2 +-
+ drivers/video/fbdev/geode/lxfb_ops.c          | 50 +++++++++----------
+ drivers/video/fbdev/geode/suspend_gx.c        | 24 +++++----
+ drivers/video/fbdev/geode/video_gx.c          |  8 +--
+ include/linux/cs5535.h                        | 10 ++--
+ 140 files changed, 567 insertions(+), 685 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  serial: sh-sci: Drop TE disable at end of
+[PATCH v3 1/4] serial: sh-sci: Drop TE disable at end of
+Author: Biju Das <biju.das.au@gmail.com>
+
+
+Commit f06c2a9000eb ("tty: serial: sh-sci: Fix end of transmission on
+SCI") made sci_transmit_chars() clear SCSCR.TE and return early on
+PORT_SCI once the transmit FIFO is empty.
+
+The hardware manual does not describe disabling the transmitter to end
+a transmission, so this special case has no basis in the documented
+programming sequence. Remove it and let SCI follow the same path as the
+other port types. A plain revert no longer applies because the driver
+now uses a kfifo, so the code is removed by hand.
+
+Fixes: f06c2a9000eb ("tty: serial: sh-sci: Fix end of transmission on SCI")
+Signed-off-by: Biju Das <biju.das.jz@bp.renesas.com>
+---
+v2->v3:
+ * No change.
+v1->v2:
+ * No change.
+---
+ drivers/tty/serial/sh-sci.c | 7 -------
+ 1 file changed, 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Fix transmit handling on SCI/RSCI ports
+[PATCH v3 0/4] Fix transmit handling on SCI/RSCI ports
+Author: Biju Das <biju.das.au@gmail.com>
+
+Hi All,
+
+This series fixes several transmit problems on the SCI (PORT_SCI) and
+RSCI ports of the sh-sci driver, seen on Renesas RZ SoCs:
+
+ - Patch 1 removes the code that disables TE at the end of a
+   transmission on SCI, which the hardware manual does not describe.
+ - Patch 2 stops the TEI handler from turning the transmitter off
+   while the xmit kfifo still holds data, which could stall or lose
+   output. It also covers the TE handling that patch 1 no longer does
+   in sci_transmit_chars().
+ - Patch 3 skips the software clear of the TDxE flag on SCI, since
+   hardware clears it on a TDR write and the extra clear caused a
+   spurious TXI and a duplicated last character.
+ - Patch 4 forces a TE toggle when restoring SCSCR in the console
+   write path on SCI, so the TXI that restarts an interrupted drain is
+   generated. Without it the RZ/G2UL console can hang during boot.
+
+Signed-off-by: Biju Das <biju.das.jz@bp.renesas.com>
+---
+Changes in v3:
+ * Updated commit description for patch#2
+ * When the port is stopped with data still queued, the transmit_chars()
+   paths (sci_transmit_chars() and rsci_transmit_chars()) now also swap
+   TIE for TEIE, as they already did for an empty kfifo. Without this, TIE
+   would keep firing with nothing the driver is allowed to send, and TEI
+   would never be raised to complete the transmission.
+ * Replaced sci_tx_interrupt() with port's transmit_chars() to avoid
+   lock drop race in sci_tx_end_interrupt() before TX handoff.
+ * Added missing has_tdxe_auto_clear init in scix_early_console_setup().
+ * Replaced to_sci_port(port)->type with sci_port->type in
+   serial_console_write().
+- Link to v2: https://lore.kernel.org/r/20261021-g2ul_sci-v2-0-b4e038220018@bp.renesas.com
+Changes in v2:
+ * Updated commit header and description for patch#2 and #3.
+ * Take the port lock before reading the control register, so the
+   read-modify-write in sci_tx_end_interrupt() is protected.
+ * Extended the pending-data check in sci_tx_end_interrupt() to cover
+   x_char and a stopped port, not only a non-empty xmit kfifo.
+ * Replaced the PORT_SCI check with a has_tdxe_auto_clear flag in
+   struct sci_port, set from the new tdxe_auto_clear field in
+   struct sci_of_data.
+- Link to v1: https://lore.kernel.org/r/20261019170139.473808-1-biju.das.jz@bp.renesas.com
+
+---
+Au Dang (2):
+      serial: sh-sci: Skip TDxE clear when hardware clears it automatically
+      serial: sh-sci: Toggle TE when restoring SCSCR in console write on SCI
+
+Biju Das (2):
+      serial: sh-sci: Drop TE disable at end of transmission on SCI
+      serial: sh-sci: Keep TX enabled on TEI while data is pending
+
+ drivers/tty/serial/rsci.c          |  4 ++-
+ drivers/tty/serial/sh-sci-common.h |  4 +++
+ drivers/tty/serial/sh-sci.c        | 71 ++++++++++++++++++++++++++------------
+ 3 files changed, 56 insertions(+), 23 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  virtio-net: add receive timestamp support
+[PATCH RFC v4 0/6] virtio-net: add receive timestamp support
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+This series picks up Willem de Bruijn's work on a virtio-net receive
+timestamp. The device puts the time of arrival (TAI, ns) into the
+virtio-net header so the guest can use it for PTP and RTT estimation
+without taking the timestamp itself after the host-to-guest latency.
+
+The series is an RFC. I am mostly interested in feedback on the
+approach and on the wire format:
+
+ - The timestamp is a new field at the end of virtio_net_common_hdr
+   after outer_nh_offset and ipsec, offset 32 (see virtio spec),
+   negotiated with VIRTIO_NET_F_RX_TSTAMP (bit 49). Header size now 40
+   bytes.
+   Willem noted on v3 that virtio_net_common_hdr was not meant to be
+   extended this way; I kept it as the simplest approach, but a
+   separate struct for the timestamp header is an option.
+ - Timestamping is enabled at runtime with SIOCSHWTSTAMP; all
+   supported rx filters behave the same for now.
+ - XDP programs can read the timestamp with
+   bpf_xdp_metadata_rx_timestamp().
+ - vhost-net passes the feature through; the timestamp itself is
+   written by tun. The tun patch is only meant as a reference
+   implementation for the device side.
+ - The timestamp is in TAI. The driver reports it as
+   SOF_TIMESTAMPING_RAW_HARDWARE without a PTP clock (phc_index -1),
+   so userspace cannot tell which clock it refers to and may compare
+   it against CLOCK_REALTIME (currently off by 37s). Options I see:
+   convert to the guest's system time in the driver (correct only if
+   host and guest agree on the TAI offset), expose a PHC so the
+   time base is explicit, or keep the raw TAI value and leave the
+   conversion to userspace. Which one is preferred?
+ - Like the existing rx_hash, the XDP timestamp callback locates the
+   header relative to xdp->data, so it must be called before
+   bpf_xdp_adjust_head().
+
+A virtio spec change is needed as well and not yet proposed.
+
+Testing: the feature needs a QEMU that knows VIRTIO_NET_F_RX_TSTAMP and
+sets the matching vnet header size; see
+https://github.com/strumtrar/qemu/tree/v11.0.1/virtio-rx-stamps
+
+Performance: I measured the receive rate with 64 byte UDP packets in
+a nested QEMU/KVM setup with vhost-net. The variance between runs is
+larger than any difference between the variants (without the series,
+series without the feature, feature negotiated, feature enabled), so
+I cannot show a measurable cost or the absence of one. Numbers from
+bare metal will follow with a non-RFC version.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+Changes in v4:
+- zero the header beyond the known fields on tx and in vhost
+- grow padded_vnet_hdr for the 40 byte header (big packets)
+- install xdp_metadata_ops if only RX_TSTAMP is negotiated
+- rename VIRTIO_NET_F_TSTAMP to VIRTIO_NET_F_RX_TSTAMP
+- move tstamp to offset 32 (header size 40) to match virtio spec layout
+- drop XDP restriction for SIOCSHWTSTAMP, add xmo_rx_timestamp
+- add static_asserts for header sizes
+- add support in vhost
+- move virtio_net_common_hdr to virtio_net.h
+- Link to v3: https://patch.msgid.link/20260921-v6-7-topic-virtio-net-ptp-v3-0-3350851c4f88@pengutronix.de
+Changes in v3:
+- rework to use virtio_net_common_hdr instead of adding new struct
+Changes in v2:
+- rework patches to use flow filter instead of feature flag
+- Link to v1: https://lore.kernel.org/r/20231218-v6-7-topic-virtio-net-ptp-v1-0-cac92b2d8532@pengutronix.de
+
+To: Michael S. Tsirkin <mst@redhat.com>
+To: Xuan Zhuo <xuanzhuo@linux.alibaba.com>
+To: David S. Miller <davem@davemloft.net>
+To: Jakub Kicinski <kuba@kernel.org>
+To: Paolo Abeni <pabeni@redhat.com>
+To: Richard Cochran <richardcochran@gmail.com>
+To: Willem de Bruijn <willemdebruijn.kernel@gmail.com>
+To: Andrew Lunn <andrew+netdev@lunn.ch>
+To: Eugenio Pérez <eperezma@redhat.com>
+To: Jason Wang <jasowangio@gmail.com>
+To: Alexei Starovoitov <ast@kernel.org>
+To: Daniel Borkmann <daniel@iogearbox.net>
+To: Jesper Dangaard Brouer <hawk@kernel.org>
+To: John Fastabend <john.fastabend@gmail.com>
+To: Stanislav Fomichev <sdf@fomichev.me>
+To: Eric Dumazet <edumazet@kernel.org>
+Cc: virtualization@lists.linux.dev
+Cc: netdev@vger.kernel.org
+Cc: linux-kernel@vger.kernel.org
+Cc: bpf@vger.kernel.org
+Cc: kvm@vger.kernel.org
+
+---
+Steffen Trumtrar (6):
+      virtio-net: move virtio_net_common_hdr to virtio_net.h
+      virtio-net: support receive timestamp
+      virtio-net: assert header sizes
+      vhost-net: support VIRTIO_NET_F_RX_TSTAMP
+      virtio-net: add XDP rx timestamp metadata
+      tun: add rx timestamp to the vnet header
+
+ drivers/net/tun.c               |  14 ++--
+ drivers/net/tun_vnet.h          |  18 +++--
+ drivers/net/virtio_net.c        | 171 ++++++++++++++++++++++++++++++++++------
+ drivers/vhost/net.c             |  17 +++-
+ include/linux/virtio_net.h      |  30 +++++++
+ include/uapi/linux/virtio_net.h |   1 +
+ 6 files changed, 214 insertions(+), 37 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  virtio-net: move virtio_net_common_hdr to
+[PATCH RFC v4 1/6] virtio-net: move virtio_net_common_hdr to
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+tun and vhost need to know the layout and size of the virtio-net
+header as the driver uses it, e.g. to fill in fields behind
+virtio_net_hdr_v1_hash_tunnel. Move struct virtio_net_common_hdr to
+the kernel-internal header that they include already.
+
+No functional change.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+Assisted-by: Claude:claude-opus-5-5
+---
+ drivers/net/virtio_net.c   | 9 ---------
+ include/linux/virtio_net.h | 9 +++++++++
+ 2 files changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Refactor out kvm_gmem_alloc_file()
+[RFC PATCH v3 1/5] KVM: guest_memfd: Refactor out kvm_gmem_alloc_file()
+Author: Tao Gong <gongtao@google.com>
+
+
+The file represents a KVM instance's view into the underlying memory
+that is managed by the guest_memfd inode. Refactoring out the file
+creation enables this function to be reused when creating multiple views
+into the same guest_memfd inode.
+
+Signed-off-by: Ackerley Tng <ackerleytng@google.com>
+Co-developed-by: Ryan Afranji <afranji@google.com>
+Signed-off-by: Ryan Afranji <afranji@google.com>
+Co-developed-by: Tao Gong <gongtao@google.com>
+Signed-off-by: Tao Gong <gongtao@google.com>
+---
+ virt/kvm/guest_memfd.c | 67 +++++++++++++++++++++++++-----------------
+ 1 file changed, 40 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: guest_memfd: Add KVM_LINK_GUEST_MEMFD ioctl
+[RFC PATCH v3 0/5] KVM: guest_memfd: Add KVM_LINK_GUEST_MEMFD ioctl
+Author: Tao Gong <gongtao@google.com>
+
+Hello,
+
+This series adds KVM_LINK_GUEST_MEMFD, a VM ioctl that takes an existing
+guest_memfd fd and returns a new guest_memfd fd, bound to the VM on which
+the ioctl is invoked, that refers to the same underlying guest_memfd
+inode.
+
+It is v3 of the gmem linking RFC [1][2], rebased onto kvm-x86/coco and
+reduced to the linking part: the prerequisites from RFC v2 are upstream
+now, and the KVM_CAP_VM_MOVE_ENC_CONTEXT_FROM memory context changes will
+be posted as a follow-up series on top of this one.
+
+Problem
+-------
+
+A guest_memfd is bound to the VM that created it: binding a memslot to
+a guest_memfd requires the file's owning VM to be the memslot's VM, and
+there is no way to reassign a guest_memfd instance to a different KVM
+instance. Passing the fd to another process does not change that.
+
+For VMs with private memory this is a hard limit. Private memory is not
+accessible to the host, so it cannot be copied through userspace into a
+new VM's guest_memfd. The only way to move a confidential VM to a new VM
+instance on the same host (intra-host migration, e.g. to replace the
+VMM) is for the new VM to take over the same memory in place.
+
+Design
+------
+
+guest_memfd already splits state between the file and the inode: memslot
+bindings and the owning VM belong to the file (struct gmem_file), while
+the memory itself, its flags and (with in-place conversion) the
+shared/private attributes belong to the inode (struct gmem_inode).
+Linking creates another file for the same inode, so a second VM can bind
+the same guest memory to its memslots without the memory being copied or
+going through userspace.
+
+Linking is only allowed between distinct, compatible VMs. On x86 both
+VMs must have the same VM type, so that e.g. memory private to a TDX
+guest can never be mapped into a non-TDX VM; the generic fallback
+requires both VMs to agree on kvm_arch_has_private_mem(). These checks
+are defensive; the underlying rule is that KVM must never create a
+stage-2 mapping for a confidential VM to another confidential VM's
+private memory (see the cutover question below). Linking therefore
+does not make private memory shareable between VMs: a private page
+remains usable only by the VM that owns it.
+
+Use cases
+---------
+
+1. Intra-host migration of VMs with private memory, where the
+   destination VM takes over the source VM's guest memory in place:
+
+   a. Userspace passes the source VM's guest_memfd fd to the destination
+      VM, e.g. over a Unix socket.
+   b. The destination VM calls KVM_LINK_GUEST_MEMFD to get a new fd for
+      the same inode, bound to the destination VM.
+   c. The destination VM binds the new fd to its memslots with
+      KVM_SET_USER_MEMORY_REGION2, at the same offsets as the source.
+   d. The remaining VM state is moved with KVM_CAP_VM_MOVE_ENC_CONTEXT_FROM
+      (SEV only today; generalized by the follow-up series) and the
+      destination VM is run as normal.
+
+   Linking does not revoke the source VM's access; the source simply
+   stops using the memory, so every private page keeps a single owner.
+
+2. Sharing guest memory between non-confidential VMs. Both VMs bind the
+   same inode at the same time, each through its own file, and the
+   memory keeps its guest_memfd properties: neither VMM needs a
+   userspace mapping of it, and inode-level operations such as a hole
+   punch apply to every linked VM.
+
+   A related use raised in discussion is Nitro Enclaves-style memory
+   donation, where a guest gives part of its memory to a sibling VM on
+   the same host ("nesting without real nesting").
+
+Alternatives considered
+-----------------------
+
+* Passing the VM fd to the new VMM and adding a way to reset the VM
+  while keeping its vCPUs and guest_memfds. A KVM VM is bound to the mm
+  that created it (VM, vCPU and device ioctls from another process fail
+  with -EIO), and its memslots and MMU notifier refer to that address
+  space. Re-homing a VM would be considerably more invasive than
+  creating a new VM and moving state into it, which is the model KVM
+  already uses for SEV intra-host migration
+  (KVM_CAP_VM_MOVE_ENC_CONTEXT_FROM); linking extends that model to
+  guest_memfd.
+
+* Keeping the memory and its attributes in a "memory provider" and
+  creating two independent guest_memfd instances on top of it. The
+  guest_memfd inode already plays that role today (page cache,
+  attributes and the list of files), so linking gets the same result
+  without a new abstraction. If guest_memfd grows a provider layer,
+  linking could be expressed on top of it.
+
+Open questions
+--------------
+
+* Cutover: for confidential VMs, an explicit cutover that delinks the
+  source VM's file at handover, instead of relying on the source to
+  stop, may be required for security: it is what guarantees that a
+  private page is never usable by two VMs when memory is transferred.
+  That would be a separate operation on top of this series;
+  non-confidential VMs probably do not need it.
+
+* IOMMU and DMA: whether iommufd page tables and in-flight DMA keep
+  working across a handover, and how they would be transferred, is not
+  addressed here. The pages themselves stay alive for as long as any
+  linked file exists.
+
+* Conversions: with in-place conversion the shared/private attributes
+  live on the inode, so a conversion by one VM applies to, and
+  invalidates, every linked VM. That is the intended behavior for
+  migration, where only one VM is live. Between confidential VMs it is
+  also required: with today's hardware they can at best share their
+  shared ranges.
+
+Patches 1-2 add the ioctl, patch 3 advertises KVM_CAP_GUEST_MEMFD_LINK,
+and patches 4-5 add selftests, including a test that transfers private
+memory between two KVM_X86_SW_PROTECTED_VMs.
+
+The series is based on kvm-x86/coco at commit ad06cf5338bc ("KVM:
+guest_memfd: Avoid deadlock in error_remove_folio()").
+
+Tested with the KVM selftests (guest_memfd_test, set_memory_region_test,
+guest_memfd_conversions_test, private_mem_conversions_test,
+private_mem_kvm_exits_test, private_mem_migrate_tests) on an Intel host,
+both with and without kvm.gmem_in_place_conversion.
+
+Changes from RFC v2 [2]:
++ Dropped the anon inode and guest_memfd inode patches, which are
+  upstream now (anon_inode_make_secure_inode() and commit a63ca4236e67
+  ("KVM: guest_memfd: Use guest mem inodes instead of anonymous
+  inodes")).
++ Dropped the KVM_CAP_VM_MOVE_ENC_CONTEXT_FROM memory context patches
+  and their selftests, to be posted separately on top of this series.
++ Rebased onto kvm-x86/coco: uses struct gmem_file and the inode's
+  gmem_file_list, and takes the mapping's invalidate_lock when adding a
+  linked file to the list.
++ Renamed kvm_gmem_alloc_view() to kvm_gmem_alloc_file().
++ Only allow linking between compatible VMs (same VM type on x86).
++ Reject non-zero reserved fields and fds larger than INT_MAX.
++ Dropped the i_nlink increment, which had no matching decrement.
++ Take the inode reference before creating the linked file.
++ Added KVM_CAP_GUEST_MEMFD_LINK and gated the selftests on it.
++ Documented KVM_LINK_GUEST_MEMFD in Documentation/virt/kvm/api.rst.
++ Selftests: fixed the negative tests to exercise the intended checks,
+  added tests for out-of-range fds, non-zero reserved fields and VM type
+  mismatch, and made private_mem_migrate_tests work with in-place
+  conversion.
+
+[1] https://lore.kernel.org/all/cover.1691446946.git.ackerleytng@google.com/
+[2] https://lore.kernel.org/all/cover.1747368092.git.afranji@google.com/
+
+Ackerley Tng (4):
+  KVM: guest_memfd: Refactor out kvm_gmem_alloc_file()
+  KVM: guest_memfd: Add ioctl KVM_LINK_GUEST_MEMFD
+  KVM: selftests: Add tests for KVM_LINK_GUEST_MEMFD ioctl
+  KVM: selftests: Test transferring private memory to another VM
+
+Vishal Annapurve (1):
+  KVM: guest_memfd: Advertise support for KVM_LINK_GUEST_MEMFD
+
+ Documentation/virt/kvm/api.rst                |  50 ++++++
+ arch/x86/kvm/x86.c                            |  10 ++
+ include/linux/kvm_host.h                      |   1 +
+ include/uapi/linux/kvm.h                      |   9 ++
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../testing/selftests/kvm/guest_memfd_test.c  |  64 ++++++++
+ .../testing/selftests/kvm/include/kvm_util.h  |  18 +++
+ .../kvm/x86/private_mem_migrate_tests.c       | 118 ++++++++++++++
+ virt/kvm/guest_memfd.c                        | 150 ++++++++++++++----
+ virt/kvm/guest_memfd.h                        |   1 +
+ virt/kvm/kvm_main.c                           |  12 ++
+ 11 files changed, 407 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From cd1b60f00 to 318f39bc3
+KVM mailing list update from cd1b60f00 to 318f39bc3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 linux.dev
+      4 kernel.org
+      4 google.com
+      4 arm.com
+
+Top 15 contributors (Based on Email Body)
+
+      6  Fuad Tabba <fuad.tabba@linux.dev>
+      4  Vincent Donnefort <vdonnefort@google.com>
+      4  Marc Zyngier <maz@kernel.org>
+      4  Leonardo Bras <leo.bras@arm.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: arm64: Make __vgic_v3_init_lrs HVC always available
+[PATCH v3 1/3] KVM: arm64: Make __vgic_v3_init_lrs HVC always available
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+The __vgic_v3_init_lrs hypercall only resets the vGIC LRs. Those
+registers are expected to be 0 when the host is running. As a
+consequence, it is completely safe to make it available at all times,
+even when pKVM is enabled and the host was deprivileged.
+
+Fixes: 057bed206f70 ("KVM: arm64: Disable privileged hypercalls after pKVM finalisation")
+Tested-by: Fuad Tabba <fuad.tabba@linux.dev>
+Reviewed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Vincent Donnefort <vdonnefort@google.com>
+---
+ arch/arm64/include/asm/kvm_asm.h   | 2 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 5 +++--
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: pkvm: Fix missing reset of GICv3 LRs
+[PATCH v3 0/3] KVM: arm64: pkvm: Fix missing reset of GICv3 LRs
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+The GICv3 List Registers (LRs) are architecturally UNKNOWN when a CPU
+boots or wakes up from a low-power state. When pKVM is enabled,
+__vgic_v3_init_lrs() is currently never called on boot, CPU hotplug, or
+CPU PM resume.
+
+Following Marc's comments on v1, instead of handling the LR reset inside
+the pKVM hypervisor, this series fixes the host CPU init, hotplug, and
+PM paths to properly reset the vGIC LRs even when pKVM is enabled. This
+removes a few calls to is_protected_kvm_enabled(), making the whole
+hypervisor init machinery more generic.
+
+Since pKVM can't trust the deprivileged host, keep the reset in the
+CPU_ON/CPU_SUSPEND path.
+
+Changelog:
+
+v3:
+  * Drop "KVM: arm64: pkvm: Avoid trapping on HVC_RESET_VECTORS". (Fuad)
+  * Collect Fuad's tags.
+  * Apply the few nits (Fuad)
+
+v2 (https://lore.kernel.org/all/20261022140048.2522787-1-vdonnefort@google.com/):
+  * Make the __vgic_v3_init_lrs HVC always available. (Marc)
+  * Propagate __hyp_reset_vectors() error and remove
+    is_protected_kvm_enabled() special-casing in the host CPU init/PM
+    paths so the host resets the vGIC LRs. (Marc)
+
+v1 (https://lore.kernel.org/all/20261021110000.508827-1-vdonnefort@google.com/)
+
+Vincent Donnefort (3):
+  KVM: arm64: Make __vgic_v3_init_lrs HVC always available
+  KVM: arm64: pkvm: Fix missing reset of GICv3 LRs
+  KVM: arm64: pkvm: Reset GICv3 LRs in the hypervisor
+
+ arch/arm64/include/asm/kvm_asm.h     |  2 +-
+ arch/arm64/include/asm/virt.h        |  2 +-
+ arch/arm64/kvm/arm.c                 | 50 +++++++++++++++-------------
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c   |  5 +--
+ arch/arm64/kvm/hyp/nvhe/psci-relay.c |  4 +++
+ 5 files changed, 36 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-v4: Don't allocate vPEs for a GICv2 VM
+[PATCH 1/2] KVM: arm64: vgic-v4: Don't allocate vPEs for a GICv2 VM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+KVM can run a GICv2 VM on a GICv4.0 host whose CPU interface supports
+legacy operation. Such a VM has no LPIs and never uses vPEs, so
+vgic_supports_direct_irqs() is false for it and kvm_vgic_dist_destroy()
+never tears them down. However, userspace can still create an ITS for
+it. Once the vgic is initialised, vgic_its_create() calls
+vgic_v4_init(), which allocates the vPEs and requests a doorbell IRQ for
+each vCPU. They're then never freed, and each doorbell handler stays
+registered with a vCPU that's freed with the VM.
+
+Only allocate vPEs for a GICv3 VM.
+
+Fixes: 74fe55dc9ab77 ("KVM: arm/arm64: GICv4: Add init/teardown of the per-VM vPE irq domain")
+Cc: stable@vger.kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/vgic/vgic-v4.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic-v4: Don't allocate vPEs that a VM can't use
+[PATCH 0/2] KVM: arm64: vgic-v4: Don't allocate vPEs that a VM can't use
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Two fixes for vgic_its_create() allocating vPEs for a VM that never
+uses them. Nothing frees them when the VM is destroyed, and each
+doorbell handler stays registered with a freed vCPU.
+
+The first is for a GICv2 VM, which KVM can run on a GICv4.0 host whose
+CPU interface supports legacy operation. The second is for a GICv3 VM
+whose VMM cleared nASSGIcap on a GICv4.1 host with vSGIs.
+
+Tested on AEM FVP, with has-gicv4.1=0 for the GICv2 case and =1 for the
+other. With my reproducer (clear nASSGIcap for the second case,
+initialise the vgic, create an ITS, destroy the VM), the kernel without
+the fix leaves four "vcpu" doorbells in /proc/interrupts in each case,
+and the fixed one doesn't leave any.
+
+It doesn't conflict with my vgic init error-path series [1].
+
+Based on Linux 7.3-rc3 (fd73f4a665989; also applies to kvmarm-7.4).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260921072958.2918477-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (2):
+  KVM: arm64: vgic-v4: Don't allocate vPEs for a GICv2 VM
+  KVM: arm64: vgic-v4: Don't allocate vPEs when userspace clears
+    nASSGIcap
+
+ arch/arm64/kvm/vgic/vgic-v4.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: pgtables: Set DBM attribute on writable Stage-2 PTEs
+[RFC PATCH v2 1/3] KVM: arm64: pgtables: Set DBM attribute on writable Stage-2 PTEs
+Author: Leonardo Bras <leo.bras@arm.com>
+
+As a preparation to the introduction of HAFDBS-based features, set the DBM
+bit (along with S2AP[1]) to all writable PTEs. Also unset DBM and S2AP[1]
+when a PTE is made read-only again.
+
+DBM bit works as following:
+- If HAFDBS is disabled, DBM bit is ignored.
+- If HAFDBS is enabled, and DBM bit is set, a write to non-writable page
+  can promote it's PTE to writable (S2AP[1]=1) without taking a fault.
+
+Since it's being set on writable and unset on read-only, it should cause no
+functional change.
+
+Signed-off-by: Leonardo Bras <leo.bras@arm.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h | 3 +++
+ arch/arm64/kvm/hyp/pgtable.c         | 5 +++--
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  Set DBM bit on writable pages
+[RFC PATCH v2 0/3] Set DBM bit on writable pages
+Author: Leonardo Bras <leo.bras@arm.com>
+
+When HAFDBS is enabled (VTCR_EL2.{HA,HD}={1,1}), having a DBM bit allows 
+hardware to promote a non-writable page to writable by setting (S2AP[1]=1),
+without having to take a fault.
+
+The reason for this patchset is to add the DBM bit when setting-up writable 
+pages, so the code is prepared for future patches that make use of 
+HDBSS/HACDBS to accelerate dirty-tracking. Write-bit detection still 
+happens based only in S2AP[1], so no change in that aspect.
+
+Having DBM set on block entries is undesired, as we benefit from the first 
+fault for splitting it in PAGE_SIZE entries, which is the granularity used 
+to track the dirty pages in KVM. So introduce a new walker that, on top of 
+clearing S2AP[1] for every entry, also clear DBM for block entries.
+
+Also introduce a new VCPU request to reload Stage2, as it will be needed on 
+future HDBSS/HAFDBS patchsets. 
+
+Please let me know of what do you think!
+
+Changes since RFCv1:
+- Dropped patch #5 on enabling HAFDBS on non-dirty-tracking guests, as it 
+  proved to be counter-productive on wrprotect, contrary to expectations
+- No more moving writable-bit to DBM. That does not seem to be the intended 
+  use. It makes sense and it's easier to convert code to new DBM approach.
+- No new PROT_DIRTY, so drop patch #2
+- Tried adding a PROT_DBM, but does not seem necessary to fault a page as 
+  writable-clean. 
+- KVM_REQ_RELOAD_STAGE2 now depends on VHE, as it already reloads Stage2 on 
+  guest entry otherwise. 
+Link: https://lore.kernel.org/all/20260901171558.2674031-1-leo.bras@arm.com/
+
+Thanks!
+Leo
+
+Leonardo Bras (3):
+  KVM: arm64: pgtables: Set DBM attribute on writable Stage-2 PTEs
+  KVM: arm64: Introduce a dedicated walker for stage2 write-protect
+  KVM: arm64: Add KVM_REQ_RELOAD_STAGE2
+
+ arch/arm64/include/asm/kvm_host.h    |  2 ++
+ arch/arm64/include/asm/kvm_pgtable.h |  3 +++
+ arch/arm64/kvm/arm.c                 | 10 ++++++++++
+ arch/arm64/kvm/hyp/pgtable.c         | 30 ++++++++++++++++++++++------
+ 4 files changed, 39 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: Don't forward LPIs to a redistributor with LPIs disabled
+[PATCH 1/2] KVM: arm64: vgic: Don't forward LPIs to a redistributor with LPIs disabled
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Clearing GICR_CTLR.EnableLPIs retires the LPIs on the target vCPU's
+ap_list, then invalidates the ITS translation caches. However, an MSI
+that hits the translation cache can still queue an LPI to that vCPU
+after the retire, and so can an INVALL that enables an LPI already
+pending. vgic_target_oracle() only checks that the distributor is
+enabled, so the LPI goes on the ap_list and the vCPU takes it with
+EnableLPIs clear.
+
+Make the oracle also return NULL for an LPI whose redistributor has LPIs
+disabled. vgic_queue_irq_unlock() rechecks it under the ap_list lock,
+which the retire takes after clearing EnableLPIs, so either the retire
+finds the LPI or the queueing reads EnableLPIs clear. The disable path
+pauses the vCPU after clearing EnableLPIs, and with this change the
+prune on that vCPU's exit would take its pending LPIs off the ap_list
+before the retire walks it. Pause the vCPU before clearing EnableLPIs,
+so that the retire still clears their pending state.
+
+Fixes: 0e4e82f154e38 ("KVM: arm64: vgic-its: Enable ITS emulation as a virtual MSI controller")
+Suggested-by: Oliver Upton <oupton@kernel.org>
+Link: https://lore.kernel.org/r/asf87i2RDh-WksL-@kernel.org
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/vgic/vgic-mmio-v3.c | 31 ++++++++++++++++--------------
+ arch/arm64/kvm/vgic/vgic.c         | 12 ++++++++----
+ 2 files changed, 25 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: vgic: LPI fixes for redistributors with LPIs disabled
+[PATCH 0/2] KVM: arm64: vgic: LPI fixes for redistributors with LPIs disabled
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Two fixes on top of Marc's cross-CPU vcpu pausing series [1], for LPIs
+whose redistributor has LPIs disabled. Without them, the guest can take
+such an LPI with EnableLPIs clear, or lose one mapped before it enables
+them.
+
+The first is the vgic_target_oracle() change Oliver suggested on v2 of
+that series [2]. It stops an LPI from being queued to a redistributor
+with EnableLPIs clear once the disable path has retired the vCPU's AP
+list. With that check, the path has to pause the vCPU before clearing
+EnableLPIs, so that the retire still finds its LPIs.
+
+With the second, an LPI mapped while its redistributor has LPIs
+disabled keeps its pending bit when they're enabled. The second relies
+on the first to keep such an LPI off the AP list until the enable.
+
+Reproducers for the INVALL case in the first and the map in the second
+fail in every run without the patch and pass with it.
+
+Based on kvm-arm64/cross-vcpu-sync as merged in kvmarm/fixes, which the
+first builds on (e99ff76f4a02b; also applies to kvmarm/fixes
+309e1d2215255).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20261015100539.1011760-1-maz@kernel.org/
+[2] https://lore.kernel.org/all/asf87i2RDh-WksL-@kernel.org/
+
+Fuad Tabba (2):
+  KVM: arm64: vgic: Don't forward LPIs to a redistributor with LPIs
+    disabled
+  KVM: arm64: vgic-v3: Don't drop a pending LPI mapped with LPIs
+    disabled
+
+ arch/arm64/kvm/vgic/vgic-mmio-v3.c | 31 ++++++++++++++++--------------
+ arch/arm64/kvm/vgic/vgic-v3.c      |  3 ++-
+ arch/arm64/kvm/vgic/vgic.c         | 12 ++++++++----
+ 3 files changed, 27 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Don't let a guest overwrite HCRX_EL2.MCE2
+[PATCH] KVM: arm64: Don't let a guest overwrite HCRX_EL2.MCE2
+Author: Marc Zyngier <maz@kernel.org>
+
+FEAT_MOPS is fun. CPUs are allowed to implement any of two ways to
+perform the memory copy, and the hypervisor is in charge of hiding
+the difference between implementation when the vcpu migrates from
+one to another. This is unhelpfully signalled with an exception,
+which KVM diligently handles.
+
+Today, we don't really make a good job of it in the sense that
+if L1 also has the trap bit set, we don't forward the trap as
+the architecture would require us to do.
+
+But there is no good reason to forward this to the L1 guest if
+L2 generates the "I'm on the wrong implementation". KVM can fix
+it up in place and return to L2 directly, as if the physical CPU
+was able to implement both options.
+
+Conversely, allowing L1 to clear HCRX_EL2.MCE2 is counter-productive,
+and violates the abstraction that KVM aims to give.
+
+Implement this behaviour by never allowing the guest's view of
+HCRX_EL2.MCE2 to make it into the HW, and document that KVM is in
+charge of the A/B handling.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/kvm/hyp/include/hyp/switch.h | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  arm64: Add return value to mte_disable_tco_entry()
+[PATCH 1/2] arm64: Add return value to mte_disable_tco_entry()
+Author: Marc Zyngier <maz@kernel.org>
+
+In order to provide adequate levels of synchronisation when clearing
+TCO, update mte_disable_tco_entry() to indicate whether it has actually
+done something.
+
+Signed-off-by: Marc Zyngier <maz@kernel.org>
+---
+ arch/arm64/include/asm/mte.h | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Reenable MTE on VHE guest exit
+[PATCH 0/2] KVM: arm64: Reenable MTE on VHE guest exit
+Author: Marc Zyngier <maz@kernel.org>
+
+Upton taking an exception, the CPU sets PSTATE.TCO to ensure that no
+tag fault can be taken while handling the exception. It is SW's job to
+eventually clear it when it is safe to do so.
+
+It appears that when MTE is enabled and that the kernel is running
+VHE, nothing eventually clears TCO when we come back from the guest,
+so things such as KASAN_HW_TAGS will not work until the next exit to
+userspace.
+
+This series aims at fixing this. This is not a stable candidate, as
+KASAN is only a debug option.
+
+Marc Zyngier (2):
+  arm64: Add return value to mte_disable_tco_entry()
+  KVM: arm64: Reenable MTE tag checking on exit from guest when running
+    VHE
+
+ arch/arm64/include/asm/mte.h    | 10 +++++++---
+ arch/arm64/kvm/hyp/vhe/switch.c |  7 +++++++
+ 2 files changed, 14 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
