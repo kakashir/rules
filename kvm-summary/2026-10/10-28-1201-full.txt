@@ -1,0 +1,2409 @@
+
+On /root/mail/repo:
+From 05e1b47dd to cb24a1060
+KVM mailing list update from 05e1b47dd to cb24a1060
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     27 google.com
+     15 amazon.co.uk
+     12 redhat.com
+      5 linux.ibm.com
+      4 outlook.com
+      2 oracle.com
+      1 zte.com.cn
+      1 qq.com
+      1 nutanix.com
+      1 kernel.org
+      1 bytedance.com
+
+Top 15 contributors (Based on Email Body)
+
+     27  Sean Christopherson <seanjc@google.com>
+     15  Fred Griffoul <fgriffo@amazon.co.uk>
+     12  =?UTF-8?q?Daniel=20P=2E=20Berrang=C3=A9?= <berrange@redhat.com>
+      5  Claudio Imbrenda <imbrenda@linux.ibm.com>
+      4  Xiaochun Yu <yxcnew@outlook.com>
+      2  Alejandro Jimenez <alejandro.j.jimenez@oracle.com>
+      1  Wang Yechao <wang.yechao255@zte.com.cn>
+      1  Thanos Makatos <thanos.makatos@nutanix.com>
+      1  Sasha Levin <sashal@kernel.org>
+      1  Qingwei Hu <qingwei.hu@bytedance.com>
+      1  Hang Nan <2122295973@qq.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2] KVM: coalesced_mmio: reject zone sizes that don't fit in an int
+Author: Hang Nan <2122295973@qq.com>
+
+kvm_vm_ioctl_register_coalesced_mmio() validates @zone->pio but not
+@zone->size.  The u32 size is handed to kvm_io_bus_register_dev() as an
+"int len", so any size >= 0x80000000 silently becomes negative.
+
+coalesced_mmio_in_range() bails out immediately for len < 0, so such a
+zone never matches its own range:
+
+  - coalesced MMIO writes for the zone are no longer coalesced and are
+    forwarded to userspace instead;
+  - KVM_UNREGISTER_COALESCED_MMIO returns 0 but does not remove the zone,
+    because the unregister path uses coalesced_mmio_in_range() for matching
+    too, leaving the kvm_io_device permanently registered;
+  - the leaked device occupies a slot on the MMIO/PIO bus.  After
+    NR_IOBUS_DEVS - 1 (998) such zones every further
+    kvm_io_bus_register_dev() on that bus fails with -ENOSPC, including
+    ioeventfds and valid coalesced zones, effectively killing the VM's
+    device model until the VM is destroyed.
+
+A negative len additionally breaks the sorted-interval invariant used by
+kvm_io_bus_cmp(), which computes the end of an interval as "addr + len".
+
+ioeventfd rejects lengths outside {0, 1, 2, 4, 8}, so the same ioctl
+family cannot be abused this way; coalesced MMIO has no equivalent check.
+
+Validate the zone in kvm_vm_ioctl_unregister_coalesced_mmio() as well: it
+has the same gap today and is only saved by coalesced_mmio_in_range()
+rejecting negative lengths (commit 1a214246cbb4).  Factor both checks into
+kvm_is_valid_io_zone() and reject with -EINVAL.
+
+Note that this makes KVM_UNREGISTER_COALESCED_MMIO return -EINVAL for a
+zone that could never have been registered, instead of the old "0 but the
+zone stays" behaviour.  QEMU never registers a zone larger than the
+coalesced ring window, so no in-tree user is affected.
+
+Fixes: 743eeb0b01d2 ("KVM: Intelligent device lookup on I/O bus")
+Cc: stable@vger.kernel.org
+Signed-off-by: Hang Nan <2122295973@qq.com>
+---
+v2:
+ - recipients taken from scripts/get_maintainer.pl (Paolo and the list in To:,
+   you and Carlos in Cc:), sorry about that
+ - dropped the comment
+ - folded the validation into kvm_is_valid_io_zone() and used it from
+   kvm_vm_ioctl_unregister_coalesced_mmio() as well
+
+On the unregister side: agreed, it only survives today because
+coalesced_mmio_in_range() rejects negative lengths (1a214246cbb4).  Validating
+there does change the return value for a zone that can no longer be registered
+at all, from 0 to -EINVAL, so I called it out in the changelog -- it is an
+ABI-visible difference for anyone who relied on the old behaviour.
+
+Verified before and after the patch on v7.3-11778-g5b0764a53235, same .config,
+unprivileged /dev/kvm, same initrd:
+
+  before: REGISTER {addr=0x1000, size=0x80000000}          -> 0
+          UNREGISTER {same}                                -> 0 (zone stays)
+          998 bad zones accepted, then
+          REGISTER {addr=0x900000, size=0x1000}            -> -ENOSPC
+  after:  REGISTER {addr=0x1000, size=0x80000000}          -> -EINVAL
+          UNREGISTER {same}                                -> -EINVAL
+          1200 attempts, 0 accepted
+          REGISTER {addr=0x900000, size=0x1000}            -> 0
+          UNREGISTER {same}                                -> 0
+
+The reproducer is ~150 lines of static C that only opens /dev/kvm; happy to
+post it if it is useful.
+
+Hang
+
+
+virt/kvm/coalesced_mmio.c | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 6/6] KVM: selftests: Expect failure when trying to set EFER
+Author: Sean Christopherson <seanjc@google.com>
+
+Adjust the EFER.LMSLE testcases to expect failure, not success, when
+attempting to stuff EFER.LMSLE=1 even when the guest CPUID model is
+configured with EFER_LMSLE_MBZ enabled, i.e. when it should be impossible
+to set EFER.LMSLE=1.  KVM's ABI is that userspace *must* set CPUID and
+feature MSRs before restoring (or stuffing) vCPU state, i.e. before writing
+normal MSRs.  The previous KVM behavior of allowing usersepace to stuff
+garbage was a KVM bug (that has since been fixed).
+
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/sashiko-outbox-182135@kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/x86/svm_nested_efer_test.c  | 20 ++++++-------------
+ 1 file changed, 6 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 5/6] KVM: selftests: Update nSVM EFER test to expect #GP
+Author: Sean Christopherson <seanjc@google.com>
+
+Adjust the nSVM EFER test to expect a #GP on WRMSR if L2 attempts to clear
+EFER.SVME to match KVM's new behavior (synthesizing #GP is safer for KVM as
+it doesn't require yanking the vCPU out of L2, and is fully synchronous).
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ .../selftests/kvm/x86/svm_nested_efer_test.c  | 75 ++++++++++++-------
+ 1 file changed, 46 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/6] KVM: nSVM: Synthesize #GP instead of SHUTDOWN if L2
+Author: Sean Christopherson <seanjc@google.com>
+
+If L2 attempts to clear EFER.SVME (because L1 neglected to intercept writes
+to EFER), synthesize a #GP instead of a triple-fault SHUTDOWN for L1, as
+yanking the vCPU out of L2 and mixing the new (invalid) EFER with L2's
+current state is unnecessarily risky for KVM since the TRIPLE_FAULT request
+isn't fully handled until KVM attempts to enter the guest, and nothing
+prevents userspace from ignoring the SHUTDOWN exit and continue running the
+guest.
+
+Apply the restriction to both guest and host (a.k.a. userspace) writes, as
+unlike kvm_x86_ops.set_efer() => svm_set_efer(), set_efer() is used *only*
+for targeted MSR writes, e.g. not for KVM_SET_SREGS{,2}, and KVM does NOT
+advertise EFER as an MSR that needs to be saved (because it's handled via
+sregs).  I.e. there is far less chance of breaking userspace that manually
+restores EFER with SVME=0 while L2 is active, because in all likelihood no
+such VMM exists.
+
+Keep the sanity check in svm_set_efer() that handles the KVM_RUN case, but
+escalate it to a KVM_BUG_ON() + -EIO, as it should now be unreachable.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/msrs.c    | 12 ++++++++++++
+ arch/x86/kvm/svm/svm.c | 15 +++++----------
+ 2 files changed, 17 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/6] KVM: x86: Recompute EFER.LMA instead of inheriting the
+Author: Sean Christopherson <seanjc@google.com>
+
+Recompute EFER.LMA on bare writes to EFER (via WRMSR or KVM_SET_MSRS)
+instead of carrying forward the current EFER.LMA.  While it _should_ be
+impossible for EFER.LMA to end up in an inconsistent state on such a write,
+KVM has had a rash of exactly those bugs, mostly because SVM is quite lax
+when it comes to consistenty checks, which in turn bleeds into KVM's nested
+SVM implementation.  Retaining the existing EFER is also rather confusing,
+as understanding why keeping EFER.LMA is correct requires a lot of a priori
+knowledge of both x86-64 and KVM.
+
+Keep the core concept of the existing logic as a sanity check: WARN if the
+computed EFER.LMA would be toggled, because as described above, that
+_should_ be impossible.  Don't return an error if the sanity check fails,
+e.g. don't inject a #GP, as setting EFER.LMA based on the current state
+provides architecturally consistency.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/msrs.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/6] KVM: x86: Reject clearing EFER.SVME via
+Author: Sean Christopherson <seanjc@google.com>
+
+Disallow clearing EFER.SVME via KVM_SYNC_X86_SREGS if L2 is active so that
+svm_set_efer() can treat yanking the vCPU out of L2 during KVM_RUN as a KVM
+bug.  Ideally, kvm_is_valid_sregs() itself would reject attempts to clear
+SVME while L2 is active, but the risk of breaking userspace, e.g. across
+save/restore, is too high.  On the other hand, yanking the vCPU out of L2
+during save/restore is already "broken" as doing so would queue a triple
+fault for L1.
+
+Link: https://lore.kernel.org/all/sashiko-outbox-182127@kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/regs.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/6] Revert "KVM: x86: Skip EFER vs. guest CPUID checks for
+Author: Sean Christopherson <seanjc@google.com>
+
+Revert the misguided-in-hindsight decision to allow userspace to violate
+architectural consistency when setting EFER as it has since been solidified
+that userspace is required to configure guest CPUID prior to setting MSRs,
+and skipping the CR0.PG vs. EFER.LME check in allows userspace to load an
+end state of EFER.LMA=1 && EFER.LME=0, which is supposed to be impossible
+and trips a variety of KVM_BUG_ON()s in the MMU.
+
+This reverts commit 11988499e62b310f3bf6f6d0a807a06d3f9ccc96.
+
+Fixes: 11988499e62b ("KVM: x86: Skip EFER vs. guest CPUID checks for host-initiated writes")
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/msrs.c | 30 +++++++++---------------------
+ 1 file changed, 9 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/6] KVM: x86: More EFER.LMA vs. CR4.PAE fixes
+Author: Sean Christopherson <seanjc@google.com>
+
+Revert a change I made years ago to allow userspace to stuff EFER before
+configuring guest CPUID, as configuring CPUID and feature MSRs before anything
+else is now a hard requirement (though I suspect I was just a bit overzealous
+at the time).  The biggest problem with that change, other than creating what
+should be impossible state, is that it also bypassed this check:
+
+	if (is_paging(vcpu) &&
+	    (vcpu->arch.efer & EFER_LME) != (efer & EFER_LME))
+		return 1;
+
+which was kinda sorta intentional?  I assume the idea was that userspace could
+stuff CR0 vs. EFER in any order.  Except that in doing so, userspace could get
+impossible state in CR0+CR4+EFER (in the aggregate, not in any one individual
+register).  KVM doesn't advertise MSR_EFER as an MSR that needs to be
+saved/restored, and AFAICT no VMM manually does that, they all just use
+KVM_{G,S}ET_SREGS{,2} (which is what we want).
+
+So, hit the "I'm feeling lucky!" button and simply revert the misguided
+commit.
+
+Patch 2 plugs a hole where userspace can get at the "wants_to_run" logic in
+svm_set_efer() via KVM_SYNC_X86_SREGS, which is "fine" for now, but would let
+a misbehaving userspace trigger the KVM_BUG_ON() added in patch 3.
+
+Patch 3 is more hardening.  Rather than pend a triple fault, which is flawed
+because (a) KVM still yanks the vCPU out of L2 without going through a normal
+nested VM-Exit and (b) there's a window where KVM can do stuff, e.g. init the
+MMU, before the triple fault request is handled, immediately synthesize a #GP.
+The only reason I didn't go with a #GP the first time around is that I didn't
+want to bleed EFER_SVME information into the common set_efer(), KVM effectively
+doesn't allow kvm_x86_call(set_efer)() to inject faults, and the vendor version
+is used for many flows, whereas set_efer() is strictly used for WRMSR emulation.
+
+Patch 4 is also more hardening, to try and detect+prevent EFER.LMA from going
+stale.
+
+Finally, update the EFER selftest to match the new #GP behavior.
+
+v2:
+ - Disallowing clearing SVME via KVM_SYNC_X86_SREGS if L2 is active. [Sashiko]
+
+v1: https://lore.kernel.org/all/20261022223052.646891-1-seanjc@google.com
+
+Sean Christopherson (6):
+  Revert "KVM: x86: Skip EFER vs. guest CPUID checks for host-initiated
+    writes"
+  KVM: x86: Reject clearing EFER.SVME via KVM_SYNC_X86_SREGS if L2 is
+    active
+  KVM: nSVM: Synthesize #GP instead of SHUTDOWN if L2 attempts to clear
+    EFER.SVME
+  KVM: x86: Recompute EFER.LMA instead of inheriting the current value
+    on EFER writes
+  KVM: selftests: Update nSVM EFER test to expect #GP when clearing SVME
+    in L2
+  KVM: selftests: Expect failure when trying to set EFER that violates
+    vCPU model
+
+ arch/x86/kvm/msrs.c                           | 53 ++++++-----
+ arch/x86/kvm/regs.c                           |  4 +
+ arch/x86/kvm/svm/svm.c                        | 15 +--
+ .../selftests/kvm/x86/svm_nested_efer_test.c  | 95 ++++++++++---------
+ 4 files changed, 92 insertions(+), 75 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/3] KVM: x86: Switch to vmcs01 to update EOI exiting
+Author: Sean Christopherson <seanjc@google.com>
+
+If KVM needs to update the EOI bitmap while L2 is running, temporarily load
+vmcs01 and immediately refresh the bitmap in vmcs01 instead of deferring
+the update until the next nested VM-Exit.  I.e. give the EOI bitmap the
+same treatment as the many other updates that were previously deferred.
+
+Reported-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+Closes: https://lore.kernel.org/all/20261017093016.32348-2-amirmohammad.eftekhar@cispa.de
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/include/asm/kvm_host.h |  3 +--
+ arch/x86/kvm/regs.h             |  6 ------
+ arch/x86/kvm/vmx/vmx.c          |  2 ++
+ arch/x86/kvm/x86.c              | 13 -------------
+ 4 files changed, 3 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/3] KVM: x86: Consolidate invocations of kvm_x86_ops.load_eoi_exitmap()
+Author: Sean Christopherson <seanjc@google.com>
+
+Rework KVM's handling of EOI exit bitmap updates to consolidate the calls
+to vendor code so that it's easier to see that the Hyper-V path is doing
+the exact same thing, just with extra input to account for the SynIC
+vectors.
+
+No functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/3] KVM: VMX: Update EOI bitmaps even if APICv is
+Author: Sean Christopherson <seanjc@google.com>
+
+As KVM does with IRTEs for device posted interrupts, update the EOI bitmaps
+if APICv *can* be enabled for the vCPU, not just if APICv is *currently*
+enabled and active.  I.e. keep the bitmaps up-to-date at all times so that
+KVM doesn't need to refresh the bitmaps if APICv is unhibited in the future.
+
+In the worst case scenario, failure to update the EOI bitmaps means KVM
+could miss an EOI and effectively break level-triggered IRQs, e.g. if a GSI
+routing change occurred while APICv was inhibitied.
+
+Reported-by: Sashiko Bot <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/sashiko-outbox-180887@kernel.org
+Fixes: d62caabb41f3 ("kvm/x86: per-vcpu apicv deactivation support")
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/3] KVM: x86: Drop deferred updates of EOI bitmaps
+Author: Sean Christopherson <seanjc@google.com>
+
+Stop deferring EOI bitmap updates.  As pointed out by Amirmohammad, I missed
+this one when removing all the other cases where KVM defers an update until
+vmcs01 is active.
+
+Patch 1 fixes a pre-existing bug Sashiko pointed out where KVM doesn't update
+the EOI bitmaps if APICv is temporarily inhibited.
+
+v3: Add the aforementioned patch 1. [Sashiko]
+
+v2: https://lore.kernel.org/all/20261022022813.303978-1-seanjc@google.com
+
+v1: https://lore.kernel.org/all/20261017093016.32348-2-amirmohammad.eftekhar@cispa.de
+
+Sean Christopherson (3):
+  KVM: VMX: Update EOI bitmaps even if APICv is (temporarily) inhibited
+  KVM: x86: Switch to vmcs01 to update EOI exiting bitmap on-demand if
+    L2 is active
+  KVM: x86: Consolidate invocations of kvm_x86_ops.load_eoi_exitmap()
+
+ arch/x86/include/asm/kvm_host.h |  3 +--
+ arch/x86/kvm/regs.h             |  6 ------
+ arch/x86/kvm/vmx/vmx.c          |  4 +++-
+ arch/x86/kvm/x86.c              | 27 +++++++--------------------
+ 4 files changed, 11 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 12/15] KVM: nVMX: Cancel the nested VMX Preemption Timer's
+Author: Sean Christopherson <seanjc@google.com>
+
+Cancel the hrtimer used to emulate a VMX Preemption Timer for L2 when
+freeing nested state instead of precisely canceling the timer if and only
+if the vCPU is/was in L2.  hrtimer_cancel() bails early if the timer isn't
+running, and KVM initializes the timer when allocating nested state, i.e.
+canceling the timer even if it's not fully in-use is glorified nop.
+
+Canceling the timer even if L1 is active will allow KVM to leave the vCPU
+in L2 without having to retain an "is_guest_mode()" check just to cancel
+timer.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 11/15] KVM: nVMX: Don't explicitly VMCLEAR+free() vmcs01's
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly VMCLEAR and free() vmcs01's shadow VMCS only when doing VMXOFF
+or forcing the vCPU out of L2, not when freeing the vCPU.  Instead, free
+the shadow VMCS as part of free_loaded_vmcs(), i.e. when freeing vmcs01 via
+vmx_vcpu_free().  This will allow leaving vmcs02 as the loaded/current VMCS
+when freeing a vCPU, i.e. will allow dropping the vmx_switch_vmcs() call as
+well as the vcpu_{load,put}() calls, all of which do far too much work when
+freeing a vCPU.  E.g. "just" switching to vmcs01 means potentially doing an
+extra VCLEAR shootdown, potentially multiple VMPTRLDs (to first load vmcs02
+and then vmcs01) and VMWRITEs, and so on and so forth.
+
+Note, shadow VMCSes are rather odd.  They're only ever used when nested
+virtualization is live, but a shadow VMCS is provided to L1, not L2, and
+more importantly is made "active" (in VMX parlance) when vmcs01 is run (the
+shadow VMCS is referenced by a pointer in vmcs01).  Because KVM dynamically
+allocates and frees nested state, shadow VMCSes are loosely coupled to the
+VMXON/VMXOFF lifecycle, but in practice are more concretely tied to vmcs01,
+e.g. a shadow VMCS needs to be VMCLEAR'd if and only if its associated
+vmcs01 was launched.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 54 ++++++++++++++++++++++++---------------
+ arch/x86/kvm/vmx/vmx.c    |  5 +++-
+ 2 files changed, 37 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 15/15] KVM: nVMX: Don't load+put the vCPU when freeing
+Author: Sean Christopherson <seanjc@google.com>
+
+Drop the vcpu_{load,put}() pair when freeing nested state for a dying vCPU,
+as nothing in what was free_nested() requires the vCPU to be loaded, common
+x86 doesn't require the vCPU to be loaded when it's dying (because SVM
+never loads the vCPU), KVM now explicitly handles taking the vCPU off the
+PI wakeup list (was subtly being handled by vt_vcpu_pi_load()), and the
+rest of vmx_vcpu_load() has no effects outside of loading/modifying the
+VMCS or vCPU-specific metadata.
+
+As for put(), because the vCPU obviously can't be loaded at the start of
+nested_vmx_free_vcpu(), "guest_state_loaded" can't be true and thus
+vmx_prepare_switch_to_host() must be a nop.  Similarly, the vCPU can't be
+blocking when it's dying, and so vt_vcpu_pi_put() is also a nop (and if
+it's not, that would be a fatal bug as it means the vCPU would be left on
+the PI wakeup list after being freed).
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 11 ++---------
+ 1 file changed, 2 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 09/15] KVM: Pre-check uaccesses in KVM's APIs to read/write
+Author: Sean Christopherson <seanjc@google.com>
+
+Add a check on whether or not doing a user access is ok in KVM's APIs for
+accessing guest memory, *before* doing memslot lookup/validation, so that
+buggy KVM accesses to guest memory more likely to fail noisily.  Because
+KVM installs dummy/empty memslots early in VM destruction, bugs in the VM
+teardown path will fail on the memslot checks without getting to the WARNs
+buried in kvm_copy_{to,from}_user() and friends.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/kvm_main.c | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 04/15] KVM: x86: Unmap VMAs for KVM-internal memslots when
+Author: Sean Christopherson <seanjc@google.com>
+
+Unmap KVM-created VMAs for KVM-internal memslots when the associated
+memslot is freed instead of unmapping via x86's internal API.  This will
+allow deleting/freeing all memslots before kvm_arch_destroy_vm() without
+leaking VMAs, and in general is a net positive as it makes it far less
+likely that KVM will leak VMAs, e.g. in the unlikely scenario some other
+flow deletes KVM-internal memslots without going through
+__x86_set_memory_region().
+
+Reviewed-by: James Houghton <jthoughton@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/x86.c | 38 ++++++++++++++++----------------------
+ 1 file changed, 16 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 14/15] KVM: nVMX: Don't switch to vmcs01 when freeing a vCPU
+Author: Sean Christopherson <seanjc@google.com>
+
+Now that neither free_nested() nor vmx_vcpu_free() relies on vmcs01 being
+the active VMCS, don't bother switching to L1 and thus vmcs01 when freeing
+nested state.
+
+Temporarily keep the vcpu_{load,put}() pair even though the only reason the
+vCPU needed to be loaded was to be able to do vmx_switch_vmcs(), as there
+was at least one *known* side effect of doing vcpu_load() that KVM was
+subtly relying on (taking the vCPU off the PI wakeup list).  I.e. defer
+dropping the superfluous load+put to a separate patch so that there's a
+dedicated bisection point if there are more lurking dependencies.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 13/15] KVM: VMX: Explicitly remove dying vCPUs from the PI
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly remove dying vCPUs that were blocking when the VM was released
+from the Posted Interrupts wakeup list instead of very, very subtly relying
+on the vcpu_load() in nested_vmx_free_vcpu() to take the vCPU off said list.
+In addition to helping avoid future regressions, e.g. if an enterprising
+developer were to optimize nested_vmx_free_vcpu() by bailing early if
+"nested" is completely disabled, this will allow dropping the load+put pair
+from nested_vmx_free_vcpu().
+
+Provide a dedicated API to remove a vCPU from the wakeup list, i.e. don't
+_completely_ abuse vt_vcpu_pi_load(), but do reuse the core logic for
+updating the PID control word.  Using a CMPXCHG8B _should_ be unnecessary
+as IRQ routing has already been torn down, i.e. no IRTEs should be pointing
+at updating the PID, and there are obviously no other references to the VM
+or vCPU, and so concurrently modifications of the PID should be impossible.
+For the same reasons, updating the destination should also be unnecessary,
+as nothing should ever send an IRQ.  However, relying on those assumptions
+begs for WARNs to ensure they hold, along with fallback code to avoid the
+worst case scenario, at which point trying to take advantage of the fact
+that the PID is unreachable would be *more* complex than what is now
+__vt_vcpu_pi_load(), not to mention KVM would have two paths to maintain.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/posted_intr.c | 68 +++++++++++++++++++++-------------
+ arch/x86/kvm/vmx/posted_intr.h |  1 +
+ arch/x86/kvm/vmx/vmx.c         |  2 +
+ 3 files changed, 45 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 10/15] KVM: VMX: Explicility free vmcs01, not the current
+Author: Sean Christopherson <seanjc@google.com>
+
+Explicitly free vmcs01 instead of the currently loaded VMCS when freeing a
+vCPU, as relying on loaded_vmcs to point at vmcb01 is unnecessarily risky
+and confusing.  E.g. during vCPU creation, the error path relies on setting
+loaded_vmcs and obfuscates that it should be impossible for vmcb02 to be
+allocated, let alone active.  Similarly, if KVM were buggy and left vmcb02
+as the current vCPU when freeing a vCPU, operating on loaded_vmcs would hit
+a use-after-free *and* leak vmcs01.
+
+Because KVM isn't buggy, no functional change intended.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/vmx.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 08/15] KVM: WARN and reject guest-based uaccess if VM is dying
+Author: Sean Christopherson <seanjc@google.com>
+
+WARN and reject user accesses to guest memory if the associated VM is dying
+even if the current address space happens to be the correct address space.
+Accessing guest memory after the last reference to the VM has been put may
+be "fine" from a safety perspective, but it's still a KVM bug.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ include/linux/kvm_host.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 05/15] KVM: Disallow setting memslots when the VM is being destroyed
+Author: Sean Christopherson <seanjc@google.com>
+
+Now that KVM doesn't delete KVM-internal memslots as an unnecessary side
+effect during VM destruction, WARN and reject any attempt to set memslots
+after the VM's refcount has hit 0.  There's obviously no need to CREATE,
+MOVE, or do a FLAGS_ONLY update when a VM is being destroyed, and there
+should be no reason for arch code to manually DELETE a memslot: once KVM
+KVM unregisters its mmu_notifier and does the final kvm_flush_shadow_all(),
+there absolutely must not be any outstanding references to memslots.  I.e.
+if arch code "needs" to manually DELETE a memslot, then it's already buggy.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/kvm_main.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 07/15] KVM: WARN if KVM attempts to do guest-related
+Author: Sean Christopherson <seanjc@google.com>
+
+Now that memslots are torn down before kvm_arch_destroy_vm(), i.e. now that
+the massive, unaudited path that is known to have at least one rogue access
+to guest memory should be short-circuited before attempting to access user
+memory, WARN if KVM attempts to do a user access to guest memory with the
+wrong address space.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ include/linux/kvm_host.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 06/15] KVM: Destroy memslots immediately after
+Author: Sean Christopherson <seanjc@google.com>
+
+Instally dummy, empty memslots immediately after unregistering KVM's
+mmu_notifier during VM destruction to harden against accessing memory from
+the wrong address space when tearing down a VM.  Because kvm_destroy_vm()
+often runs when the associated VM's file is being released, current->mm is
+often no longer kvm->mm, i.e. using the memslots to access userspace memory
+is inherently broken/dangerous.
+
+While KVM's APIs to read/write guest memory explicitly reject accesses if
+current->mm != kvm->mm, taking away the memslots adds another layer of
+defense and helps guard against rogue accesses that don't go through KVM's
+standard API, or that do GUP+kmap().
+
+Note, simply hoisting memslot destruction above kvm_arch_destroy_vm()
+without installing dummy slots is not a viable alternative.  Doing so would
+require auditing all the paths of kvm_arch_destroy_vm(), which is nearly
+infeasible, and missing even one case would result in a NULL pointer
+dereference and/or use-after-free, neither of which is a substantially
+better outcome than the status quo.
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ virt/kvm/kvm_main.c | 45 +++++++++++++++++++++++++++++++--------------
+ 1 file changed, 31 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 01/15] KVM: Reject user accesses to guest memory if
+Author: Sean Christopherson <seanjc@google.com>
+
+Reject user accesses to guest memory, which are supposed to be done only
+in the context of KVM_RUN or similar operations, if the current address
+space is not the VM's (host userspace) address space.  If KVM writes to
+guest memory after the owning host process has exited, or if the VM is
+being destroyed in the context of a different process, then writing using
+the wrong address space will corrupt a different process' memory.
+
+Reject the access but don't WARN() or KVM_BUG_ON() event though attempting
+to access guest memory with a mismatched address space is a blatant KVM
+bug, because unfortunately KVM is buggy.  On KVM VMX, when a vCPU is
+destroyed while L2 is active, KVM synthesizes a nested VM-Exit to force the
+vCPU out of L2 in order to free the nested VMX assets, and a side effect of
+a nested VM-Exit is that it flushes the cached shadow VMCS12 back to guest
+memory:
+
+  vmx_vcpu_free()
+  |-> nested_vmx_free_vcpu()
+      |-> vmx_leave_nested()
+          |-> nested_vmx_vmexit(vcpu, -1, 0, 0)
+              |-> nested_flush_cached_shadow_vmcs12()
+                  |-> kvm_write_guest_cached()
+                      |-> __copy_to_user(ghc->hva, ...)
+
+Fix the bug broadly even though the "real" bug is that KVM abuses the
+nested VM-Exit flow for non-architectural purposes, as there may be other
+such violations lurking.  For now, punt on fixing individual bugs and
+hardening the common flows, e.g. with WARNs.
+
+Opportunistically provide wrappers in anticipation of adding more checks
+and hardening, i.e. growing the logic beyond checking current->mm.
+
+Fixes: 61ada7488ffd ("KVM: nVMX: Cache shadow vmcs12 on VMEntry and flush to memory on VMExit")
+Cc: stable@vger.kernel.org
+Reported-by: Jim Mattson <jmattson@google.com>
+Closes: https://lore.kernel.org/all/20260908132838.2116068-1-jmattson@google.com
+Reviewed-by: James Houghton <jthoughton@google.com>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/sgx.c   |  2 +-
+ arch/x86/kvm/vmx/vmx.c   |  8 ++++----
+ include/linux/kvm_host.h | 25 +++++++++++++++++++++++--
+ virt/kvm/kvm_main.c      | 24 ++++++++++++------------
+ 4 files changed, 40 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 03/15] KVM: PPC: Flush/zap all memslots on kvm_arch_flush_shadow_all()
+Author: Sean Christopherson <seanjc@google.com>
+
+Flush/zap every memslot in kvm_arch_flush_shadow_all(), i.e. when the
+owning userspace process is exiting, as KVM must ensure all associated
+memory is unmapped from the guest.
+
+Cc: stable@vger.kernel.org
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/powerpc/include/asm/kvm_host.h |  1 -
+ arch/powerpc/kvm/powerpc.c          | 11 +++++++++++
+ 2 files changed, 11 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 02/15] KVM: nVMX: Don't force a full nested VM-Exit when
+Author: Sean Christopherson <seanjc@google.com>
+
+For all intents and purposes, revert commit b4b65b5642d6 ("KVM: x86: cleanup
+freeing of nested state") and go back to manually tearing down nested state
+when freeing a vCPU.
+
+When a vCPU is destroyed while L2 is active, KVM synthesizes a nested
+VM-Exit, which flushes the cached shadow VMCS12 back to guest memory:
+
+  vmx_vcpu_free()
+  |-> nested_vmx_free_vcpu()
+      |-> vmx_leave_nested()
+          |-> nested_vmx_vmexit(vcpu, -1, 0, 0)
+              |-> nested_flush_cached_shadow_vmcs12()
+                  |-> kvm_write_guest_cached()
+                      |-> __copy_to_user(ghc->hva, ...)
+
+Accessing user memory via a memslot during VM destruction is broken, as
+there are no guarantees that current->mm == kvm->mm when the VM is dying,
+because the last reference to the VM can be put from a different process
+than the original creating processes.
+
+And even if the original process does put the final reference, during
+process exit, do_exit() calls exit_mm() before closing file descriptors, so
+vCPU destruction runs with current->mm == NULL on a borrowed lazy TLB
+active_mm.  If the borrowed address space has a writable mapping at the
+to-be-written userspace address, KVM will corrupt an unrelated task's
+memory since uaccess APIs, including __copy_to_user(), don't sanity check
+current->mm (and *can't* sanity perform KVM's current->mm == kvm->mm check
+since that is firmly a KVM-only concept).
+
+Furthermore, the shadow VMCS flaw is only the tip of the iceberg, as the
+MSR load/store lists mean that emulating a nested VM-Exit can read or write
+an arbitrary set of MSRs, e.g. if MSR_KVM_SYSTEM_TIME_NEW is in L1's MSR
+load list:
+
+      kvm_arch_vcpu_destroy()
+        kvmclock_reset() - takes pv_time off kvm->gpc_list
+        vmx_vcpu_free()
+          nested_vmx_free_vcpu()
+            vmx_leave_nested()
+              nested_vmx_vmexit()
+                __nested_vmx_vmexit()
+                  load_vmcs12_host_state()
+                    nested_vmx_load_msr() - writes the MSRs that L1 listed
+                  kvm_cpu_has_injectable_intr() - reads Xen's vcpu_info
+        kvm_xen_destroy_vcpu() - deactivates the vcpu_info cache
+
+processing the MSR write puts the "pv_time" cache back on kvm->gpc_list,
+and the next list_del() writes into the freed vCPU.  And as effectively
+pointed out by syzbot[*], attempting to fix each case individually is a
+losing game of whack-a-mole.
+
+Deliberately leave "nested_run_pending" as-is, because even though doing so
+creates potentitally inconsistent state, KVM should *never* consume said
+state while freeing a vCPU.  I.e. if leaving nested_run_pending set trips a
+sanity check or bug, then that just means there's more fixing to be done.
+
+Open code only the "free vCPU" path, i.e. keep emulating a nested VM-Exit
+when forcing a vCPU out of L2 via vmx_leave_nested(), as there are a number
+of updates buried in the nested VM-Exit flow that are needed if the vCPU is
+going to run in L1, e.g. clearing pending exceptions and MTF traps, setting
+the TSC offset+scale information back to L1, and so on and so forth.  Note,
+this means svm_leave_nested() is all but guaranteed to be buggy, but that's
+basically an open secret at this point and at least any bugs "only" break
+L1, i.e. don't corrupt host state as is the case for abusing nested VM-Exit
+when freeing a vCPU.
+
+Link: https://lore.kernel.org/all/6ac0145f.34119e79.2f92f3.0003.GAE@google.com [*]
+Fixes: b4b65b5642d6 ("KVM: x86: cleanup freeing of nested state")
+Cc: stable@vger.kernel.org
+Co-developed-by: Chris Mason <mason@kernel.org>
+Signed-off-by: Chris Mason <mason@kernel.org>
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+---
+ arch/x86/kvm/vmx/nested.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 00/15] KVM: Fix+harden against bad uaccess using dying VM
+Author: Sean Christopherson <seanjc@google.com>
+
+Fix a class of bugs (limited to nested VMX, as far as we know) where KVM can
+corrupt an unrelated process' memory if KVM (attempts to) write to guest memory
+during VM destruction.  Because current->mm usually isn't kvm->mm when a VM is
+dying, e.g. because the associated kvm->mm process has already exited, writing
+to what KVM thinks is guest memory will corrupt the current address space if
+the associated userspace address happens to be writable in the victim.
+
+Patch 1 is a blanket fix for the uaccess paths.  AFAIK, x86's nVMX is the only
+path in KVM that screws up, but auditing kvm_arch_destroy_vm() proved to be
+infeasible for a human (I didn't throw AI at it, yet...), and I can't think of
+any downsides to going straight to a broader fix.
+
+Patch 2 fixes the underlyihng nVMX bug where KVM absuses the architectural
+nested VM-Exit flow when tearing down a vCPU, which has a truly absurd number
+of problems.
+
+Patch 3 fixes what I assume is a blatant PPC bug.  KVM PPC completely ignores
+kvm_arch_flush_shadow_all(), i.e. AFAICT, doesn't tear down its page tables
+when the owning process exits.  I don't have much confidence in the "fix", in
+part because it seems impossible that such a blatant bug could have gone
+unnoticed, but also because I went with a very naive approach of invoking
+kvm_arch_flush_shadow_memslot() for each memslot.  The changelog is pretty
+sparse, because I didn't know how to describe the issue byeond "this is
+completely broken".
+
+Patches 4-6 implement more agressive hardening to nuke the memslots before
+calling kvm_arch_destroy_vm(), e.g. to guard against writing to guest memory
+during kvm_arch_destroy_vm() without going through uaccess.  Setting dummy
+memslots feels a little hacky, but kvm_arch_flush_shadow_all() should have
+purged everything that effectively caches memslots, so it seems like the right
+approach?
+
+Patches 7-9 add more hardening to detect KVM bugs (though the uaccess+memslot
+changes earlier in the series should render any bugs benign).
+
+The remaining patches double down on open coding nVMX's vCPU teardown by
+tearing down the vCPU "as-is", instead of forcing a switch to L1 and then
+doing teardown.  The forced switch is quite heinous, as it requires KVM to
+*load* the vCPU when it's dying due to architectural constraints for active
+VMCSes.  Not only is that gross, it was also papering over a bug (hopefully
+just the one) where KVM was relying on the vCPU load for nested VMX to take
+vCPUs off the posted interrupts wakeup list.
+
+v3:
+ - Give up, and open code nVMX teardown. [Sashiko, syzbot, Chris]
+ - Drop the nVMX hacks that were trying to fudge around the mass of nVMX
+   teardown issues.
+ - Free the VMA only for the non-SMM internal memslot. [Sashiko]
+ - Use @len, not hardcoded PAGE_SIZE, in kvm_is_guest_access_ok(). [Sashiko]
+ - Rip out the awful vCPU load code from nested_vmx_free_vcpu().
+ - Collect James' reviews.
+
+v2: https://lore.kernel.org/all/20261001202234.3794060-1-seanjc@google.com
+
+v1: https://lore.kernel.org/all/20260908132838.2116068-1-jmattson@google.com
+
+Sean Christopherson (15):
+  KVM: Reject user accesses to guest memory if current->mm != kvm->mm
+  KVM: nVMX: Don't force a full nested VM-Exit when destroying a vCPU
+  KVM: PPC: Flush/zap all memslots on kvm_arch_flush_shadow_all()
+  KVM: x86: Unmap VMAs for KVM-internal memslots when the memslot is
+    freed
+  KVM: Disallow setting memslots when the VM is being destroyed
+  KVM: Destroy memslots immediately after mmu_notifiers are unregistered
+  KVM: WARN if KVM attempts to do guest-related uaccess with "wrong"
+    process
+  KVM: WARN and reject guest-based uaccess if VM is dying
+  KVM: Pre-check uaccesses in KVM's APIs to read/write guest memory
+  KVM: VMX: Explicility free vmcs01, not the current VMCS, in vCPU free
+    paths
+  KVM: nVMX: Don't explicitly VMCLEAR+free() vmcs01's shadow VMCS when
+    freeing vCPU
+  KVM: nVMX: Cancel the nested VMX Preemption Timer's hrtimer in
+    free_nested()
+  KVM: VMX: Explicitly remove dying vCPUs from the PI wakeup list
+  KVM: nVMX: Don't switch to vmcs01 when freeing a vCPU
+  KVM: nVMX: Don't load+put the vCPU when freeing nested state for a
+    dying vCPU
+
+ arch/powerpc/include/asm/kvm_host.h |  1 -
+ arch/powerpc/kvm/powerpc.c          | 11 ++++
+ arch/x86/kvm/vmx/nested.c           | 69 ++++++++++++-----------
+ arch/x86/kvm/vmx/posted_intr.c      | 68 +++++++++++++---------
+ arch/x86/kvm/vmx/posted_intr.h      |  1 +
+ arch/x86/kvm/vmx/sgx.c              |  2 +-
+ arch/x86/kvm/vmx/vmx.c              | 19 ++++---
+ arch/x86/kvm/x86.c                  | 38 ++++++-------
+ include/linux/kvm_host.h            | 26 ++++++++-
+ virt/kvm/kvm_main.c                 | 87 +++++++++++++++++++----------
+ 10 files changed, 199 insertions(+), 123 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Don't reuse the GPA of a fault on the guest's page tables
+Author: Sasha Levin <sashal@kernel.org>
+
+When a #NPF or EPT violation leads to emulation, x86_emulate_instruction()
+saves the faulting GPA for direct MMUs, and emulator_read_write_onepage()
+uses it instead of walking the guest's page tables for an access whose
+page offset matches.  If the fault occurred while the CPU was walking the
+guest's page tables (PFERR_GUEST_PAGE_MASK), the GPA is that of a guest
+paging structure, not of the access being emulated, and the access goes
+to the wrong address.
+
+KVM selftest set_memory_region_test runs into this on AMD.
+test_delete_memory_region() deletes the memslot holding the guest's page
+tables while the guest spins on a read of 0xc0000000 that userspace
+handles as MMIO.  If the vCPU is at the read when the memslot goes away,
+the CPU takes a #NPF on the guest's root page table at 0x180000.
+DecodeAssist provides the instruction bytes, the read of 0xc0000000 has
+the same page offset as 0x180000, and the emulator turns it into an MMIO
+read of 0x180000:
+
+  ==== Test Assertion Failure ====
+    set_memory_region_test.c:83: run->mmio.phys_addr == MEM_REGION_GPA
+    ...
+    Unexpected exit mmio address = 0x180000
+
+If the vCPU is at the next instruction instead, the #NPF happens on the
+code fetch, DecodeAssist provides no bytes, KVM fails to fetch the
+instruction itself and injects a #PF, and the guest shuts down as the
+test expects.  KernelCI sees the failure in about half of the runs on a
+DL345 Gen11 (EPYC).
+
+The CPU walks the guest's page tables with write accesses, so such faults
+also set EMULTYPE_PF_WRITE, and a write would be redirected the same way.
+
+Tell the emulator when the fault occurred on the guest's page tables and
+don't use the GPA for the access then, so that the access is translated
+through the guest's page tables.  KVM can't walk the encrypted page tables
+of SEV guests, so resume an SEV guest instead of emulating, as is done
+when the #NPF occurred on the instruction fetch.
+
+Fixes: 0f89b207b04a ("kvm: svm: Use the hardware provided GPA instead of page walk")
+Signed-off-by: Sasha Levin <sashal@kernel.org>
+---
+Reproduced on an HPE DL345 Gen11 (EPYC 9655P) with KernelCI's x86 build of
+mainline d135ab453a74: set_memory_region_test failed in 15 of 30 runs, and
+in 6 of 12 runs with tracing, always with the MMIO exit at 0x180000. The
+traces show the #NPF at 0x180000 with error code 0x200000006 on the cmpq
+that reads 0xc0000000, followed by an MMIO read of 0x180000.
+
+With this patch on the same config, the test passed 50 of 50 runs. When
+the #NPF hits the cmpq, KVM now injects a #PF for the read of 0xc0000000
+and the guest shuts down. The rest of the KVM selftests give the same
+results as without the patch, with and without
+kvm.force_emulation_prefix=1. Not tested on SEV or Intel.
+
+ arch/x86/kvm/mmu/mmu.c |  2 ++
+ arch/x86/kvm/svm/svm.c |  9 +++++++++
+ arch/x86/kvm/x86.c     | 10 ++++++++--
+ arch/x86/kvm/x86.h     |  6 ++++++
+ 4 files changed, 25 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 11/11] accel/nitro: mark 'nitro' accelerator as secure
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 'nitro' accelerator is used with a real AWS deployment and
+thus is considered to be secure.
+
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ accel/nitro/nitro-accel.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 10/11] accel/xen: mark xen accelerator as secure
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+Xen is servicing virtualization use cases which must provide security
+and actively maintained.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ accel/xen/xen-all.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 08/11] hw/nitro: mark 'nitro' machine as secure
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+Unlike the 'nitro-enclave' machine which provides emulation, the
+'nitro' machine is used with a real AWS deployment and thus is
+considered to be secure.
+
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/nitro/machine.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 09/11] accel/kvm: mark kvm accelerator as secure
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+KVM is servicing virtualization use cases which must provide security
+and actively maintained.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ accel/kvm/kvm-all.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 07/11] hw: mark xenpv, xenpvh, xenfv as secure machines
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The Xen machines are already declared secure in
+docs/system/security.rst, due too their intended usage
+in virtualization scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/arm/xen-pvh.c          | 1 +
+ hw/i386/pc_piix.c         | 4 ++--
+ hw/i386/xen/xen-pvh.c     | 1 +
+ hw/xenpv/xen_machine_pv.c | 2 +-
+ 4 files changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 06/11] hw/s390x: mark 's390x-ccw-virtio' as a secure machine
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 's390x-ccw-virtio' s390x machine is already declared secure in
+docs/system/security.rst, due too its intended usage in virtualization
+scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Acked-by: Cornelia Huck <cohuck@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/s390x/s390-virtio-ccw.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 05/11] hw/riscv: mark 'virt' as a secure machine
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 'virt' riscv machine is already declared secure in
+docs/system/security.rst, due too its intended usage in virtualization
+scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/riscv/virt.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 04/11] hw/ppc: mark 'pseries' as a secure machine
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 'pseries' ppc machine is already declared secure in
+docs/system/security.rst, due too its intended usage in virtualization
+scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/ppc/spapr.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 03/11] hw/loongarch: mark 'virt' as a secure machine
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 'virt' loongarch machine is already declared secure in
+docs/system/security.rst, due too its intended usage in virtualization
+scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/loongarch/virt.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 02/11] hw/i386: mark 'microvm', 'i440fx', 'q35' as secure machines
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 'microvm', 'i440fx', 'q35' i386 machines are already declared
+secure in docs/system/security.rst, due too their intended usage
+in virtualization scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/i386/microvm.c    | 1 +
+ include/hw/i386/pc.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 01/11] hw/arm: mark 'virt' as a secure machine
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+The 'virt' arm machine is already declared secure in
+docs/system/security.rst, due too its intended usage in virtualization
+scenarios.
+
+Reviewed-by: Marc-André Lureau <marcandre.lureau@redhat.com>
+Signed-off-by: Daniel P. Berrangé <berrange@redhat.com>
+---
+ hw/arm/virt.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+----------------------------------------------------------------------
+
+[PATCH 00/11] hw: mark virtualization related machines & accelerators as secure
+Author: Daniel P. Berrangé <berrange@redhat.com>
+
+This is the machine type and accelerators patches pulled out of the
+bigger series and split per target / accelerator:
+
+  https://lists.gnu.org/archive/html/qemu-devel/2026-09/msg03555.html
+
+Note this only deals with marking leaf types. All parent types
+are implicitly also considered secure if any leaf is secure. A
+future series will explicitly mark parent types too.
+
+Daniel P. Berrangé (11):
+  hw/arm: mark 'virt' as a secure machine
+  hw/i386: mark 'microvm', 'i440fx', 'q35' as secure machines
+  hw/loongarch: mark 'virt' as a secure machine
+  hw/ppc: mark 'pseries' as a secure machine
+  hw/riscv: mark 'virt' as a secure machine
+  hw/s390x: mark 's390x-ccw-virtio' as a secure machine
+  hw: mark xenpv, xenpvh, xenfv as secure machines
+  hw/nitro: mark 'nitro' machine as secure
+  accel/kvm: mark kvm accelerator as secure
+  accel/xen: mark xen accelerator as secure
+  accel/nitro: mark 'nitro' accelerator as secure
+
+ accel/kvm/kvm-all.c        | 1 +
+ accel/nitro/nitro-accel.c  | 1 +
+ accel/xen/xen-all.c        | 1 +
+ hw/arm/virt.c              | 1 +
+ hw/arm/xen-pvh.c           | 1 +
+ hw/i386/microvm.c          | 1 +
+ hw/i386/pc_piix.c          | 4 ++--
+ hw/i386/xen/xen-pvh.c      | 1 +
+ hw/loongarch/virt.c        | 1 +
+ hw/nitro/machine.c         | 1 +
+ hw/ppc/spapr.c             | 1 +
+ hw/riscv/virt.c            | 1 +
+ hw/s390x/s390-virtio-ccw.c | 1 +
+ hw/xenpv/xen_machine_pv.c  | 2 +-
+ include/hw/i386/pc.h       | 1 +
+ 15 files changed, 16 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: optionally post write on ioeventfd write
+Author: Thanos Makatos <thanos.makatos@nutanix.com>
+
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/4] KVM: s390: Move some skey functions to headers
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Move some storage key handling functions to headers, since they will be
+needed from outside, and they are small, so inlining is acceptable.
+
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Cc: stable@vger.kernel.org # 7.0+
+---
+ arch/s390/kvm/gmap/dat.c | 26 --------------------------
+ arch/s390/kvm/gmap/dat.h | 26 ++++++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/4] KVM: s390: vsie: Fix pinning using the wrong flag
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When pinning guest memory using pin_blocks(), gfn_to_page() was used,
+which under the hood uses FOLL_GET, which is the wrong type of flag for
+memory that is accessed directly by hardware.
+
+Fix by using kvm_vcpu_{,un}map(), which uses FOLL_PIN and is the
+correct thing to do.
+
+While technically a bugfix, the previous behaviour can only lead to
+guest corruption in extremely convoluted test scenarios that cannot
+happen in real/production systems.
+
+Fixes: e38c884df921 ("KVM: s390: Switch to new gmap")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Cc: stable@vger.kernel.org #7.0+
+---
+ arch/s390/kvm/s390/vsie.c | 137 ++++++++++++++------------------------
+ 1 file changed, 50 insertions(+), 87 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/4] KVM: s390: Fix UCONTROL inconsistencies
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+For UCONTROL VMs, when a vCPU segment entry is mapped but unallocated,
+the tl field was set to 1. This collides with the present bit, which
+means that other parts of gmap would mistake the entry for a present
+one.
+
+Refactor the code to use a different combination of flags to indicate a
+mapped but unallocated segment.
+
+Fixes: a2c17f9270cc ("KVM: s390: New gmap code")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Cc: stable@vger.kernel.org # 7.0+
+---
+ arch/s390/kvm/gmap/dat.h  | 16 +++++++++++-
+ arch/s390/kvm/gmap/gmap.c | 54 +++++++++++++++++++--------------------
+ 2 files changed, 41 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/4] KVM: s390: Misc bugfixes for 7.4
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+Misc bugfixes.
+
+Some Fixes tags are approximate, since the bugs arise from slow changes
+behind the scenes in the kernel, and not from an actual bug at the moment
+of the introduction of the original code.
+
+v2->v3:
+* remove all non-bugfix patches
+* rebase onto master
+
+v1->v2:
+* add "memory" clobber to idte_crste()
+* remove superflouos gpa parameter for unpin_scb()
+* clear the zero bit in the PGSTE when unmapping, add missing barrier
+
+The remaining issues raised by sashiko in v1 are false positives.
+
+Claudio Imbrenda (4):
+  KVM: s390: Fix UCONTROL inconsistencies
+  KVM: s390: Move some skey functions to headers
+  KVM: s390: Improve unmapping of large ranges
+  KVM: s390: vsie: Fix pinning using the wrong flag
+
+ arch/s390/kvm/gmap/dat.c  |  26 ------
+ arch/s390/kvm/gmap/dat.h  |  42 ++++++++-
+ arch/s390/kvm/gmap/gmap.c | 178 +++++++++++++++++++++++++++++---------
+ arch/s390/kvm/s390/vsie.c | 137 +++++++++++------------------
+ 4 files changed, 230 insertions(+), 153 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/4] KVM: s390: Improve unmapping of large ranges
+Author: Claudio Imbrenda <imbrenda@linux.ibm.com>
+
+When unmapping guest ranges, each individual leaf DAT entry is
+invalidated. When unmapping large ranges, this results in a very large
+amount of invalidations, which is time consuming. Moreover, since the
+unmap callback is called by KVM while holding a spinlock, this also
+leads to stall warnings.
+
+Improve the situation by invalidating DAT entries higher in the tree,
+instead of each leaf individually.
+
+For small invalidations (up to 1 segment = 1M of guest memory), and
+special cases (like protected VMs) regardless of the size, the old and
+slow invalidation is performed; all leaf entries are invalidated one by
+one.
+
+For large invalidations (larger than 1M of guest memory), the new
+strategy is used:
+ - Invalidate prefixes on the whole range, extending start and end to
+   1M granularity
+ - Iterate through the page table pointed to by each pmd and unshadow
+   entries as needed
+ - Detatch (invalidate) the pmd
+ - Save storage keys as needed
+ - Invalidate each (now detached) pte by simply overwriting it
+ - Reattach the old pmd to point to the updated page table
+
+Fixes: a2c17f9270cc ("KVM: s390: New gmap code")
+Signed-off-by: Claudio Imbrenda <imbrenda@linux.ibm.com>
+Cc: stable@vger.kernel.org # 7.0+
+---
+ arch/s390/kvm/gmap/gmap.c | 124 ++++++++++++++++++++++++++++++++++----
+ 1 file changed, 113 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 14/14] KVM: selftests: Test guest_memfd mapped by iommufd
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Nothing tests that a device mapping of a guest_memfd follows the file.
+
+Add gmem_conversion_iommufd_test. A KVM_X86_SW_PROTECTED_VM maps its
+guest_memfd into an iommufd mock domain, on native folios, a tmpfs
+resource and the sample provider in PFN mode, and the test checks what
+the guest, the VMM and the device see after each change: conversions,
+allocations, punch holes, memory failure, and the provider's revokes and
+restores. It is skipped without CONFIG_IOMMUFD_TEST, the PFN mode cases
+without the sample, and memory failure without CONFIG_MEMORY_FAILURE.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/x86/gmem_conversion_iommufd_test.c    | 956 ++++++++++++++++++
+ 2 files changed, 957 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 08/14] iommufd: Track the domains of revocable pages in struct iopt_pages
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+guest_memfd pages, like dma-buf pages, can be taken away from iommufd
+whatever references it holds, but the list of (area, domain) pairs to
+unmap on a revoke lives in struct iopt_pages_dmabuf.
+
+Move it to struct iopt_pages, rename the iopt_dmabuf_*track* helpers to
+iopt_pages_*, and add iopt_pages_tracked() for the page types that need
+it, so that other page types can use it. No functional change.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/iommu/iommufd/io_pagetable.c | 24 +++++-----
+ drivers/iommu/iommufd/io_pagetable.h | 33 +++++++++-----
+ drivers/iommu/iommufd/pages.c        | 67 ++++++++++++++--------------
+ 3 files changed, 67 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 10/14] iommufd/selftest: Add mock-domain IOVA queries
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+Tests of guest_memfd mappings cannot know in advance which frame an
+IOVA reaches, since a revoke can unmap or replace it, and
+IOMMU_TEST_OP_MD_CHECK_MAP only compares a range against a user buffer.
+
+Add IOMMU_TEST_OP_MD_CHECK_MAPPED, which checks that a range of a mock
+domain is all mapped or all unmapped, and IOMMU_TEST_OP_MD_IOVA_TO_PHYS,
+which returns the physical address behind an IOVA. They hold
+domains_rwsem for writing, so that a userspace unmap cannot free a
+page-table level during the walk; they are not safe against a
+concurrent guest_memfd update or dma-buf revoke, which the selftests do
+not do.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/iommu/iommufd/iommufd_test.h |  18 ++++
+ drivers/iommu/iommufd/selftest.c     | 125 +++++++++++++++++++++++++++
+ 2 files changed, 143 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 12/14] samples/kvm: Add read-only pages and large blocks to the sample provider
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+The sample provider reports every page as writable and of order 0, and
+does nothing when a page comes back, so tests cannot exercise read-only
+frames, large mappings, or a device mapping that follows a page made
+present again.
+
+Add MPS_SET_READONLY, report the largest aligned block of pages in the
+same state, and call kvm_gmem_restore() when pages become present or
+writable again; making pages read only revokes them.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ samples/kvm/mem_provider_sample.c | 89 +++++++++++++++++++++++++++----
+ samples/kvm/mem_provider_sample.h |  9 ++++
+ 2 files changed, 87 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 13/14] samples/kvm: Back absent pages on demand in the sample provider
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+The sample provider fails get_pfn() for an absent page and keeps its
+frames on a punch hole, so tests cannot exercise a provider that backs
+a hole when it is asked for a frame, one that backs more than the page
+asked for, or one that frees the frames that a punch hole gives back.
+
+Add MPS_NEW_FILE_FILL: get_pfn() then backs an absent page with the
+whole 2 MiB block around it, and put_pfn_range() makes the pages absent
+again.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ samples/kvm/mem_provider_sample.c | 29 ++++++++++++++++++++++++-----
+ samples/kvm/mem_provider_sample.h |  9 ++++++++-
+ 2 files changed, 32 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 11/14] KVM: guest_memfd: Add kvm_gmem_restore() for PFN mode providers
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A device cannot fault, so when a PFN mode provider gives frames to pages
+that had none, or makes a read-only frame writable, a subsystem that
+maps the file must be told. kvm_gmem_revoke() does not fit: it would
+zap the guest's and the VMM's mappings and reclaim frames that a guest
+may already use.
+
+Add kvm_gmem_restore(), the counterpart to kvm_gmem_revoke() that the
+sample provider leaves for users that cannot fault. It only updates the
+exports, under the shared invalidate lock.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/x86/kvm/Makefile       |  1 +
+ include/linux/guest_memfd.h | 37 ++++++++++++++++++++++---------------
+ virt/kvm/guest_memfd.c      | 35 +++++++++++++++++++++++++++++++++--
+ 3 files changed, 56 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 09/14] iommufd: Map guest_memfd files
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A VMM that assigns a device to a guest backed by guest_memfd needs the
+IOMMU mappings to follow the guest's shared memory. IOMMU_IOAS_MAP_FILE
+pins what it maps, which guest_memfd does not allow.
+
+Accept a guest_memfd in IOMMU_IOAS_MAP_FILE through guest_memfd's export
+interface: its pages are not pinned, and each update() unmaps the range
+and maps what a lookup returns now, read-only frames without write
+permission. This is a demonstration: entries are PAGE_SIZE, a device
+that touches the range during an update faults, and a range that fails
+to map again stays unmapped, with a warning.
+
+Dirty tracking, the no-IOMMU mode, kernel access, splitting an area and
+a frame at address 0 are refused, since iommufd could not follow them.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ drivers/iommu/iommufd/io_pagetable.c |  14 +-
+ drivers/iommu/iommufd/io_pagetable.h |  30 ++-
+ drivers/iommu/iommufd/pages.c        | 299 ++++++++++++++++++++++++++-
+ include/uapi/linux/iommufd.h         |  11 +-
+ 4 files changed, 349 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 06/14] KVM: guest_memfd: Report the size of holes in export lookups
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A lookup reports a hole as a single page, so a consumer walks a large
+private or unbacked range one page at a time, and cannot map a large
+hole with one entry, e.g. to a scratch page.
+
+Report the largest aligned hole around the page, up to the order the
+caller asks for. The search checks one half-block at a time, so it
+costs about one lookup per page of the hole it finds.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ virt/kvm/guest_memfd.c | 48 ++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 46 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 07/14] KVM: guest_memfd: Update exports when pages are allocated
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+An export maps only the pages that have memory when it looks them up,
+and a device cannot fault in the others, so guest_memfd must call
+update() when a page gets memory.
+
+Lookups treat a folio that was never zeroed as a hole. Zero folios in
+one helper, under the invalidate lock, from the host fault, KVM's
+get_pfn() and fallocate(), which did not zero at all, and update the
+exports for each folio zeroed. Mark zeroed folios dirty: lookups hold no
+reference, and memory-failure handling evicts clean folios that nothing
+references.
+
+In PFN mode, update the block that get_pfn() reports when it fills a
+hole, since the provider may back all of it.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ include/linux/guest_memfd.h | 26 ++++++------
+ virt/kvm/guest_memfd.c      | 85 +++++++++++++++++++++++++++++++------
+ 2 files changed, 85 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 04/14] KVM: guest_memfd: Keep truncated folios until the exports are updated
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A punch hole frees the folios it truncates at once, but an export may
+still map them, since it holds no reference: a device would then write
+into freed memory.
+
+Truncate a folio mode range batch by batch, holding a reference on each
+folio until the exports are updated, so that a folio goes back to the
+allocator only once no device maps it.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ include/linux/guest_memfd.h | 28 ++++++++++++++--------------
+ virt/kvm/guest_memfd.c      | 30 ++++++++++++++++++++++++++++--
+ 2 files changed, 42 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 03/14] KVM: guest_memfd: Allow other subsystems to map guest_memfd files
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A device assigned to a guest must map the guest's shared memory and
+lose a page whenever guest_memfd takes it away. iommufd cannot do that:
+it pins what it maps, which guest_memfd does not allow, and a device
+cannot fault.
+
+Add an export interface. A subsystem attaches to a guest_memfd file,
+looks up the frame behind each shared page without taking a reference,
+and gets an update() callback when what a lookup returns for a range
+may have changed. The old frames stay valid until update() returns, so
+a device that never faults can switch each mapping in one step.
+
+update() is called on conversions and memory failure; punch holes, PFN
+mode and pages that get memory follow. The functions are exported for
+symbol_get(), since KVM may be a module while the consumer is built in.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/x86/kvm/Makefile       |   3 +-
+ include/linux/guest_memfd.h |  55 +++++++++++++
+ virt/kvm/guest_memfd.c      | 149 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 206 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 01/14] KVM: guest_memfd: Clamp the order of PFN mode blocks to what KVM can map
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+KVM maps guest memory in 4K, 2M or 1G blocks, and uses guest_memfd's
+max_order to choose. A folio of order N is physically aligned and never
+mixes shared and private pages, so the order needs no check. A PFN mode
+provider's frames need not be aligned and the provider does not know
+which pages are private, yet kvm_gmem_get_pfn() passes its order to KVM
+unchanged. KVM can then map a block over the wrong frames, or with one
+attribute over shared and private pages.
+
+Define the provider's order as that of the naturally aligned block
+around the index, preset to 0. Clamp it to a block size KVM supports,
+in which the gfn, the index and the pfn are aligned alike and every
+page has the same attribute.
+
+A fault that sized its block just before a revoke or conversion of
+another page in the block would not retry, since KVM only retries
+faults inside the invalidated range. Make every invalidation of a PFN
+mode file cover the 1G-aligned blocks around its range.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ include/linux/guest_memfd.h |  5 +--
+ virt/kvm/guest_memfd.c      | 63 +++++++++++++++++++++++++++++++++++--
+ 2 files changed, 63 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 05/14] KVM: guest_memfd: Export PFN mode files
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+PFN mode files cannot be attached yet, though a provider's frames are
+the memory that most needs a device mapping that follows its revokes.
+
+Allow them. A lookup asks the provider with lookup_pfn_range(), which
+allocates nothing, then get_pfn() for the block and its attributes. A
+revoke updates the exports before the frames are reclaimed. A punch hole
+must remove the frames from the exports before the provider gets them
+back, while the provider still backs them: lookups report the range as
+holes until then, and the exports are updated again afterwards.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ include/linux/guest_memfd.h |  20 ++++---
+ virt/kvm/guest_memfd.c      | 111 ++++++++++++++++++++++++++++++------
+ 2 files changed, 105 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 02/14] KVM: guest_memfd: Support read-only frames from PFN mode providers
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+A PFN mode provider may lend a frame that the guest must not write,
+e.g. one shared by several guests, but guest_memfd maps every frame
+writable.
+
+Add an attributes output to get_pfn(), with GUEST_MEMFD_PFN_READONLY as
+its first bit. KVM then maps such a frame read only and exits to
+userspace on a guest write, and the VMM's mapping raises SIGBUS on a
+write. A read-only frame cannot back a private page or be populated.
+
+On arm64, the new exit in gmem_abort() also restores the return after a
+failed kvm_gmem_get_pfn() that a kvm/next merge dropped.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/arm64/kvm/mmu.c              |  10 ++-
+ arch/arm64/kvm/nested.c           |   9 ++-
+ arch/x86/kvm/mmu/mmu.c            |  15 +++-
+ arch/x86/kvm/svm/sev.c            |   4 +-
+ include/linux/guest_memfd.h       |  24 +++++-
+ include/linux/kvm_host.h          |   6 +-
+ samples/kvm/mem_provider_sample.c |   2 +-
+ virt/kvm/guest_memfd.c            | 128 ++++++++++++++++++++++++++----
+ 8 files changed, 168 insertions(+), 30 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 00/14] guest_memfd: Export guest_memfd files to iommufd
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+This series follows Ackerley's RFC v2, "guest_memfd alternative
+providers" [1], and applies on top of it (kvm/next 7e60162b16f9 plus
+his 50 patches). It answers one question his RFC leaves open: how the
+IOMMU mappings of a device assigned to the guest follow guest_memfd.
+
+A device cannot fault, and iommufd cannot pin guest_memfd pages: a
+conversion to private, a punch hole, memory failure or a provider's
+revoke must take a page away from the device too, and in PFN mode
+there is no page to pin. So guest_memfd has to drive the device
+mapping. This series proposes an interface for that, uses it in
+iommufd as a demonstration, and adds the two PFN mode pieces it relies
+on.
+
+The interface
+=============
+
+A subsystem that maps guest_memfd pages, such as iommufd, uses three
+functions and one callback, all in include/linux/guest_memfd.h:
+
+  kvm_gmem_export_attach()      start following a guest_memfd file
+  kvm_gmem_export_lookup_pfn()  which frame backs this page? A frame for
+                                a shared page with memory, nothing for a
+                                private page or a page without memory
+  kvm_gmem_export_detach()      stop following it
+  update(start, nr_pages)       the subsystem's callback: the answer for
+                                this range may have changed, look it up
+                                again and fix the mappings
+
+No reference is taken on the frames. Instead, guest_memfd calls
+update() on every change: conversions, punch holes, memory failure,
+pages getting memory, and a PFN mode provider taking frames back or
+giving them. The subsystem can rely on this:
+
+  - the old frames stay valid until update() returns, so a device that
+    never faults can switch each mapping in one step, to the new frame
+    or to a scratch page; after it returns, the old frames are no
+    longer used;
+  - update() cannot fail (see the open questions);
+  - update() may be called for pages that did not change;
+  - it runs under guest_memfd's invalidate lock.
+
+For the update to come before a frame is freed, a punch hole keeps the
+frames until then: folios are held until update() returns, and in PFN
+mode the range reads as holes until the update has run, before the
+provider gets its frames back.
+
+A PFN mode provider takes frames back with kvm_gmem_revoke(), from
+Ackerley's RFC. When it gives frames to pages that had none, or makes a
+read-only frame writable, it calls the new kvm_gmem_restore(), the
+"counterpart to kvm_gmem_revoke()" that his sample leaves for users that
+cannot fault (48/50). Nothing is taken away then, so restore only calls
+update(); KVM and the VMM fault the pages in themselves.
+
+Why not dma-buf: our RFC that backed guest_memfd with an imported
+dma-buf [3] needed a dma-buf call for importers to build their own page
+tables, and ranged invalidation, and Christian rejected both: importers
+filling page tables is a no-go for dma-buf. A dma-buf also knows
+nothing of shared and private pages, and folio mode guest_memfd needs
+the same tracking as PFN mode. So the interface lives in guest_memfd.
+
+iommufd, as a demonstration
+===========================
+
+IOMMU_IOAS_MAP_FILE accepts a guest_memfd. Its pages are not pinned:
+each update() unmaps the range and maps what a lookup returns now, with
+PAGE_SIZE IOPTEs, so a device that touches the range during an update
+faults. Dirty tracking, the no-IOMMU mode and kernel access are
+refused. This tests the interface and is not meant to be merged: real
+support needs large IOPTEs cut and merged in place, IOPTEs replaced in
+one step, and a scratch page for holes, all generic_pt work (Jason, on
+our v2), and will be a separate iommufd series.
+
+PFN mode pieces
+===============
+
+Two PFN mode changes come first, both raised in replies to Ackerley's
+series:
+
+  - get_pfn()'s order now means the naturally aligned block around the
+    index, and KVM clamps it to a block it can map, aligned and of one
+    attribute; today it can map a block over the wrong frames, or over
+    shared and private pages. Invalidations of a PFN mode file cover
+    the 1G-aligned blocks around their range, so that a fault that
+    sized a block before the change retries.
+  - get_pfn() gains an attributes output, with read only as its first
+    bit, which the guest's, the VMM's and the IOMMU's mappings follow.
+
+Open questions
+==============
+
+  - Private pages. The export gives shared pages only. That suits
+    devices that are not trusted, and TDX, where a shared IOPTE on a
+    private page is fatal. A trusted device (TDISP) needs private pages
+    too: on AMD the IOMMU maps them, with IOPTE sizes that follow the
+    RMP. The choice depends on the architecture and the device, so
+    userspace would make it through iommufd, which would pass an attach
+    flag asking lookups for private frames too, refused where the
+    architecture cannot take it. Is an attach flag the right place for
+    it?
+  - update() cannot fail, but a consumer may need memory to apply one:
+    iommufd allocates page tables to map a range again, and will need
+    one to cut a large IOPTE. The demonstration only warns when that
+    fails. Either the consumer reserves page tables when a range is
+    mapped, or guest_memfd adds a prepare step before a conversion,
+    which could fail and abort it. A provider's revoke cannot be
+    aborted, so it would need the reservation either way. Which would
+    you prefer?
+
+Patches
+=======
+
+  1-2   PFN mode: clamp the order KVM maps, read-only frames.
+  3-7   the export interface: folio mode, truncation, PFN mode, hole
+        sizes, and updates when pages get memory.
+  8-10  iommufd: track revocable domains, map guest_memfd files, and
+        mock-domain IOVA queries for the test.
+  11    kvm_gmem_restore().
+  12-13 the sample provider: read-only pages, large blocks, and backing
+        pages on demand and freeing them on a punch hole.
+  14    gmem_conversion_iommufd_test.
+
+Patch 2 also puts back the return after a failed kvm_gmem_get_pfn() in
+arm64's gmem_abort(), which a kvm/next merge dropped; the fix alone
+will be sent separately.
+
+Testing
+=======
+
+On x86_64 in QEMU, with KASAN and lockdep:
+
+  - gmem_conversion_iommufd_test maps the guest_memfd of a
+    KVM_X86_SW_PROTECTED_VM into an iommufd mock domain, backed by
+    folios, a tmpfs resource or the sample provider in PFN mode, and
+    checks that the guest, the VMM and the device all see each change:
+    conversions, allocations, punch holes, memory failure, and the
+    provider's revokes and restores;
+  - Ackerley's tests pass as on his RFC alone;
+  - the iommufd selftests pass, except 12 dmabuf and
+    access_domain_destory tests that also fail on his RFC alone here;
+  - each patch builds with KVM and iommufd built in, with KVM as a
+    module, with both as modules, and with SEV.
+
+arm64 is neither built nor run.
+
+History
+=======
+
+Our v2 [2] added an interface in mm for drivers that lend memory, with
+guest_memfd and iommufd as two consumers of a provider file. Ackerley's
+RFC now gives guest_memfd PFN mode providers itself and takes v2's
+sample provider, so this series drops the mm interface: iommufd maps
+the guest_memfd, not the provider file, and follows conversions.
+
+[1] https://lore.kernel.org/all/20261022-gmem-alternative-providers-v2-0-5dd1dc6c660a@google.com/
+[2] https://lore.kernel.org/all/20261014093733.90312-1-griffoul@gmail.com/
+[3] https://lore.kernel.org/all/20261005095329.49764-1-griffoul@gmail.com/
+
+prerequisite-message-id: <20261022-gmem-alternative-providers-v2-0-5dd1dc6c660a@google.com>
+
+Fred Griffoul (14):
+  KVM: guest_memfd: Clamp the order of PFN mode blocks to what KVM can
+    map
+  KVM: guest_memfd: Support read-only frames from PFN mode providers
+  KVM: guest_memfd: Allow other subsystems to map guest_memfd files
+  KVM: guest_memfd: Keep truncated folios until the exports are updated
+  KVM: guest_memfd: Export PFN mode files
+  KVM: guest_memfd: Report the size of holes in export lookups
+  KVM: guest_memfd: Update exports when pages are allocated
+  iommufd: Track the domains of revocable pages in struct iopt_pages
+  iommufd: Map guest_memfd files
+  iommufd/selftest: Add mock-domain IOVA queries
+  KVM: guest_memfd: Add kvm_gmem_restore() for PFN mode providers
+  samples/kvm: Add read-only pages and large blocks to the sample
+    provider
+  samples/kvm: Back absent pages on demand in the sample provider
+  KVM: selftests: Test guest_memfd mapped by iommufd
+
+ arch/arm64/kvm/mmu.c                          |  10 +-
+ arch/arm64/kvm/nested.c                       |   9 +-
+ arch/x86/kvm/Makefile                         |   4 +-
+ arch/x86/kvm/mmu/mmu.c                        |  15 +-
+ arch/x86/kvm/svm/sev.c                        |   4 +-
+ drivers/iommu/iommufd/io_pagetable.c          |  38 +-
+ drivers/iommu/iommufd/io_pagetable.h          |  61 +-
+ drivers/iommu/iommufd/iommufd_test.h          |  18 +
+ drivers/iommu/iommufd/pages.c                 | 366 ++++++-
+ drivers/iommu/iommufd/selftest.c              | 125 +++
+ include/linux/guest_memfd.h                   |  93 +-
+ include/linux/kvm_host.h                      |   6 +-
+ include/uapi/linux/iommufd.h                  |  11 +-
+ samples/kvm/mem_provider_sample.c             | 118 ++-
+ samples/kvm/mem_provider_sample.h             |  18 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../kvm/x86/gmem_conversion_iommufd_test.c    | 956 ++++++++++++++++++
+ virt/kvm/guest_memfd.c                        | 601 ++++++++++-
+ 18 files changed, 2329 insertions(+), 125 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 3/3] KVM: riscv: selftests: Add Vector owner regression tests
+Author: slack up <yxcnew@outlook.com>
+
+
+Add focused tests for the correctness boundaries of a resident guest
+Vector owner.
+
+The lifetime test destroys a vCPU with resident Vector data before
+creating a new vCPU and verifies that the new vCPU cannot inherit it. The
+ONE_REG test checks that GET preserves guest data and SET becomes visible
+on the next entry. The fault test crosses into a protected page to verify
+that a partially completed SET_ONE_REG copy cannot leave stale hardware
+state visible to the guest.
+
+Pin each test to one host CPU so the same-hart owner path is deterministic
+when the optional optimization is enabled. Size the Vector buffers for
+the architectural maximum VLEN so the tests are not limited to the VLEN
+implemented by the development platform.
+
+Development note: OpenAI Codex assisted with source analysis, selftest
+drafting, test orchestration and changelog preparation.
+
+Signed-off-by: Xiaochun Yu <yxcnew@outlook.com>
+---
+ tools/testing/selftests/kvm/Makefile.kvm      |   3 +
+ .../kvm/riscv/vector_owner_fault_test.c       | 147 ++++++++++++++
+ .../kvm/riscv/vector_owner_lifetime_test.c    | 127 ++++++++++++
+ .../kvm/riscv/vector_owner_onereg_test.c      | 191 ++++++++++++++++++
+ 4 files changed, 468 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 1/3] riscv: vector: Add a guest owner invalidation hook
+Author: slack up <yxcnew@outlook.com>
+
+
+KVM can avoid restoring a guest Vector register file when it remains
+resident on the same hart, but only if every generic Vector user
+invalidates that ownership before touching the registers.
+
+Add a single RCU-protected invalidation callback and guard its call sites
+with a static key. Hook task save, restore and discard, kernel Vector
+entry, and the resume path for preemptible kernel Vector contexts. With
+no registered consumer, the static key leaves the generic paths disabled.
+
+This patch only establishes the invalidation boundary; it does not change
+KVM behavior.
+
+Development note: OpenAI Codex assisted with source analysis,
+implementation drafting, test orchestration and changelog preparation.
+
+Signed-off-by: Xiaochun Yu <yxcnew@outlook.com>
+---
+ arch/riscv/include/asm/vector.h        | 31 +++++++++++++++++++++
+ arch/riscv/kernel/kernel_mode_vector.c | 38 ++++++++++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 2/3] RISC-V: KVM: Preserve guest Vector state across vCPU put/load
+Author: slack up <yxcnew@outlook.com>
+
+
+kvm_arch_vcpu_put() saves the guest Vector state and restores the host
+register file. A later load on the same hart saves the host again and
+requests a full guest restore, even when the host has not used Vector in
+between.
+
+Track a per-hart owner with an opaque vCPU identity, an allocation cookie
+and a state generation. After saving a dirty guest to memory, leave its
+data registers resident when the host has no Vector restore obligation. A
+matching load restores only the Vector control CSRs. All mismatches and
+generic Vector users fall back to a full restore.
+
+Keep guest memory authoritative by continuing to save at every dirty put.
+Advance the generation on saves, resets and SET_ONE_REG. Do so before
+copy_from_user() because a fault can leave a modified prefix in the
+destination even though the ioctl fails.
+
+Register the generic invalidation hook only when the read-only
+vector_owner_fastpath module parameter is enabled. The parameter defaults
+to false so the existing full-restore behavior remains the default. Add
+tracepoints for restore mode, owner decisions and invalidation reasons.
+
+Development note: OpenAI Codex assisted with source analysis,
+implementation drafting, test orchestration and changelog preparation.
+
+Signed-off-by: Xiaochun Yu <yxcnew@outlook.com>
+---
+ arch/riscv/include/asm/kvm_host.h        |   4 +
+ arch/riscv/include/asm/kvm_vcpu_vector.h |  54 ++++-
+ arch/riscv/include/asm/processor.h       |   1 +
+ arch/riscv/kvm/trace.h                   |  98 +++++++++
+ arch/riscv/kvm/vcpu.c                    |  54 ++++-
+ arch/riscv/kvm/vcpu_vector.c             | 252 ++++++++++++++++++++++-
+ 6 files changed, 439 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH 0/3] RISC-V: KVM: Preserve resident guest Vector state
+Author: slack up <yxcnew@outlook.com>
+
+
+kvm_arch_vcpu_put() saves the guest Vector state and restores the host
+register file. A later vCPU load on the same hart saves the host again and
+requests a full guest restore, even when no host user touched the Vector
+data registers in between.
+
+This RFC keeps the guest Vector register file resident across a vCPU
+put/load pair when it is safe to do so. A matching load restores only the
+control CSRs; all uncertain cases retain the existing full-restore path.
+
+The series is intentionally conservative:
+
+- every dirty vCPU put still saves the guest state, so guest memory remains
+  authoritative for migration and userspace access;
+- a per-hart owner records an opaque vCPU identity, an allocation cookie and a
+  state generation, without retaining a dereferenceable vCPU pointer;
+- task Vector save/restore/discard, kernel-mode Vector use, preemptible kernel
+  Vector task resume and CPU state changes invalidate a resident guest before
+  the registers can be reused;
+- reset, dirty saves and KVM_SET_ONE_REG advance the generation;
+- KVM_SET_ONE_REG advances the generation before copy_from_user(), because a
+  partial copy can modify the destination and still return EFAULT;
+- the optimization is guarded by a read-only module parameter and defaults to
+  disabled. The generic invalidation sites are guarded by a static key.
+
+Patch 1 establishes the generic invalidation boundary without changing KVM
+behavior. Patch 2 adds the owner tracking, CSR-only restore and tracepoints.
+Patch 3 adds focused lifetime, ONE_REG and partial-fault regression tests.
+
+This series currently depends on the separately posted build fix:
+
+  Message-ID: <OSQPR01MB6326DDE9C2F390EA3F0F444EC2662@OSQPR01MB6326.apcprd01.prod.exchangelabs.com>
+  Link: https://lore.kernel.org/all/OSQPR01MB6326DDE9C2F390EA3F0F444EC2662@OSQPR01MB6326.apcprd01.prod.exchangelabs.com/
+
+Ze Huang <ze.huang@oss.qualcomm.com> independently tested that prerequisite
+with GCC 16.2.1 and Clang 23.1.3 and supplied a Tested-by tag in this reply:
+
+  Link: https://lore.kernel.org/all/DMCBQSJ0B22A.2TDXAXPJNPZL2@oss.qualcomm.com/
+
+Validation on Torvalds master 21a7f44fd076:
+
+- CONFIG_RISCV_ISA_V=y, CONFIG_KVM=m: full Image + modules build;
+- CONFIG_RISCV_ISA_V=n, CONFIG_KVM=m: full Image + modules build;
+- lifetime, ONE_REG and partial-fault tests pass with the fast path disabled
+  and enabled;
+- nested KVM/RVV smoke passes 3/3 with the fast path enabled;
+- the smoke trace recorded 785 owner hits, 784 CSR-only restores and eight
+  conservative full fallbacks, with no trace-buffer overwrite;
+- no emergency, alert, critical or error messages were present in dmesg.
+
+Development note: OpenAI Codex was used in an extended interactive session to
+assist with source analysis, implementation and selftest drafting, experiment
+orchestration, patch review and changelog preparation. The prompts focused on
+modeling per-hart ownership as a cache-validity problem, enumerating Vector
+register invalidation boundaries, reproducing partial KVM_SET_ONE_REG writes
+and reviewing the resulting patches. The build and runtime results above were
+collected from the stated test environment rather than inferred by the model.
+
+The nested QEMU result demonstrates functional behavior and event counts only;
+it is not presented as a performance result. Hardware performance measurement
+remains future work.
+
+Feedback is especially welcome on whether the generic invalidation callback is
+an acceptable RISC-V Vector/KVM boundary, whether the default-off module
+parameter is useful for the first version, and whether the behavior patch
+should be split further after the interface direction is agreed.
+
+Xiaochun Yu (3):
+  riscv: vector: Add a guest owner invalidation hook
+  RISC-V: KVM: Preserve guest Vector state across vCPU put/load
+  KVM: riscv: selftests: Add Vector owner regression tests
+
+ arch/riscv/include/asm/kvm_host.h             |   4 +
+ arch/riscv/include/asm/kvm_vcpu_vector.h      |  54 +++-
+ arch/riscv/include/asm/processor.h            |   1 +
+ arch/riscv/include/asm/vector.h               |  31 +++
+ arch/riscv/kernel/kernel_mode_vector.c        |  38 +++
+ arch/riscv/kvm/trace.h                        |  98 +++++++
+ arch/riscv/kvm/vcpu.c                         |  54 +++-
+ arch/riscv/kvm/vcpu_vector.c                  | 252 +++++++++++++++++-
+ tools/testing/selftests/kvm/Makefile.kvm      |   3 +
+ .../kvm/riscv/vector_owner_fault_test.c       | 147 ++++++++++
+ .../kvm/riscv/vector_owner_lifetime_test.c    | 127 +++++++++
+ .../kvm/riscv/vector_owner_onereg_test.c      | 191 +++++++++++++
+ 12 files changed, 976 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Fix out-of-bounds index into aia_irq2bitpos[]
+Author: Wang Yechao <wang.yechao255@zte.com.cn>
+
+aia_get_iprio8() and aia_set_iprio8() index the 64-entry
+aia_irq2bitpos[] array with an irq value derived from the
+guest-controlled VSISELECT register. For RV64:
+
+  first_irq = (isel - ISELECT_IPRIO0) * 4
+  nirqs = 8
+  isel up to ISELECT_IPRIO15
+
+so the irq number can reach 67 and aia_irq2bitpos[64..67] is
+accessed out of bounds. A malicious guest can trigger this,
+causing host panic under KASAN/UBSAN or undefined behavior
+otherwise.
+
+Add an explicit bounds check in both accessors before indexing
+the table.
+
+Fixes: 2f4d58f7635a ("RISC-V: KVM: Virtualize per-HART AIA CSRs")
+Signed-off-by: Wang Yechao <wang.yechao255@zte.com.cn>
+---
+ arch/riscv/kvm/aia.c | 12 ++++++++++--
+ 1 file changed, 10 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Validate PMU counter info using available counters
+Author: Qingwei Hu <qingwei.hu@bytedance.com>
+
+COUNTER_GET_INFO validates the counter index using the pmc[] storage
+capacity rather than the number of counters advertised by NUM_COUNTERS.
+When fewer counters are available, a guest can query an index outside
+the advertised range and receive success.
+
+Validate the index using kvm_pmu_num_counters(), matching the counter
+initialization and read paths.
+
+Fixes: 8f0153ecd3bf ("RISC-V: KVM: Add skeleton support for perf")
+Signed-off-by: Qingwei Hu <qingwei.hu@bytedance.com>
+---
+ arch/riscv/kvm/vcpu_pmu.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: x86: Select lowest vCPU ID for aliased xAPIC IDs
+Author: Partha Sarathi Satapathy <partha.satapathy@oracle.com>
+
+
+When KVM_X2APIC_API_USE_32BIT_IDS is enabled, KVM's x2APIC hotplug
+quirk allows events to target a vCPU by its x2APIC ID while the vCPU
+is still in xAPIC mode.
+
+In xAPIC mode, APIC IDs are truncated to eight bits. Consequently,
+vCPUs with distinct x2APIC IDs can share an effective physical APIC ID.
+KVM's x2APIC erratum specifies that an event targeting an aliased
+physical APIC ID is delivered only to the vCPU with the lowest vCPU ID.
+
+However, the optimized physical APIC map does not guarantee lowest-ID
+selection. When rebuilding the map, KVM retains the first xAPIC-mode
+vCPU encountered for an aliased 8-bit xAPIC ID. Since vCPUs can be
+added in any order, that vCPU need not have the lowest vCPU ID.
+
+For example, vCPU 19 has x2APIC ID 0x013 and vCPU 275 has x2APIC ID
+0x113. Both expose xAPIC ID 0x13 while in xAPIC mode. If vCPU 275 is
+created before vCPU 19, the map retains:
+
+  phys_map[0x13] = vCPU 275
+
+An INIT/SIPI targeting physical destination 0x13 then starts vCPU 275
+instead of vCPU 19. vCPU 275 executes the secondary startup path for
+the firmware CPU entry with APIC ID 0x013. After vCPU 275 enables
+x2APIC, Linux observes APIC ID 0x113 and reports:
+
+  Firmware: 13 APIC: 113
+
+KVM hardcodes a vCPU's x2APIC ID to its vCPU ID. When populating an
+aliased legacy xAPIC entry, retain the vCPU with the lowest vCPU ID.
+This makes optimized-map selection independent of vCPU-add order. The
+separate full-ID entry remains unaffected, and destination 0x113
+continues to select vCPU 275.
+
+Signed-off-by: Alejandro Jimenez <alejandro.j.jimenez@oracle.com>
+Signed-off-by: Partha Sarathi Satapathy <partha.satapathy@oracle.com>
+---
+ arch/x86/kvm/lapic.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] KVM: selftests: Cover aliased xAPIC physical IDs
+Author: Partha Sarathi Satapathy <partha.satapathy@oracle.com>
+
+
+The optimized physical APIC map must select the lowest vCPU ID
+when multiple xAPIC-mode vCPUs share an effective physical APIC ID.
+
+Extend recalc_apic_map_test with a regression test that enables
+KVM_X2APIC_API_USE_32BIT_IDS and creates vCPU 285 before vCPU 29.
+Keep both LAPICs in xAPIC mode, where their physical APIC IDs alias
+to 0x1d.
+
+Inject an MSI to destination 0x1d and verify that its vector is
+pending only in vCPU 29's IRR. This checks lowest-ID selection when
+the higher-ID alias is created first.
+
+Signed-off-by: Alejandro Jimenez <alejandro.j.jimenez@oracle.com>
+Tested-by: Partha Sarathi Satapathy <partha.satapathy@oracle.com>
+Signed-off-by: Partha Sarathi Satapathy <partha.satapathy@oracle.com>
+---
+ .../selftests/kvm/x86/recalc_apic_map_test.c  | 98 +++++++++++++++++++
+ 1 file changed, 98 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 318f39bc3 to bf36846c8
+KVM mailing list update from 318f39bc3 to bf36846c8
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 linux.dev
+      2 google.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  Fuad Tabba <fuad.tabba@linux.dev>
+      1  Vincent Donnefort <vdonnefort@google.com>
+      1  Oliver Upton <oliver.upton@linux.dev>
+      1  Colton Lewis <coltonlewis@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v2] irqchip/gic-v4: Use a separate lockdep class for vPE
+Author: Colton Lewis <coltonlewis@google.com>
+
+By default, init_desc() assigns the shared irq_desc_lock_class lockdep
+key to desc->lock for every struct irq_desc. Device drivers that
+register an IRQ affinity notifier establish a lock dependency chain of
+&irq_desc_lock_class --> &pool->lock --> &p->pi_lock --> &rq->__lock
+when irq_set_affinity_locked() calls schedule_work() while holding
+desc->lock.
+
+On GICv4 systems, scheduling out a KVM vCPU calls kvm_sched_out() ->
+kvm_arch_vcpu_put() -> vgic_v3_put() -> vgic_v4_put() ->
+its_make_vpe_non_resident() -> irq_set_vcpu_affinity() while holding the
+scheduler runqueue lock (&rq->__lock). Acquiring the vPE doorbell IRQ's
+desc->lock establishes &rq->__lock --> &irq_desc_lock_class, triggering
+a lockdep circular locking splat:
+
+  WARNING: possible circular locking dependency detected
+  ------------------------------------------------------
+  VCPU-0/109705 is trying to acquire lock:
+  ffff0001e41e4cc8 (&irq_desc_lock_class){-.-.}-{2:2}, at: __irq_get_desc_lock+0x5c/0xb0
+
+  but task is already holding lock:
+  ffff00dad15fd260 (&rq->__lock){-.-.}-{2:2}, at: __schedule+0x23c/0x1850
+
+  which lock already depends on the new lock.
+
+  Chain exists of:
+    &irq_desc_lock_class --> &p->pi_lock --> &rq->__lock
+
+   Possible unsafe locking scenario:
+
+         CPU0                    CPU1
+         ----                    ----
+    lock(&rq->__lock);
+                                 lock(&p->pi_lock);
+                                 lock(&rq->__lock);
+    lock(&irq_desc_lock_class);
+
+GICv4 vPE doorbell IRQs are internal to KVM and GICv4, set
+IRQ_NO_BALANCING, and never register an affinity notifier or queue work
+under desc->lock. However, under forced IRQ threading (threadirqs or
+CONFIG_PREEMPT_RT), request_irq() creates an IRQ thread for the doorbell
+handler, causing irq_set_affinity() -> irq_set_thread_affinity() in
+vgic_v4_load() to call wake_up_process() under desc->lock and establish
+a real desc->lock --> &p->pi_lock --> &rq->__lock dependency on the vPE
+doorbell IRQ itself.
+
+Mark vPE doorbell IRQs with irq_set_nothread() so they are never
+force-threaded, and assign them a dedicated lockdep class in
+its_alloc_vcpu_irqs() via irq_set_lockdep_class().
+
+Fixes: 8e01d9a396e6 ("KVM: arm64: vgic-v4: Move the GICv4 residency flow to be driven by vcpu_load/put")
+Signed-off-by: Colton Lewis <coltonlewis@google.com>
+---
+
+Notes:
+    Changes in v2:
+    - Call irq_set_nothread() on vPE doorbell IRQs in
+      its_alloc_vcpu_irqs() so forced IRQ threading cannot create a
+      desc->lock -> rq->__lock inversion via irq_set_thread_affinity()
+      (Sashiko, Marc Zyngier).
+    - Link to v1: https://lore.kernel.org/r/20261023215207.1465369-1-coltonlewis@google.com
+    
+    An LLM-based coding assistant was used to help analyze the lockdep
+    report and draft this patch. I reviewed the analysis and the change.
+    
+    Tested v2 with threadirqs and CONFIG_PROVE_LOCKING=y on a GICv4.1 host
+    with an idpf NIC: confirmed vPE doorbell IRQs remain non-threaded while
+    normal IRQs are threaded, and co-pinned vgic_lpi_stress runs after
+    bouncing an idpf interface pass with no lockdep warnings. Also
+    compile-tested for arm64 against v7.3.
+
+ drivers/irqchip/irq-gic-v4.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 3/3] KVM: arm64: Disable host PMU counters for protected guests
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+A protected guest has no PMU, and EL2 clears MDCR_EL2.HPME for it.
+However, HPME has no effect, since __pkvm_vcpu_load() sets HPMN to cover
+every event counter, and HPME never covers the cycle or instruction
+counter. The counters the host has enabled therefore keep counting the
+guest.
+
+Stop them in the world switch while a protected guest runs, reading
+PMCNTENSET_EL0 rather than trusting the host-controlled events mask.
+Gate this on a new per-CPU HAS_PMUV3 flag, since system_supports_pmuv3()
+is false when the CPUs implement different PMU versions.
+
+Side channels are outside pKVM's threat model, so this is hardening
+rather than a fix.
+
+Reported-by: Oculytic <oculytic@gmail.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_host.h |  1 +
+ arch/arm64/kvm/debug.c            |  4 +++-
+ arch/arm64/kvm/hyp/nvhe/switch.c  | 24 ++++++++++++++++++++++++
+ 3 files changed, 28 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/3] KVM: arm64: Fix PMU handling in pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Two fixes and a hardening patch for PMU handling in pKVM, as one series
+[1].
+
+The first is Vincent's rework of his HPMN fix. It supersedes his earlier
+posting [2]. Rather than read nr_event_counters through a different
+accessor, the host now copies the hypervisor's kvm_host_data before it's
+deprivileged, so host_data_ptr() returns what was set up at init.
+Otherwise, HPMN is 0 and a non-protected guest's event counters don't
+count.
+
+The second is the non-protected half of Oliver's patch from 2024 [3]. It
+passes the host's PMU events to the hyp vCPU of a non-protected guest,
+whose counters otherwise all read 0.
+
+The third covers the protected half. It stops the host's counters while
+a protected guest runs, so the host can't count the guest's cycles and
+events. Side channels are outside pKVM's threat model, so it carries no
+Fixes: tag.
+
+Based on kvmarm/next (dd0bc00e3e920).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/86bj8kzix4.wl-maz@kernel.org/
+[2] https://lore.kernel.org/all/20261023092007.3918848-1-vdonnefort@google.com/
+[3] https://lore.kernel.org/all/20240305184840.636212-2-oliver.upton@linux.dev/
+
+Fuad Tabba (1):
+  KVM: arm64: Disable host PMU counters for protected guests
+
+Oliver Upton (1):
+  KVM: arm64: Pass the PMU events to the hyp vCPU of non-protected
+    guests
+
+Vincent Donnefort (1):
+  KVM: arm64: Synchronise kvm_host_data before host deprivileging
+
+ arch/arm64/include/asm/kvm_host.h  |  1 +
+ arch/arm64/kvm/debug.c             |  4 +++-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 11 +++++++++++
+ arch/arm64/kvm/hyp/nvhe/switch.c   | 24 ++++++++++++++++++++++++
+ arch/arm64/kvm/pkvm.c              |  6 ++++++
+ 5 files changed, 45 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/3] KVM: arm64: Pass the PMU events to the hyp vCPU of non-protected guests
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+Before every run, the host records in vcpu->arch.pmu.events which perf
+counters to disable and enable around guest entry, and
+__pmu_switch_to_guest() applies them at EL2. Since commit be66e67f1750
+("KVM: arm64: Use the pKVM hyp vCPU structure in handle___kvm_vcpu_run()"),
+protected mode runs the hyp vCPU instead, and flush_hyp_vcpu() never
+copies the events into it. So the counters backing a non-protected
+guest's PMU are never enabled, and every counter the guest reads stays
+at 0, the cycle counter included. The host's counters that exclude
+guests keep counting the guest as well.
+
+Copy the events into the hyp vCPU of a non-protected guest on every run.
+The events only exist with CONFIG_HW_PERF_EVENTS, so the copy is built
+under it. Like mdcr_el2, they're host-controlled and never reach a
+protected guest.
+
+Fixes: be66e67f1750 ("KVM: arm64: Use the pKVM hyp vCPU structure in handle___kvm_vcpu_run()")
+Link: https://lore.kernel.org/all/20240305184840.636212-2-oliver.upton@linux.dev/
+Signed-off-by: Oliver Upton <oliver.upton@linux.dev>
+[Fuad: non-protected copy only, tested on the hyp vCPU, under
+ CONFIG_HW_PERF_EVENTS, new message]
+Co-developed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/3] KVM: arm64: Synchronise kvm_host_data before host deprivileging
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+When protected mode is enabled, the host is populating and reading the
+hypervisor copy of kvm_host_data until it is deprivileged. This is an
+issue for nr_event_counters which is only used by the host to populate
+mdcr_el2. After deprivileging, it is reading an uninitialised value and
+sets HPMN to 0, preventing programmable event counters from counting a
+non-protected guest.
+
+Before the host is entirely deprivileged, copy the entire kvm_host_data
+content from the hypervisor copy to the host-accessible one.
+
+Fixes: 2417218f2f23 ("KVM: arm64: Get rid of __kvm_get_mdcr_el2() and related warts")
+Signed-off-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/pkvm.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
