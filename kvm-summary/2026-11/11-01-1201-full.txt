@@ -1,0 +1,188 @@
+
+On /root/mail/repo:
+From 736dd8314 to 044ebc966
+KVM mailing list update from 736dd8314 to 044ebc966
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      3 columbia.edu
+      1 linux.dev
+      1 cispa.de
+
+Top 15 contributors (Based on Email Body)
+
+      3  Tal Zussman <tz2294@columbia.edu>
+      1  Shakeel Butt <shakeel.butt@linux.dev>
+      1  Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] vhost_task: do the return-to-userspace work between work items
+Author: Shakeel Butt <shakeel.butt@linux.dev>
+
+A vhost task is a user worker: a thread of a user process that runs only
+kernel code. It never returns to userspace, so it never runs the work
+that is queued for the way back. resume_user_mode_work() does that work
+when TIF_NOTIFY_RESUME is set. For a vhost task this means:
+
+- memory.high is handled at the wrong time. When a charge goes over
+  memory.high, the task counts the pages, and should reclaim, and sleep
+  if needed, on its way back to userspace. A vhost task only reclaims
+  when more than a batch of pages has built up and the charge can block.
+  Then it reclaims and sleeps in the middle of the charge, maybe while
+  it holds a lock. vhost-scsi, for example, can fault in guest memory
+  while it holds vq->mutex. If the charges can't block, nothing is done
+  at all, and the count keeps growing.
+
+- Block cgroup throttling never runs. blkcg_schedule_throttle() asks for
+  it, but only resume_user_mode_work() acts on it.
+
+- Task work queued with TWA_RESUME, like a deferred fput() or a NUMA
+  balancing scan, waits until the task gets a signal or exits.
+
+io_uring workers had the same problem, and io_run_task_work() calls
+resume_user_mode_work() for them. Do the same in vhost_task_fn(): if
+TIF_NOTIFY_RESUME is set, call resume_user_mode_work() at the top of the
+loop. That is between work items, no locks are held there, and the task
+is running. Passing a NULL regs is fine, io_uring and KVM already do it.
+
+This covers every user of vhost_task_create(): the vhost workers and
+KVM's NX huge page recovery thread.
+
+Tested in a VM with a version of tools/virtio/vhost_net_test that puts
+each RX buffer on a new page, so the vhost worker faults in, and
+charges, 256M while its cgroup has memory.high=64M. Before, all 285
+calls to __mem_cgroup_handle_over_high() came from try_charge_memcg(),
+inside handle_rx() with vq->mutex held. After, all 589 came from
+vhost_task_fn(). memory.peak stayed at 64M, and the run took about the
+same time (0.66s before, 0.67s after). A lockdep kernel showed no
+warnings.
+
+Signed-off-by: Shakeel Butt <shakeel.butt@linux.dev>
+---
+ kernel/vhost_task.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] vhost-vdpa: unpin mappings by range
+Author: Tal Zussman <tz2294@columbia.edu>
+
+vhost_vdpa_pa_unmap() unpins each mapping a page at a time, dirtying
+each page first if the mapping is writable. Each mapping is physically
+contiguous, so use unpin_user_page_range_dirty_lock() instead, which
+marks every folio dirty once and drops its pins in one go. Do the same
+for the pages left pinned in the vhost_vdpa_pa_map() error path.
+
+This removes the last use of set_page_dirty_lock() in vhost.
+
+Signed-off-by: Tal Zussman <tz2294@columbia.edu>
+---
+ drivers/vhost/vdpa.c | 20 ++++++--------------
+ 1 file changed, 6 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] vhost-vdpa: fix pinned page leak in
+Author: Tal Zussman <tz2294@columbia.edu>
+
+When pin_user_pages() or vhost_vdpa_map() fails, vhost_vdpa_pa_map()
+is supposed to unpin the pages pinned after the last successfully
+mapped chunk, i.e. the range [map_pfn, last_pfn]. The unpin is guarded
+by nchunks, but nchunks is reset to 0 every time a chunk is mapped from
+inside the current page list, so a failure after any such boundary
+leaves that pending range pinned forever. With physically scattered
+memory nearly every page list contains a boundary, so the leak happens
+on practically every failed IOTLB update.
+
+The pending range is non-empty exactly when a page has been pinned,
+which last_pfn already tells us, so drop nchunks and test last_pfn.
+
+Fixes: ad89653f79f1 ("vhost-vdpa: fix page pinning leakage in error path (rework)")
+Cc: stable@vger.kernel.org
+Signed-off-by: Tal Zussman <tz2294@columbia.edu>
+---
+ drivers/vhost/vdpa.c | 8 ++------
+ 1 file changed, 2 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] vhost-vdpa: fix a pin leak and unpin mappings by range
+Author: Tal Zussman <tz2294@columbia.edu>
+
+While testing the second patch I ran into a pinned page leak in the
+vhost_vdpa_pa_map() error path. The first patch fixes that and is
+tagged for stable.
+
+The second patch unpins each IOTLB mapping as a range with
+unpin_user_page_range_dirty_lock(), which marks each folio dirty once
+and drops its pins in one go, instead of a set_page_dirty_lock() and
+unpin_user_page() per page. It removes the last use of
+set_page_dirty_lock() in vhost.
+
+---
+Tal Zussman (2):
+      vhost-vdpa: fix pinned page leak in vhost_vdpa_pa_map() error path
+      vhost-vdpa: unpin mappings by range
+
+ drivers/vhost/vdpa.c | 28 ++++++++--------------------
+ 1 file changed, 8 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: VMX: Add array_index_nospec() to evmcs_field_offset()
+Author: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+
+evmcs_field_offset() bounds-checks the guest-supplied field index against
+nr_evmcs_1_fields and then indexes vmcs_field_to_evmcs_1[] without an
+array_index_nospec() clamp, unlike its vmcs12 counterpart
+get_vmcs12_field_offset().
+
+A regular VMREAD instruction is allowed while an enlightened VMCS is active
+since 6cbbaab60ff3 ("KVM: nVMX: Allow VMREAD when Enlightened VMCS is in
+use"), and it reaches evmcs_field_offset() with a guest-supplied field
+encoding. Because the index is not clamped, the guest may be able to
+speculatively access past the bound check and read out of bounds of
+vmcs_field_to_evmcs_1[] (Spectre v1). The leaked value is only the u16
+'offset', so the exposure is limited.
+
+The other callers of evmcs_field_offset() are not under direct guest
+control, but the array_index_nospec() clamp does not hurt them.
+
+Clamp the index with array_index_nospec(), mirroring
+get_vmcs12_field_offset().
+
+Fixes: 6cbbaab60ff3 ("KVM: nVMX: Allow VMREAD when Enlightened VMCS is in use")
+Signed-off-by: Amirmohammad Eftekhar <amirmohammad.eftekhar@cispa.de>
+---
+v2:
+ - Reword the changelog per Vitaly Kuznetsov: the reachable path is a
+   regular VMREAD (allowed since 6cbbaab60ff3), not an "enlightened
+   VMREAD/VMWRITE"; note the limited exposure and the other callers.
+ - Add the Fixes: tag.
+
+v1: https://lore.kernel.org/all/20261017093016.32348-3-amirmohammad.eftekhar@cispa.de/
+
+ arch/x86/kvm/vmx/hyperv_evmcs.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From b34108125 to 17654bf28
+KVM mailing list update from b34108125 to 17654bf28
+
+Top 15 contributor Email domains (Based on Email Body)
+
+
+Top 15 contributors (Based on Email Body)
+
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
