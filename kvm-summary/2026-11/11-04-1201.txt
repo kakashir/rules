@@ -1,0 +1,1622 @@
+
+On /root/mail/repo:
+From da428a554 to 174f56ee7
+KVM mailing list update from da428a554 to 174f56ee7
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     19 nvidia.com
+     10 linux.ibm.com
+      8 meta.com
+      7 gmail.com
+      7 amazon.co.uk
+      5 kernel.org
+      3 redhat.com
+      1 web.de
+      1 kylinos.cn
+      1 hotmail.co.uk
+      1 google.com
+      1 broadcom.com
+
+Top 15 contributors (Based on Email Body)
+
+     19  Leon Romanovsky <leonro@nvidia.com>
+      8  Bobby Eshleman <bobbyeshleman@meta.com>
+      7  Fred Griffoul <fgriffo@amazon.co.uk>
+      6  Omar Elghoul <oelghoul@linux.ibm.com>
+      6  Jia Jia <physicalmtea@gmail.com>
+      4  Mark Brown <broonie@kernel.org>
+      3  Paolo Bonzini <pbonzini@redhat.com>
+      3  Andreas Grapentin <gra@linux.ibm.com>
+      1  Zack Rusin <zack.rusin@broadcom.com>
+      1  Steffen Eiden <seiden@linux.ibm.com>
+      1  Samiullah Khawaja <skhawaja@google.com>
+      1  Leon Romanovsky <leon@kernel.org>
+      1  Karthikeyan KS <karthiproffesional@gmail.com>
+      1  Hao Zhang <zhanghao1@kylinos.cn>
+      1  Abdelali Maddane <ma.08@web.de>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  vsock: assign the guest vsock device to a
+[PATCH net-next v5 0/7] vsock: assign the guest vsock device to a
+Author: Bobby Eshleman <bobbyeshleman@meta.com>
+
+vsock network namespaces let a host put each VM in a namespace of its
+own. A guest has no equivalent yet. It has a single G2H device that
+cannot be assigned to a network namespace.
+
+This series lets a guest move that device into a network namespace. A
+new generic netlink family, "vsock", supports the command
+VSOCK_CMD_DEV_NETNS_SET which assigns the device to the namespace the
+request was sent from. The namespace's existing ns_mode then decides who
+may use it: a "global" namespace shares the device with every other
+global namespace, and a "local" namespace keeps the host connection to
+itself. The device starts out in the initial namespace, so until the
+command is issued nothing has moved and no mode has changed. There is no
+explicit unassign as assigning the device back to the initial namespace
+is equivalent.
+
+The command requires CAP_NET_ADMIN in the initial user namespace, so
+that an unprivileged user namespace cannot claim the device.
+
+Connections that can no longer reach the device after a move are reset,
+so that a namespace which has lost access cannot keep using a socket it
+opened while it still had access. The assignment holds a reference on
+the namespace, so deleting that namespace does not move the device; only
+another assignment does.
+
+Transports opt in through a new netns_assign_allow flag. Only
+virtio-vsock sets it here, because it is the only guest transport
+that I am able to test against.
+
+Based off of Stefano's original series:
+https://lore.kernel.org/all/20200116172428.311437-1-sgarzare@redhat.com/
+
+Suggested-by: Stefano Garzarella <sgarzare@redhat.com>
+Link: https://lore.kernel.org/all/20200427142518.uwssa6dtasrp3bfc@steredhat/
+Signed-off-by: Bobby Eshleman <bobbyeshleman@meta.com>
+---
+Changes in v5:
+- Rename the uapi header to linux/vsock_netlink.h (Stefano)
+- Drop the VSOCK_CMD_DEV_NETNS_SET reply and rely on the netlink ack
+  (Stefano)
+- Keep vsock_register_mutex static, export vsock_cid_lock() and
+  vsock_cid_unlock() for vhost_vsock_set_cid() instead (Stefano)
+- Replace vsock_g2h_next_unreachable() with a generic
+  vsock_next_connected_socket() next to vsock_for_each_connected_socket(),
+  which cannot be reused because the sweep takes lock_sock() (Stefano)
+- Use rcu_dereference_protected() in vsock_nl_dev_netns_fill(), drop the
+  RCU read lock and allocate the nsid with GFP_KERNEL (Stefano)
+- Point to the vsock_g2h_assign_mutex comment for the lock ordering in
+  vsock_g2h_net_assign() (Stefano)
+- Reverse xmas tree in vsock_dev_do_ioctl() (Stefano)
+- Set SOCK_DONE and peer_shutdown on swept sockets, so recv() returns EOF
+  and send() fails with -EPIPE/-ECONNRESET instead of -ENOTCONN (Sashiko)
+- Only move sock->state back to SS_UNCONNECTED in vsock_connect() if it is
+  still SS_CONNECTING, via the new vsock_connect_close(), so a socket
+  swept while connect() sleeps cannot be connect()ed again and have
+  vsk->trans freed under in-flight skbs (Michal)
+- Send the RSTs in virtio_transport_recv_listen() and
+  virtio_transport_recv_connecting() to the netns the packet arrived on,
+  not the socket's: after an assign the socket's netns may no longer
+  reach the device, so the RST would be dropped by the reachability
+  check this patch adds to virtio_transport_send_pkt() (Stefano, Sashiko)
+- Pick up Stefano's RoBs on patches 2 and 3
+- Link to v4: https://lore.kernel.org/r/20261020-vsock-guest-ns-v4-0-047527cfccfc@meta.com
+
+Changes in v4:
+- All Sashiko fixes (see individual patch change lists)
+- Link to v3: https://lore.kernel.org/r/20261012-vsock-guest-ns-v3-0-b32447c66b23@meta.com
+
+Changes in v3:
+- Lots of fixes for race conditions found by local and upstream Sashiko.
+  Sorry for the delayed reposting, it took significant time to track
+  down and confirm that these were real issues, and come up with a
+  decent solution for each...
+- Pin the assigned netns instead of returning the device to init_net
+  when it is deleted, and refuse an assign that would make the device's
+  CID collide with a nested H2G vhost-vsock with the same CID
+- Drop the idea of sending RST to the peer from the reset sweep. Sending
+  a RST required a lock_sock, which can't be acquired underneath the
+  vsock_table_lock.  Splitting into two phases of locking opened up new
+  races, I couldn't find a solution I was really happy with. Probably
+  not worth the complexity
+- New prep patch passing the netns to ->has_remote_cid(), which is used
+  in a later patch in the series for avoid CID collisions between nested
+  H2G guests and the G2H device
+- Various fixes (see individual patch change lists for more details)
+- Link to v2: https://lore.kernel.org/r/20260921-vsock-guest-ns-v2-0-693bd78fde9e@meta.com
+
+Changes in v2:
+- Replace the IOCTL_VM_SOCKETS_ASSIGN_G2H_NETNS ioctl with the "vsock"
+  genl family and VSOCK_CMD_DEV_NETNS_SET
+- RST the peer from the reset sweep, v1 only set TCP_CLOSE locally, so
+  the peer waited on a connection the guest had abandoned (Stefano)
+- Drop the vsock_assign_g2h_netns helper patch, the tests use ynl cli.py
+- Note why only virtio-vsock opts in (Stefano)
+- Add a getter to the uAPI
+- Various fixes (see individual patch change list for more details)
+- Link to v1: https://lore.kernel.org/r/20260902-vsock-guest-ns-v1-0-9995383e9a8b@meta.com
+
+---
+Bobby Eshleman (7):
+      vsock: constify the transport in vsock_for_each_connected_socket()
+      vsock: rename the vsock pernet operations
+      vsock: pass the netns to ->has_remote_cid()
+      vsock: add a netlink command to assign the g2h device to a netns
+      vsock/virtio: support guest device network namespace
+      selftests/vsock: test the guest vsock device network namespace
+      selftests/vsock: test the netns assign privilege checks
+
+ Documentation/admin-guide/sysctl/net.rst |  42 +++
+ Documentation/netlink/specs/vsock.yaml   |  72 ++++
+ MAINTAINERS                              |   2 +
+ drivers/vhost/vsock.c                    |  23 +-
+ include/net/af_vsock.h                   |  18 +-
+ include/uapi/linux/vsock_netlink.h       |  28 ++
+ net/vmw_vsock/Makefile                   |   2 +-
+ net/vmw_vsock/af_vsock.c                 | 523 +++++++++++++++++++++++++++--
+ net/vmw_vsock/virtio_transport.c         |  34 +-
+ net/vmw_vsock/virtio_transport_common.c  |  40 ++-
+ net/vmw_vsock/vsock_nl_gen.c             |  36 ++
+ net/vmw_vsock/vsock_nl_gen.h             |  20 ++
+ tools/net/ynl/Makefile.deps              |   1 +
+ tools/testing/selftests/vsock/Makefile   |   5 +
+ tools/testing/selftests/vsock/config     |   1 +
+ tools/testing/selftests/vsock/vmtest.sh  | 550 ++++++++++++++++++++++++++++++-
+ 16 files changed, 1326 insertions(+), 71 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock: constify the transport in
+[PATCH net-next v5 1/7] vsock: constify the transport in
+Author: Bobby Eshleman <bobbyeshleman@meta.com>
+
+Allow const transports to be passed too. The function only compares the
+pointer against vsk->transport, which is itself const, and never writes
+through it.
+
+No functional change.
+
+Reviewed-by: Stefano Garzarella <sgarzare@redhat.com>
+Signed-off-by: Bobby Eshleman <bobbyeshleman@meta.com>
+---
+ include/net/af_vsock.h   | 2 +-
+ net/vmw_vsock/af_vsock.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Walk memslot rmaps by index
+[RFC PATCH 1/5] KVM: x86/mmu: Walk memslot rmaps by index
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+In preparation for storing memslot rmaps in chunks that are not
+contiguous in memory, walk a slot's rmaps by index instead of stepping
+a pointer through the array, and look each head up through a new
+__idx_to_rmap() helper.
+
+No functional change intended.
+
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+ arch/x86/kvm/mmu/mmu.c | 34 ++++++++++++++++++++++++----------
+ 1 file changed, 24 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Allocate memslot rmaps on demand
+[RFC PATCH 0/5] KVM: x86/mmu: Allocate memslot rmaps on demand
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+When an L1 guest runs a nested guest, KVM allocates rmaps for all of
+L1's memory the first time it creates a shadow root, one 8-byte head
+per 4 KiB page. For an L1 with 4 TiB of memory that is 8 GiB, allocated
+at once on the first nested VM-Enter, whether L2 maps 1% or all of L1's
+memory. Sean pointed at this cost on Mushahid's lpage_info patch [1].
+
+This RFC allocates rmaps in page-sized chunks instead, when the first
+SPTE in a chunk's range is added. Each memslot keeps a per-level
+directory of chunks, 8 bytes per 2 MiB at the 4 KiB level, so the 4 TiB
+L1 above allocates 16 MiB on the first nested VM-Enter. A missing chunk
+reads as empty rmaps and slot walks skip it. When L2 maps every gfn,
+rmaps cost what they did before plus the directory.
+
+Patches 1 and 2 prepare the slot walk and the debugfs rmap statistics,
+with no functional change. Patch 3 does the chunking. Patches 4 and 5
+add a selftest in which L2 writes pages around chunk boundaries and
+checks the dirty log after the memslot is write-protected, including
+eager splitting of nested huge pages.
+
+I would like feedback on:
+  - The data structure. A directory of page-sized chunks keeps lookups
+    to one extra load. An xarray would be simpler to grow but adds a
+    tree walk to every rmap lookup.
+  - Freeing chunks once they are empty. That would let the shadow MMU
+    page limit bound rmap memory too, but lockless aging reads chunks
+    without mmu_lock, so freeing needs an RCU grace period. I left it
+    out of this RFC.
+  - Doing the same for gfn_write_track, 2 bytes per 4 KiB page, which
+    is still allocated for every memslot on the first shadow root.
+
+Limitations:
+  - Chunks are only freed with the memslot.
+  - Eager page splitting on dirty-log enable splits L2's huge mappings,
+    so every 2 MiB that L2 mapped with a huge page then gets a chunk.
+
+The series is based on kvm.git next.
+
+[1] https://lore.kernel.org/all/arr1VgGZmgUmY4hc@google.com/
+
+Fred
+
+
+Fred Griffoul (5):
+  KVM: x86/mmu: Walk memslot rmaps by index
+  KVM: x86: Count rmaps per level in a debugfs helper
+  KVM: x86/mmu: Allocate memslot rmaps in on-demand chunks
+  KVM: selftests: Declare __tdp_map() in the x86 processor header
+  KVM: selftests: Test dirty logging of sparse nested mappings
+
+ arch/x86/include/asm/kvm_host.h               |  22 +-
+ arch/x86/kvm/debugfs.c                        |  46 ++-
+ arch/x86/kvm/mmu/mmu.c                        | 126 +++++++-
+ arch/x86/kvm/x86.c                            |  22 +-
+ tools/testing/selftests/kvm/Makefile.kvm      |   1 +
+ .../selftests/kvm/include/x86/processor.h     |   1 +
+ .../kvm/x86/nested_dirty_log_sparse_test.c    | 275 ++++++++++++++++++
+ 7 files changed, 460 insertions(+), 33 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: Add helpers to allocate memslot metadata
+[PATCH] KVM: Add helpers to allocate memslot metadata
+Author: Fred Griffoul <griffoul@gmail.com>
+
+
+__vcalloc() makes every allocation at least one page, so a memslot
+that spans a single page uses 8 KiB of vmalloc for 8 bytes of
+lpage_info, plus 4 KiB for a 16-byte dirty bitmap once dirty logging
+is enabled. The waste grows with the number of memslots and VMs on a
+host. kvcalloc() avoids it for small arrays, but refuses allocations
+above INT_MAX bytes, which the rmap and write-tracking arrays of a
+large memslot exceed.
+
+Add kvm_memslot_metadata_alloc() and kvm_memslot_metadata_free(),
+which use kvzalloc() up to INT_MAX bytes and vmalloc above, and route
+the dirty bitmap, rmaps, lpage_info and write-tracking arrays through
+them. That way, how KVM allocates memslot metadata is decided in one
+place instead of at each array.
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Link: https://lore.kernel.org/all/arr1VgGZmgUmY4hc@google.com/
+Signed-off-by: Fred Griffoul <fgriffo@amazon.co.uk>
+---
+Mushahid's patch [1] switched the lpage_info arrays and dirty bitmaps to
+kvcalloc(). Sean suggested dedicated helpers for memslot metadata
+instead [2], which this patch adds.
+
+[1] https://lore.kernel.org/all/20260815142218.85067-1-hmushi@amazon.co.uk/
+[2] https://lore.kernel.org/all/arr1VgGZmgUmY4hc@google.com/
+---
+ arch/x86/kvm/mmu/page_track.c |  6 +++---
+ arch/x86/kvm/x86.c            | 10 +++++-----
+ include/linux/kvm_host.h      |  2 ++
+ virt/kvm/kvm_main.c           | 23 +++++++++++++++++++++--
+ 4 files changed, 31 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: nSVM: Validate L1 host save state restored on RSM from SMM
+[PATCH] KVM: nSVM: Validate L1 host save state restored on RSM from SMM
+Author: Abdelali Maddane <ma.08@web.de>
+
+When an SMI is taken while L2 is running, svm_enter_smm() saves L1's host
+state into the HSAVE area (ordinary guest memory pointed to by
+MSR_VM_HSAVE_PA).  On RSM, svm_leave_smm() copies that state back into
+vmcb01 and builds the nested MMU from it, but unlike KVM_SET_NESTED_STATE
+it does not validate the restored state.
+
+Because the HSAVE area is guest memory, L1 can modify it while the vCPU is
+in SMM so that RSM loads an impossible EFER.LMA=3D1 && EFER.LME=3D0 combin=
+ation
+(e.g. together with CR4.PAE=3D0).  kvm_calc_cpu_role() then computes a 4- =
+or
+5-level role while shadow_mmu_init_context() wires up the 2-level paging32
+template, and FNAME(walk_addr_generic) indexes out of bounds of the
+fixed-size guest_walker arrays.  On kernels carrying the KVM_BUG_ON()
+backstop in kvm_calc_cpu_role() this is a guest-triggerable KVM_BUG_ON()
+(dead VM, or a host panic with panic_on_warn); on older kernels it is an
+out-of-bounds access in the page-table walker.
+
+Validate the restored L1 host state in svm_leave_smm() with the same check=
+s
+KVM_SET_NESTED_STATE already applies to L1 host state, factored out into
+nested_svm_check_l1_save().  A failed check fails RSM, which is the correc=
+t
+response to an impossible saved state.
+
+The patch, reproducer, and this changelog were developed with substantial
+help from an AI assistant (Anthropic's Claude Code), directed and reviewed
+by the submitter.  Tested by the submitter on an AMD EPYC host: without th=
+e
+patch a reproducer triggers the guest-reachable KVM_BUG_ON() in
+kvm_calc_cpu_role(); with the patch the reproducer is rejected, and the
+smm_test and svm_nested_shutdown_test selftests still pass.
+
+Fixes: 37be407b2ce8 ("KVM: nSVM: Fix L1 state corruption upon return from =
+SMM")
+Signed-off-by: Abdelali Maddane <ma.08@web.de>
+=2D--
+Reproducer (a KVM selftest) available on request.
+
+ arch/x86/kvm/svm/nested.c | 36 ++++++++++++++++++++++--------------
+ arch/x86/kvm/svm/svm.c    |  7 +++++++
+ arch/x86/kvm/svm/svm.h    |  1 +
+ 3 files changed, 30 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Report set_id_reg reads of
+[PATCH v9 1/3] KVM: selftests: arm64: Report set_id_reg reads of
+Author: Mark Brown <broonie@kernel.org>
+
+Currently when we run guest code to validate that the values we wrote to
+the registers are seen by the guest we assert that these values match using
+a KVM selftests level assert, resulting in unclear diagnostics if the test
+fails. Replace this assert with reporting a kselftest test per register.
+
+In order to support getting the names of the registers we repaint the array
+of ID_ registers to store the names and open code the rest.
+
+Reviewed-by: Ben Horgan <ben.horgan@arm.com>
+Reviewed-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 82 +++++++++++++++++++------
+ 1 file changed, 63 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Improve diagnostics from
+[PATCH v9 0/3] KVM: selftests: arm64: Improve diagnostics from
+Author: Mark Brown <broonie@kernel.org>
+
+While debugging issues related to aarch64 only systems I ran into
+speedbumps due to the lack of detail in the results reported when the
+guest register read and reset value preservation tests were run, they
+generated an immediately fatal assert without indicating which register
+was being tested. Update these tests to non-fatally report a standard
+kselftest result per register, making it much easier to see what the
+problem being reported is.
+
+A similar issue exists with the validation of the individual bitfields
+in registers due to the use of immediately fatal asserts. Update those
+asserts to be standard kselftest reports.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v9:
+- Rebase onto v7.4-rc1.
+- Link to v8: https://patch.msgid.link/20260929-kvm-arm64-set-id-regs-aarch64-v8-0-58aabe2c2fac@kernel.org
+
+Changes in v8:
+- Convert another assert.
+- Link to v7: https://patch.msgid.link/20260901-kvm-arm64-set-id-regs-aarch64-v7-0-7b065b0bda9a@kernel.org
+
+Changes in v7:
+- Rebase onto v7.3-rc1.
+- Link to v6: https://patch.msgid.link/20260719-kvm-arm64-set-id-regs-aarch64-v6-0-724287f5f108@kernel.org
+
+Changes in v6:
+- Rebase onto v7.2-rc3.
+- Drop changes to handling of aarch32 related registers on 64 bit only
+  systems, an in kernel solution is preferred for those.
+- Use a define to count the non-test_regs registers.
+- Link to v5: https://patch.msgid.link/20260317-kvm-arm64-set-id-regs-aarch64-v5-0-a60f2b956e22@kernel.org
+
+Changes in v5:
+- Rebase onto v7.0-rc1.
+- Link to v4: https://patch.msgid.link/20260106-kvm-arm64-set-id-regs-aarch64-v4-0-c7ef4551afb3@kernel.org
+
+Changes in v4:
+- Correct check for 32 bit ID registers.
+- Link to v3: https://patch.msgid.link/20251219-kvm-arm64-set-id-regs-aarch64-v3-0-bfa474ec3218@kernel.org
+
+Changes in v3:
+- Rebase onto v6.19-rc1.
+- Link to v2: https://patch.msgid.link/20251114-kvm-arm64-set-id-regs-aarch64-v2-0-672f214f41bf@kernel.org
+
+Changes in v2:
+- Add a fix for spurious failures with 64 bit only guests.
+- Link to v1: https://patch.msgid.link/20251030-kvm-arm64-set-id-regs-aarch64-v1-0-96fe0d2b178e@kernel.org
+
+---
+Mark Brown (3):
+      KVM: selftests: arm64: Report set_id_reg reads of test registers as tests
+      KVM: selftests: arm64: Report register reset tests individually
+      KVM: selftests: arm64: Make set_id_regs bitfield validity checks non-fatal
+
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 130 ++++++++++++++++++------
+ 1 file changed, 98 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: arm64: Turn vcpu->arch.pause into a counter
+[PATCH 1/3] KVM: s390: arm64: Turn vcpu->arch.pause into a counter
+Author: Andreas Grapentin <gra@linux.ibm.com>
+
+
+The s390 arm64 vcpu struct mirrors arm64's kvm_vcpu_arch. When commit
+e64309198eda2 ("KVM: arm64: Turn vcpu->arch.pause into a counter")
+changed the type of kvm_vcpu_arch.pause from bool to atomic_t, the merge
+into this tree missed the s390 copy, leaving it out of sync.
+
+Nothing on the s390 side accesses vcpu->arch.pause yet, so this has
+no functional effect. Align the type to keep the mirror identical to
+its arm64 counterpart.
+
+Fixes: e6c329180d1d ("KVM: s390: arm64: Introduce host definitions")
+Signed-off-by: Steffen Eiden <seiden@linux.ibm.com>
+Signed-off-by: Andreas Grapentin <gra@linux.ibm.com>
+---
+ arch/s390/include/asm/kvm_host_arm64.h | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: s390: arm64: Fixes for arm64 KVM support
+[PATCH 0/3] KVM: s390: arm64: Fixes for arm64 KVM support
+Author: Andreas Grapentin <gra@linux.ibm.com>
+
+Some fixups for the previous series that introduced arm64 KVM support on
+s390. Forward-declare enum vcpu_sysreg because we are definitely going
+to need that, then make the module naming consistent and iron out an
+inconsistency in the definition of vcpu->arch.pause between s390 and
+native arm64 KVM.
+
+No functional changes intended on either arm64 or s390.
+
+Signed-off-by: Andreas Grapentin <gra@linux.ibm.com>
+---
+Andreas Grapentin (2):
+      KVM: s390: arm64: Declare enum vcpu_sysreg
+      KVM: s390: arm64: Fix kvm_arm64 module naming consistency
+
+Steffen Eiden (1):
+      KVM: s390: arm64: Turn vcpu->arch.pause into a counter
+
+ arch/s390/include/asm/kvm_host_arm64.h |  8 ++++----
+ arch/s390/kvm/arm64/Makefile           | 12 ++++++------
+ 2 files changed, 10 insertions(+), 10 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio-pci/zdev: Improved zPCI Function Measurement Support
+[PATCH v12 0/5] vfio-pci/zdev: Improved zPCI Function Measurement Support
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Hi,
+
+This patch series improves support for function measurement for zPCI
+passthrough devices on s390.
+
+Changelog
+=========
+v11 -> v12:
+* Patch 2/5:
+  - Replace the statistics_on bool with a bitfield
+
+* Patch 3/5:
+  - Add the fmb_enabled bitfield to struct zpci_dev to track the actual
+    FMB enablement
+  - Replace the kmem_cache allocator with kzalloc/kfree after learning
+    it guarantees alignment for power-of-two sizes
+
+* Patch 5/5:
+  - Use fmb_enabled as the FMB liveness check
+
+v10 -> v11:
+* Patches 2/5 and 3/5:
+  - Swap their ordering within the series
+  - Set/unset statistics_on after an enable/disable succeeds instead of
+    before
+
+* Patch 5/5:
+  - On FMB re-enable, use an intermediate request-off step instead of
+    directly touching the device state
+
+v9 -> v10:
+* Patches 2/5 and 3/5:
+  - Split the old 2/4 into two patches; the new patch 2/5 reuses one FMB
+    buffer per device, and 3/5 improves FMB state management
+  - Rework FMB management functions to decouple requesting enablement or
+    disablement from managing the user's intended state
+  - Preserve measurement state in pcibios_enable_device()
+
+v8 -> v9:
+* Patch 2/4:
+  - Remove the intermediate disable step from zpci_fmb_reenable_device()
+    for more uniform semantics
+  - Rename fmb_enabled to fmb_requested with the intent of tracking the
+    desired status of FMB enablement
+  - Make zpci_fmb_enable_device() delegate to zpci_fmb_reenable_device()
+
+* Patch 4/4:
+  - Set fmb_requested when the user enables measurement
+
+v7 -> v8:
+* Patch 2/4:
+  - Replace the fmb_enabled bitfield in struct zpci_dev with a dedicated
+    bool to avoid future tearing bugs
+  - Rewrite commit message for a more natural flow
+
+* Patch 4/4:
+  - Replace mutex_lock/unlock() in vfio_pci_zdev_feature_fmb_read() with
+    a scoped_guard()
+
+v6 -> v7:
+* Patch 2/4:
+  - Don't re-enable FMB if it wasn't already enabled
+
+v5 -> v6:
+* Patch 2/4:
+  - Rework the FMB re-enablement code to reuse the same buffer again
+  - Make the FMB buffer persistent once allocated for as long as the
+    device's lifetime to accommodate an architectural quirk
+* Patch 4/4:
+  - Update the liveness check to use the new FMB enabled bool
+
+v4 -> v5:
+* Typo in the cover letter
+* Swap the ordering of patches 3/4 and 4/4 to ease merging (i.e., to
+  ensure the three s390 patches are ordered before the VFIO patch)
+* Patch 2/4:
+  - Drop the refactor of zpci_fmb_enable_device() and the separation of
+    zpci_fmb_clear_iommu_ctrs() and zpci_fmb_do_enable()
+  - Allocate a new buffer in zpci_fmb_reenable_device() rather than
+    reusing the same buffer to avoid firmware edge cases
+
+* Patch 3/4 (previously 4/4):
+  - Avoid reading from userspace while holding kzdev_lock unnecessarily
+
+* Patch 4/4 (previously 3/4):
+  - Drop allowing usercopy of the FMB when initializing the kmem_cache
+  - Avoid copying to userspace while holding fmb_lock unnecessarily
+    - Restore the FMB bounce buffer to achieve this one
+  - Clarify uAPI documentation and ensure it accurately describes the
+    behavior of the VFIO features
+
+v3 -> v4:
+* Patch 2/4:
+  - Replace mutex_lock/unlock in zpci_reenable_device() with a guard
+
+* Patch 3/4:
+  - Allow usercopy of the FMB when initializing its kmem_cache
+  - Move the guard in vfio_pci_zdev_feature_fmb_enable() lower to only
+    protect the FMB
+  - Ensure vfio_pci_zdev_feature_fmb_enable() fails on double-enable for
+    consistency with the documentation
+  - Eliminate the bounce buffer in vfio_pci_zdev_feature_fmb_read()
+  - Replace the void pointer with __aligned_u64 in the FMB read uAPI
+    structure
+
+v2 -> v3:
+* Patch 1/4 (new patch):
+  - Fix race conditions in pcibios_enable/disable_device() with regard to
+    the FMB enable/disable
+  - Assert that fmb_lock is held within zpci_fmb_enable_device() and
+    zpci_fmb_disable_device()
+
+* Patch 2/4 (previously 1/3):
+  - Move the FMB enable logic into a static function zpci_fmb_do_enable()
+    to reduce code duplication between zpci_fmb_enable_device() and
+    zpci_fmb_reenable_device()
+  - Reword commit message to use the imperative voice more consistently
+
+* Patch 3/4 (previously 2/3):
+  - Split the previous VFIO feature into a SET-only and a GET-only feature
+    for enabling/disabling and reading the FMB respectively
+  - Remove FMB definitions from the VFIO uAPI and instead treat it as an
+    opaque structure
+
+* Patch 4/4 (previously 3/3):
+  - Clarify goto label name to reduce misunderstandings
+
+v1 -> v2:
+* Patch 1/3:
+  - Address a possible race condition in zpci_reenable_device() caused by
+    calling zpci_fmb_reenable_device() without holding fmb_lock
+  - Assert that fmb_lock is held within zpci_fmb_reenable_device()
+
+* Patch 3/3:
+  - Address a possible race condition in pci_perf_seq_write() caused by
+    consuming zdev->kzdev without holding kzdev_lock
+
+Motivation
+==========
+The firmware on s390x machines allows for tracking a variety of statistics
+relating to zPCI devices in a function measurement block (FMB). However,
+the kernel currently lacks a structured mechanism of sharing this
+information with userspace, beyond /sys/kernel/debug/pci/ID/statistics.
+This can lead to shortcomings when running a guest on KVM with PCI
+passthrough devices, as QEMU is unable to provide an accurate FMB snapshot
+to the guest.
+
+Proposal
+========
+We propose adding a new VFIO device feature to zPCI passthrough devices,
+allowing userspace programs to read the latest FMB snapshot as it is
+written by the firmware. We ensure that function measurement enablement is
+preserved across device resets on the host. Furthermore, we guard against
+host tampering with the FMB via sysfs when the zPCI device is in
+passthrough to protect the VM's state.
+
+I'd appreciate some feedback on these patches.
+
+Thanks in advance.
+
+Omar Elghoul (5):
+  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+  s390/pci: Improve function measurement state management
+  s390/pci: Improve FMB memory management
+  s390/pci: Fence FMB enable/disable via debugfs for passthrough devices
+  vfio-pci/zdev: Add VFIO FMB device features
+
+ arch/s390/include/asm/pci.h      |   8 +-
+ arch/s390/pci/pci.c              | 121 +++++++++++++++++++++++--------
+ arch/s390/pci/pci_debug.c        |  15 +++-
+ drivers/vfio/pci/vfio_pci_core.c |   4 +
+ drivers/vfio/pci/vfio_pci_priv.h |  18 +++++
+ drivers/vfio/pci/vfio_pci_zdev.c |  64 ++++++++++++++++
+ include/uapi/linux/vfio.h        |  30 ++++++++
+ 7 files changed, 224 insertions(+), 36 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+[PATCH v12 1/5] s390/pci: Hold fmb_lock when enabling or disabling PCI devices
+Author: Omar Elghoul <oelghoul@linux.ibm.com>
+
+Ensure that fmb_lock is held by pcibios_enable_device() and
+pcibios_disable_device() when calling zpci_fmb_enable_device() or
+zpci_fmb_disable_device(), respectively. Additionally, assert that the
+fmb_lock is held within the latter two functions to prevent future race
+conditions regarding new callers.
+
+Fixes: af0a8a8453f7 ("s390/pci: implement pcibios_add_device")
+Fixes: 944239c59e93 ("s390/pci: implement pcibios_release_device")
+Cc: stable@vger.kernel.org
+Signed-off-by: Omar Elghoul <oelghoul@linux.ibm.com>
+Reviewed-by: Niklas Schnelle <schnelle@linux.ibm.com>
+Reviewed-by: Matthew Rosato <mjrosato@linux.ibm.com>
+---
+ arch/s390/pci/pci.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: register asynchronous page fault waits with interrupts disabled
+[PATCH 1/2] KVM: register asynchronous page fault waits with interrupts disabled
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Asynchronous page fault handling has some wonky code to detect page ready
+notifications that are sent before the waiter is registered.  When page
+ready notifications for asynchronous page faults were separated from
+not-present notifications and turned into an interrupt, this code was
+unwittingly made almost-redundant.  Page ready notification is now delayed
+until after interrupts are enabled; and for an asynchronous page faults
+that occur outside guest mode, Linux never enables interrupts between the
+delivery of the #PF exception and the call to kvm_async_pf_queue_task().
+Therefore, the dummy allocation path is fully dead on that common path.
+
+For the nested virtualization case, however, vmx.c and svm.c do
+record in the interrupt-disabled region whether a #PF vmexit is an
+asynchronous page fault, but they defer registration of the waiter until
+kvm_handle_page_fault().  Because of this, the vCPU thread can be preempted
+before kvm_async_pf_task_wait_schedule() is called, and apf_task_wake_one()
+may them not find the vCPU thread in the waiters list.  It then allocates
+the struct kvm_task_sleep_node* on behalf of the task that received the
+asynchronous page fault.  Besides keeping alive the wonky code, allocating
+the node from an hardirq-disabled region is a problem for PREEMPT_RT kernels,
+as duly reported by syzkaller.
+
+Split registration from wait so that the caller decides where to
+put the node and so that KVM can anticipate the registration before
+interrupts are enabled.  KVM cannot use a node on the stack like
+kvm_async_pf_task_wait_schedule() does, but it can place it in the vCPU
+struct instead.
+
+Reported-by: syzbot+f11512d1e5878ba5e60e@syzkaller.appspotmail.com
+Link: https://lore.kernel.org/kvm/6adf2939.67317f00.38c4bc.00ae.GAE@google.com/
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: stable@vger.kernel.org
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+---
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/include/asm/kvm_para.h | 21 +++++++++++++++++++--
+ arch/x86/kernel/kvm.c           | 31 ++++++++++++-------------------
+ arch/x86/kvm/mmu.h              | 14 ++++++++++++++
+ arch/x86/kvm/mmu/mmu.c          |  4 +++-
+ arch/x86/kvm/svm/svm.c          |  3 +--
+ arch/x86/kvm/vmx/main.c         |  2 +-
+ 7 files changed, 51 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: remove the dummy allocation case from async page fault handling
+[PATCH 0/2] KVM: remove the dummy allocation case from async page fault handling
+Author: Paolo Bonzini <pbonzini@redhat.com>
+
+Asynchronous page fault handling is supposedly able to detect page
+ready notifications that are sent before the waiter is registered,
+but this code is broken for PREEMPT_RT because it tries to allocate in
+hardirq-disabled context.
+
+This code however is almost dead, because page ready notification will
+happen on the same vCPU as the waiter and not until after the waiter
+enables interrupts.  Outside guest mode, interrupts are only enabled once
+the waiter has registered itself, and this guarantees that an outstanding
+(non-spurious) waiter will always be found.  This unfortunately is not
+the case for asynchronous page faults that are delivered while in guest
+mode, but that can be fixed and the dubious code removed.
+
+Paolo
+
+Paolo Bonzini (2):
+  KVM: register asynchronous page fault waits with interrupts disabled
+  x86: KVM: remove the dummy allocation case from async page fault
+    handling
+
+ arch/x86/include/asm/kvm_host.h |  1 +
+ arch/x86/include/asm/kvm_para.h | 20 ++++++-
+ arch/x86/kernel/kvm.c           | 97 +++++++++------------------------
+ arch/x86/kvm/mmu.h              | 14 +++++
+ arch/x86/kvm/mmu/mmu.c          |  4 +-
+ arch/x86/kvm/svm/svm.c          |  3 +-
+ arch/x86/kvm/vmx/main.c         |  2 +-
+ 7 files changed, 65 insertions(+), 76 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI/P2PDMA: Honor device-specific ACS redirection
+[PATCH v12 01/19] PCI/P2PDMA: Honor device-specific ACS redirection
+Author: Leon Romanovsky <leon@kernel.org>
+
+
+Some ports, such as Zhaoxin Switch Downstream Ports, redirect peer-to-peer
+traffic without an ACS capability, as their device-specific ACS quirks
+report. P2PDMA reads only ACS Control, so below such a port it hands out
+bus addresses for traffic that goes to the host bridge.
+
+Take Request and Completion Redirect from a bridge's quirk too. Ignore
+endpoint quirks, which only describe traffic between an endpoint's own
+functions. Skip bridges on a root bus: they never sit between two peers,
+and the AMD southbridge quirk may sleep there during DMA mapping.
+
+pci=disable_acs_redir= cannot override a quirk, so name such ports
+separately.
+
+Fixes: 52916982af48 ("PCI/P2PDMA: Support peer-to-peer memory")
+Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+---
+ drivers/pci/p2pdma.c | 114 +++++++++++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 96 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  PCI/P2PDMA: Route peer-to-peer DMA by TLP class
+[PATCH v12 00/19] PCI/P2PDMA: Route peer-to-peer DMA by TLP class
+Author: Leon Romanovsky <leon@kernel.org>
+
+PCI P2PDMA applies Request and Completion Redirect throughout both paths.
+This misclassifies asymmetric and nested switches, and reports one answer
+for every kind of TLP.
+
+Three ACS controls act on TLP attributes the Requester chooses rather
+than on the topology: Translation Blocking and Direct Translated P2P act on
+a Request's Address Type, and Completion Redirect skips Completions carrying
+Relaxed Ordering.
+
+Evaluate each direction at the path divergence, decide every class from the
+one walk, and treat a client with ATS enabled as translating unless its
+driver declares per-mapping ATS.
+
+This completes the P2PDMA side; dma-buf and mlx5 follow separately.
+
+Signed-off-by: Leon Romanovsky <leonro@nvidia.com>
+---
+Changes in v12:
+- Rebaed to v7.4-rc1
+- Link to v11: https://patch.msgid.link/20261013-fix-p2p-acs-v4-0-v11-0-72cf8c96e617@nvidia.com
+
+Changes in v11:
+- Applied the client ATS policy in pci_p2pdma_distance_many() too, as
+  local Sashiko pointed out.
+- Read the ATS Enable bit once per query, so the class and the ATS policy
+  always agree.
+- Documented that pcim_p2pdma_set_ats_per_mapping() needs a successful
+  pcim_p2pdma_init().
+- The path diagnostics no longer read ACS Control or the bridge bus range,
+  and they report a failed cache store.
+- Added a KUnit case for Direct Translated P2P without a redirect.
+- Clarified the Relaxed Ordering and diagnostics commit messages.
+- Honored device-specific ACS redirection, such as Zhaoxin Downstream
+  Ports, in a new first patch with a KUnit case, as local Sashiko
+  pointed out. Relaxed Ordering Completions are redirected at such a
+  port too.
+- Clarified in the documentation that a quirk also redirects Relaxed
+  Ordering Completions and that Translation Blocking applies only to
+  upstream Requests, and labelled the ACS routing debug line with its
+  class, as local Sashiko pointed out.
+- Treated ACS registers that read as all ones as unreadable, and named
+  ports that a quirk redirects instead of suggesting
+  pci=disable_acs_redir= for them, as local Sashiko pointed out.
+- Ignored ACS quirks of endpoints, which only describe traffic between
+  their own functions.
+- Link to v10: https://patch.msgid.link/20261012-fix-p2p-acs-v4-0-v10-0-6ffe7b7a4517@nvidia.com
+
+Changes in v10:
+- Fixed the Relaxed Ordering description: a Completion carries the
+  attribute of its Request (PCIe r7.0 sec 2.2.9.1).
+- Used the PCIe terms Requester and Completer for TLPs, ACS and ports;
+  client and provider remain for P2PDMA objects.
+- Rebased on pci/p2pdma, which includes the prerequisite P2PDMA fixes.
+- Added a topology example to the path divergence patch.
+- Removed a repeated sentence from the disable_acs_redir documentation.
+- Explained the path divergence in the documentation.
+- Link to v9: https://patch.msgid.link/20261001-fix-p2p-acs-v4-0-v9-0-1a8e0f50ddd9@nvidia.com
+
+Changes in v9:
+- Removed dmabuf patches for now.
+- Removed mlx5 per-mapping ATS declaration for now; it comes back with
+  the dmabuf patches.
+- Link to v8: https://patch.msgid.link/20260928-fix-p2p-acs-v4-0-v8-0-404453b9c435@nvidia.com
+
+Changes in v8:
+- Added extra Reviewed-by from Logan.
+- Added patches to take care of ATS per-device vs. per-mapping option
+- Link to v7: https://patch.msgid.link/20260920-fix-p2p-acs-v4-0-v7-0-ca0828ab697c@nvidia.com
+
+Changes in v7:
+- Removed "Document pdev->p2pdma lifetime rules" patch, it gives nothing
+  after p2pmem fix.
+- Split dmabuf patch.
+- Tushar retested the series, so added his Tested-by.
+- Added Logan's ROB tags and fixed minor documentation issues pointed
+  by him.
+- Link to v6: https://lore.kernel.org/all/20260914-fix-p2p-acs-v4-0-v6-0-5ef07ec9ef06@nvidia.com/
+
+Changes in v6:
+- Changed DMABUF to use callbacks and not directly stored pointer.
+- Link to v5: https://patch.msgid.link/20260910-fix-p2p-acs-v4-0-v5-0-856087f63c0d@nvidia.com
+
+Changes in v5:
+- Rebase on the posted fixes.
+- Dropped tags from changed patches.
+- Remove Egress Control Vector interpretation and coverage.
+- Keep enabled Egress Control conservative as a Request redirect.
+- Use pci_dbg()/dev_dbg() for diagnostics and drop the "debug" prefix.
+- Removed code comments from "Document the pdev->p2pdma lifetime and RCU
+  rules" patch and reduced description to actual lifetime explanation.
+- Added note that Linux assumes that TLPs are in strict-ordering and
+  untranslated.
+- Added code to calculate p2p paths per-TLP type.
+- Converted mlx5 to use that new proposed API.
+- Link to https://patch.msgid.link/20260821-fix-p2p-acs-v4-0-v4-0-94426b96de73@nvidia.com
+
+Changes in v4:
+- Reject ACS Violations and unreadable routing state instead of treating
+  them as host-bridge redirects
+- Added Tested-by tags from Tushar Dave
+- Added support to asymmetric ACS routing
+- Limited redirect checks to the two ports at the path divergence
+- Added standalone ACS routing diagnostics for hardware retesting
+- Dropped " PCI: Account for Direct Translated P2P in ACS isolation checks" patch
+- Link to v3: https://patch.msgid.link/20260811-fix-p2p-acs-v3-0-efc488ee7c03@nvidia.com
+
+Changes in v3:
+- Fixed pci_p2pdma_add_resource() error unwinding
+- Made pdev->p2pdma teardown wait unconditionally for RCU readers
+- Restricted pci_p2pmem_find_many() to pool-backed providers
+- Documented the pdev->p2pdma lifetime and RCU rules
+- Fixed calc_map_type_and_dist() handling of the verbose argument
+- Required the ACS port and target to share a bus before indexing the
+  Egress Control Vector
+- Gave pci_acs_enabled() and pci_acs_path_enabled() a scope, so the ACS
+  Direct Translated P2P rule no longer stops pci_enable_pasid() from
+  enabling PASID
+- Dropped "Report ACS ports when the paths share no upstream bridge":
+  the mapping type cannot change without a shared upstream bridge, so
+  the pci=disable_acs_redir= hint was not actionable there and the ACS
+  walk only cost config space reads
+- Folded the Request Redirect rule into pci_acs_rr_ineffective(), so
+  pci_acs_flags_enabled() and the Intel SPT PCH quirk share one copy
+- Renamed pci_acs_egress_ctrl_set() to pci_acs_egress_ctrl_is_set(), it
+  reads the bit rather than setting it
+- Reworded the blocked-path warning: ACS may also leave the direct route
+  indeterminate rather than blocked
+- Added KUnit coverage for the shared-bus guard, a device with no ACS
+  capability and an unreadable ACS Control register
+- Added the missing Fixes: tags, a second one on the
+  pci_p2pdma_add_resource() unwinding fix (the dangling devres action
+  dates to f58ef9d1d135) and one on the Egress Control isolation change
+- Link to v2: https://patch.msgid.link/20260806-fix-p2p-acs-v2-0-0cec14812965@nvidia.com
+
+Changes in v2:
+- Added Logan's ROB tags
+- Added commas in Documentation patch
+- Link to v1: https://patch.msgid.link/20260802-fix-p2p-acs-v1-0-a7c5eb64fff6@nvidia.com
+
+---
+Leon Romanovsky (19):
+      PCI/P2PDMA: Honor device-specific ACS redirection
+      PCI/P2PDMA: Document the TLP attribute assumptions
+      PCI/P2PDMA: Derive routing from directional ACS controls
+      PCI: Reject unreadable ACS controls in isolation checks
+      PCI/P2PDMA: Evaluate ACS controls at the path divergence
+      PCI/P2PDMA: Document directional ACS routing
+      PCI/P2PDMA: Collect the path's ACS controls before deciding
+      PCI/P2PDMA: Answer routing per TLP class
+      PCI/P2PDMA: Route Relaxed Ordering Completions directly
+      PCI/P2PDMA: Reject Translated Requests blocked by Translation Blocking
+      PCI/P2PDMA: Route Translated Requests under Direct Translated P2P
+      PCI/P2PDMA: Log detailed ACS routing diagnostics
+      PCI/P2PDMA: Add KUnit tests for the ACS routing decisions
+      PCI/P2PDMA: Test the ACS P2P routing walk
+      PCI: Add KUnit coverage for ACS isolation checks
+      PCI/P2PDMA: Document TLP-class routing
+      PCI/P2PDMA: Let a client declare that it selects ATS per mapping
+      PCI/P2PDMA: Evaluate the ATS path for clients with ATS enabled
+      PCI/P2PDMA: Test the routing of clients with ATS enabled
+
+ Documentation/admin-guide/kernel-parameters.txt |   11 +-
+ Documentation/driver-api/pci/p2pdma.rst         |  105 ++
+ drivers/pci/Kconfig                             |   15 +
+ drivers/pci/Makefile                            |    1 +
+ drivers/pci/p2pdma.c                            |  942 +++++++++++++++--
+ drivers/pci/pci.c                               |    8 +-
+ drivers/pci/pci.h                               |   57 ++
+ drivers/pci/pci_acs_test.c                      | 1225 +++++++++++++++++++++++
+ drivers/pci/quirks.c                            |    8 +-
+ include/linux/pci-p2pdma.h                      |   12 +-
+ 10 files changed, 2292 insertions(+), 92 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: x86/mmu: Batch masked dirty clearing within leaf page
+[PATCH] KVM: x86/mmu: Batch masked dirty clearing within leaf page
+Author: Hao Zhang <hao_zhang_kdev@163.com>
+
+
+Walk the TDP page tables down to L2 when clearing a dirty-log bitmap word,
+and update the selected 4KiB SPTEs directly in each child page table.
+
+clear_dirty_pt_masked() currently uses the generic TDP iterator to visit
+individual leaf mappings. For a densely populated bitmap word, this repeats
+the iterator's traversal and entry checks for adjacent SPTEs in the same
+page table. Sparse masks can also cause unselected entries to be visited.
+
+Use the existing minimum-level iterator to locate each L1 page table
+through its parent. The GFN range covered by a bitmap word can cross a
+2MiB boundary. Clip a private copy of the mask to each table's coverage,
+keeping bit indices relative to the original GFN.
+
+Locate the first covered SPTE once per batch, then use relative offsets for
+the selected bits. This avoids recomputing the SPTE index in the inner loop
+and avoids reading and checking unselected 4KiB entries.
+
+The write side of mmu_lock keeps the parent-child link stable, and the RCU
+read-side critical section protects the page-table memory. Retain the
+existing SPTE update helper and tracing semantics. Continue to skip huge
+mappings, as before. Preserve the generic iterator and the caller's TLB
+flush behavior.
+
+For an 8-vCPU dirty-log benchmark with a 768MiB tracked region, reduce
+KVM_CLEAR_DIRTY_LOG time by approximately 42-51% on the tested Intel host
+with PML enabled.
+
+Signed-off-by: Hao Zhang <zhanghao1@kylinos.cn>
+---
+Benchmark and testing details:
+
+Base commit: 3857c2fe5449541e24afc5efdb0f81a8a8f9a3a0
+
+Test setup:
+  - Intel Xeon E5-2680 v4 @ 2.40GHz, two sockets, 14 cores per socket,
+    two threads per core, 56 logical CPUs.
+  - Approximately 31GiB host memory, all on NUMA node1; node0 has no memory.
+  - GCC (Debian 12.2.0-14) 12.2.0, x86_64, CONFIG_PREEMPT=y.
+  - kvm_intel.pml=Y, kvm.tdp_mmu=Y, kvm.eager_page_split=Y.
+  - CPU governor=performance, THP=madvise, NUMA balancing=1.
+
+Measured with a modified dirty_log_perf_test that allows selecting
+MANUAL_DIRTY_LOG_PROTECT2 flags independently. The modified test is named
+dirty_log_clear_probe in the commands below.
+
+Representative commands, with the executable path relocated:
+
+  CLEAR_MANUAL_CAPS=1 numactl --membind=1 \
+    dirty_log_clear_probe \
+    -v 8 -b 96M -c 3,5,7,9,11,13,15,17,27 -i 50 -w 100 -r 1
+
+  CLEAR_MANUAL_CAPS=3 numactl --membind=1 \
+    dirty_log_clear_probe \
+    -v 8 -b 96M -c 3,5,7,9,11,13,15,17,27 -i 50 -w 100 -r 1
+
+-b specifies per-vCPU tracked memory: 8 * 96MiB = 768MiB total. vCPU
+threads are pinned to CPUs 3,5,...,17; the main thread is pinned to CPU27.
+Memory is bound to node1. -w 100 makes all workload accesses writes,
+and -r 1 fixes the random seed. Each vCPU accesses a disjoint range in
+one anonymous-backed memslot, using 4KiB guest pages and sequential
+page-stride accesses. This is not a full-region byte-write bandwidth test.
+Adapt CPU/NUMA IDs on other machines. caps=1 enables MANUAL_PROTECT_ENABLE;
+caps=3 also enables INITIALLY_SET.
+
+Run each configuration seven times in fresh processes on each kernel.
+The caps order alternates between repetitions (3,1 then 1,3). The recorded
+runs interleaved these cases with other vCPU counts and region sizes.
+
+The guest first populates the region. Each iteration waits for the vCPUs
+to finish dirtying it, gets the dirty bitmap, and then clears it. CLEAR
+timing uses CLOCK_MONOTONIC around memstress_clear_dirty_log() for the
+single workload memslot. It includes helper/ioctl overhead, not only the
+in-kernel SPTE loop. Populate, dirty-log enable, guest dirtying, GET, and
+disable time are excluded. vCPUs wait for the next iteration during CLEAR;
+this does not measure continuous-writer concurrency or guest pause latency.
+
+Discard iteration 1 from each 50-iteration process. Take the median of the
+remaining 49 CLEAR timings, then the median of the seven process medians.
+Do not use the probe's printed overall average.
+
+Results for 8 vCPUs and a 768MiB tracked region:
+
+  INITIALLY_SET    Before (ms)    After (ms)    Reduction
+  disabled          2.280414      1.128757        50.5%
+  enabled           2.752557      1.607395        41.6%
+
+Ranges of the seven process medians, in ms (not confidence intervals):
+  disabled: before 2.277870..2.290569; after 1.125377..1.141876
+  enabled:  before 2.750839..2.758421; after 1.601551..1.618283
+
+CPU affinity, NUMA placement, kernel configuration and benchmark parameters
+were held fixed. Timing runs did not enable perf or tracing; separate
+profiles were excluded from these numbers. No new dmesg messages, kernel
+taint, swap, or reclaim scanning were observed in the final measurement
+window.
+
+The original and final kernels were measured on separate boots, without
+alternating between kernels. These results are CLEAR latency measurements,
+not end-to-end migration throughput. Runtime coverage is limited to the
+tested Intel/PML-enabled host; AMD and PML-disabled paths were not tested.
+
+dirty_log_test -i 32 -I 10, nested_dirty_log_test, and 80 selective-clearing
+cases covering same-table/cross-2MiB boundaries, sparse masks, bit63,
+nonzero first_page and slot tails passed on the patched kernel.
+
+ arch/x86/kvm/mmu/tdp_mmu.c | 71 +++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 51 insertions(+), 20 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: split socket lookup from locked RX processing
+[PATCH net-next v5 1/5] vsock/virtio: split socket lookup from locked RX processing
+Author: Jia Jia <physicalmtea@gmail.com>
+
+Split virtio_transport_recv_pkt() so socket lookup is separate from
+processing that occurs while holding the socket lock. This prepares the
+receive path to retain a looked-up socket across multiple packets in a
+later change.
+
+Keep virtio_transport_recv_pkt() on its existing per-packet locking path.
+Pass the caller-provided network namespace to the locked helper so reset
+handling retains its existing semantics. Preserve source validation and
+failure handling.
+
+Signed-off-by: Jia Jia <physicalmtea@gmail.com>
+---
+ net/vmw_vsock/virtio_transport_common.c | 131 ++++++++++++++----------
+ 1 file changed, 78 insertions(+), 53 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vsock/virtio: reduce RX per-packet socket overhead
+[PATCH net-next v5 0/5] vsock/virtio: reduce RX per-packet socket overhead
+Author: Jia Jia <physicalmtea@gmail.com>
+
+This series reduces per-packet socket overhead in the virtio-vsock RX
+worker.
+
+Patch 1: separate socket lookup from locked packet processing.
+
+Patch 2: factor out the RX skb metadata-budget check.
+
+Patch 3: keep one socket lock across a bounded run of established
+STREAM/RW packets for the same native socket, and reuse the locked socket
+for later same-flow packets.
+
+Patch 4: coalesce default write-space notifications while that
+lock is held.
+
+Patch 5: defer the default readable callback until after the batch
+unlocks.
+
+Performance:
+
+Tested on a single-stream vsock connection (one Guest receiver thread on
+CPU0, virtio-vsock IRQ on Guest CPU1, fresh QEMU Guest per state, with 16
+balanced AB/BA pairs per payload for each baseline/patchset comparison).
+The host uses vhost-vsock.
+
+For throughput, vsock_perf runs on the host as the
+sender, with a custom single-threaded Guest receiver pinned to Guest CPU0
+using blocking recv(). The fixed-64K table uses a 64K buffer; the matched
+table uses the sender's request size. The virtio-vsock IRQ/RX worker is
+pinned to Guest CPU1. To normalize run times across payloads into a
+bounded, deterministic window and avoid long runs being skewed by host
+background noise or virtualization scheduling jitter, transfer sizes scale
+proportionally with the request size (64B/64M, 256B/256M, etc.), capped at
+2G for 4K–64K. The custom receiver keeps the recv() size and count
+explicit; vsock_perf's receiver uses poll()+read().
+
+Latency uses a custom user-space vsock ping-pong tool.
+
+The measurements below were collected for the RX batching series.
+
+This benchmark does not run vsock_perf on both ends. Instead, it uses
+vsock_perf as the sender on the host (vhost-vsock) side and a custom
+blocking recv() program without poll() on the Guest side, with the receiver
+thread pinned to Guest CPU0 (and the virtio-vsock RX worker pinned to Guest
+CPU1). Plain blocking recv() combined with strict core pinning gives
+audit-level determinism for tracing a single-threaded TID.
+
+With all patches applied:
+
+End-to-end RX throughput (64K Guest recv() size, SO_RCVLOWAT=1; Gbit/s):
+
+  payload  baseline RX  PATCH RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B        0.1290       0.2489    +92.91% [+89.31%, +96.58%]
+  256B       0.5780       0.9727    +68.29% [+66.14%, +70.48%]
+  512B       1.1688       1.8316    +56.70% [+53.85%, +59.61%]
+  1K         2.3059       3.3377    +44.75% [+43.39%, +46.12%]
+  4K         3.8787       5.7310    +47.76% [+45.20%, +50.36%]
+  8K         4.5983       5.4575    +18.68% [+16.42%, +20.99%]
+  16K        5.0806       5.5615     +9.47% [ +8.05%, +10.90%]
+  64K        5.4842       5.6423     +2.88% [ +1.13%,  +4.67%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+Gbit/s):
+
+  payload baseline PATCH    throughput change (95% CI)    recv()
+          RX       RX                                     (base/patch)
+          (Gbit/s) (Gbit/s)
+  64B      0.1384   0.2532   +82.99% [+74.19%, +92.24%]       1048577/1048577
+  256B     0.4042   0.8983  +122.25% [+113.06%, +131.85%]    1048577/1048577
+  512B     0.8056   1.6035   +99.05% [+89.34%, +109.26%]      1048577/1048577
+  1K       1.6030   2.7158   +69.42% [+63.22%, +75.85%]       1048577/1048577
+  4K       3.0194   4.9586   +64.22% [+58.43%, +70.23%]       536799/525225
+  8K       3.8316   5.1255   +33.77% [+31.00%, +36.59%]       274864/263013
+  16K      4.5702   5.3808   +17.74% [+14.87%, +20.67%]       144958/131332
+  64K      5.4736   5.7118    +4.35% [ +2.79%,  +5.94%]        49039/32938
+
+Request-response latency (Ping-Pong RTT, 10,000 requests):
+
+  payload  baseline mean RTT (us)  PATCH mean RTT (us)  change (95% CI)
+  64B      224.148                  224.151              +0.00%
+                                                        [-2.26%, +2.32%]
+  256B     222.037                  224.499              +1.11%
+                                                        [-1.66%, +3.95%]
+  4K       225.982                  227.026              +0.46%
+                                                        [-1.15%, +2.10%]
+
+Guest CPU1 aggregate cycles per received byte (fixed 64K receiver, with perf):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  64B        65.282    57.843  -11.40% [-13.77%, -8.95%]
+  256B       14.710    13.813   -6.10% [ -7.89%, -4.28%]
+  512B        7.709     7.188   -6.75% [ -8.79%, -4.66%]
+  1K          4.075     3.862   -5.23% [ -6.80%, -3.63%]
+  4K          2.034     1.887   -7.21% [ -8.67%, -5.72%]
+  8K          1.664     1.568   -5.78% [ -7.83%, -3.69%]
+  16K         1.450     1.385   -4.48% [ -6.08%, -2.86%]
+  64K         1.338     1.317   -1.51% [ -3.21%, +0.22%]
+
+P1-P3 contribution:
+
+  payload  baseline RX  PATCH RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B        0.1285       0.2462    +91.59% [+79.74%, +104.22%]
+  256B       0.5909       0.9666    +63.59% [+61.03%, +66.19%]
+  512B       1.1817       1.8350    +55.29% [+46.76%, +64.32%]
+  1K         2.3252       3.3600    +44.50% [+38.93%, +50.30%]
+  4K         3.8436       5.5661    +44.82% [+40.30%, +49.47%]
+  8K         4.6609       5.4115    +16.10% [ +8.91%, +23.77%]
+  16K        5.1196       5.6399    +10.16% [ +4.07%, +16.61%]
+  64K        5.6095       5.7062     +1.72% [-3.19%, +6.89%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+no perf; Gbit/s):
+
+  payload baseline PATCH    throughput change (95% CI)    recv()
+          RX       RX                                     (base/patch)
+          (Gbit/s) (Gbit/s)
+  64B      0.1446   0.2540   +75.71% [+63.67%, +88.62%]       1048577/1048577
+  256B     0.4211   0.9061  +115.18% [+72.13%, +169.00%]     1048577/1048577
+  512B     0.7980   1.6112  +101.90% [+95.30%, +108.72%]     1048577/1048577
+  1K       1.4965   2.6986   +80.33% [+68.93%, +92.49%]       1048577/1048577
+  4K       2.9384   4.8590   +65.36% [+60.17%, +70.72%]       539544/524982
+  8K       3.8170   5.1887   +35.94% [+27.66%, +44.75%]       274857/262991
+  16K      4.6856   5.5996   +19.51% [+15.36%, +23.81%]       147518/131351
+  64K      5.5182   5.8800    +6.56% [-0.83%, +14.49%]        48492/32910
+
+Guest CPU1 aggregate cycles per received byte (fixed 64K receiver, with perf):
+
+  Buffer size  baseline cycles/B  PATCH cycles/B  cycles change (95% CI)
+  64B        66.728    61.220  -8.25% [-18.99%, +3.91%]
+  256B       14.363    14.515  +1.06% [ -4.22%, +6.64%]
+  512B        7.792     7.578  -2.74% [ -6.55%, +1.23%]
+  1K          3.988     4.032  +1.09% [ -1.64%, +3.88%]
+  4K          2.063     1.973  -4.38% [ -8.23%, -0.37%]
+  8K          1.702     1.667  -2.06% [ -7.99%, +4.25%]
+  16K         1.473     1.475  +0.17% [ -5.06%, +5.68%]
+  64K         1.385     1.358  -1.96% [-10.61%, +7.53%]
+
+P4-P5 contribution (combined):
+
+End-to-end RX throughput (64K Guest recv() size, SO_RCVLOWAT=1; Gbit/s):
+
+  payload  P1-P3 RX  P1-P5 RX  throughput change (95% CI)
+           (Gbit/s)      (Gbit/s)
+  64B        0.2449       0.2463    +0.55% [-3.86%, +5.17%]
+  256B       0.9649       0.9931    +2.93% [+0.83%, +5.07%]
+  512B       1.8205       1.8260    +0.30% [-4.27%, +5.10%]
+  1K         3.3431       3.3420    -0.03% [-2.15%, +2.12%]
+  4K         5.6541       5.8428    +3.34% [+1.10%, +5.63%]
+  8K         5.4280       5.3364    -1.69% [-15.55%, +14.46%]
+  16K        5.5935       5.6701    +1.37% [-1.41%, +4.23%]
+  64K        5.6917       5.8351    +2.52% [-0.20%, +5.31%]
+
+Fixed-syscall stress test (receiver recv() size = sender write size;
+Gbit/s):
+
+  payload P1-P3 P1-P5    throughput change (95% CI)    recv()
+          RX       RX                                     (P1-P3/P1-P5)
+          (Gbit/s) (Gbit/s)
+  64B      0.2553   0.2575   +0.87% [-3.68%, +5.63%]          1048577/1048577
+  256B     0.9069   0.9183   +1.26% [-3.96%, +6.76%]          1048577/1048577
+  512B     1.6048   1.6459   +2.56% [+0.98%, +4.18%]          1048577/1048577
+  1K       2.6939   2.7357   +1.55% [-1.35%, +4.54%]          1048577/1048577
+  4K       4.9168   4.9678   +1.04% [-1.84%, +4.00%]          524965/525283
+  8K       5.1476   5.2005   +1.03% [-4.02%, +6.34%]          262926/263156
+  16K      5.5964   5.6609   +1.15% [-2.86%, +5.33%]          131311/131475
+  64K      5.9439   5.9073   -0.62% [-3.00%, +1.83%]          32875/32937
+
+Guest CPU1 aggregate cycles per received byte (fixed 64K receiver, with perf):
+
+  payload     P1-P3     P1-P5  change (95% CI)
+  64B        60.281    58.258  -3.36% [-8.74%, +2.35%]
+  256B       14.242    13.648  -4.17% [-9.81%, +1.82%]
+  512B        7.547     7.211  -4.45% [-9.73%, +1.13%]
+  1K          3.987     3.853  -3.35% [-8.52%, +2.12%]
+  4K          1.983     1.880  -5.17% [-7.97%, -2.27%]
+  8K          1.665     1.620  -2.75% [-9.03%, +3.96%]
+  16K         1.409     1.346  -4.52% [-10.94%, +2.37%]
+  64K         1.322     1.281  -3.11% [-6.49%, +0.38%]
+
+---
+This rerun used a stable host with a single Guest running and no background
+workload. The baseline throughput is higher and more stable than in v4, and
+the previous anomalous 4K throughput spike was not reproduced, confirming it
+was an artifact of host-side scheduling jitter. Consequently, while the
+absolute throughput numbers differ due to the cleaner host environment, the
+relative CPU cycle savings and syscall reductions remain consistent and
+robust.
+
+v5:
+  - split the former batching patch into a metadata-budget helper (patch 2)
+    and the batching policy itself (patch 3)
+  - retain write-space coalescing and deferred data-ready handling as
+    separate patches (patches 4 and 5)
+  - document why a connected lookup type mismatch returns to the regular
+    receive path, which sends the reset
+  - restore reverse-Christmas-tree declaration order in the batch helpers
+  - add the requested cap rationale, guest-virtio-only scope explanation,
+    and cumulative performance results to patch 3
+  - add cumulative full-series performance results to patch 5 and identify
+    the P4/P5 result as a combined measurement
+  - use AF_VSOCK helpers for native callback access and save native
+    callbacks before socket publication
+  - serialize callback/protocol/psock eligibility checks with
+    sk_callback_lock at every notification batch boundary
+  - make the callback timing dependency explicit: patch 4 retains the
+    under-lock context and patch 5 moves both notification types after
+    release_sock()
+  - share the receive low-watermark predicate between the ordinary and
+    deferred data-ready paths
+  - clarify the caller-provided network namespace and locking contract in
+    the preparatory lookup split
+v4:
+  - use only the connected socket lookup for batch admission and return
+    misses to the normal receive path
+  - read packet-specific addresses from the skb in the locked receive
+    helper and use the matched socket namespace for reset replies
+  - remove the extra address and network namespace arguments from the
+    locked receive helper
+v3:
+  - restrict RX batching to sockets using the original protocol and
+    data-ready/write-space callbacks
+  - exclude sockets carrying the psock marker published before sockmap
+    protocol/callback replacement, and recheck it at each packet boundary
+  - preserve existing sockmap update return values; an attach racing a
+    native batch makes the next packet end the batch without queued-skb
+    handoff
+  - remove a leftover blank line after an opening brace
+  - remove callback handoff work and attach/detach kicks, preserving the
+    existing per-packet behavior for sockmap and other non-native sockets
+  - avoid making this series drain queued or partially consumed skbs when a
+    socket is added to or removed from a sockmap
+  - clarify that Patch 1 prepares for batching and intends no functional
+    change
+  - inline address decoding and receive tracing, simplify the socket lookup
+    helper, and pass locked receive arguments directly
+  - fold same-flow lookup reuse into Patch 2 and match packets against the
+    locked socket state, reducing the series from five patches to four
+v2:
+  - stop a batch after it consumes the last skb metadata slot, sharing the
+    admission predicate with virtio_transport_inc_rx_pkt()
+  - move replacement-callback handoff into vsock, process queued skbs one
+    at a time, and trigger the handoff from vsock_bpf_update_proto() on
+    attach and detach
+  - reduce the packet-context diff in the locked receive helper
+  - keep RX batch counters in the batch state and reset them in the finish
+    path
+  - use the vsock/virtio subject prefix and add the requested measurements
+v1: https://lore.kernel.org/virtualization/20261002074551.318789-1-physicalmtea@gmail.com/
+
+Jia Jia (5):
+  vsock/virtio: split socket lookup from locked RX processing
+  vsock/virtio: factor RX skb metadata budget check
+  vsock/virtio: amortize RX socket locking for stream packets
+  vsock/virtio: coalesce native RX write-space notifications
+  vsock/virtio: defer native RX readiness notifications until batch
+    unlock
+
+ include/linux/virtio_vsock.h            |  26 ++
+ include/net/af_vsock.h                  |  11 +
+ net/vmw_vsock/af_vsock.c                |  45 ++-
+ net/vmw_vsock/virtio_transport.c        |   7 +-
+ net/vmw_vsock/virtio_transport_common.c | 440 +++++++++++++++++++++---
+ 5 files changed, 471 insertions(+), 58 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From f55f29b60 to 267731ebc
+KVM mailing list update from f55f29b60 to 267731ebc
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      6 kernel.org
+      5 linux.dev
+
+Top 15 contributors (Based on Email Body)
+
+      5  Fuad Tabba <fuad.tabba@linux.dev>
+      4  Mark Brown <broonie@kernel.org>
+      1  Will Deacon <will@kernel.org>
+      1  Ard Biesheuvel <ardb@kernel.org>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  KVM: selftests: arm64: Report set_id_reg reads of
+[PATCH v9 1/3] KVM: selftests: arm64: Report set_id_reg reads of
+Author: Mark Brown <broonie@kernel.org>
+
+Currently when we run guest code to validate that the values we wrote to
+the registers are seen by the guest we assert that these values match using
+a KVM selftests level assert, resulting in unclear diagnostics if the test
+fails. Replace this assert with reporting a kselftest test per register.
+
+In order to support getting the names of the registers we repaint the array
+of ID_ registers to store the names and open code the rest.
+
+Reviewed-by: Ben Horgan <ben.horgan@arm.com>
+Reviewed-by: Lorenzo Stoakes (ARM) <ljs@kernel.org>
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 82 +++++++++++++++++++------
+ 1 file changed, 63 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: arm64: Improve diagnostics from
+[PATCH v9 0/3] KVM: selftests: arm64: Improve diagnostics from
+Author: Mark Brown <broonie@kernel.org>
+
+While debugging issues related to aarch64 only systems I ran into
+speedbumps due to the lack of detail in the results reported when the
+guest register read and reset value preservation tests were run, they
+generated an immediately fatal assert without indicating which register
+was being tested. Update these tests to non-fatally report a standard
+kselftest result per register, making it much easier to see what the
+problem being reported is.
+
+A similar issue exists with the validation of the individual bitfields
+in registers due to the use of immediately fatal asserts. Update those
+asserts to be standard kselftest reports.
+
+Signed-off-by: Mark Brown <broonie@kernel.org>
+---
+Changes in v9:
+- Rebase onto v7.4-rc1.
+- Link to v8: https://patch.msgid.link/20260929-kvm-arm64-set-id-regs-aarch64-v8-0-58aabe2c2fac@kernel.org
+
+Changes in v8:
+- Convert another assert.
+- Link to v7: https://patch.msgid.link/20260901-kvm-arm64-set-id-regs-aarch64-v7-0-7b065b0bda9a@kernel.org
+
+Changes in v7:
+- Rebase onto v7.3-rc1.
+- Link to v6: https://patch.msgid.link/20260719-kvm-arm64-set-id-regs-aarch64-v6-0-724287f5f108@kernel.org
+
+Changes in v6:
+- Rebase onto v7.2-rc3.
+- Drop changes to handling of aarch32 related registers on 64 bit only
+  systems, an in kernel solution is preferred for those.
+- Use a define to count the non-test_regs registers.
+- Link to v5: https://patch.msgid.link/20260317-kvm-arm64-set-id-regs-aarch64-v5-0-a60f2b956e22@kernel.org
+
+Changes in v5:
+- Rebase onto v7.0-rc1.
+- Link to v4: https://patch.msgid.link/20260106-kvm-arm64-set-id-regs-aarch64-v4-0-c7ef4551afb3@kernel.org
+
+Changes in v4:
+- Correct check for 32 bit ID registers.
+- Link to v3: https://patch.msgid.link/20251219-kvm-arm64-set-id-regs-aarch64-v3-0-bfa474ec3218@kernel.org
+
+Changes in v3:
+- Rebase onto v6.19-rc1.
+- Link to v2: https://patch.msgid.link/20251114-kvm-arm64-set-id-regs-aarch64-v2-0-672f214f41bf@kernel.org
+
+Changes in v2:
+- Add a fix for spurious failures with 64 bit only guests.
+- Link to v1: https://patch.msgid.link/20251030-kvm-arm64-set-id-regs-aarch64-v1-0-96fe0d2b178e@kernel.org
+
+---
+Mark Brown (3):
+      KVM: selftests: arm64: Report set_id_reg reads of test registers as tests
+      KVM: selftests: arm64: Report register reset tests individually
+      KVM: selftests: arm64: Make set_id_regs bitfield validity checks non-fatal
+
+ tools/testing/selftests/kvm/arm64/set_id_regs.c | 130 ++++++++++++++++++------
+ 1 file changed, 98 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Use S1E1A when Stage-1 PIE is supported
+[PATCH] KVM: arm64: Use S1E1A when Stage-1 PIE is supported
+Author: Will Deacon <will@kernel.org>
+
+On a system with stage-1 PIE, a guest can try to execute from an
+execute-only mapping at stage-1 but trigger a permission fault at
+stage-2 if the stage-2 mapping is execute-never.
+
+In this case, the EL2 permission fault handler will attempt to translate
+the faulting VA using an AT S1E1R operation, which will fail due to the
+lack of read permission at stage-1. We will then return to the guest and
+take the exact same fault the next time around.
+
+Similarly to commit 55f4b215fb60 ("KVM: arm64: use `at s1e1a` for POE"),
+use the S1E1A operation to bypass stage-1 permission checks when
+obtaining the IPA for a stage-2 permission fault. Like FEAT_S1POE,
+FEAT_S1PIE implies FEAT_ATS1A, so extend the existing AT invocation in
+__translate_far_to_hpfar() to use the permission-bypassing variant when
+S1PIE is implemented.
+
+Cc: Marc Zyngier <maz@kernel.org>
+Cc: Oliver Upton <oupton@kernel.org>
+Cc: Fuad Tabba <fuad.tabba@linux.dev>
+Cc: Joey Gouly <joey.gouly@arm.com>
+Cc: Steffen Eiden <seiden@linux.ibm.com>
+Cc: Ard Biesheuvel <ardb@kernel.org>
+Signed-off-by: Will Deacon <will@kernel.org>
+---
+
+I've been debugging an external report of a failure in Android related
+to S1PIE. The symptoms match what I would expect from this issue and
+this patch has been reported to fix the problem, but I don't have enough
+information to know for sure that my analysis is correct. I've had to
+piece things together based on partial information and bits of logs.
+
+ arch/arm64/include/asm/cpufeature.h    | 5 +++++
+ arch/arm64/kvm/hyp/include/hyp/fault.h | 5 +++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Don't walk the whole IPA space when destroying a pKVM stage-2
+[PATCH 1/3] KVM: arm64: Don't walk the whole IPA space when destroying a pKVM stage-2
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Since commit 4ddfab5436b6 ("KVM: arm64: Reschedule as needed when
+destroying the stage-2 page-tables"), kvm_stage2_destroy() steps through
+the IPA space in block-sized chunks, and with pKVM each chunk is a
+lookup in the VM's mapping tree. However, pKVM gives every VM the host's
+IPA limit, so with LPA2 a teardown makes 2^27 lookups with 16K pages
+(2^22 with 4K), nearly all of them for empty space.
+
+Walk the mapping tree once instead, and reschedule after passing each
+mapping to the reclaim or unshare helper. The unshare helper can't
+reschedule itself, as the map and unmap paths call it under the
+mmu_lock. A failed unshare now leaves only its own mapping behind, not
+the rest of its chunk.
+
+Fixes: 4ddfab5436b69 ("KVM: arm64: Reschedule as needed when destroying the stage-2 page-tables")
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/mmu.c  |  7 ++++++-
+ arch/arm64/kvm/pkvm.c | 17 +++++++++++++----
+ 2 files changed, 19 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: arm64: Stop stage-2 teardown scaling with the IPA size
+[PATCH 0/3] KVM: arm64: Stop stage-2 teardown scaling with the IPA size
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Two fixes for stage-2 teardown, which since 4ddfab5436b6 takes time
+proportional to the size of the IPA space rather than to what is mapped.
+
+Under QEMU TCG ('-cpu max', 16K pages with LPA2), destroying even an
+empty VM takes about 7 seconds in pKVM. Without pKVM it takes about 19
+seconds if the VM requests a 52-bit IPA (crosvm requests the host's
+limit). I would expect it to scale the same way in hardware. I tested
+only under QEMU, since I don't have hardware with LPA2.
+
+pKVM gives every VM the host's IPA limit. The first makes it release the
+VM's mappings from its tree instead of walking that space. My series
+honoring KVM_VM_TYPE_ARM_IPA_SIZE in pKVM [1] (respinning it soon)
+doesn't replace the fix, as crosvm requests the limit there too.
+
+The second makes the non-pKVM teardown step over an empty entry larger
+than the largest block in one go, rather than start a new walk for each
+block-sized chunk of it. It depends on the first, as the lookup it adds
+reads fields that hold the mapping tree on a pKVM stage-2.
+
+The third moves the pKVM/non-pKVM split in the teardown into
+kvm_vm_s2_ops, with no functional change. The first two apply back to
+7.1, except that a backport of the second drops the flags argument 7.4
+added to kvm_pgtable_get_leaf().
+
+Based on Linux 7.4-rc1 (6628e7d4c6b25).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20260917091826.2639205-1-fuad.tabba@linux.dev/
+
+Fuad Tabba (3):
+  KVM: arm64: Don't walk the whole IPA space when destroying a pKVM
+    stage-2
+  KVM: arm64: Skip empty IPA ranges when destroying stage-2 page-tables
+  KVM: arm64: Move stage-2 teardown into kvm_vm_s2_ops
+
+ arch/arm64/include/asm/kvm_host.h |  2 ++
+ arch/arm64/kvm/mmu.c              | 34 +++++++++++++++++++++++--------
+ arch/arm64/kvm/pkvm.c             | 17 ++++++++++++----
+ 3 files changed, 41 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
