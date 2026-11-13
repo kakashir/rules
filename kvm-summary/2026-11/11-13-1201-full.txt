@@ -1,0 +1,4122 @@
+
+On /root/mail/repo:
+From 51907f604 to e9303e99a
+KVM mailing list update from 51907f604 to e9303e99a
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     21 nvidia.com
+     17 kernel.org
+     16 linux.intel.com
+     16 intel.com
+     10 suse.de
+     10 pengutronix.de
+      3 kylinos.cn
+      3 google.com
+      3 gmail.com
+      3 amazon.co.uk
+      1 tencent.com
+      1 redhat.com
+      1 rbox.co
+      1 oracle.com
+      1 mailbox.org
+
+Top 15 contributors (Based on Email Body)
+
+     21  Shameer Kolothum <skolothumtho@nvidia.com>
+     17  "Aneesh Kumar K.V (Arm)" <aneesh.kumar@kernel.org>
+     16  Zide Chen <zide.chen@intel.com>
+     10  =?UTF-8?q?Carlos=20L=C3=B3pez?= <clopez@suse.de>
+     10  Steffen Trumtrar <s.trumtrar@pengutronix.de>
+     10  Lu Baolu <baolu.lu@linux.intel.com>
+      6  Dapeng Mi <dapeng1.mi@linux.intel.com>
+      3  Khan Zhao <zhaoguohan@kylinos.cn>
+      3  David Woodhouse <dwmw@amazon.co.uk>
+      2  "Ritesh Harjani (IBM)" <ritesh.list@gmail.com>
+      2  Jim Mattson <jmattson@google.com>
+      1  Suyuan Wang <stevewong@hust.edu.cn>
+      1  Samiullah Khawaja <skhawaja@google.com>
+      1  Priyanka Mani <priyankamani2100@gmail.com>
+      1  Michal Luczaj <mhal@rbox.co>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 2/2] KVM: PPC: BOOK3S HV: Use ksm_disable() for secure guests
+Author: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+
+Pages of a secure guest are moved to device private memory with
+migrate_vma_*(), which can't be done for a KSM page. So, when a guest
+wants to switch to secure mode, kvmppc_memslot_page_merge(), walks the
+VMAs backing each memslot and calls for ksm_madvise(MADV_UNMERGEABLE) on
+them. It does the reverse if the H_SVM_INIT_START fails or when the
+memslot is getting deleted.
+
+Instead of using ksm_madvise(), one can use ksm_disable() on the mm.
+IIUC, ksm_disable() was introduced for this purpose itself in commit
+  2c281f54f556e ("mm/ksm: move disabling KSM from s390/gmap code to KSM code").
+
+Also, it seems there are other existing issues in current code.
+For e.g. The current code can turn KSM on for the memory the VMM never
+marked mergeable. This can happen say for a guest whose H_SVM_INIT_START
+fails and therefore the cleanup routine ends up setting VM_MERGEABLE on
+it's memory.
+
+Note: This was spotted and reported in one of the series which was
+converting legacy vm_flags_t to vma_flags_t, showing concern around why
+powerpc has to call into an mm internal functions. Besides, this is the
+only remaining user of ksm_madvise(), outside of mm.
+
+Let's fix the existing issues and also address the reported concern.
+
+Reported-by: David Hildenbrand (Arm) <david@kernel.org>
+Closes: https://lore.kernel.org/linuxppc-dev/1c0b1368-a381-4b25-bba9-7a4f8e92b764@kernel.org/
+Signed-off-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+---
+ arch/powerpc/include/asm/kvm_book3s_uvmem.h |  1 +
+ arch/powerpc/kvm/book3s_hv_builtin.c        | 26 ++++++++
+ arch/powerpc/kvm/book3s_hv_uvmem.c          | 69 ++++-----------------
+ mm/ksm.c                                    |  1 -
+ 4 files changed, 40 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] KVM: PPC: BOOK4S HV: Fix memslot rollback in H_SVM_INIT_START
+Author: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+
+If registering a memslot with the ultravisor fails,
+kvmppc_h_svm_init_start() is supposed to undo the memslots it has
+already registered. The loop walks them with "m", however it wrongly
+passes "memslot" instead (which failed to get registered).
+
+Fix the loop by passing "m" instead, the memslot which was registered
+successfully, for rollback from the beginning.
+
+Fixes: 2027a24a75ce ("KVM: PPC: Book3S HV: Disable page merging in H_SVM_INIT_START")
+Signed-off-by: Ritesh Harjani (IBM) <ritesh.list@gmail.com>
+---
+ arch/powerpc/kvm/book3s_hv_uvmem.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vfio/spapr: Check the whole IOVA range in
+Author: Suyuan Wang via B4 Relay <devnull+shyckless.gmail.com@kernel.org>
+
+
+VFIO_IOMMU_MAP_DMA checks the request with iommu_tce_put_param_check(),
+which only checks one page against the DMA window:
+
+    #define iommu_tce_put_param_check(tbl, ioba, gpa)          \
+            (iommu_tce_check_ioba((tbl)->it_page_shift,        \
+                            (tbl)->it_offset, (tbl)->it_size,  \
+                            (ioba), 1) ||                      \
+
+tce_iommu_ioctl() then maps the whole size:
+
+    ret = iommu_tce_put_param_check(tbl, param.iova, param.vaddr);
+    ...
+    ret = tce_iommu_build(container, tbl,
+                    param.iova >> tbl->it_page_shift,
+                    param.vaddr,
+                    param.size >> tbl->it_page_shift,
+                    direction);
+
+tce_iommu_build() and tce_iommu_build_v2() write one TCE per page,
+entry + i for i up to the page count, and nothing below them checks the
+index. On PowerNV, iommu_tce_xchg_no_kill() goes through pnv_tce_xchg()
+to pnv_tce(), which for a single level table ends with
+
+    return tmp + idx;
+
+where tmp is it_base. So a mapping that starts inside the window and
+runs past its end writes TCEs past the end of the table. Each of them
+holds the host physical address of one of the caller's pages plus
+permission bits. v2 also stores the caller's userspace addresses past
+the end of it_userspace, through the same pnv_tce() lookup.
+
+To get there the caller needs an enabled SPAPR TCE container with a
+group attached and valid memory behind the whole range (preregistered
+for v2), which is what QEMU sets up for device passthrough.
+
+VFIO_IOMMU_UNMAP_DMA already checks the whole range. Do the same for
+MAP_DMA. This relies on commit 0b271f7d7f5e ("powerpc/iommu: Fix the
+overflow validation in iommu_tce_check_ioba"), before which
+iommu_tce_check_ioba() ignored npages, so stable trees need that commit
+too.
+
+Found with a static analysis tool and checked by hand.
+
+Fixes: 5ffd229c0273 ("powerpc/vfio: Implement IOMMU driver for VFIO")
+Cc: stable@vger.kernel.org
+Co-developed-by: Kaixuan Li <kaixuan.li@ntu.edu.sg>
+Signed-off-by: Kaixuan Li <kaixuan.li@ntu.edu.sg>
+Signed-off-by: Suyuan Wang <stevewong@hust.edu.cn>
+---
+Compile tested only, I don't have a PowerNV machine to try passthrough.
+---
+ drivers/vfio/vfio_iommu_spapr_tce.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 17/16] Documentation: kvm: Renumber KVM_CREATE_PLANE and restore the kvm_run label
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The KVM_CREATE_PLANE section was inserted between the .. _kvm_run:
+label and "5. The kvm_run structure", so the :ref:`kvm_run` in the
+KVM_CAP_SYNC_REGS text now links to KVM_CREATE_PLANE. It also took the
+number 4.145, which KVM_PPC_GET_COMPAT_CAPS already has, leaving 4.147
+unused.
+
+Move the label back above section 5 and number the section 4.147.
+
+Found by a local Sashiko review.
+
+Fixes the section placement in "Documentation: kvm: introduce "VM
+plane" concept".
+
+Fixes: https://lore.kernel.org/all/20260608144252.351443-9-joro@8bytes.org/
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ Documentation/virt/kvm/api.rst | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 18/16] KVM: SVM: Bound the SNP plane count by the architectural VMPL limit
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+sev_snp_max_planes() reports the VMPL count straight from CPUID
+0x8000001f EBX[15:12], a 4-bit field the host provides. A value above
+four lets userspace create SNP planes that no VMPL switch can ever
+reach, because the switch already refuses a VMPL at or above
+SVM_SEV_VMPL_MAX.
+
+Clamp the count to between one and SVM_SEV_VMPL_MAX, so that a
+VM's plane count never exceeds what the architecture defines.
+
+Fixes the plane count in "kvm: svm: Implement max_planes x86
+operation".
+
+Fixes: https://lore.kernel.org/all/20260608144252.351443-60-joro@8bytes.org/
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/svm/sev.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vfio/pci: Only lock the upstream bridge if the reset may need it
+Author: Samiullah Khawaja <skhawaja@google.com>
+
+Commit 962ae6892d8b ("vfio/pci: Lock upstream bridge for
+vfio_pci_core_disable()") makes vfio_pci_core_disable() trylock the
+upstream bridge before resetting the device, and skips the reset if the
+trylock fails.
+
+All VFs of a PF have the same upstream bridge. Take a device with two
+VFs, both used by one process. When the process is killed, both VFs can
+be released at the same time. The first one takes the bridge lock and
+does its FLR, the second one fails the trylock and is never reset.
+
+The bridge lock is only needed for a bus reset, which is done through
+the bridge. A VF is reset with FLR, and pci_parent_bus_reset() never
+resets the bus for it because the PF and the other VFs are on the same
+bus.
+
+Add pci_reset_needs_bridge_lock(), which returns true if any reset
+method enabled for the device is a bus reset, and only lock the bridge
+in vfio_pci_core_disable() when it does.
+
+Fixes: 962ae6892d8b ("vfio/pci: Lock upstream bridge for vfio_pci_core_disable()")
+Cc: stable@vger.kernel.org
+Signed-off-by: Samiullah Khawaja <skhawaja@google.com>
+---
+Tested in QEMU with an igb PF behind a PCIe root port, bound to vfio-pci
+with two VFs. Both VFs are opened through VFIO and then closed from two
+threads at the same time, counting FLRs with a kprobe on pcie_flr().
+Without this patch one VF missed its FLR in 50 of 50 rounds, with it
+both VFs were reset in every round. I will send a VFIO selftest for this
+separately.
+---
+ drivers/pci/pci.c                | 28 ++++++++++++++++++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c |  3 ++-
+ include/linux/pci.h              |  1 +
+ 3 files changed, 31 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nSVM: Gate CET state copy in svm_copy_vmrun_state() on
+Author: Jim Mattson <jmattson@google.com>
+
+Like nested_vmcb02_prepare_save() and nested_svm_vmexit_update_vmcb12(),
+svm_copy_vmrun_state() should gate copying s_cet, isst_addr, and ssp on
+guest_cpu_cap_has(vcpu, X86_FEATURE_SHSTK) (i.e. the feature is advertised
+to the guest). Instead, copying is gated on
+kvm_cpu_cap_has(X86_FEATURE_SHSTK) (i.e. the host supports shadow stacks).
+
+Check guest_cpu_cap_has(vcpu, X86_FEATURE_SHSTK) instead of
+kvm_cpu_cap_has(X86_FEATURE_SHSTK) in svm_copy_vmrun_state().
+
+Fixes: c5ba49458513 ("KVM: nSVM: Save/load CET Shadow Stack state to/from vmcb12/vmcb02")
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/nested.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 20/21] KVM: x86/pmu: Advertise PerfMon version 5 on Intel hosts
+Author: Zide Chen <zide.chen@intel.com>
+
+
+KVM currently caps the guest PerfMon version at 2 for all Intel
+platforms. Now that KVM emulates the basic architectural PMU features
+introduced in PerfMon versions 3 through 5, raise the guest PerfMon
+version to 5. Features that require additional emulation support, e.g.
+architectural LBR will be enabled separately.
+
+PerfMon versions 3 and 4 continue to be exposed as version 2 because
+KVM cannot safely virtualize AnyThread due to cross-VM information
+leakage. PerfMon v5 is supported because it provides the
+AnyThread-deprecated capability, allowing KVM to indicate that
+AnyThread is deprecated.
+
+When enable_mediated_pmu is disabled or in the non-Intel paths, KVM
+retains the existing cap of version 2.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+v3:
+- Simplify version cap logic since mediated PMU already requires
+  version >= 4. (Jim)
+v2:
+- Cap vPMU v3/v4 to v2, as AnyThread cannot be safely virtualized.
+  (Sashiko)
+---
+ arch/x86/kvm/pmu.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 18/21] KVM: x86/pmu: Mask only OS/USR bits when filtering fixed counters
+Author: Zide Chen <zide.chen@intel.com>
+
+In preparation for supporting AnyThread deprecation and Fixed Counter 3,
+mask only INTEL_FIXED_0_KERNEL and INTEL_FIXED_0_USER when updating
+fixed_ctr_ctrl_hw in kvm_mediated_pmu_refresh_event_filter().
+
+Masking the full 0xf nibble would cause two issues:
+
+1. AnyThread for Fixed Counters 0-2: When a counter is allowed, copying
+   the full nibble from guest-visible pmu->fixed_ctr_ctrl back into
+   hardware-visible pmu->fixed_ctr_ctrl_hw would resurrect AnyThread in
+   hardware, defeating SMT cross-VM isolation.
+
+2. Metrics Clear for Fixed Counter 3: If an event filter denies Fixed
+   Counter 3, clearing 0xf inadvertently strips METRICS_CLEAR_EN from
+   hardware. If the guest sets METRICS_CLEAR_EN and executes native RDPMC,
+   metrics will remain un-cleared, returning stale data.
+
+This gates hardware counting without clobbering other control bits,
+matching general-purpose counter filtering which only masks the event
+ENABLE bit.
+
+Suggested-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+v3:
+- New patch.
+---
+ arch/x86/kvm/pmu.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/21] KVM: x86/pmu: Add mediated vPMU PerfMon v5 support
+Author: Zide Chen <zide.chen@intel.com>
+
+KVM currently caps the guest Intel architectural PMU version at 2 and
+relies on counter-count fields that cannot describe sparse or
+non-contiguous fixed counters.
+
+Rework KVM's vPMU to track counters with bitmasks instead of counts, so
+mediated-PMU guests can use Intel PerfMon v5 and non-contiguous fixed
+counters, and lay the groundwork for non-contiguous GP counters (CPUID
+leaf 0x23). This series also adds support for new features
+introduced in PerfMon v3-v5.
+
+- CPUID.0AH:ECX fixed-counter bitmap (v5): supersedes EDX[4:0] and
+  lets KVM/guests represent non-contiguous fixed counters (e.g. some
+  E-core server parts skip fixed counter 3).
+- Support IA32_PERF_GLOBAL_STATUS_RESET (v4): inherits MSR 0x390 and its
+  emulation from IA32_PERF_GLOBAL_OVF_CTRL; mark CondChgd (bit 63)
+  reserved in IA32_PERF_GLOBAL_STATUS while allowing it to be cleared
+  on STATUS_RESET, and document its mediated-PMU passthrough erratum in
+  errata.rst.
+- Add support for IA32_PERF_GLOBAL_STATUS_SET (v4): lets software set
+  individual bits in the global status MSR.
+- Add support for IA32_PERF_GLOBAL_INUSE (v4): reports which counters
+  and PMI are currently claimed.
+- Implement ANYTHREAD_DEPRECATION capability (v5).
+- Clamp guest PMU version to KVM's host capabilities (pmu->version):
+  ensures KVM's internal state tracks the effective PMU version that
+  KVM can actually emulate, matching how bit_width, mask_length, and
+  nr_{gp,fixed}_counters are clamped.
+
+Intel PerfMon v5 doesn't support non-contiguous GP counters; however,
+this series lays the groundwork for GP counter bitmap support anyway,
+for consistency with the host perf API interface, and prepares for
+PerfMon Masking support.
+
+Freeze_PerfMon_On_PMI virtualization is not implemented because, as
+commit 3daa96d67274 ("perf/intel: Remove Perfmon-v4 counter_freezing
+support") states, the Freeze-on-PMI mechanism violates the perf counter
+independence.
+
+Streamlined Freeze_LBRs_On_PMI is not implemented because LBR is not
+yet supported on mediated vPMU.
+
+Mutual exclusion between Intel PT and mediated vPMU, to prevent host PT
+PMIs from asserting IA32_PERF_GLOBAL_STATUS.Trace_ToPA_PMI (bit 55)
+while guest PMU context is loaded, as analyzed by Yosry Ahmed, is left
+out of this series and will be addressed in a separate follow-up patch.
+
+Tests are described in v2 cover letter.
+
+Patch series summary:
+patch 1-4: Code cleanups and bug fixes.
+patch 5-10: Implement PMC bitmap support across perf and KVM.
+patch 11-19: Implement PerfMon v4-v5 new features, including PMU
+             version clamping.
+patch 20: Advertise PerfMon version up to v5 on Intel hosts.
+patch 21: Support fixed counters bitmap in pmu_counters_test selftest.
+
+Rebased on kvm-x86/next: commit cbe54fc3462b("Merge branch 'vmx'")
+
+v4:
+ - New patches:
+   - Patch 1: Drop redundant counter MSR checks in amd_is_valid_msr().
+     (Jim)
+   - Patch 12: Handle CondChgd (bit 63) asymmetry: mark bit 63 reserved
+     in global_status_rsvd to reject writes to GLOBAL_STATUS{,_SET},
+     while allowing writes to STATUS_RESET. (Jim, Yosry)
+   - Patch 15: Clamp pmu->version to kvm_pmu_cap.version. (Sean, Yosry)
+ - Collected Reviewed-by tags, but did not carry Reviewed-by on patches
+   5, 9, and 13 due to code changes.
+ - All other changes are non-functional, including code improvements,
+   coding style cleanups, and patch rearrangements.
+
+v3:
+ - https://lore.kernel.org/kvm/20261106013927.166209-1-zide.chen@intel.com/
+ - Dropped v2 patch 4 ("Gate BUFFER_OVF reserved bit on guest DS").
+   (Jim)
+ - New patch 10 to document the IA32_PERF_GLOBAL_STATUS_RESET
+   passthrough erratum in errata.rst.
+ - New patch 15 to mask only OS/USR bits when filtering fixed counters,
+   preventing AnyThread leakage into hardware and preserving
+   METRICS_CLEAR_EN.
+ - Split MSR 0x391 and MSR 0x392 emulation into separate patches.
+ - Always intercept IA32_PERF_GLOBAL_STATUS_SET and GLOBAL_INUSE to
+   prevent hardware state divergence. (Jim)
+ - Reject bit 63 (CondChgd) writes to GLOBAL_STATUS_SET. (Jim)
+ - Keep the AnyThread bit guest-visible while removing it from the
+   hardware-visible states. (Jim)
+ - Address other minor review comments from LKML, also some fixes
+   suggested by AI tools.
+ - Collected Reviewed-by and Acked-by tags.
+
+v2:
+ - https://lore.kernel.org/kvm/20260827223755.143247-1-zide.chen@intel.com/
+ - Dropped v1 11/15: KVM: x86/pmu: Emulate streamlined
+   Freeze-LBR-on-PMI.
+ - New patch 4/15 to gate BUFFER_OVF reserved bit on guest DS feature.
+ - Some renames:
+   - all_valid_pmc_mask to pmc_exists;
+   - add _is to kvm_{gp,fixed}_pmc_supported();
+   - split kvm_for_each_set_pmc_idx() to
+     kvm_for_each_{gp,fixed}_counter().
+ - Add missing AnyThr handling in IA32_FIXED_CTR_CTRL and advertise
+   anythread_deprecated only if kvm_pmu_cap.version >= 5.
+ - Cap vPMU v3/v4 to v2, as AnyThread cannot be safely virtualized.
+ - Miscellaneous updates to changelogs and some minor fixes.
+
+v1: https://lore.kernel.org/kvm/amj-5YH-LSwZOLow@google.com/T/#u
+
+Dapeng Mi (6):
+  KVM: x86/pmu: Drop nr_arch_{gp,fixed}_counters from kvm_pmu
+  perf/x86: Plumb counter bitmap from x86_pmu to x86_pmu_cap
+  KVM: x86/pmu: Switch to bitmask-based KVM PMU capabilities
+  perf/x86: Remove num_counters_{gp,fixed} from x86_pmu_capability
+  KVM: x86/pmu: Advertise PerfMon version 5 on Intel hosts
+  KVM: selftests: Support fixed counters bitmap in pmu_counters_test
+
+Zide Chen (15):
+  KVM: SVM: Drop counter MSR checks in amd_is_valid_msr()
+  KVM: x86/pmu: Remove redundant Perf Global Status MSR bit definitions
+  KVM: x86/pmu: Rename all_valid_pmc_idx to pmc_exists
+  KVM: x86/pmu: Rename reserved_bits to eventsel_rsvd in kvm_pmu
+  KVM: x86/pmu: Use pmc_exists in PMC lookup helpers
+  KVM: x86/pmu: Expose kvm_host_pmu to vendor modules
+  KVM: x86/pmu: Document GLOBAL_STATUS_RESET passthrough erratum
+  KVM: x86/pmu: Mark CondChgd reserved in global_status_rsvd
+  KVM: x86/pmu: Emulate IA32_PERF_GLOBAL_STATUS_SET MSR
+  KVM: x86/pmu: Emulate IA32_PERF_GLOBAL_INUSE MSR
+  KVM: x86/pmu: Clamp pmu->version to kvm_pmu_cap.version
+  KVM: x86/pmu: Populate CPUID.0AH:ECX fixed-counter bitmap
+  KVM: x86/pmu: Factor out fixed counter control bit calculation
+  KVM: x86/pmu: Mask only OS/USR bits when filtering fixed counters
+  KVM: x86/pmu: Ignore AnyThread bit if CPUID.0AH:EDX[15] is set
+
+ Documentation/virt/kvm/x86/errata.rst         |  10 +-
+ arch/x86/events/core.c                        |   8 +-
+ arch/x86/include/asm/kvm_host.h               |   9 +-
+ arch/x86/include/asm/msr-index.h              |   9 +-
+ arch/x86/include/asm/perf_event.h             |  13 +-
+ arch/x86/kvm/cpuid.c                          |  24 ++-
+ arch/x86/kvm/msrs.c                           |  12 +-
+ arch/x86/kvm/pmu.c                            |  85 +++++---
+ arch/x86/kvm/pmu.h                            |  54 ++++-
+ arch/x86/kvm/svm/pmu.c                        |  43 ++--
+ arch/x86/kvm/svm/svm.c                        |  19 +-
+ arch/x86/kvm/vmx/nested.c                     |   4 +-
+ arch/x86/kvm/vmx/pmu_intel.c                  | 192 +++++++++++++-----
+ arch/x86/kvm/vmx/vmx.c                        |  28 ++-
+ .../selftests/kvm/include/x86/processor.h     |   6 +-
+ .../selftests/kvm/x86/pmu_counters_test.c     |  29 ++-
+ 16 files changed, 366 insertions(+), 179 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 14/21] KVM: x86/pmu: Emulate IA32_PERF_GLOBAL_INUSE MSR
+Author: Zide Chen <zide.chen@intel.com>
+
+Intel PerfMon v4 introduces IA32_PERF_GLOBAL_INUSE (0x392) to track
+which counters and the PMI are currently claimed by software agents,
+allowing independent software agents to check counter availability
+without a shared scheduler arbitrating between them.
+
+IA32_PERF_GLOBAL_INUSE is a read-only MSR, and any write attempt
+results in a #GP. The MSR is not part of the VM state, so it does
+not need to be advertised to userspace, nor saved and restored during
+live migration.
+
+Always intercept IA32_PERF_GLOBAL_INUSE to prevent the guest from
+erroneously observing filtered fixed counters as idle.
+
+Originally-by: Yang Weijiang <weijiang.yang@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+v4:
+- Pass 'pmu' directly to kvm_for_each_{gp,fixed}_counter().
+
+v3:
+- Split from combined v2 patch into standalone GLOBAL_INUSE patch.
+- Always intercept MSR_CORE_PERF_GLOBAL_INUSE. (Jim)
+- Use '!!' for explicit boolean conversion. (Jim)
+- Relocate PERF_GLOBAL_INUSE_PMI_INUSE to perf_event.h.
+---
+ arch/x86/include/asm/msr-index.h  |  1 +
+ arch/x86/include/asm/perf_event.h |  3 +++
+ arch/x86/kvm/vmx/pmu_intel.c      | 34 +++++++++++++++++++++++++++++++
+ 3 files changed, 38 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/21] KVM: x86/pmu: Switch to bitmask-based KVM PMU capabilities
+Author: Zide Chen <zide.chen@intel.com>
+
+
+Intel platforms support non-contiguous fixed counters via CPUID.0AH:ECX
+starting with PerfMon v5, and support non-contiguous GP counters
+through the Architectural PerfMon Extension (CPUID leaf 23H).
+
+struct x86_pmu_capability now exposes {,fixed_}cntr_mask64 bitmaps,
+which may contain sparse bits representing non-contiguous counters.
+Switch KVM's kvm_host_pmu and kvm_pmu_cap consumers over to the new
+bitmask fields, including iterating kvm_host_pmu bitmasks directly in
+VMX and SVM PMU MSR intercept setup.
+
+CPUID.0AH:EAX[15:8] and CPUID.0AH:EDX[4:0] enumerate only contiguous
+counters. Derive these values from kvm_pmu_cap.{,fixed_}cntr_mask64 as
+the number of consecutive counters starting at index 0.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Co-developed-by: Zide Chen <zide.chen@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- Cleanly substitute kvm_pmu_cap.num_counters_{gp,fixed} with
+  find_first_zero_bit() in intel_pmu_refresh() without throwaway
+  code churn.
+- Use find_first_zero_bit() instead of hweight64() for AMD CPUID
+  0x80000022 EBX[3:0] (NumCorePmc) and svm_set_cpu_caps() to enumerate
+  contiguous counters. (Yosry)
+- Do not carry over Jim's Reviewed-by from v3 due to reworking counter
+  clamping in intel_pmu_refresh().
+
+v3:
+- Iterate kvm_host_pmu bitmasks directly in VMX and SVM intercept loops.
+- Clamp nr_{gp,fixed}_counters to the number of contiguous counters
+  supported by KVM in intel_pmu_refresh(). (Jim, Sashiko)
+- Drop redundant !enable_mediated_pmu clamp on fixed_cntr_mask64.
+  (Sashiko)
+---
+ arch/x86/kvm/cpuid.c         | 17 ++++++++++++++---
+ arch/x86/kvm/msrs.c          | 12 ++++++------
+ arch/x86/kvm/pmu.c           | 17 ++++++++---------
+ arch/x86/kvm/svm/pmu.c       |  2 +-
+ arch/x86/kvm/svm/svm.c       |  8 ++++----
+ arch/x86/kvm/vmx/pmu_intel.c | 18 +++++++++++++++---
+ arch/x86/kvm/vmx/vmx.c       |  4 ++--
+ 7 files changed, 50 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 21/21] KVM: selftests: Support fixed counters bitmap in pmu_counters_test
+Author: Zide Chen <zide.chen@intel.com>
+
+
+On PerfMon v5, CPUID.0AH:ECX represents the fixed counter bitmask,
+while EDX[4:0] indicates the number of contiguous fixed counters
+starting from 0:
+
+FxCtr[i]_is_supported := ECX[i] || (EDX[4:0] > i).
+
+Fix test_fixed_counters() to derive supported fixed counters using the
+above formula instead of relying solely on EDX[4:0]. This allows the
+test to cover non-contiguous fixed counter configurations.
+
+Update this_pmu_has() to take the PMU version into consideration.
+Without this fix, it could return incorrect results in test cases such
+as test_arch_events(), which configure a PMU version different from
+the one originally advertised by KVM without explicitly updating
+CPUID.0AH:{ECX,EDX} to match the new PMU version.
+
+For example, after downgrading a guest from PMU v5 to PMU v2,
+this_pmu_has() would still consult CPUID.0AH:ECX while KVM ignores it,
+resulting in a mismatch in the reported fixed counter capabilities.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Co-developed-by: Zide Chen <zide.chen@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v3:
+- use the BIT() macro instead of an open-coded left shift. (Sashiko)
+- Simplified ternary condition in this_pmu_has(). (Sashiko)
+- Also test legacy EDX contiguous counts with ECX=0 in
+  test_fixed_counters(). (Sashiko)
+
+v2:
+- Fix this_pmu_has() to honor the guest's configured PMU version.
+- Update the pmu_vm_create_with_vcpus() calls after rebasing.
+---
+ .../selftests/kvm/include/x86/processor.h     |  6 +++-
+ .../selftests/kvm/x86/pmu_counters_test.c     | 29 +++++++++++++++----
+ 2 files changed, 29 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 19/21] KVM: x86/pmu: Ignore AnyThread bit if CPUID.0AH:EDX[15] is set
+Author: Zide Chen <zide.chen@intel.com>
+
+Intel PerfMon v5 introduces the ANYTHREAD_DEPRECATION capability
+(CPUID.0AH:EDX[15]) to indicate that AnyThread counting is deprecated
+and that writes to the AnyThread bit in IA32_PERFEVTSELx and
+IA32_FIXED_CTR_CTRL are ignored.
+
+Preserve the guest-written value in guest-visible state so that guest
+RDMSRs observe the AnyThread bit, but strip it before programming
+hardware to ensure cross-VM SMT isolation.
+
+Continue to inject #GP when ANYTHREAD_DEPRECATION is not present in the
+guest CPUID, e.g. for PerfMon v3/v4 guests or when the capability is
+not configured for a PerfMon v5+ guest.
+
+Advertise CPUID.0AH:EDX[15] only for PMU version 5+ guests, since the
+bit doesn't exist below version 5.
+
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+v3:
+- Exclude Fixed Counter 3 bit 14 (METRICS_CLEAR_EN) from the AnyThread mask
+  so it remains reserved in fixed_ctr_ctrl_rsvd. (Jim)
+- Preserve AnyThread in guest-visible state (eventsel/fixed_ctr_ctrl) to
+  match bare-metal RDMSR behavior. (Jim)
+- Removed it from the hardware-visible counterparts (_hw) so that it
+  doesn't need to explicitly remove this bit in intel_pmu_set_msr().
+  (Jim)
+- Re-use intel_pmu_fixed_ctrl_bits() for AnyThread bits computation.
+  (Sashiko)
+---
+ arch/x86/kvm/cpuid.c         |  2 +-
+ arch/x86/kvm/vmx/pmu_intel.c | 28 +++++++++++++++++++++++++---
+ 2 files changed, 26 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 17/21] KVM: x86/pmu: Factor out fixed counter control bit calculation
+Author: Zide Chen <zide.chen@intel.com>
+
+Rename intel_pmu_enable_fixed_counter_bits() to
+intel_pmu_fixed_ctrl_bits() and have it return the computed fixed
+counter control mask instead of updating fixed_ctr_ctrl_rsvd directly.
+
+Accumulate the desired fixed counter control bits during PMU setup and
+apply them once in intel_pmu_refresh().
+
+Move the helper earlier in the file so it can also be reused for
+upcoming ANYTHREAD_DEPRECATION emulation.
+
+No functional change intended.
+
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+v4:
+- Pass 'pmu' directly to kvm_for_each_fixed_counter().
+---
+ arch/x86/kvm/vmx/pmu_intel.c | 30 ++++++++++++++++++------------
+ 1 file changed, 18 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/21] KVM: x86/pmu: Remove redundant Perf Global Status MSR bit definitions
+Author: Zide Chen <zide.chen@intel.com>
+
+IA32_PERF_GLOBAL_STATUS and its SET/RESET counterparts share bit
+definitions with perf_event.h, which is the canonical home for Intel
+PMU bit definitions (e.g., PERFEVTSEL, FIXED_CTR_CTRL, GLOBAL_STATUS).
+Drop the duplicate definitions from msr-index.h and update KVM code to
+use the macros from perf_event.h.
+
+Drop the comment as well, since the macros now match the MSR
+naming.
+
+No functional change intended.
+
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/include/asm/msr-index.h |  8 --------
+ arch/x86/kvm/vmx/pmu_intel.c     | 11 ++---------
+ arch/x86/kvm/vmx/vmx.c           |  2 +-
+ 3 files changed, 3 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/21] KVM: SVM: Drop counter MSR checks in amd_is_valid_msr()
+Author: Zide Chen <zide.chen@intel.com>
+
+amd_msr_idx_to_pmc() accurately validates individual counter MSRs by
+checking whether the corresponding counter is supported for the vCPU.
+Validating counter MSRs again in amd_is_valid_msr() is redundant.
+
+Furthermore, validating counter MSRs using broad checks like
+"pmu->version > 0" or "PERFCTR_CORE" is inaccurate and misleading. It
+falsely validates unexposed counters, which then fail in
+amd_pmu_{get,set}_msr(), injecting an errant #GP instead of taking
+KVM's fallback (read 0, write ignored) and breaking migration for
+unadvertised counters.
+
+Finally, the range check in the default case is dead code because AMD
+CPUs currently support at most 6 Core Perf counters. Even if future AMD
+CPUs support more than 6, counter MSRs would still be sufficiently
+validated by amd_msr_idx_to_pmc().
+
+Drop the counter cases and dead range check from amd_is_valid_msr(),
+leaving counter validation solely to amd_msr_idx_to_pmc().
+
+Fixes: 4a2771895ca6 ("KVM: x86/svm/pmu: Add AMD PerfMonV2 support")
+Reported-by: Jim Mattson <jmattson@google.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- New patch. (Jim)
+---
+ arch/x86/kvm/svm/pmu.c | 9 +--------
+ 1 file changed, 1 insertion(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 16/21] KVM: x86/pmu: Populate CPUID.0AH:ECX fixed-counter bitmap
+Author: Zide Chen <zide.chen@intel.com>
+
+PerfMon v5 adds a fixed-counter support bitmap in CPUID.0AH:ECX.
+This is a superset of EDX[4:0] which indicates the contiguous
+counters starting from 0. For backward compatibility, it's recommended
+to use the following to determine if a fixed counter is supported:
+
+FxCtr[i]_is_supported := ECX[i] || (EDX[4:0] > i);
+
+Populate CPUID.0AH:ECX with kvm_pmu_cap.fixed_cntr_mask64 when KVM
+supports PerfMon v5, and in intel_pmu_refresh(), incorporate the
+guest's ECX bits into fixed_mask for PerfMon v5+ guests.
+
+Originally-by: Yang Weijiang <weijiang.yang@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- Check pmu->version directly instead of checking both kvm_pmu_cap and
+  pmu version, as pmu->version is now clamped. (Yosry, Sean)
+- Merge the blanket masking into the fixed_mask assignment. (Yosry)
+
+v3:
+- Remove '&' when populating entry->ecx. (Jim)
+---
+ arch/x86/kvm/cpuid.c         | 5 ++++-
+ arch/x86/kvm/vmx/pmu_intel.c | 3 +++
+ 2 files changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 15/21] KVM: x86/pmu: Clamp pmu->version to kvm_pmu_cap.version
+Author: Zide Chen <zide.chen@intel.com>
+
+KVM's policy of not policing guest CPUID allows userspace to configure
+an arbitrary PMU version without KVM rejecting the ioctl or mutating
+guest CPUID entries. As userspace is responsible for validating its
+configuration against KVM_GET_SUPPORTED_CPUID, userspace is entitled to
+"shoot itself in the foot" by presenting an unsupported virtual CPU
+model.
+
+Clamp pmu->version to kvm_pmu_cap.version so that KVM's internal state
+tracks the effective PMU version that KVM supports, and avoid exposing
+or emulating features that KVM does not support (such as MSRs gated on
+higher PMU versions).
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Suggested-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- New patch. (Sean, Yosry)
+---
+ arch/x86/kvm/vmx/pmu_intel.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/21] KVM: x86/pmu: Emulate IA32_PERF_GLOBAL_STATUS_SET MSR
+Author: Zide Chen <zide.chen@intel.com>
+
+Intel PerfMon v4 introduces IA32_PERF_GLOBAL_STATUS_SET (0x391) to
+allow software to set individual bits in the global status MSR. Reads
+of IA32_PERF_GLOBAL_STATUS_SET always return zero.
+
+IA32_PERF_GLOBAL_STATUS_SET is not part of the VM state, so it doesn't
+need to be advertised to userspace, nor saved and restored during live
+migration.
+
+Always intercept IA32_PERF_GLOBAL_STATUS_SET to prevent the guest from
+modifying status bits that are not virtualized by KVM.
+
+Bit 63 (CondChgd) is architecturally reserved in STATUS_SET per the SDM.
+Reject writes to bit 63, injecting #GP for guest writes. While older
+processors had silicon errata that accepted writes without #GP (e.g.
+SKX95), strictly enforce the architectural specification for
+deterministic behavior across migrations.
+
+Originally-by: Yang Weijiang <weijiang.yang@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- Split out CondChgd specific handling into a separate patch since it
+  impacts MSR 0x38e and 0x390 as well.
+- Move the defensive filtering code in pmu load to the new patch.
+- Do not carry over Jim's Reviewed-by due to above changes.
+
+v3:
+- Split from combined v2 patch into standalone GLOBAL_STATUS_SET patch.
+- Always intercept IA32_PERF_GLOBAL_STATUS_SET to prevent passthrough of
+  unvirtualized status bits. (Jim)
+- Reject writing bit 63 (CondChgd) to IA32_PERF_GLOBAL_STATUS_SET. (Jim)
+- Filter out bit 63 before writing to hardware in
+  intel_mediated_pmu_load().
+- Store status set bits in a local variable in
+  intel_mediated_pmu_load(). (Yosry)
+- Move validation for MSR_CORE_PERF_GLOBAL_STATUS_SET to pmu_intel.c
+  rather than common pmu.c to avoid exposing the Intel MSR on AMD.
+---
+ arch/x86/kvm/pmu.c           | 7 +++++++
+ arch/x86/kvm/vmx/pmu_intel.c | 2 ++
+ 2 files changed, 9 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/21] KVM: x86/pmu: Mark CondChgd reserved in global_status_rsvd
+Author: Zide Chen <zide.chen@intel.com>
+
+Bit 63 (CondChgd) of IA32_PERF_GLOBAL_STATUS indicates a change to
+IA32_MISC_ENABLE[7], which KVM intercepts and keeps read-only for
+guests.
+
+In the Intel SDM, there is an asymmetry regarding bit 63: it is valid
+in IA32_PERF_GLOBAL_STATUS_{,RESET}, but it is architecturally
+reserved in IA32_PERF_GLOBAL_STATUS_SET. Consequently, KVM cannot
+restore bit 63 to hardware on vPMU context switch.
+
+Fortunately, because KVM intercepts IA32_MISC_ENABLE and keeps it
+read-only for guests, neither hardware nor KVM will ever assert
+CondChgd for the guest. It is therefore safe to not virtualize
+CondChgd while maintaining architectural consistency.
+
+Mark CondChgd reserved in pmu->global_status_rsvd so that userspace
+writes to IA32_PERF_GLOBAL_STATUS, and upcoming emulation of
+IA32_PERF_GLOBAL_STATUS_SET, reject bit 63.
+
+Clearing CondChgd via IA32_PERF_GLOBAL_STATUS_RESET (0x390, a.k.a.
+GLOBAL_OVF_CTRL) is architecturally valid per the Intel SDM, so
+explicitly allow bit 63 to be cleared without #GP.
+
+Additionally, in mediated PMU mode, defensively mask out reserved bits
+in intel_mediated_pmu_load() before writing to
+IA32_PERF_GLOBAL_STATUS_SET to prevent a host #GP.
+
+Reported-by: Jim Mattson <jmattson@google.com>
+Suggested-by: Yosry Ahmed <yosry@kernel.org>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- New prep patch to mark CondChgd reserved in global_status_rsvd (suggested
+  by Yosry), addressing the STATUS_SET bit 63 asymmetry identified by Jim.
+  (Jim, Yosry)
+---
+ arch/x86/kvm/pmu.c           |  8 +++++---
+ arch/x86/kvm/vmx/pmu_intel.c | 11 +++++++----
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/21] perf/x86: Remove num_counters_{gp,fixed} from x86_pmu_capability
+Author: Zide Chen <zide.chen@intel.com>
+
+
+Now that KVM has switched to bitmap-based PMU capabilities,
+num_counters_{gp,fixed} can be removed from x86_pmu_capability.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Acked-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/events/core.c            | 2 --
+ arch/x86/include/asm/perf_event.h | 2 --
+ 2 files changed, 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/21] KVM: x86/pmu: Document GLOBAL_STATUS_RESET passthrough erratum
+Author: Zide Chen <zide.chen@intel.com>
+
+IA32_PERF_GLOBAL_STATUS_RESET, introduced in PerfMon version 4,
+inherits the MSR address and architecturally defined bits from
+IA32_PERF_GLOBAL_OVF_CTRL, while providing additional bits to clear
+new indicators in IA32_PERF_GLOBAL_STATUS.
+
+From an emulation perspective, KVM handles it identically to the legacy
+OVF_CTRL MSR: reads return zero, and intercepted writes are guarded
+against pmu->global_status_rsvd. No code changes are needed in KVM
+to emulate this MSR.
+
+However, to reduce VM-exits on performance-critical paths, KVM passes
+through this MSR in mediated PMU mode when all hardware counters are
+exposed to the guest. Consequently, writes to bits that are valid in
+hardware but unvirtualized by KVM will not trigger #GP (unlike when
+intercepted). This is safe because such unvirtualized bits are never set
+while the guest runs, so clearing them has no effect, and because the
+MSR is read-as-zero and write-to-clear, passing it through cannot leak
+host state.
+
+Document this divergence in errata.rst.
+
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+v4:
+- Clarify in errata.rst that passthrough occurs when all hardware
+  counters are exposed to the guest, and that guest writes cannot
+  clobber host state. (Yosry)
+
+v3:
+- New patch. (Jim)
+---
+ Documentation/virt/kvm/x86/errata.rst | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/21] perf/x86: Plumb counter bitmap from x86_pmu to x86_pmu_cap
+Author: Zide Chen <zide.chen@intel.com>
+
+
+Intel PerfMon v5 introduced CPUID.0AH:ECX to support non-contiguous
+fixed counters and Architectural PerfMon Extension leaf (0x23) further
+supports non-contiguous general-purpose counters.
+
+num_counters_{gp,fixed} indicates the total number of GP or fixed
+counters, but cannot represent non-contiguous counters.
+
+Add cntr_mask and fixed_cntr_mask unions so that KVM can get the
+accurate counter availability directly from x86_pmu_cap. The u64
+alias is convenient for mask arithmetic, while the bitmap form works
+with for_each_set_bit() and friends.
+
+num_counters_{gp,fixed} in x86_pmu_capability will be removed once
+callers have been converted to the use of {,fixed_}cntr_mask.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Acked-by: Peter Zijlstra (Intel) <peterz@infradead.org>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/events/core.c            | 6 ++++--
+ arch/x86/include/asm/perf_event.h | 8 ++++++++
+ 2 files changed, 12 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/21] KVM: x86/pmu: Drop nr_arch_{gp,fixed}_counters from kvm_pmu
+Author: Zide Chen <zide.chen@intel.com>
+
+
+Populate and use pmc_exists directly when walking guest-visible PMCs,
+instead of relying on pmu->nr_arch_{gp,fixed}_counters as intermediate
+state, in preparation for switching KVM's host PMU capabilities from
+counter counts to counter bitmaps.
+
+Extend pmu->pmc_exists to a union so that the u64 alias (pmc_exists64)
+is available for mask arithmetic operations. Introduce
+kvm_{gp,fixed}_pmc_mask() to extract the respective counter bitmasks,
+and provide the kvm_for_each_{gp,fixed}_counter() iterator macros to
+replace open-coded counter index loops.
+
+Consolidate PMU MSR intercept setup in VMX and SVM into single loops.
+In SVM, this also fixes legacy counter interception by re-enabling
+intercepts if a vCPU's counter count is narrowed.
+
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Co-developed-by: Zide Chen <zide.chen@intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- In intel_pmu_refresh(), directly clamp guest counters against
+  kvm_pmu_cap.num_counters_{gp,fixed} using min_t() instead of
+  temporary BIT_ULL() mask ANDing, avoiding intermediate code churn
+  with the subsequent bitmask capability conversion.
+- Move pmc_exists64 union, BUILD_BUG_ON(), kvm_{gp,fixed}_pmc_mask(),
+  and kvm_for_each_{gp,fixed}_counter() to this patch where they are
+  first used, and return u64 to avoid casts and 32-bit truncation
+  hazards. (Yosry)
+- Pass 'pmu' directly to kvm_for_each_{gp,fixed}_counter() using
+  compound literals. (Yosry)
+- In reprogram_fixed_counters(), directly index &pmu->fixed_counters[i]
+  instead of calling get_fixed_pmc(). (Yosry)
+- In intel_rdpmc_ecx_to_pmc(), rename 'num_counters' to
+  'max_nr_counters'. (Yosry)
+
+v3:
+- Consolidate PMU MSR intercept setup into single loops in VMX and SVM.
+- Rename fixed_cntr_mask to fixed_mask in intel_pmu_refresh().
+- Fix 32-bit zero-extension bug in pebs_enable_rsvd calculation
+  by explicitly casting to u64. (Sashiko)
+
+v2:
+- Fix AMD legacy PMU MSR intercept handling for guest PMU
+  narrowing reconfiguration by adding for_each_clear_bit_from().
+- Re-word the stale interception changelog part.
+---
+ arch/x86/include/asm/kvm_host.h |  7 ++---
+ arch/x86/kvm/pmu.c              | 24 +++++++----------
+ arch/x86/kvm/pmu.h              | 23 ++++++++++++++++
+ arch/x86/kvm/svm/pmu.c          | 23 +++++++---------
+ arch/x86/kvm/svm/svm.c          | 13 ++++-----
+ arch/x86/kvm/vmx/nested.c       |  4 +--
+ arch/x86/kvm/vmx/pmu_intel.c    | 47 ++++++++++++++++++++-------------
+ arch/x86/kvm/vmx/vmx.c          | 26 +++++++++---------
+ 8 files changed, 95 insertions(+), 72 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/21] KVM: x86/pmu: Use pmc_exists in PMC lookup helpers
+Author: Zide Chen <zide.chen@intel.com>
+
+pmu->nr_arch_{gp,fixed}_counters cannot represent non-contiguous GP or
+fixed counters.
+
+Introduce kvm_is_{gp,fixed}_pmc_supported() to validate counter indices
+via pmu->pmc_exists, and switch the PMC lookup helpers to use them in
+preparation for dropping nr_arch_{gp,fixed}_counters.
+
+No functional change intended.
+
+Co-developed-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+---
+v4:
+- Move kvm_for_each_{gp,fixed}_counter() and kvm_{gp,fixed}_pmc_mask()
+  to the patch where they are first used. (Yosry)
+- Move pmc_exists64 union to the patch where they are first used.
+- Retitle to reflect that this patch now converts PMC lookup helpers.
+- Do not carry over Jim's Reviewed-by due to above changes.
+
+v2:
+- Rename kvm_{gp,fixed}_pmc_supported() to
+  kvm_is_{gp,fixed}_pmc_supported() and simplify them by removing the
+  temporary bitmap. (Sean)
+- Split kvm_for_each_set_pmc_idx() to kvm_for_each_gp_counter() and
+  kvm_for_each_fixed_counter(). (Sean)
+---
+ arch/x86/kvm/pmu.h | 30 ++++++++++++++++++++++++------
+ 1 file changed, 24 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/21] KVM: x86/pmu: Expose kvm_host_pmu to vendor modules
+Author: Zide Chen <zide.chen@intel.com>
+
+kvm_host_pmu holds the unadulterated host PMU capabilities, which
+can be used to compare against guest capabilities to determine whether
+certain MSRs should be intercepted by KVM.
+
+Exposing it directly avoids the need to introduce per-field accessors,
+which would add boilerplate without hiding any implementation detail
+worth encapsulating.
+
+Opportunistically, fix typo "Unadultered" in the comment.
+
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+---
+ arch/x86/kvm/pmu.c | 5 +++--
+ arch/x86/kvm/pmu.h | 1 +
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/21] KVM: x86/pmu: Rename reserved_bits to eventsel_rsvd in kvm_pmu
+Author: Zide Chen <zide.chen@intel.com>
+
+This field stores the bits that are reserved in guest IA32_PERFEVTSELx
+MSRs. Rename it to eventsel_rsvd to better reflect its purpose and to
+align with other field names in struct kvm_pmu.
+
+Opportunistically, replace magic numbers with macros.
+
+No functional change intended.
+
+Suggested-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Reviewed-by: Sandipan Das <sandipan.das@amd.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+---
+v4:
+- Diff AMD eventsel_rsvd against generic baseline instead of overwriting
+  from scratch. (Yosry)
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/pmu.c              |  6 +++++-
+ arch/x86/kvm/svm/pmu.c          | 11 ++++++++---
+ arch/x86/kvm/vmx/pmu_intel.c    | 12 ++++++------
+ 4 files changed, 20 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/21] KVM: x86/pmu: Rename all_valid_pmc_idx to pmc_exists
+Author: Zide Chen <zide.chen@intel.com>
+
+all_valid_pmc_idx is a bitmap of valid PMC indices, not an index
+itself; rename it to pmc_exists to better reflect what it holds and
+keep the name consistent with other fields in the same struct.
+
+No functional change intended.
+
+Signed-off-by: Zide Chen <zide.chen@intel.com>
+Reviewed-by: Dapeng Mi <dapeng1.mi@linux.intel.com>
+Reviewed-by: Jim Mattson <jmattson@google.com>
+Reviewed-by: Yosry Ahmed <yosry@kernel.org>
+---
+v2:
+- Pick the name pmc_exists other than all_valid_pmc_mask. (Sean)
+---
+ arch/x86/include/asm/kvm_host.h |  2 +-
+ arch/x86/kvm/pmu.c              | 10 +++++-----
+ arch/x86/kvm/vmx/pmu_intel.c    |  2 +-
+ 3 files changed, 7 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nSVM: Add CET shadow stack MSRs to merge_msrs[]
+Author: Jim Mattson <jmattson@google.com>
+
+When shadow stack is enabled for a vCPU, svm_recalc_msr_intercepts()
+disables interception of MSR_IA32_U_CET, MSR_IA32_S_CET, and
+MSR_IA32_PL{0..3}_SSP in vmcb01's MSRPM. However, because these MSRs are
+missing from merge_msrs[] in nested_svm_init_msrpm_merge_offsets(),
+their MSRPM bits are never merged into vmcb02's MSRPM, and L0 continues
+to intercept L2 accesses to them even when L1 disables interception.
+
+Add the CET shadow stack MSRs to merge_msrs[] and bump the size of
+nested_svm_msrpm_merge_offsets[] to accommodate their MSRPM chunk offset.
+
+Fixes: 38c46bdbf998 ("KVM: SVM: Pass through shadow stack MSRs as appropriate")
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/nested.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH RFC v2 1/1] x86/irq/i8259: Ack PIC vectors in the LAPIC ISR
+Author: Dongli Zhang <dongli.zhang@oracle.com>
+
+This is to fix a LAPIC ISR stall that can happen in a kdump kernel, but can
+also happen in other scenarios.
+
+The issue can be intermittently reproduced in a QEMU/KVM guest when there
+are large number of VMs on the same host.
+
+Device interrupts can use the PIC, IOAPIC, or MSI-X. Nowadays, most x86
+device interrupts use MSI-X or the IOAPIC. However, the PIC handler does
+not send a LAPIC EOI, even when the interrupt it handles has set a bit in
+the LAPIC ISR.
+
+For example, suppose there is a QEMU/KVM guest using virtio-net.
+
+1. virtio-net is about to deliver vector 52 to CPU 2 (APIC ID 2), but the
+guest suddenly panics on that CPU.
+
+2. The kdump kernel boots on APIC ID 2, which becomes CPU 0 in the new
+kernel.
+
+3. Suppose delivery of the interrupt is delayed, so vector 52 has not
+reached the CPU yet.
+
+4. On the new CPU 0, init_ISA_irqs() initially sets up the legacy IRQs to
+use the PIC. Vector 52 maps to IRQ4, which is normally used by the serial
+console.
+
+5. Before these legacy IRQs are handed over to the IOAPIC, suppose the
+delayed vector 52 arrives through the LAPIC and sets its ISR bit.
+
+6. The new kernel handles it as PIC IRQ4. Since mask_and_ack_8259A()
+does not send a LAPIC EOI, the ISR bit for vector 52 remains set.
+
+The below is an example when vector is 55.
+
+(qemu) info lapic 2
+dumping local APIC state for CPU 2
+
+LVT0	 0x00010700 active-hi edge  masked                      ExtINT (vec 0)
+LVT1	 0x00000400 active-hi edge                              NMI
+LVTPC	 0x00000400 active-hi edge                              NMI
+LVTERR	 0x000000fe active-hi edge                              Fixed  (vec 254)
+LVTTHMR	 0x00010000 active-hi edge  masked                      Fixed  (vec 0)
+LVTT	 0x000400ec active-hi edge                 tsc-deadline Fixed  (vec 236)
+Timer	 DCR=0x0 (divide by 2) initial_count = 0 current_count = 0
+SPIV	 0x000001ff APIC enabled, focus=off, spurious vec 255
+ICR	 0x000c0400 physical edge de-assert all
+ICR2	 0x00000000
+ESR	 0x00000000
+ISR	 55
+IRR	 37 38 39 40 48 56
+
+APR 0x00 TPR 0x10 DFR 0x0f LDR 0x00 PPR 0x30
+
+This is painful when it happens in production. The kdump kernel stalls, so
+we cannot collect a vmcore for analysis.
+
+The issue is easier to reproduce with a customized KVM host kernel that
+allows arbitrary vectors to be injected through debugfs and
+kvm_apic_set_irq(). I can stall the guest kernel by injecting vector 50
+into vCPU 0, even after the guest has booted successfully. Vector 50 maps
+to IRQ2, the cascade interrupt between the two 8259A chips. IRQ2 is not
+taken over by the IOAPIC.
+
+For other vectors, I can reproduce the issue by adding mdelay() at the
+beginning of setup_IO_APIC() and injecting the vectors during the delay
+through the modified KVM host kernel.
+
+In theory, a normal kexec reboot may also hit this issue if device
+interrupts arrive late.
+
+Fix this by checking the LAPIC ISR bit corresponding to the PIC vector and
+sending a LAPIC EOI only if it is set. Cover both normal and auto-EOI
+modes.
+
+Send an EOI only when the LAPIC is ready. Use a per-CPU flag to track
+readiness across initialization, disable, and resume.
+
+Assisted-by: OpenAI Codex
+Signed-off-by: Dongli Zhang <dongli.zhang@oracle.com>
+---
+v1: https://lore.kernel.org/all/20261029063112.203893-1-dongli.zhang@oracle.com
+
+v1->v2:
+  - Mark the patch as RFC, as the APIC readiness and disable paths need
+    further review (I tried my best).
+  - Introduce a per-CPU flag to track APIC readiness to fix issue
+    mentioned by Sashiko for v1.
+
+Reproducer:
+https://lore.kernel.org/all/e4070a8b-fa4d-4ba1-a333-e7cf72da416e@oracle.com
+
+Suggestions for improving the readiness checks or alternative solutions are
+welcome.
+
+ arch/x86/include/asm/apic.h |  3 +++
+ arch/x86/kernel/apic/apic.c | 26 ++++++++++++++++++++++++++
+ arch/x86/kernel/i8259.c     | 11 ++++++++++-
+ 3 files changed, 39 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: selftests: Drop stale exact flags check in private_mem_kvm_exits_test
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+Commit 7d0afe669374 ("KVM: selftests: Take into account mixed memory
+fault flags") relaxed the memory_fault.flags checks so that they only
+test for KVM_MEMORY_EXIT_FLAG_PRIVATE, since KVM may report the access
+type alongside it. In test_private_access_memslot_deleted() it added
+the relaxed check but left the exact match above it, and with the
+READ flag now reported the test fails for me there:
+
+  x86/private_mem_kvm_exits_test.c:93: vcpu->run->memory_fault.flags == KVM_MEMORY_EXIT_FLAG_PRIVATE
+  0x9 != 0x8 (vcpu->run->memory_fault.flags != KVM_MEMORY_EXIT_FLAG_PRIVATE)
+
+Drop the exact match, leaving the check that the fault was private.
+
+Fixes: 7d0afe669374 ("KVM: selftests: Take into account mixed memory fault flags")
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ tools/testing/selftests/kvm/x86/private_mem_kvm_exits_test.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 9/9] KVM: s390: don't unmap the gmap on permission upgrade
+Author: Carlos López <clopez@suse.de>
+
+When an mmu_notifier invalidation only upgrades permissions
+(MMU_NOTIFIER_RANGE_PERM_UPGRADE), keep the existing gmap entries
+instead of unmapping them. The PFN is unchanged and no access is
+revoked, so an existing entry is no more permissive than the new host
+PTE.
+
+A write to an entry that is still read-only causes a protection
+exception, which kvm_s390_faultin_gfn() handles as a write fault. This
+applies to both s390 and arm64 guests.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ arch/s390/kvm/arm64/arm.c | 7 +++++++
+ arch/s390/kvm/s390/s390.c | 7 +++++++
+ 2 files changed, 14 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 5/9] mm/mprotect: add MM_CP_PERM_UPGRADE
+Author: Carlos López <clopez@suse.de>
+
+Add a change_protection() flag for changes that only add permissions,
+so that MMU notifier users can keep their mappings and fault in the new
+permissions later. mprotect() sets it when the new VMA flags only add
+read, write or execute permissions, or VM_ACCOUNT, which does not affect
+the page tables. Any other change, such as a different protection key,
+is not an upgrade.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ include/linux/mm.h |  2 ++
+ mm/mprotect.c      | 13 +++++++++++++
+ 2 files changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 7/9] KVM: pass the mmu_notifier event and flags to kvm_gfn_range
+Author: Carlos López <clopez@suse.de>
+
+Propagate the event and flags of the mmu_notifier invalidation into
+struct kvm_gfn_range, so that architecture handlers can detect a
+permission upgrade (MMU_NOTIFIER_RANGE_PERM_UPGRADE). No functional
+change.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ include/linux/kvm_host.h | 3 +++
+ virt/kvm/kvm_main.c      | 8 ++++++++
+ 2 files changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/9] mm/huge_memory: honor MM_CP_TRY_CHANGE_WRITABLE in change_huge_pud()
+Author: Carlos López <clopez@suse.de>
+
+change_protection() applies vma->vm_page_prot, which lacks the write bit
+for CoW and write-notified mappings. MM_CP_TRY_CHANGE_WRITABLE makes
+entries writable again if a write fault would only set the write bit.
+
+However, change_huge_pud() ignores the flag. For example, device DAX
+mappings are write-notified once soft-dirty tracking is armed through
+/proc/pid/clear_refs, and a protection change then leaves dirty PUDs
+read-only, so the next write to each of them faults.
+
+Fix this by adding can_change_pud_writable(), based on
+can_change_pmd_writable(). It omits the NUMA and uffd-wp checks, as
+change_huge_pud() bails out on those changes.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ include/linux/pgtable.h |  5 +++++
+ mm/huge_memory.c        | 28 +++++++++++++++++++++++++++-
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 6/9] mm/mmu_notifier: add MMU_NOTIFIER_RANGE_PERM_UPGRADE
+Author: Carlos López <clopez@suse.de>
+
+Add a range flag for invalidations that only upgrade permissions, so
+that secondary MMUs can keep their mappings rather than zap them.
+change_protection() sets it for MM_CP_PERM_UPGRADE and for the
+userfaultfd resolves, which only restore access.
+
+Now that change_protection() keeps writable entries writable on these
+changes, no present entry loses access. Writable migration and
+device-private entries are still made read-only, which does not affect
+secondary MMUs. Migration entries are only installed after secondary
+MMUs are invalidated, and device-private pages are migrated back, with
+an invalidation, before the CPU can access them.
+
+hugetlb_change_protection() never sets the flag, as hugetlb does not
+restore the write bit and may unshare page tables.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ include/linux/mmu_notifier.h | 5 +++++
+ mm/hugetlb.c                 | 4 ++++
+ mm/internal.h                | 7 +++++++
+ mm/mprotect.c                | 5 +++--
+ 4 files changed, 19 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 8/9] KVM: x86/mmu: don't zap secondary MMU on permission upgrade
+Author: Carlos López <clopez@suse.de>
+
+When an mmu_notifier invalidation only upgrades permissions
+(MMU_NOTIFIER_RANGE_PERM_UPGRADE), keep the existing SPTEs instead of
+zapping them. The PFN is unchanged and no access is revoked, so an
+existing SPTE is no more permissive than the new host PTE, and the new
+permissions are picked up on the next fault.
+
+The motivating case is a userfaultfd-wp dirty tracker such as QEMU's
+background snapshot, which unprotects every guest page as it saves it.
+Zapping on each unprotect makes the guest refault its whole working
+set. On a 64GB guest under a background snapshot, a read-mostly workload
+drops secondary-MMU refaults from ~1M/s to ~2.5K/s and cross-vCPU TLB
+shootdowns from ~1400/s to near zero.
+
+Note: this also skips the APIC-access page reload, which is not needed
+as the page's PFN is unchanged.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ arch/x86/kvm/mmu/mmu.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/9] mm: fix eager write-bit restore for write-notified shared mappings
+Author: Carlos López <clopez@suse.de>
+
+change_protection() applies vma->vm_page_prot, which lacks the write bit
+for CoW and write-notified mappings. Callers set
+MM_CP_TRY_CHANGE_WRITABLE when vma_wants_manual_pte_write_upgrade()
+returns true, so that entries that can be written without a fault, such
+as dirty PTEs in a shared mapping, are made writable right away.
+
+For shared mappings, that function passes vma->vm_page_prot to
+vma_wants_writenotify(). Once writenotify is enabled, this protection
+lacks the write bit, while the vma_pgprot_modify() result it is compared
+against adds it back. The two never match, so vma_wants_writenotify()
+returns false before checking for soft-dirty, uffd-wp and writeback.
+
+As a result, write-notified shmem mappings never get
+MM_CP_TRY_CHANGE_WRITABLE. For example, commit 931298e103c2
+("mm/userfaultfd: rely on vma->vm_page_prot in uffd_wp_range()") made
+uffd-wp unprotect set the flag so that dirty shmem PTEs become writable
+again, but this never takes effect. Unprotecting N dirty shmem pages
+still leads to N faults that only set the write bit.
+
+This dates back to the commit in the Fixes tag, which moved the
+equivalent check in mprotect_fixup() before vma_set_page_prot().
+
+Fix this by passing the protection recomputed from the VMA flags, as
+vma_set_page_prot() does.
+
+Note: this only affects performance, as the next write fault restores
+the write bit anyway.
+
+Fixes: 64e455079e1b ("mm: softdirty: enable write notifications on VMAs after VM_SOFTDIRTY cleared")
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ mm/vma.h | 23 ++++++++++++++---------
+ 1 file changed, 14 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/9] mm: keep writable entries writable on protection changes
+Author: Carlos López <clopez@suse.de>
+
+change_protection() applies vma->vm_page_prot, which lacks the write bit
+for CoW and write-notified mappings. MM_CP_TRY_CHANGE_WRITABLE makes
+entries writable again if a write fault would only set the write bit.
+In shared mappings, it relies on the dirty bit for this, as a clean
+entry might still need a write fault to notify the FS.
+
+However, this misses clean entries that were already writable. For
+example, a uffd-wp unprotect makes shmem PTEs read-only if they were
+mapped by a read fault before uffd-wp was registered, so the next write
+to each of them faults.
+
+Entries that were writable before the change can stay writable, as
+anything that relies on write faults write-protects the entry first, and
+MM_CP_TRY_CHANGE_WRITABLE is only set if the VMA stays writable. So
+check the old entry before the shared and private rules.
+
+Note: writable anonymous entries are always exclusive and thus already
+kept writable, so in private mappings this only affects PFNs that
+drivers map writable into them.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ mm/huge_memory.c | 22 ++++++++++++++++------
+ mm/mprotect.c    | 11 +++++++++++
+ 2 files changed, 27 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/9] riscv: mm: add pud_soft_dirty()
+Author: Carlos López <clopez@suse.de>
+
+riscv supports soft-dirty and PUD-sized transparent huge pages, but only
+provides pmd_soft_dirty() and not pud_soft_dirty(). Add it, so generic
+code can check the soft-dirty bit of a huge PUD.
+
+Signed-off-by: Carlos López <clopez@suse.de>
+---
+ arch/riscv/include/asm/pgtable.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/9] KVM: don't zap secondary MMU on permission upgrade
+Author: Carlos López <clopez@suse.de>
+
+Stop KVM from zapping its mappings on permission upgrades on x86 and
+s390, as these keep the PFNs unchanged and revoke no access. KVM faults
+in the new permissions on demand, so dropping mappings early gains
+nothing.
+
+To do so, add an MMU notifier flag that marks an
+MMU_NOTIFY_PROTECTION_VMA invalidation as a strict permission upgrade.
+For the flag to be accurate, change_protection() keeps writable entries
+writable on such changes. A few cases where it needlessly makes or
+leaves entries read-only are fixed along the way.
+
+Background
+==========
+
+change_protection() pairs every protection change with an
+MMU_NOTIFY_PROTECTION_VMA invalidation, and KVM zaps its SPTEs in
+response, as it cannot tell whether permissions widened or narrowed.
+This is costly, e.g. during a QEMU background snapshot, which uses
+uffd-wp to write-protect guest RAM and unprotects each page once it is
+saved. Every unprotect then makes the guest refault memory it could
+already access.
+
+Secondary MMUs that share the CPU page tables (e.g. ARM SMMU,
+IOMMU/ATS) can keep read-only entries in their TLBs that a fault does
+not flush, so they are already notified of permission upgrades on the
+CPU TLB flush path [1]. KVM keeps its own page tables and faults in
+permissions on demand, so it needs no notification, as Sean noted when
+that signalling was first proposed [2].
+
+Series overview
+===============
+
+Patches 1-4 fix cases where change_protection() needlessly makes or
+leaves entries read-only, so that the next write to them faults. They
+only affect performance and can be picked up independently.
+
+Patches 5-6 add MM_CP_PERM_UPGRADE for mprotect() calls that only add
+permissions, and MMU_NOTIFIER_RANGE_PERM_UPGRADE, which is set for these
+and for userfaultfd unprotects.
+
+Patches 7-9 pass the MMU notifier event and flags to KVM and skip the
+zap on x86 and s390.
+
+Considerations
+==============
+
+1. This series covers only x86 and s390. Claudio confirmed that
+   skipping the zap should be safe on s390 and offered to test it [3],
+   so patch 9 is only compile-tested. Other architectures should be
+   able to skip it as well, but I have not tested or benchmarked
+   them. Moving the code to arch-independent KVM would also avoid the
+   SEV cache flush in kvm_arch_guest_memory_reclaimed().
+
+2. struct kvm_gfn_range carries the MMU notifier event and flags, as
+   agreed at LPC [4] and proposed in the past for other purposes
+   [5] [6]. The fields are only set for MMU notifier invalidations.
+
+3. Writable migration and device-private entries are still made
+   read-only on a permission upgrade. This does not affect secondary
+   MMUs (see patch 6), but the downgrade could be skipped as well if
+   preferred.
+
+4. hugetlb does not benefit, as hugetlb_change_protection() does
+   not restore the write bit and may unshare page tables (see patch 6).
+
+5. The notification cannot simply be skipped in MM code (see [7]).
+   Secondary MMUs that keep their own page tables but cannot fault
+   rely on it to pick up new permissions. A flag lets each user opt
+   in instead.
+
+Benchmarks
+==========
+
+These were measured on v1.
+
+AMD EPYC 9654 96-Core Processor host running a recent Linux kernel
+(6b4b543fa187), with a 64GB, 64-vCPU guest running stress-ng --vm while
+the host takes a QEMU background snapshot. Results are aggregated over
+5 runs on a stock kernel and on one with this series, rebooting the
+guest between runs, with NUMA balancing disabled.
+
+pf/s and tlb/s (per-second deltas of KVM's pf_taken and remote_tlb_flush
+debugfs stats):
+
+  guest pattern          baseline                    patched
+  -----------------------------------------------------------------------
+  read64   (read)        pf/s=950,015   tlb/s=1,440  pf/s=2,503 tlb/s=0.1
+  rand-set (read+write)  pf/s=1,004,353 tlb/s=862    pf/s=4,073 tlb/s=0.3
+  write64  (write)       pf/s=968,018   tlb/s=94     pf/s=2,292 tlb/s=0.3
+
+Guest read latency was sampled with a paced probe thread in the guest,
+reading one byte per page with an idle gap between reads, while
+stress-ng ran with read64. Each figure is the median across 5 runs, with
+the run-to-run min and max, in ns:
+
+  metric           baseline             patched
+  ------------------------------------------------------
+  p50 (min max)      340     (270 380)   260   (250 260)
+  p99 (min max)    19789 (16885 20200)  5207 (4076 5638)
+  p99.9 (min max)  23445 (22845 24036)  6850 (6259 7110)
+
+The median improves modestly, while p99 drops ~3.8x.
+
+A separate stress-ng run with write64 and --verify showed no data
+corruption and no livelocks.
+
+Changes in v3
+=============
+
+- Patch 4 (was 5): check the old entry in the existing write-bit
+  helpers, for any MM_CP_TRY_CHANGE_WRITABLE change (David).
+- Patch 6: add mm_cp_is_perm_upgrade() here instead of in the old
+  patch 5.
+- Trim some commit messages.
+
+Changes in v2
+=============
+
+- New patch 1: fix setting MM_CP_TRY_CHANGE_WRITABLE for shmem with
+  uffd-wp or soft-dirty (Sashiko).
+- New patches 2-3: honor MM_CP_TRY_CHANGE_WRITABLE in change_huge_pud(),
+  adding pud_soft_dirty() on riscv (Sashiko).
+- Patch 4 (was 1): only treat changes to the read, write and execute
+  flags as an upgrade, plus VM_ACCOUNT (Sashiko).
+- New patch 5: keep writable entries writable on permission upgrades
+  (Sashiko).
+- Patch 6 (was 2): don't set the flag for hugetlb (Sashiko).
+- Patch 7 (was 3): pass the MMU notifier event and flags instead of a
+  bool (Claudio).
+- Patch 8 (was 4): check the flag in range->flags. The APIC-access page
+  reload issue that Sashiko pointed out is pre-existing.
+- New patch 9: skip the unmap on s390 as well (Claudio).
+
+v1: https://lore.kernel.org/all/20261029143336.390231-3-clopez@suse.de/
+v2: https://lore.kernel.org/all/20261105165004.2663799-4-clopez@suse.de/
+
+References
+==========
+
+[1] https://lore.kernel.org/linux-mm/cover.1eca029b8603ef4eebe5b41eae51facfc5920c41.1690292440.git-series.apopple@nvidia.com/
+[2] https://lore.kernel.org/linux-mm/ZGu1vsbscdO48V6h@google.com/
+[3] https://lore.kernel.org/all/20261030133939.630e29af@p-imbrenda/
+[4] https://lpc.events/event/20/contributions/2552/
+[5] https://lore.kernel.org/all/20240801183453.57199-1-seanjc@google.com
+[6] https://lore.kernel.org/all/20231110003734.1014084-1-jackyli@google.com
+[7] https://lore.kernel.org/all/7ba2ca65-1eab-40fd-ae4c-f7cd9e156d8c@suse.de/
+
+Carlos López (9):
+  mm: fix eager write-bit restore for write-notified shared mappings
+  riscv: mm: add pud_soft_dirty()
+  mm/huge_memory: honor MM_CP_TRY_CHANGE_WRITABLE in change_huge_pud()
+  mm: keep writable entries writable on protection changes
+  mm/mprotect: add MM_CP_PERM_UPGRADE
+  mm/mmu_notifier: add MMU_NOTIFIER_RANGE_PERM_UPGRADE
+  KVM: pass the mmu_notifier event and flags to kvm_gfn_range
+  KVM: x86/mmu: don't zap secondary MMU on permission upgrade
+  KVM: s390: don't unmap the gmap on permission upgrade
+
+ arch/riscv/include/asm/pgtable.h |  5 ++++
+ arch/s390/kvm/arm64/arm.c        |  7 +++++
+ arch/s390/kvm/s390/s390.c        |  7 +++++
+ arch/x86/kvm/mmu/mmu.c           |  7 +++++
+ include/linux/kvm_host.h         |  3 +++
+ include/linux/mm.h               |  2 ++
+ include/linux/mmu_notifier.h     |  5 ++++
+ include/linux/pgtable.h          |  5 ++++
+ mm/huge_memory.c                 | 46 ++++++++++++++++++++++++++++----
+ mm/hugetlb.c                     |  4 +++
+ mm/internal.h                    |  7 +++++
+ mm/mprotect.c                    | 29 ++++++++++++++++++--
+ mm/vma.h                         | 23 +++++++++-------
+ virt/kvm/kvm_main.c              |  8 ++++++
+ 14 files changed, 142 insertions(+), 16 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 11/20] vfio/pci: Use access ops for hardware information queries
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+AtomicOps and ROM information queries access PCI configuration and ROM
+contents. Run these accesses through access ops and keep userspace
+copies outside SRCU. Free the capability buffer if the query fails.
+
+A VF's AtomicOps query accesses its PF. If the PF is managed by VFIO and
+supports recovery, check its access ops too. Hold the PF's access_lock
+and reject queries when it is closed, since its SRCU instance exists
+only while open. Other PF drivers retain their existing behavior.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 82 ++++++++++++++++++++++++--------
+ 1 file changed, 61 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 15/20] vfio/pci: Use access ops for SR-IOV configuration and shared reset
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+SR-IOV configuration and shared hot reset can change device state during
+recovery. Both can involve unopened devices, whose per-open SRCU
+instance is unavailable.
+
+Select SR-IOV configuration through access ops under the PCI device
+lock. Reject requests for open devices while access is blocked, but
+preserve configuration of unopened devices. Unregister uses the internal
+helper to remove VFs regardless of the selected ops.
+
+Select hot-reset preparation under each device's memory_lock. Reject
+open recovering devices, but allow unopened and failed devices so they
+do not prevent resetting healthy siblings. Unwind the acquired locks if
+preparation fails.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h |  4 +++
+ drivers/vfio/pci/vfio_pci_core.c | 55 +++++++++++++++++++++++++++++---
+ 2 files changed, 54 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 20/20] vfio/pci: Enable recovery for supported native PCIe endpoints
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Enable recovery for generic vfio-pci endpoints on the subordinate bus of
+a PCIe Root Port or Downstream Port.
+
+The recovery power helpers require pci_bus_sem held for reading. Native
+PCI recovery provides this through its bus walk. Check the endpoint's
+bus as well as its upstream port, since synthetic VF buses are outside
+that walk. Exclude direct RCiEP and root-bus endpoints.
+
+Exclude EEH-enabled builds and Xen PV because their callbacks do not
+provide the required locking. Exclude s390 and CXL memory devices
+because their recovery paths can omit completion callbacks. Variant
+drivers remain unsupported until their hardware accesses are protected.
+
+Exclude functions with VPD redirected to function zero. The lookup takes
+pci_bus_sem inside SRCU and can deadlock with recovery when a bus writer
+is queued.
+
+Also exclude Intel Ethernet function zero devices with VPD. Redirected
+accesses from sibling functions bypass the target's access checks.
+Exclude potential targets even before siblings are probed so support
+does not depend on probe order.
+
+These restrictions affect only the new recovery feature. Ordinary
+assignment and existing error notifications remain available.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ include/uapi/linux/vfio.h   |  6 +++-
+ drivers/vfio/pci/vfio_pci.c | 61 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 66 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 19/20] vfio/pci: Add VFIO_DEVICE_FEATURE_PCI_ERROR_RECOVERY
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Userspace needs a way to enable host recovery and find out whether it is
+still running, succeeded, reset the device or failed.
+
+Add a device feature that registers a recovery eventfd and reports
+status flags and a sequence number. SET with eventfd -1 disables
+recovery. GET is available while hardware access is blocked. The
+sequence number lets userspace detect recovery that finished before it
+read the notification.
+
+Reject SET if access is blocked, recovery has failed or a recorded host
+recovery is still running. This also applies if userspace had not
+enabled recovery when the event started, so a late subscription cannot
+report part of an older event as a new one. Updating the eventfd resets
+status for the current open. The existing error eventfd is unchanged.
+
+Add the recovery eventfd and signal it when recovery starts, completes
+or fails. Release it during close. Signal under access_lock so SET cannot
+replace the eventfd and reset status before notification.
+
+Userspace must probe each device and restore guest state after a reset.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ include/linux/vfio_pci_core.h    |   1 +
+ include/uapi/linux/vfio.h        |  51 ++++++++++++
+ drivers/vfio/pci/vfio_pci_core.c | 139 +++++++++++++++++++++++++++++++
+ 3 files changed, 191 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 13/20] vfio/pci: Track PCI recovery state
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+PCI error recovery spans several callbacks. Add state to track its
+progress so later patches can keep access blocked until recovery
+succeeds and leave it blocked if recovery fails.
+
+Add recovery flags, a sequence counter and saved PCI_COMMAND state.
+Initialize per-open state during open and clear it on close. Keep host
+recovery state separate so close does not lose an ongoing recovery that
+must prevent reopening.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ include/linux/vfio_pci_core.h    | 18 +++++++++++++++++-
+ drivers/vfio/pci/vfio_pci_core.c |  7 +++++++
+ 2 files changed, 24 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 17/20] vfio/pci: Complete recovery in resume()
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Add resume() to finish recovery and allow device access again. This also
+handles recovery that did not require a reset.
+
+Complete deferred D0 requests and restore PCI_COMMAND, DMA-BUF mappings
+and INTx state before installing live ops. Take igate before
+memory_lock, matching IRQ configuration, and hold both through
+restoration and live-ops installation so no deferred D0 request is
+missed.
+
+Use the locked PCI power helper because native PCI recovery already
+holds pci_bus_sem for reading. Leave failed devices blocked.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ include/linux/vfio_pci_core.h    |  3 ++
+ drivers/vfio/pci/vfio_pci.c      |  8 +++
+ drivers/vfio/pci/vfio_pci_core.c | 87 ++++++++++++++++++++++++++++++++
+ 3 files changed, 98 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 18/20] vfio/pci: Block device access during host recovery
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+An error notification does not stop userspace or asynchronous VFIO work
+from accessing a device while the host is recovering it.
+
+For an open device with recovery enabled, install blocked ops in
+error_detected() and drain existing SRCU readers. Block INTx unmasking,
+remove BAR mappings and revoke DMA-BUF mappings. Disable bus mastering
+on a normal channel. Keep shared-line INTx masking available.
+
+Hold memory_lock and irqlock when publishing blocked ops so an earlier
+PM restore cannot undo the blocked handler's INTx mask. Release both
+locks before draining SRCU, since readers may need memory_lock to
+finish. Use the same transition during close.
+
+Defer blocked D0 requests while the device is open and reject them once
+close begins. Reject low-power requests while blocked. Check for ongoing
+host recovery before enabling a device.
+
+Return CAN_RECOVER for a normal channel, NEED_RESET for a frozen channel
+and DISCONNECT for permanent failure. If saving PCI_COMMAND or disabling
+bus mastering fails, keep access blocked and return NONE so other
+devices can continue recovery. Preserve existing error eventfd
+notifications.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ include/linux/vfio_pci_core.h    |   5 +-
+ drivers/vfio/pci/vfio_pci.c      |   2 +-
+ drivers/vfio/pci/vfio_pci_core.c | 156 ++++++++++++++++++++++++++++++-
+ 3 files changed, 157 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 16/20] vfio/pci: Restore device state from slot_reset()
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+A host reset loses device configuration and IRQ state. Add slot_reset()
+to restore the configuration saved at open, discard the old PM snapshot
+and tear down IRQ configuration for userspace to rebuild. Record RESET
+before restoration so failures also report that a reset occurred. Leave
+failed devices blocked.
+
+Use the locked PCI power helper because native PCI recovery already
+holds pci_bus_sem for reading. Taking it again could deadlock behind a
+queued writer.
+
+Preserve NoINTx and recovery masking when restoring saved configuration.
+The state saved at open predates the NoINTx correction. Route PM
+restoration through access ops while the device is open. Open and close
+continue to restore state directly.
+
+Keep the original error_detected-only callback table for Xen PV and EEH-
+enabled builds. Xen treats a missing slot_reset callback as recovered
+but treats NONE from a callback as failure. EEH also uses callback
+presence to decide whether to keep a device. Disabling the new feature
+alone would not preserve these decisions.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h |   2 +
+ include/linux/vfio_pci_core.h    |   1 +
+ drivers/vfio/pci/vfio_pci.c      |  17 +++++
+ drivers/vfio/pci/vfio_pci_core.c | 112 ++++++++++++++++++++++++++++++-
+ 4 files changed, 131 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 14/20] vfio/pci: Add INTx recovery operations
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Physical INTx interrupts and eventfd unmask requests can arrive while
+device access is blocked for recovery. Add blocked operations that
+remember unmask requests and keep masking pending interrupts on shared
+lines. An explicit mask cancels a pending unmask request.
+
+Select and call INTx operations under irqlock, and hold the same lock
+when switching access ops. Process pending unmask requests and publish
+live ops under irqlock so requests cannot be lost between these steps.
+Keep closed and failed devices blocked.
+
+Provide helpers to mask INTx at recovery entry and preserve its mask
+when restoring PCI_COMMAND. The completion caller holds igate and
+memory_lock through restoration, then sends any resulting INTx
+notification after releasing memory_lock and irqlock.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h  |  22 ++++
+ include/linux/vfio_pci_core.h     |   2 +-
+ drivers/vfio/pci/vfio_pci_core.c  |  23 ++++
+ drivers/vfio/pci/vfio_pci_intrs.c | 183 ++++++++++++++++++++++++++----
+ 4 files changed, 209 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 12/20] vfio/pci: Use access ops for DMA-BUF export and restoration
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+DMA-BUF export can race with recovery revoking device mappings.
+
+Keep the range lookup, export and list insertion inside SRCU so recovery
+waits for admitted exports before revoking mappings. Keep userspace
+copies and file descriptor installation outside SRCU.
+
+Select ordinary mapping restoration through access ops under
+memory_lock. Skip restoration while access is blocked. Provide an
+internal helper so recovery can restore mappings before allowing access
+again. Revocation remains available while access is blocked.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h   |   8 ++
+ drivers/vfio/pci/vfio_pci_core.c   |   6 ++
+ drivers/vfio/pci/vfio_pci_dmabuf.c | 113 +++++++++++++++++++----------
+ 3 files changed, 89 insertions(+), 38 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 10/20] vfio/pci: Use access ops for runtime-PM requests
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Userspace low-power requests change PM references and device mappings.
+Run these requests through access ops so recovery can reject new
+requests and drain admitted operations.
+
+Validate userspace arguments and obtain the eventfd reference before
+entering SRCU. Release the reference if entry fails. Keep the existing
+memory_lock protection and PM reference handling.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 09/20] vfio/pci: Use access ops for function reset
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Userspace function reset and its D0 preparation must finish before host
+recovery changes device state.
+
+Run both through the SRCU-protected access ops. Reject blocked requests
+and let recovery drain admitted operations. The D0 helper returns
+-EAGAIN on bus-lock contention.
+
+Hold memory_lock across preparation and reset so concurrent PM writes
+cannot put the device back into D3. Keep the existing DMA-BUF mapping
+removal and restoration around reset.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 29 +++++++++++++++++------------
+ 1 file changed, 17 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 08/20] vfio/pci: Use access ops for hardware IRQ operations
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+IRQ queries and configuration can access PCI registers while recovery
+resets the device or restores its configuration.
+Use access ops when reading hardware IRQ counts and applying IRQ
+configuration. Continue to hold igate for configuration changes.
+
+Use separate SRCU read-side sections for the count query and the
+configuration change so copies to and from userspace stay outside SRCU.
+ERR and REQ operations do not touch hardware and remain available while
+access is blocked.
+
+IRQ teardown flushes the global virqfd workqueue. Waiting for an IRQ
+operation to finish therefore also waits for that flush, including work
+for other devices.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 78 ++++++++++++++++++++++++++++----
+ 1 file changed, 70 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 06/20] vfio/pci: Use access ops for BAR and ROM accesses
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Recovery needs to wait for hardware reads and writes to finish before
+changing device state. Use access ops for individual MMIO and PIO
+reads and writes, covering BAR, VGA, port-I/O and ioeventfd accesses.
+Keep copies to and from userspace outside SRCU.
+
+For ROM reads, keep mapping, reading into the buffer and unmapping within
+one SRCU read-side section. Copy the buffered data to userspace afterward.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_rdwr.c | 156 ++++++++++++++++++++-----------
+ 1 file changed, 102 insertions(+), 54 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 04/20] vfio/pci: Use access ops for config-space accesses
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Config-space handlers can touch hardware during recovery. Run them
+through vfio_pci_core_access() and keep userspace copies outside SRCU
+so page faults cannot delay recovery.
+
+Defer D0 requests until the config handler has left SRCU. Select the
+power-state operation under memory_lock and use the bus try-lock helper
+for D0. Return transition errors to userspace.
+
+Blocked power operations reject requests. Open and close continue to
+use the internal power helper.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h   |   5 ++
+ drivers/vfio/pci/vfio_pci_config.c | 122 +++++++++++++++++++++++------
+ drivers/vfio/pci/vfio_pci_core.c   |   8 ++
+ 3 files changed, 109 insertions(+), 26 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 07/20] vfio/pci: Use access ops when mapping BAR pages
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+A BAR page fault can race with recovery and install a mapping after
+recovery has removed the existing mappings.
+
+Insert the mapping through the SRCU-protected access ops while holding
+memory_lock. Recovery can then wait for pending insertions before
+removing mappings. If access is blocked, return VM_FAULT_SIGBUS instead
+of waiting for recovery in the fault handler.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 26 ++++++++++++++++++++++++--
+ 1 file changed, 24 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 05/20] vfio/pci: Buffer ROM reads before copying to userspace
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+ROM reads copy directly to userspace while ROM decoding is enabled.
+Putting the whole operation inside SRCU would let a userspace page
+fault delay recovery.
+
+Read the requested ROM data into a kernel buffer, then unmap the ROM
+before copying to userspace. Hold memory_lock across mapping and reading
+to serialize ROM decoding with power changes and other ROM accesses.
+
+Preserve byte, word and dword reads and 0xff padding beyond the ROM.
+Subsequent patch adds SRCU protection around the hardware access.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_rdwr.c | 147 ++++++++++++++++++++++---------
+ 1 file changed, 104 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 03/20] vfio/pci: Avoid waiting for the bus lock when preparing D0
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+A D0 transition can wait behind a pci_bus_sem writer while holding locks
+needed by PCI error recovery. Recovery holds the bus read lock, leaving
+all three tasks waiting for each other.
+
+Use pci_try_set_power_state() for D0 preparation during function reset,
+hot reset, runtime suspend and SR-IOV enable. Preserve VFIO's saved PM
+state handling and unwind reset and SR-IOV requests if D0 preparation
+fails.
+
+Runtime suspend returns -EAGAIN on bus-lock contention. Keep its existing
+handling of other D0 errors to avoid leaving runtime PM in an error state.
+
+Apply this even when recovery is disabled, since global IRQ cleanup can
+wait for another device's D0 transition. Low-power transitions keep the
+existing helper. Subsequent patch handles config-space power requests.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h |  2 ++
+ drivers/vfio/pci/vfio_pci_core.c | 49 +++++++++++++++++++++++++++-----
+ 2 files changed, 44 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 01/20] vfio/pci: Add SRCU-protected access ops
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Before recovering a device, VFIO needs to stop new hardware accesses and
+wait for operations already in progress to finish.
+
+Give each open device an SRCU instance to track hardware accesses.
+Enable SRCU access tracking only for devices with
+pci_recovery_supported set.
+Select and call the access operation within the same SRCU read-side
+section. Keep copies to and from userspace outside that section so a
+page fault cannot hold up recovery.
+
+Introduce live and blocked tables. Initialize the ops pointer to blocked
+when the device is created, and select live ops when open finishes.
+Close uses a blocking transition that installs blocked ops and drains
+SRCU readers before teardown. Open publishes live ops after setup.
+Serialize these transitions with access_lock. Internal setup and cleanup
+use their own helpers.
+
+Provide an accessor for operations that use their existing synchronization
+instead of SRCU. The accessor only returns the selected table. It does
+not acquire a lock or keep the device's per-open resources alive.
+
+Subsequent patches convert hardware access paths to these ops and add
+support for host PCI error recovery using the same blocked table.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ drivers/vfio/pci/vfio_pci_priv.h | 15 ++++++
+ include/linux/vfio_pci_core.h    | 10 ++++
+ drivers/vfio/pci/vfio_pci_core.c | 86 ++++++++++++++++++++++++++++++++
+ 3 files changed, 111 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 00/20] vfio/pci: Handle PCI error recovery and report state to userspace
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+Hi,
+
+Currently, vfio-pci signals the error eventfd from error_detected() and
+returns PCI_ERS_RESULT_CAN_RECOVER, including for permanent failure. It
+has no slot_reset() or resume() callback, so userspace is not notified
+when host recovery completes or whether the device was reset.
+
+This series adds opt-in host PCI error recovery for vfio-pci. It blocks
+device access during recovery, restores device state after a host reset,
+and reports recovery status to userspace. The kernel runs host recovery
+and the VMM decides how to recover the guest.
+
+Major Changes from v2:
+v2: https://lore.kernel.org/kvm/20260929173305.204856-1-skolothumtho@nvidia.com/
+
+ - Rework device access serialization around live and blocked access ops,
+   using SRCU to drain ongoing accesses before recovery.
+ - Address the D0 bus-lock cycle described in RFC v2. Add
+   pci_try_set_power_state() for ordinary transitions and use the locked
+   helper during recovery to avoid taking pci_bus_sem again.
+ - Fix INTx restoration ordering, recovery status reporting and PF access
+   during VF information queries.
+ - Limit enablement to supported native PCIe recovery paths. Exclude
+   functions with VPD redirected to function zero, and Intel Ethernet
+   function zero devices with VPD.
+
+Design
+------
+Userspace opts in through VFIO_DEVICE_FEATURE_PCI_ERROR_RECOVERY. It
+registers an eventfd and reads status flags and a sequence number. The
+existing error eventfd is still signaled.
+
+The callbacks handle the host recovery sequence:
+
+ - error_detected() blocks new accesses and drains admitted ones,
+   quiesces INTx, and revokes BAR mappings and exported DMA-BUFs. On a
+   normal channel it also clears bus mastering. It votes CAN_RECOVER
+   for a normal channel, NEED_RESET for a frozen channel, and DISCONNECT
+   for permanent failure. Failure to save PCI_COMMAND or disable bus
+   mastering leaves access blocked and returns NONE so other devices
+   can continue recovery.
+ - slot_reset() restores the configuration saved at open after a host
+   reset, then tears down interrupt configuration. Userspace must set
+   up interrupts again.
+ - resume() completes restoration, unblocks access and completes INTx
+   handling. A restoration failure keeps the device blocked.
+
+Non-fatal errors also block device access because host recovery may
+require a reset. Userspace reads the recovery status to determine
+whether the device was reset or recovery failed.
+
+Without opt-in, the existing error notification behavior is retained.
+Open also rejects attempts while a recorded host recovery is in progress,
+even when userspace has not enabled recovery.
+
+Locking and open questions
+-------------------------
+
+PCI core holds device_lock during recovery callbacks and pci_bus_sem
+for reading during the supported recovery walk.
+
+VFIO uses access_lock to serialize recovery and switch access ops.
+Recovery blocks new accesses and waits for existing SRCU readers to
+finish. Switching ops also takes irqlock to serialize with INTx
+callbacks, which do not use SRCU. Power transitions and mapping
+changes use memory_lock.
+
+The D0 bus-lock cycle described in RFC v2 is addressed by the try-lock
+helper for ordinary transitions and the locked helper in recovery. This
+uses the locking provided by the supported native PCI bus walk. It does
+not impose a new locking requirement on every PCI recovery dispatcher.
+
+Pre-existing(Sashiko reported):
+--------------
+  - Open and close were not serialized with the whole host recovery
+    transaction before this series. That remains the case. Recovery
+    can start after the open check, and close can overlap the
+    physical reset. Restoration of closed devices is also still
+    missing.
+
+LLM tools assisted with implementation. I also ran local Sashiko
+reviews.
+
+Testing
+-------
+Basic sanity tests performed on a GB200 with an NVIDIA GPU assigned.
+
+Kernel branch:
+ https://github.com/shamiali2008/linux/tree/vfio-aer-rfc-v3-ext
+
+QEMU test branch is here(This registers the recovery eventfd and uses
+pcie_aer_inject_error() to report the error to Guest)
+ https://github.com/shamiali2008/qemu-master/commits/private-master-vfio-aer-test-v2/
+
+Software AER injection was performed using a modified pcieaer_inject
+module.
+
+./aer-inject nonfatal.conf
+
+qemu-system-aarch64: info: vfio 0018:06:00.0: host PCI error recovery completed (seq 1)
+
+Guest kernel:
+
+[   59.036988] pcieport 0000:01:00.0: AER: Uncorrectable (Non-Fatal) error message received from 0000:02:00.0
+[   59.038326] nvidia 0000:02:00.0: PCIe Bus Error: severity=Uncorrectable (Non-Fatal), type=Transaction Layer, (Completer ID)
+[   59.038440] nvidia 0000:02:00.0:   device [10de:2941] error status/mask=00008000/02400000
+[   59.038533] nvidia 0000:02:00.0:    [15] CmpltAbrt              (First)
+[   59.038705] nvidia 0000:02:00.0: AER:   TLP Header: 0x00000000 0x00000000 0x00000000 0x00000000
+...
+
+./aer-inject fatal.conf
+qemu-system-aarch64: info: vfio 0018:06:00.0: host PCI error recovery started (seq 2, channel frozen)
+qemu-system-aarch64: info: vfio 0018:06:00.0: host PCI error recovery completed (seq 2, device was reset)
+
+Guest kernel:
+
+[  150.909306] pcieport 0000:01:00.0: AER: Uncorrectable (Fatal) error message received from 0000:02:00.0
+[  150.909566] nvidia 0000:02:00.0: AER: PCIe Bus Error: severity=Uncorrectable (Fatal), type=Inaccessible, (Unregistered Agent ID)
+[  150.909835] nvidia 0000:02:00.0: AER: can't recover (no error_detected callback)
+[  150.910062] pcieport 0000:01:00.0: unlocked secondary bus reset via: pciehp_reset_slot+0x54/0x98
+[  156.603467] pcieport 0000:01:00.0: AER: Root Port link has been reset (0)
+...
+
+Please take a look and let me know your feedback.
+
+Thanks,
+Shameer
+
+
+Shameer Kolothum (20):
+  vfio/pci: Add SRCU-protected access ops
+  PCI/PM: Add a power-state helper that tries the bus lock
+  vfio/pci: Avoid waiting for the bus lock when preparing D0
+  vfio/pci: Use access ops for config-space accesses
+  vfio/pci: Buffer ROM reads before copying to userspace
+  vfio/pci: Use access ops for BAR and ROM accesses
+  vfio/pci: Use access ops when mapping BAR pages
+  vfio/pci: Use access ops for hardware IRQ operations
+  vfio/pci: Use access ops for function reset
+  vfio/pci: Use access ops for runtime-PM requests
+  vfio/pci: Use access ops for hardware information queries
+  vfio/pci: Use access ops for DMA-BUF export and restoration
+  vfio/pci: Track PCI recovery state
+  vfio/pci: Add INTx recovery operations
+  vfio/pci: Use access ops for SR-IOV configuration and shared reset
+  vfio/pci: Restore device state from slot_reset()
+  vfio/pci: Complete recovery in resume()
+  vfio/pci: Block device access during host recovery
+  vfio/pci: Add VFIO_DEVICE_FEATURE_PCI_ERROR_RECOVERY
+  vfio/pci: Enable recovery for supported native PCIe endpoints
+
+ drivers/vfio/pci/vfio_pci_priv.h   |  58 ++
+ include/linux/pci.h                |   3 +
+ include/linux/vfio_pci_core.h      |  36 +-
+ include/uapi/linux/vfio.h          |  55 ++
+ drivers/pci/pci.c                  |  37 ++
+ drivers/vfio/pci/vfio_pci.c        |  88 ++-
+ drivers/vfio/pci/vfio_pci_config.c | 122 +++-
+ drivers/vfio/pci/vfio_pci_core.c   | 955 +++++++++++++++++++++++++++--
+ drivers/vfio/pci/vfio_pci_dmabuf.c | 113 ++--
+ drivers/vfio/pci/vfio_pci_intrs.c  | 183 +++++-
+ drivers/vfio/pci/vfio_pci_rdwr.c   | 297 ++++++---
+ 11 files changed, 1705 insertions(+), 242 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v3 02/20] PCI/PM: Add a power-state helper that tries the bus lock
+Author: Shameer Kolothum <skolothumtho@nvidia.com>
+
+PCI error recovery can hold pci_bus_sem for reading while waiting for a
+lock held by a driver. If that driver also needs the bus read lock to
+bring a device to D0, a queued writer can block it. Recovery, the driver
+and the writer then all wait for each other.
+
+Add pci_try_set_power_state(), which returns -EAGAIN if it cannot take
+the bus lock immediately. The caller can then release its locks. Once
+the bus lock is held, use pci_set_power_state_locked() for the transition.
+Keep the existing cases that need no power-state change. The transition
+itself can still sleep.
+
+Callers that already hold the bus read lock must use the locked helper
+instead.
+
+Signed-off-by: Shameer Kolothum <skolothumtho@nvidia.com>
+---
+ include/linux/pci.h |  3 +++
+ drivers/pci/pci.c   | 37 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86: Don't patch L2's hypercall if L1 intercepts #UD
+Author: Like Xu <like.xu.linux@gmail.com>
+
+
+The fix_hypercall_test selftest fails when run in an L1 VM on an AMD host:
+
+  ret == (u64)-EFAULT
+
+On SVM, L0 always intercepts #UD in vmcb01, so nested_svm_exit_special()
+claims every #UD from L2 for L0, before L1's intercepts are consulted.
+L0 then emulates L2's VMCALL and, based on the quirk that L0 userspace
+configured for L1, patches it to VMMCALL. This ignores L1's decision to
+disable KVM_X86_QUIRK_FIX_HYPERCALL_INSN for L2.
+
+Synthesize #UD instead if the vCPU is in L2 and L1 intercepts #UD, so
+the nested exception machinery reflects it to L1.  Keep patching L2's
+instruction when L1 doesn't intercept #UD, as existing userspace relies
+on it, e.g. nested SVM selftests execute VMCALL in L2 and expect L1 to
+see SVM_EXIT_VMMCALL.
+
+Fixes: f1a9761fbb00 ("KVM: x86: Allow userspace to opt out of hypercall patching")
+Signed-off-by: Like Xu <likexu@tencent.com>
+---
+ arch/x86/kvm/x86.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 8/9] virtio-net: add XDP rx timestamp metadata
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+For the skb, the timestamp is read from the header before the XDP
+program runs, so XDP_PASS keeps it even if the program changes the
+packet. XDP therefore works with rx timestamping enabled.
+
+Add xmo_rx_timestamp so XDP programs can read the timestamp with
+bpf_xdp_metadata_rx_timestamp(). It returns -ENODATA if timestamping
+is not enabled or the device did not timestamp the packet. Install the
+metadata ops also if only VIRTIO_NET_F_RX_TSTAMP is negotiated;
+rx_hash returns -ENODATA then.
+
+Like the hash, the timestamp is copied into struct virtnet_xdp_buff
+before the program runs, so the callback still works after the program
+changed the headroom with bpf_xdp_adjust_head() or
+bpf_xdp_adjust_meta().
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/net/virtio_net.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 5/9] virtio-net: support receive timestamp
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+Add optional hardware rx timestamp offload for virtio-net.
+
+Introduce the virtio feature VIRTIO_NET_F_RX_TSTAMP. If negotiated, the
+virtio-net header grows by room for a 64 bit TAI timestamp (header
+size 40 bytes), stored in struct virtio_net_common_hdr. The layout is
+cumulative: the field is at the same offset whether or not the
+features before it were negotiated. The fixed layout needs
+VIRTIO_F_VERSION_1, so the feature is cleared without it.
+
+Implement ndo_hwtstamp_get/set so the timestamping can be enabled
+and disabled at runtime with SIOCSHWTSTAMP. The driver cannot filter
+what the device timestamps, so any rx filter other than NONE becomes
+ALL. The timestamp is read before the packet is handed to the XDP
+program or the stack, and attached to the skb with skb_hwtstamps().
+It is a raw TAI value; there is no PHC.
+
+The header size is negotiated per device and also applies to
+transmitted packets. xmit_skb() clears the whole header, so the device
+sees a zero tstamp.
+
+On receive in big packet mode, the header is placed in front of the
+data in the first page. Grow padded_vnet_hdr to 48 bytes so the
+40 byte header still fits there.
+
+Tested in a guest with a patched QEMU:
+  guest: ./timestamping eth0 \
+          SOF_TIMESTAMPING_RAW_HARDWARE \
+          SOF_TIMESTAMPING_RX_HARDWARE
+  host:  nc -4 -u 192.168.1.1 319
+
+Based on work by Willem de Bruijn.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/net/virtio_net.c        | 131 +++++++++++++++++++++++++++++++++++-----
+ include/linux/virtio_net.h      |  10 +++
+ include/uapi/linux/virtio_net.h |   1 +
+ 3 files changed, 127 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 7/9] vhost-net: support VIRTIO_NET_F_RX_TSTAMP
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+Advertise VIRTIO_NET_F_RX_TSTAMP to userspace and size the vnet header
+for it, so a guest can negotiate the feature with a vhost-net backed
+tap device.
+
+The header is 40 bytes if the feature is negotiated. Whoever writes
+the header (tun, or vhost itself with VHOST_NET_F_VIRTIO_NET_HDR) has
+to fill in the timestamp; vhost only reserves the room. If vhost
+writes the header, it zeroes everything behind the fields it fills in
+(num_buffers only with VIRTIO_F_VERSION_1 or VIRTIO_NET_F_MRG_RXBUF),
+so the timestamp is 0, which the guest ignores.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/vhost/net.c | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 6/9] virtio-net: assert header sizes
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+The header is cast from skb->cb and from device buffers, so its layout
+must not change silently. Add static_asserts for the offset of tstamp,
+the total size, the alignment, and that the header fits into skb->cb.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ include/linux/virtio_net.h | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 1/9] net: ethtool: tsconfig: allow hardware
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+A driver can do hardware timestamping without a PTP hardware clock; its
+get_ts_info() then reports hardware timestamping with phc_index -1.
+ngbe and txgbe (libwx) do so when no PTP clock is registered, e.g. with
+CONFIG_PTP_1588_CLOCK=n, and dpaa without a ptimer-handle.
+
+SIOCGHWTSTAMP and SIOCSHWTSTAMP work for such a device, but
+tsconfig_prepare_data() refuses it with -ENODEV:
+
+ - TSCONFIG_GET fails.
+ - TSCONFIG_SET passes the new config to ndo_hwtstamp_set() first and
+   fails only when building the reply, so user space gets an error
+   although the config was applied.
+ - In a dump only -EOPNOTSUPP is skipped; the error ends the dump, and
+   the devices after this one are not listed.
+
+The reply already leaves out ETHTOOL_A_TSCONFIG_HWTSTAMP_PROVIDER when
+the index is -1. Let tsconfig_prepare_data() take that path instead of
+failing.
+
+Fixes: 6e9e2eed4f39 ("net: ethtool: Add support for tsconfig command to get/set hwtstamp config")
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ net/ethtool/tsconfig.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 9/9] tun: add rx timestamp to the vnet header
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+Reference implementation of the device side of VIRTIO_NET_F_RX_TSTAMP: if
+the configured vnet_hdr_sz covers the tstamp field, write the current
+TAI time into the header when a packet is handed to userspace or vhost.
+__tun_vnet_hdr_put() now takes the full struct virtio_net_common_hdr
+and copies as much of it as vnet_hdr_sz holds.
+
+This is not intended to be merged. A full test needs a QEMU that knows
+the feature and sets the matching vnet_hdr_sz in
+virtio_net_set_mrg_rx_bufs(); see
+https://github.com/strumtrar/qemu/tree/v11.0.1/virtio-rx-stamps
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/net/tun.c      | 14 +++++++++-----
+ drivers/net/tun_vnet.h | 18 ++++++++++++------
+ 2 files changed, 21 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 4/9] virtio-net: move virtio_net_common_hdr to
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+tun and vhost need to know the layout and size of the virtio-net
+header as the driver uses it, e.g. to fill in fields behind
+virtio_net_hdr_v1_hash_tunnel. Move struct virtio_net_common_hdr to
+the kernel-internal header that they include already.
+
+No functional change.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/net/virtio_net.c   | 9 ---------
+ include/linux/virtio_net.h | 9 +++++++++
+ 2 files changed, 9 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 3/9] virtio-net: copy the XDP rx hash before
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+virtnet_xdp_rx_hash() reads the hash from the vnet header at
+xdp->data - vi->hdr_len when the XDP program calls
+bpf_xdp_metadata_rx_hash(). That is only the header until the program
+changes the buffer: bpf_xdp_adjust_meta() writes the metadata right in
+front of xdp->data, over the header, and bpf_xdp_adjust_head() moves
+xdp->data, so the callback then reads metadata or packet bytes.
+
+Wrap struct xdp_buff in struct virtnet_xdp_buff, copy hash value and
+report type into it in virtnet_xdp_handler() before
+bpf_prog_run_xdp(), and let the callback read the copy. The small and
+mergeable paths put the wrapper on the stack; for AF_XDP the fields are
+in the cb of struct xdp_buff_xsk, checked with XSK_CHECK_PRIV_TYPE().
+
+Move virtio_net_hash_value() up so the copy can use it.
+
+Fixes: aa37f8916d20 ("virtio_net: Support RX hash XDP hint")
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/net/virtio_net.c | 86 ++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 58 insertions(+), 28 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 0/9] virtio-net: add receive timestamp support
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+This series picks up Willem de Bruijn's work on a virtio-net receive
+timestamp. The device puts the time of arrival (TAI, ns) into the virtio-net
+header so the guest can use it for PTP and RTT estimation without
+taking the timestamp itself after the host-to-guest latency.
+
+In detail, with the points that are still open:
+
+ - The timestamp is a new field at the end of virtio_net_common_hdr
+   after outer_nh_offset and ipsec, offset 32 (see virtio spec),
+   negotiated with VIRTIO_NET_F_RX_TSTAMP (bit 49). Header size now 40
+   bytes.
+   Willem noted on v3 that virtio_net_common_hdr was not meant to be
+   extended this way; I kept it as the simplest approach, but a
+   separate struct for the timestamp header is an option.
+ - Timestamping is enabled at runtime with SIOCSHWTSTAMP; all
+   supported rx filters behave the same for now.
+ - XDP programs can read the timestamp with
+   bpf_xdp_metadata_rx_timestamp().
+ - vhost-net passes the feature through; the timestamp itself is
+   written by tun, the device side in software.
+ - The timestamp is in TAI. On v4 Willem and I discussed whether the
+   spec should fix the time base at all. Fixing it to TAI is the
+   simplest: a software device like tun can convert its own clock, and
+   the guest needs nothing else. The driver reports the timestamp as
+   SOF_TIMESTAMPING_RAW_HARDWARE without a PTP clock (phc_index -1).
+   For hardware virtio-net queues, which may not be able to convert,
+   the model of NIC timestamps and their PHC would fit better: the
+   device names a clock (e.g. a virtio_rtc clock, whose PHC the driver
+   reports) or virtio-net gets a PHC of its own. That needs consensus
+   on the virtio side; Which way would you prefer?
+ - With phc_index -1, ETHTOOL_MSG_TSCONFIG_GET and _SET fail with
+   -ENODEV (SET after the config was already applied). Other drivers
+   with hardware timestamps but no PHC have the same problem
+   (ngbe/txgbe, dpaa); patch 1 lets tsconfig handle phc_index -1.
+
+Patches 1 to 3 fix existing code and do not depend on the rest:
+tsconfig refused devices with hardware timestamps but no PHC, the tx
+header was not fully cleared, and the XDP rx hash was read from the
+headroom after the XDP program could have overwritten it. They can go
+to net on their own if preferred.
+
+A virtio spec change is needed as well and not yet proposed.
+
+Testing: the feature needs a QEMU that knows VIRTIO_NET_F_RX_TSTAMP and
+sets the matching vnet header size; see
+https://github.com/strumtrar/qemu/tree/v11.0.1/virtio-rx-stamps
+Each patch builds with W=1 on arm64 on top of net-next.
+
+Tools: this version was developed with an LLM coding assistant (Claude
+Opus 5.5 in Claude Code). From the review of v4 (Willem's and the
+Sashiko findings) it wrote patches 1 to 3, the xdp_buff wrapper and
+the other changes listed below, and drafts of the commit messages and
+of this cover letter.
+v4 carried Assisted-by tags; after commit 1e035297ffda ("docs: remove
+Assisted-by references") this is said here instead.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+Changes in v5:
+- new patch: let tsconfig handle devices without a PHC
+- new patch: clear the whole tx header in xmit_skb()
+- new patch: copy the XDP rx hash into a wrapper around xdp_buff
+  before the XDP program runs
+- use the same wrapper for the XDP rx timestamp
+- rename has_rx_tstamp/hwts_rx_en to rx_tstamp_supported/rx_tstamp_enabled
+- add VIRTIO_NET_F_RX_TSTAMP to features[] only, not to features_legacy[]
+- vhost: zero the rest of the header also when num_buffers is not written
+- timestamp stays TAI, open question for the virtio side in the cover letter
+- drop the performance numbers from the cover letter
+- drop the Assisted-by tags, tool use is described in the cover letter
+- send as PATCH, no longer RFC
+- rebase onto net-next/main 20261112
+- Link to v4: https://patch.msgid.link/20261026-v6-7-topic-virtio-net-ptp-v4-0-008af03cd43b@pengutronix.de
+Changes in v4:
+- add static_asserts for header sizes
+- rework hdr_len handling
+- add support in vhost
+- fix/add support for xdp
+- Link to v3: https://patch.msgid.link/20260921-v6-7-topic-virtio-net-ptp-v3-0-3350851c4f88@pengutronix.de
+Changes in v3:
+- rework to use virtio_net_common_hdr instead of adding new struct
+Changes in v2:
+- rework patches to use flow filter instead of feature flag
+- Link to v1: https://lore.kernel.org/r/20231218-v6-7-topic-virtio-net-ptp-v1-0-cac92b2d8532@pengutronix.de
+
+---
+Steffen Trumtrar (9):
+      net: ethtool: tsconfig: allow hardware timestamping without a PHC
+      virtio-net: zero the whole tx header
+      virtio-net: copy the XDP rx hash before the program runs
+      virtio-net: move virtio_net_common_hdr to virtio_net.h
+      virtio-net: support receive timestamp
+      virtio-net: assert header sizes
+      vhost-net: support VIRTIO_NET_F_RX_TSTAMP
+      virtio-net: add XDP rx timestamp metadata
+      tun: add rx timestamp to the vnet header
+
+ drivers/net/tun.c               |  14 ++-
+ drivers/net/tun_vnet.h          |  18 ++-
+ drivers/net/virtio_net.c        | 250 +++++++++++++++++++++++++++++++---------
+ drivers/vhost/net.c             |  21 +++-
+ include/linux/virtio_net.h      |  30 +++++
+ include/uapi/linux/virtio_net.h |   1 +
+ net/ethtool/tsconfig.c          |   6 +-
+ 7 files changed, 270 insertions(+), 70 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH net-next v5 2/9] virtio-net: zero the whole tx header
+Author: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+
+xmit_skb() builds the virtio-net header either in skb->cb or in the
+headroom in front of the packet. virtio_net_hdr_tnl_from_skb() only
+clears struct virtio_net_hdr (10 bytes) and, for tunnel GSO, the hash
+fields; num_buffers is cleared only with mergeable rx buffers. With a
+larger negotiated header the remaining bytes go to the device as they
+were in skb->cb or the headroom:
+
+  - num_buffers with VIRTIO_F_VERSION_1 but without
+    VIRTIO_NET_F_MRG_RXBUF (header size 12),
+  - hash_value, hash_report and padding with
+    VIRTIO_NET_F_HASH_REPORT (header size 20),
+  - additionally outer_th_offset and inner_nh_offset for packets
+    without tunnel GSO if a UDP tunnel GSO feature was negotiated
+    (header size 24).
+
+Clear the whole header before filling it in. This also covers
+num_buffers, so drop the separate assignment.
+
+The helpers still clear struct virtio_net_hdr and, for tunnel GSO, the
+hash fields themselves; that is now redundant here, but they are
+shared with tun, tap, af_packet and the UML vector driver and stay as
+they are.
+
+Signed-off-by: Steffen Trumtrar <s.trumtrar@pengutronix.de>
+---
+ drivers/net/virtio_net.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH RFC] vhost: set dirty log bits without pinning pages on x86
+Author: Michael S. Tsirkin <mst@redhat.com>
+
+vhost had a TODO to replace page pinning with a version
+of set_bit that works on userspace memory, since forever.
+
+It is really best to avoid GUP on fast path entirely.
+Implement set_user_bit and use it in vhost, to do just that.
+
+Should not be too hard for non-x86 too.
+
+Reported-by: Khan Zhao <zhaoguohan@kylinos.cn>
+Link: https://lore.kernel.org/all/20261112085631.128819-1-zhaoguohan@kylinos.cn/
+Signed-off-by: Michael S. Tsirkin <mst@redhat.com>
+---
+
+
+lightly tested. pls test and resubmit with your tool.
+
+ arch/x86/include/asm/uaccess.h | 18 ++++++++++++++++++
+ drivers/vhost/vhost.c          |  7 +++++++
+ 2 files changed, 25 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH net] vhost/vsock: Fix socket state constant
+Author: Michal Luczaj <mhal@rbox.co>
+
+Refactor under Fixes missed one: SS_UNCONNECTED (1) -> TCP_CLOSE (7).
+Until now, sk->sk_state = 1 stood for TCP_ESTABLISHED.
+
+Fixes: 3b4477d2dcf2 ("VSOCK: use TCP state constants for sk_state")
+Reviewed-by: Stefano Garzarella <sgarzare@redhat.com>
+Signed-off-by: Michal Luczaj <mhal@rbox.co>
+---
+Salvaging a single already-reviewed patch from a series[1] that was
+superseded.
+
+[1]: https://lore.kernel.org/all/20260922-vsock-connect-reset-closing-v3-0-78907b8200d4@rbox.co/
+---
+ drivers/vhost/vsock.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] tools/virtio: add a vhost dirty log test
+Author: zhaoguohan <zhaoguohan@kylinos.cn>
+
+
+Add vhost_log_test, which exercises used-ring dirty logging through the
+existing vhost_test module. It sets a log base with VHOST_SET_LOG_BASE,
+enables VHOST_VRING_F_LOG on the ring, submits descriptors and checks
+the resulting bitmap from userspace. No new kernel interface is needed.
+
+The test covers:
+
+ - every bit in a byte, repeated sets, and neighbouring bytes being left
+   untouched, including the last byte of a page followed by a PROT_NONE
+   guard page
+ - a log page that has not been faulted in yet, read-only, PROT_NONE
+   and unmapped log pages, and logging after access is restored
+ - private (COW) and shared file mappings, checking that the bit reaches
+   the file after msync/fsync
+ - eight vrings setting different bits of the same byte concurrently,
+   with and without a userspace thread atomically fetching and clearing
+   that byte
+ - two shared mappings of one file page, one of them zapped with
+   MADV_DONTNEED each round, so both resident and faulting pages are
+   hit
+
+log_used() ignores errors from log_write(), so the fault cases can only
+check that nothing crashes, that nothing is written to an inaccessible
+log, and that logging works again afterwards.
+
+A --bench mode reports ns per descriptor with logging disabled and
+enabled. vhost_log_test.rst describes how to build and run the test.
+
+Assisted-by: Codex:gpt-6.1-sol
+Signed-off-by: Khan Zhao <zhaoguohan@kylinos.cn>
+---
+ tools/virtio/.gitignore         |   1 +
+ tools/virtio/Makefile           |   7 +-
+ tools/virtio/vhost_log_test.c   | 393 ++++++++++++++++++++++++++++++++
+ tools/virtio/vhost_log_test.rst |  53 +++++
+ 4 files changed, 452 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] vhost: set dirty log bits without pinning pages on x86
+Author: zhaoguohan <zhaoguohan@kylinos.cn>
+
+
+set_bit_to_user() pins the log page with pin_user_pages_fast(), maps it
+with kmap_atomic(), sets one bit and then unpins the page and marks it
+dirty. This runs for every bit set in the dirty log, e.g. on each used
+ring update while logging is enabled for live migration.
+
+log_write() always passes a byte address and a bit number in [0, 7], so
+the update can be done as a byte-sized cmpxchg on the user address. On
+x86, try that first using unsafe_try_cmpxchg_user() inside a
+user_access_begin()/user_access_end() section with page faults disabled.
+If the access faults (page not present, read-only or needing COW), or
+the cmpxchg loses to concurrent updates of the same byte four times in
+a row, fall back to the existing pin/kmap/set_bit path, which can fault
+the page in.
+
+unsafe_try_cmpxchg_user() is only implemented on x86, so other
+architectures keep using the existing path.
+
+On an x86_64 KVM guest (i7-12800HX host), a synthetic used-ring
+workload with logging enabled went from 243.60 to 171.11 ns per
+descriptor, averaged over five alternating runs. This is the
+end-to-end cost per descriptor, not live migration performance.
+
+Signed-off-by: Khan Zhao <zhaoguohan@kylinos.cn>
+---
+ drivers/vhost/vhost.c | 50 ++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 45 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] vhost: set dirty log bits without pinning pages on x86
+Author: zhaoguohan <zhaoguohan@kylinos.cn>
+
+
+We use vhost-net with live migration in our product. While dirty
+logging is enabled, every used ring update and every logged write goes
+through set_bit_to_user(), which pins the log page, maps it, sets a
+single bit and unpins it again. The TODO above that function has noted
+for a long time that a direct user access would be better.
+
+Patch 1 does that on x86: it tries a byte-sized cmpxchg on the user
+address with page faults disabled, and falls back to the existing
+pin/kmap path if the access faults or keeps losing to concurrent
+updates of the same byte. Other architectures are unchanged, since
+unsafe_try_cmpxchg_user() is only implemented on x86.
+
+Patch 2 adds a userspace test in tools/virtio that drives used-ring
+logging through vhost_test and checks the bitmap, including fault,
+COW, shared-file and concurrent cases, plus a small benchmark mode.
+
+On an x86_64 KVM guest (i7-12800HX host), the benchmark with logging
+enabled went from 243.60 to 171.11 ns per descriptor, averaged over
+five alternating runs. This is the per-descriptor cost in the vhost
+worker; I have not measured the effect on total migration time.
+
+Tool usage: the test, its documentation and the benchmark in patch 2
+were largely generated with OpenAI Codex (gpt-6.1-sol) from a request
+to exercise vhost used-ring dirty logging, and Codex helped run the
+build and VM tests. The changelogs were edited with help from an AI
+assistant. I have reviewed all of the code and take responsibility
+for it.
+
+Testing: x86_64 with SMAP under QEMU/KVM, running the test from
+patch 2 against both the unmodified and patched vhost modules. i386
+and arm64 are build-tested only; non-x86 has not been runtime tested.
+
+Khan Zhao (2):
+  vhost: set dirty log bits without pinning pages on x86
+  tools/virtio: add a vhost dirty log test
+
+ drivers/vhost/vhost.c           |  50 +++-
+ tools/virtio/.gitignore         |   1 +
+ tools/virtio/Makefile           |   7 +-
+ tools/virtio/vhost_log_test.c   | 393 ++++++++++++++++++++++++++++++++
+ tools/virtio/vhost_log_test.rst |  53 +++++
+ 5 files changed, 497 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] x86/virt/tdx: remove kernel-doc syntax from comment
+Author: Manuel Ebner <manuelebnerli@mailbox.org>
+
+Remove kernel-doc syntax form multiline comment, fixing:
+  $ ./scripts/kernel-doc --none arch/x86/virt/vmx/tdx/tdx.c
+  Warning: arch/x86/virt/vmx/tdx/tdx.c:123 This comment starts with '/**', but isn't a kernel-doc comment. Refer to Documentation/doc-guide/kernel-doc.rst
+   * Enable VMXON and then do one-time TDX module per-cpu initialization SEAMCALL
+
+Fixes: 165e77353831 ("KVM: x86/tdx: Do VMXON and TDX-Module initialization during subsys init")
+Signed-off-by: Manuel Ebner <manuelebnerli@mailbox.org>
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 16/16] KVM: guest_memfd: Invalidate mappings before memslot unbind
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Use the generic invalidate_start/end helpers to remove shared and
+private device mappings before removing the memslot's guest_memfd
+binding.
+
+Hold gmem_provider_lock_updates() across invalidation and binding removal to
+prevent device unlock from racing with teardown.
+
+Keep the file attributes and has_private_ranges unchanged. Deleting a
+memslot removes mappings but does not share the memory range. Device unlock
+remains blocked until userspace shares the private ranges or closes the
+last guest_memfd reference.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ virt/kvm/guest_memfd.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 15/16] KVM: guest_memfd: Notify providers during file release
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+When releasing the last file associated with an inode, invalidate its
+mappings and notify the provider that no private ranges remain. Hold the
+provider lock across both operations so device unlock waits for cleanup.
+Skip notification if provider attachment failed.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ virt/kvm/guest_memfd.c | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 14/16] KVM: guest_memfd: Enable shared host mappings for device providers
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Use the PFN provider mmap and fault handlers for shared device memory.
+Apply device VMA flags and noncached, decrypted protections, retaining
+the inode invalidate lock across PFN lookup and PTE insertion.
+
+Private ranges remain inaccessible to host faults. Attribute conversion
+revokes host mappings before making memory private.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  4 +++-
+ virt/kvm/guest_memfd.c      | 18 ++++++++++++++++--
+ 2 files changed, 19 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 13/16] KVM: guest_memfd: Notify providers after private attribute updates
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Publish whether committed private ranges remain through an optional
+update_private_ranges() provider operation. Scan the attribute tree
+after successful publication while holding the inode invalidate lock and
+any provider lock.
+
+Keep the cached summary in the provider that uses it. Providers
+initialize their summary during attach() before exposing access checks.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  5 +++++
+ virt/kvm/guest_memfd.c      | 25 ++++++++++++++++++++++++-
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 12/16] KVM: guest_memfd: Support devices through common provider operations
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Allow device MMIO to use the PFN provider interface on architectures
+that support protected device mappings. Pass device information during
+attachment. Invalidate both shared and private device mappings during
+revocation and file cleanup.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ Documentation/virt/kvm/api.rst    |  6 ++-
+ include/linux/guest_memfd.h       | 34 ++++++++++++++--
+ include/linux/kvm_host.h          |  5 +++
+ mm/shmem.c                        |  3 +-
+ samples/kvm/mem_provider_sample.c |  3 +-
+ virt/kvm/guest_memfd.c            | 68 +++++++++++++++++++++++++++----
+ 6 files changed, 104 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 11/16] KVM: guest_memfd: Pass KVM explicitly to provider attach
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Pass the attaching VM to the resource-provider attach callbacks. The
+argument is valid during attachment and must not be retained. This
+avoids storing the VM in the device binding context introduced next.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h       | 3 ++-
+ mm/shmem.c                        | 2 +-
+ samples/kvm/mem_provider_sample.c | 2 +-
+ virt/kvm/guest_memfd.c            | 9 +++++----
+ 4 files changed, 9 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 10/16] KVM: guest_memfd: Let providers prepare memory regions
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Memory providers may need to check memslot flags and memory ranges before
+KVM installs a memslot. Add an optional prepare_memory_region() callback to
+the common provider operations
+
+Pass the byte offset, size and requested dirty-logging and read-only
+flags, and return any error before publishing the slot. Providers do not
+need access to KVM's memslot structure or internal flags. Existing
+providers that do not implement the callback keep their current
+behavior.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  8 ++++++++
+ virt/kvm/guest_memfd.c      | 14 ++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 09/16] KVM: guest_memfd: Use provider operations for host mappings and faults
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Add mmap() and fault() callbacks so providers can set up host mappings
+and handle faults. Keep common permission checks, private/shared checks
+and inode locking in guest_memfd. Require providers to supply both
+callbacks together, or let guest_memfd handle both.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  14 ++++
+ virt/kvm/guest_memfd.c      | 146 +++++++++++++++++++++++-------------
+ 2 files changed, 106 insertions(+), 54 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 08/16] KVM: guest_memfd: Use provider operations for fallocate allocation
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Use allocate_range() for fallocate allocation so providers can supply
+allocation and release callback. When a provider supplies neither callback,
+guest_memfd handles allocation and release for it. Providers that supply
+only release_range() cannot use fallocate(), including hole punching.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |   8 +++
+ virt/kvm/guest_memfd.c      | 122 +++++++++++++++++++++++-------------
+ 2 files changed, 87 insertions(+), 43 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 07/16] KVM: guest_memfd: Release and revoke memory through provider operations
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Add release_range() helpers for folios and PFNs. Keep guest invalidation
+in the core. Folio release truncates memory; ->free_folio() calls
+kvm_arch_gmem_reclaim() when the folio is removed from the page cache.
+PFN release removes host mappings and calls kvm_arch_gmem_reclaim()
+before put_pfn_range() releases the memory.
+
+Use these operations for hole punching, provider revocation and final
+inode cleanup.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h       |  13 +++-
+ samples/kvm/mem_provider_sample.c |   3 +-
+ virt/kvm/guest_memfd.c            | 106 +++++++++++++++++++++---------
+ 3 files changed, 88 insertions(+), 34 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 06/16] KVM: guest_memfd: Share memory through provider range lookup
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Use provider range lookup for both folios and PFNs when converting memory
+to shared. Skip holes without allocating pages and return lookup errors.
+
+Invalidate mappings before conversion and publish shared attributes only
+after conversion succeeds.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ virt/kvm/guest_memfd.c | 126 ++++++++++++++++++++---------------------
+ 1 file changed, 62 insertions(+), 64 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 05/16] KVM: guest_memfd: Let providers validate attribute changes
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Call prepare_attributes() before invalidating guest mappings or changing
+file attributes. Remove host mappings first when converting to private,
+so folio validation can check for outstanding references.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  9 ++++++++
+ virt/kvm/guest_memfd.c      | 43 ++++++++++++++++++++++++-------------
+ 2 files changed, 37 insertions(+), 15 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 04/16] KVM: guest_memfd: Add provider PFN range lookup
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Provide nonallocating folio range lookup and carry PFN attributes separately
+from requested KVM memory attributes
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h       | 10 ++++--
+ samples/kvm/mem_provider_sample.c |  6 ++--
+ virt/kvm/guest_memfd.c            | 60 ++++++++++++++++++++++++++-----
+ 3 files changed, 63 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 03/16] KVM: guest_memfd: Let providers coordinate mapping changes
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Add optional paired lock() and unlock() callbacks so providers can prevent
+memory changes during guest invalidation and attribute conversion. Reject
+providers that supply only one callback.
+
+Take the provider lock with the inode invalidate lock held for write,
+before guest invalidation. Release it after invalidation and any
+successful attribute publication. Use the same locking for revocation
+and final inode cleanup.
+
+This lock is separate from the lock taken by get_pfn() for an individual
+PFN. Existing providers can omit both callbacks.
+
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h |  8 ++++++
+ virt/kvm/guest_memfd.c      | 50 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 02/16] KVM: guest_memfd: Get PFNs through common provider operations
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Use get_pfn() for both folios and external PFNs. Folio helpers return
+a locked folio reference in the handle. The core unlocks and releases
+that reference. PFN providers keep memory stable under the inode
+invalidate lock.
+
+Declare native provider operations in their static table. Install the
+folio get_pfn() helper inside KVM for external folio providers, so
+built-in shmem does not depend on modular KVM.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h       |  23 +--
+ samples/kvm/mem_provider_sample.c |  10 +-
+ virt/kvm/guest_memfd.c            | 245 +++++++++++++++++++-----------
+ 3 files changed, 176 insertions(+), 102 deletions(-)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 01/16] KVM: guest_memfd: Add a handle for provider PFNs
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Add an MMIO PFN flag, separate from KVM memory attributes.
+
+Add struct guest_memfd_handle to hold a PFN, its attributes, the order
+of the contiguous range and an optional folio reference. Later patches
+use this handle for both folio and PFN providers.
+
+Signed-off-by: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+---
+ include/linux/guest_memfd.h | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+----------------------------------------------------------------------
+
+[RFC PATCH v5 00/16] KVM: guest_memfd: Add a common framework for device memory providers
+Author: Aneesh Kumar K.V (Arm) <aneesh.kumar@kernel.org>
+
+Confidential device assignment needs guest_memfd to manage device MMIO as
+well as RAM. Device resources such as PCI BARs supply PFNs directly, and
+their protected mappings need architecture-specific map and unmap
+operations.
+
+This series adds the common guest_memfd support needed by device memory
+providers. It builds on the resource-provider API [1] and the existing support
+for folios and RAM PFNs.
+
+The VFIO provider, IOMMUFD integration and Arm CCA implementation are
+available together at:
+
+  https://git.gitlab.arm.com/linux-arm/linux-cca.git cca/topics/cca-da-gmem-backend-v5
+
+This series depends on the resource-provider groundwork from:
+[1] https://lore.kernel.org/all/20261022-gmem-alternative-providers-v2-0-5dd1dc6c660a@google.com
+
+Notes:
+* Codex assisted with implementation, review and series organization.
+
+Changes from v4:
+https://lore.kernel.org/all/20261104150322.3516320-1-aneesh.kumar@kernel.org
+* Leave VFIO changes out of this series to agree on guest_memfd changes
+  that work with all providers.
+* Replace the separate folio, RAM PFN and device operation tables with
+  provider callbacks. Add callbacks for attribute validation, allocation,
+  release, host mmap and host faults, with core helpers for providers that
+  omit them.
+* Use get_pfn() for both folios and PFNs through guest_memfd_handle. The
+  handle carries the PFN, its attributes, contiguous range order and an
+  optional folio reference. The core manages folio locking and references.
+* Add nonallocating folio lookup through lookup_pfn_range() and require
+  PFN providers to supply it alongside get_pfn(). Report PFN attributes
+  separately from KVM shared/private memory attributes, including an MMIO
+  flag.
+* Remove convert_attributes() and prepare_pfn(). Make existing pages
+  shared through provider range lookup, independently of VM bindings,
+  before publishing shared attributes. Leave private conversion to guest
+  faults or prefaults
+* Pass KVM explicitly to attach() for use during attachment only.
+* Use the provider mmap and fault callbacks for shared device mappings.
+  Set noncached, decrypted protections in the VMA
+
+Changes from v3:
+https://lore.kernel.org/all/20261101071928.2462549-1-aneesh.kumar@kernel.org
+* Include the VFIO PCI provider and IOMMUFD vDEVICE integration alongside
+  the common guest_memfd framework; v3 posted only the common framework.
+* Replace make_private()/make_shared() with an optional convert_attributes()
+  callback, and prepare_private_pfn() with prepare_pfn(). Pass attributes to
+  both to handle shared and private memory at attribute-update or PFN-lookup
+  time.
+* Pass the device context directly to provider attach(), removing
+  kvm_gmem_get_device() and avoiding a VFIO dependency on KVM symbols.
+* Store has_private_ranges in guest_memfd_device so providers can read
+  the core-maintained summary directly instead of calling has_private().
+* Serialize VFIO file operations with provider setup and release using
+  gmem_lock. Reject existing BAR mappings, dma-buf exports and ioeventfd
+  handlers, and block direct VFIO BAR access while guest_memfd uses the
+  device. Shared userspace mappings go through guest_memfd.
+* Require D0 and hold a runtime-PM reference while guest_memfd uses the
+  device. Block VFIO reset, power-state changes and userspace changes to
+  Memory Enable or Bus Master Enable during that time.
+
+Changes from v2:
+https://lore.kernel.org/all/20261017073149.1303738-1-aneesh.kumar@kernel.org
+* Rebase on the v2 alternative-provider series and separate the common
+  guest_memfd framework from the VFIO, IOMMUFD and Arm CCA integration.
+* Separate folio, RAM PFN and device MMIO handling, with common locking,
+  invalidation and attribute updates.
+* Replace prepare_conversion()/finish_conversion() with non-failing
+  lock()/unlock() callbacks.
+* Convert device memory through ordinary file-offset attribute updates.
+  Derive GPA from memslot bindings and PA from provider PFNs, removing the
+  device request object.
+* Allow shared and private device PFN lookup in the common layer. Include
+  both mapping types in generic invalidation and leave architecture
+  mapping policy to the backend.
+* Support device range revocation through the common revoke path without
+  reclaiming MMIO PFNs or changing attributes.
+* Add shared device mmap through the existing get_pfn() fault path. Keep
+  VMA protections and flags in the core
+* Require only get_pfn() for device providers; lookup_pfn_range() remains
+  required for RAM PFN providers.
+
+Changes from v1:
+https://lore.kernel.org/all/20261010072504.536230-1-aneesh.kumar@kernel.org
+* Require GUEST_MEMFD_FLAG_MMAP to allow VFIO BAR mmap while a provider is
+  attached; disable it by default.
+* Use the common guest_memfd_provider_operations for folio and PFN
+  providers. Select operations through the resource mapping superblock
+  and forward VFIO operations to the device driver.
+
+Cc: Ackerley Tng <ackerleytng@google.com>
+Cc: David Woodhouse <dwmw2@infradead.org>
+Cc: David Hildenbrand <david@kernel.org>
+Cc: Jason Gunthorpe <jgg@ziepe.ca>
+Cc: Kevin Tian <kevin.tian@intel.com>
+Cc: Paolo Bonzini <pbonzini@redhat.com>
+Cc: Sean Christopherson <seanjc@google.com>
+Cc: Alexey Kardashevskiy <aik@amd.com>
+Cc: Xu Yilun <yilun.xu@linux.intel.com>
+Cc: Catalin Marinas <catalin.marinas@arm.com>
+Cc: Suzuki K Poulose <suzuki.poulose@arm.com>
+Cc: Steven Price <steven.price@arm.com>
+Cc: Fred Griffoul <griffoul@gmail.com>
+Cc: iommu@lists.linux.dev
+Cc: kvm@vger.kernel.org
+Cc: patches@lists.linux.dev
+
+
+Aneesh Kumar K.V (Arm) (16):
+  KVM: guest_memfd: Add a handle for provider PFNs
+  KVM: guest_memfd: Get PFNs through common provider operations
+  KVM: guest_memfd: Let providers coordinate mapping changes
+  KVM: guest_memfd: Add provider PFN range lookup
+  KVM: guest_memfd: Let providers validate attribute changes
+  KVM: guest_memfd: Share memory through provider range lookup
+  KVM: guest_memfd: Release and revoke memory through provider
+    operations
+  KVM: guest_memfd: Use provider operations for fallocate allocation
+  KVM: guest_memfd: Use provider operations for host mappings and faults
+  KVM: guest_memfd: Let providers prepare memory regions
+  KVM: guest_memfd: Pass KVM explicitly to provider attach
+  KVM: guest_memfd: Support devices through common provider operations
+  KVM: guest_memfd: Notify providers after private attribute updates
+  KVM: guest_memfd: Enable shared host mappings for device providers
+  KVM: guest_memfd: Notify providers during file release
+  KVM: guest_memfd: Invalidate mappings before memslot unbind
+
+ Documentation/virt/kvm/api.rst    |   6 +-
+ include/linux/guest_memfd.h       | 152 ++++-
+ include/linux/kvm_host.h          |   5 +
+ mm/shmem.c                        |   3 +-
+ samples/kvm/mem_provider_sample.c |  22 +-
+ virt/kvm/guest_memfd.c            | 996 +++++++++++++++++++++---------
+ 6 files changed, 868 insertions(+), 316 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nSVM: Check full nested state size before writing to user buffer
+Author: Priyanka Mani <priyankamani2100@gmail.com>
+
+svm_get_nested_state() compares the userspace-provided buffer size against
+kvm_state.size before adding KVM_STATE_NESTED_SVM_VMCB_SIZE for a vCPU that
+is in guest mode.  When L2 is active and userspace passes a size that is
+large enough for the header but too small for the vmcb12 payload, KVM thus
+skips the early exit, copies out the header, clears and fills the full 4KiB
+vmcb12 area past the end of the buffer described by userspace, and only
+then does the caller notice that the returned size is larger than the
+provided one and fail with -E2BIG.
+
+As a result, KVM writes up to 4KiB beyond the buffer userspace said it
+has, and if that memory isn't mapped, the ioctl fails with -EFAULT instead
+of the documented -E2BIG without reporting the required size.
+
+Compute the full size before the check, as vmx_get_nested_state() does, so
+that a too-small buffer is rejected without writing anything to it.
+
+Fixes: cc440cdad5b7 ("KVM: nSVM: implement KVM_GET_NESTED_STATE and KVM_SET_NESTED_STATE")
+Cc: stable@vger.kernel.org
+Signed-off-by: Priyanka Mani <priyankamani2100@gmail.com>
+---
+Tested on an AMD EPYC 7763 host by booting the patched kernel under QEMU
+(nested SVM) with KASAN and lockdep.  A reproducer enters L2, exits to
+userspace from L2 and calls KVM_GET_NESTED_STATE with
+size = sizeof(struct kvm_nested_state).  Without this patch, KVM writes
+4096 bytes past the 128-byte buffer before returning -E2BIG, or returns
+-EFAULT if the next page is unmapped.  With this patch, KVM returns
+-E2BIG and reports size = 4224 without writing to the buffer.
+
+KVM selftests nested_set_state_test, state_test, smm_test, hyperv_svm_test,
+svm_nested_vmcb12_gpa, svm_nested_pat_test and the other nested SVM tests
+give identical results with and without the patch.  kvm-unit-tests' SVM
+tests could not be run in this nested setup.  Not tested on Intel; the VMX
+path is unchanged.
+
+ arch/x86/kvm/svm/nested.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 9/9] coco/tdx-host: Enable trusted DMA on IOMMUs on device connect
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Assigning a device to a TD for private memory access requires that DMA
+from that device be translated by structures the TDX module controls.
+An Intel IOMMU that implements the trusted DMA extension provides a
+parallel set of translation and invalidation resources for this purpose.
+They become usable once TDH.IOMMU.SETUP puts the IOMMU into Secure TDX
+Mode and the TDX module initializes them. The host keeps the regular
+translation path.
+
+Issue TDH.IOMMU.SETUP on demand, when the first device behind an IOMMU
+is connected through the TSM, rather than for every capable IOMMU at
+probe time. Secure TDX Mode costs host resources: the TDX module's
+metadata pages and half of the IOMMU's domain ID space. That cost should
+only be paid for IOMMUs that actually serve such devices.
+
+tdx_iommu_get() and tdx_iommu_put() keep a per-IOMMU refcount. The first
+get() issues TDH.IOMMU.SETUP and the last put() issues TDH.IOMMU.CLEAR.
+A single mutex covers both the refcount and the SEAMCALL that follows,
+so a device cannot join an IOMMU that is being cleared or whose setup
+has not finished. The refcount lives here rather than in the VT-d
+driver because tdx-host already owns the per-IOMMU state that must
+outlive TDH.IOMMU.SETUP: the IOMMU_MT pages and the TDX IOMMU ID.
+
+The IOMMU_MT parameter page lists two contiguous buffers for the
+trusted invalidation queue, followed by the metadata pages. The TDX
+module reports how many metadata pages it needs in its global metadata.
+
+With Dynamic PAMT, every 4K page given to the TDX module needs PAMT
+backing first. Take it for each page of the invalidation queue buffers
+and the metadata pages before TDH.IOMMU.SETUP, and drop it if setup
+fails or once TDH.IOMMU.CLEAR succeeds. The parameter page itself only
+carries the page list into the SEAMCALL and needs no backing.
+
+If TDH.IOMMU.CLEAR fails, the TDX module may still reference the
+IOMMU_MT pages, so they are leaked together with their PAMT backing,
+and the IOMMU is marked unusable. Later get() calls for that IOMMU fail
+with -EBUSY rather than reuse an IOMMU in an unknown state. tdx-host
+pins itself while such an IOMMU exists, so unloading can't lose track
+of it. If the failure happens during unload itself, only the tracking
+entry is freed; the VT-d driver still has the IOMMU acquired and keeps
+rejecting it.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ drivers/virt/coco/tdx-host/Kconfig   |   5 +
+ drivers/virt/coco/tdx-host/Makefile  |   1 +
+ drivers/virt/coco/tdx-host/private.h |  21 ++
+ drivers/virt/coco/tdx-host/main.c    |  11 +
+ drivers/virt/coco/tdx-host/viommu.c  | 401 +++++++++++++++++++++++++++
+ 5 files changed, 439 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 7/9] coco/tdx-host: Add skeleton to support PCI link encryption
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Register a Link TSM instance to support host side TSM operations for
+TDISP, when the TDX Connect support bit is set by TDX Module in
+tdx_feature0.
+
+This is the main purpose of an independent tdx-host module out of TDX
+core. Recall that a TEE Security Manager (TSM) is a platform agent that
+speaks the TEE Device Interface Security Protocol (TDISP) to PCIe
+devices and manages private memory resources for the platform. An
+independent tdx-host module allows for device-security enumeration and
+initialization flows to be deferred from other TDX Module initialization
+requirements. Crucially, when / if TDX Module init moves earlier in x86
+initialization flow this driver is still guaranteed to run after IOMMU
+and PCI init (i.e. subsys_initcall() vs device_initcall()).
+
+The ability to unload the module, or unbind the driver is also useful
+for debug and coarse grained transitioning between PCI TSM operation and
+PCI CMA operation (native kernel PCI device authentication).
+
+For now only check for TDX Connect support in the TDX Module and
+register the Link TSM. The TSM support is basic boilerplate with
+operation flows to be added later.
+
+Based on work by Yilun and Dan.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ drivers/virt/coco/tdx-host/Kconfig    |   2 +
+ arch/x86/include/asm/tdx.h            |   8 ++
+ drivers/virt/coco/tdx-host/tdx-host.c | 118 +++++++++++++++++++++++++-
+ 3 files changed, 127 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 8/9] coco/tdx-host: Rename tdx-host.c to main.c
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+The tdx-host driver is about to gain more source files. Rename
+tdx-host.c to main.c and build the tdx-host module from it, so the
+following changes can add objects to the module without renaming the
+main file at the same time.
+
+No functional change.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ drivers/virt/coco/tdx-host/Makefile               | 2 ++
+ drivers/virt/coco/tdx-host/{tdx-host.c => main.c} | 0
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 6/9] iommu/vt-d: Refuse system suspend while acquired by the TDX module
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+While tdx-host has acquired an IOMMU, the VT-d driver blocks its GCMD
+writes. TDX disables S3 by clearing acpi_suspend_lowlevel, but that is
+only checked after the syscore suspend callbacks have run, so an S3
+request, e.g. "echo mem > /sys/power/state", still runs iommu_suspend()
+and then iommu_resume():
+
+  suspend_enter()
+    syscore_suspend()
+      iommu_suspend()                  <- runs on the acquired IOMMU
+    suspend_ops->enter() = acpi_suspend_enter()
+      if (!acpi_suspend_lowlevel)      <- TDX's "S3 disabled" check
+          return -ENOSYS
+    syscore_resume()
+      iommu_resume()                   <- runs on the acquired IOMMU
+
+Register a PM notifier for each DMAR unit that supports trusted DMA and
+refuse PM_SUSPEND_PREPARE with -EBUSY while the unit is acquired. The
+suspend then fails before tasks are frozen and before syscore callbacks
+run.
+
+A check at PM_SUSPEND_PREPARE alone leaves a window: user space is only
+frozen after the notifiers run, so a device connect may still acquire
+the unit in between. Close it with a per-unit tdxc_suspending flag, set
+when the notifier lets the suspend proceed and cleared at
+PM_POST_SUSPEND. dmar_tdxc_acquire() fails with -EBUSY while it is set.
+Both the notifier and dmar_tdxc_acquire() hold the unit's tdxc_lock, so
+the check and the acquisition can't interleave.
+
+The notifiers are registered at init only for units advertising
+ECAP.TDXCS. Such units are never hot-added or hot-removed, so the set
+doesn't change afterwards and the notifiers are never unregistered.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ drivers/iommu/intel/iommu.h |  1 +
+ include/linux/dmar.h        |  4 ++-
+ drivers/iommu/intel/dmar.c  | 53 +++++++++++++++++++++++++++++++++++++
+ drivers/iommu/intel/iommu.c |  1 +
+ 4 files changed, 58 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 4/9] iommu/vt-d: Add interface for tdx-host when enabling trusted DMA
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+An Intel IOMMU that supports trusted DMA (ECAP.TDXCS) provides a second
+set of DMA translation resources, managed by the TDX module and used
+only for devices assigned to TDs. Before they can be used, the tdx-host
+driver issues TDH.IOMMU.SETUP to put the IOMMU into Secure TDX Mode, and
+issues TDH.IOMMU.CLEAR to take it out again.
+
+The VT-d driver owns the hardware state these SEAMCALLs depend on, so
+it checks that state and keeps its own use of the IOMMU out of the TDX
+module's way. This is cooperation, not enforcement: the TDX module
+protects trusted DMA regardless, and a misbehaving host can only cause
+failures.
+
+Add a per-device interface so that an IOMMU is put into Secure TDX Mode
+only when a device behind it needs trusted DMA. tdx-host tracks how many
+devices use each IOMMU and calls into the VT-d driver only for the first
+and the last of them:
+
+- dmar_tdxc_get_params() looks up the DMAR unit translating the device
+  and returns its register base address, which is how the TDX module
+  identifies an IOMMU, and its NUMA node, so that tdx-host can allocate
+  the TDX module's metadata pages local to that IOMMU.
+
+- dmar_tdxc_acquire() is called right before TDH.IOMMU.SETUP. It checks
+  the preconditions TDH.IOMMU.SETUP requires (DMA translation, queued
+  invalidation and scalable mode enabled) and confines the host to the
+  lower half of the domain ID space, since the TDX module owns the half
+  with the MSB set.
+
+- dmar_tdxc_release() undoes acquire(). tdx-host calls it if
+  TDH.IOMMU.SETUP fails, or after TDH.IOMMU.CLEAR succeeds for the last
+  user. If TDH.IOMMU.CLEAR fails, tdx-host doesn't call it, so the upper
+  half of the domain ID space stays reserved for the TDX module.
+
+DMAR units advertising ECAP.TDXCS are excluded from DMAR hotplug. No
+platform currently supports both trusted DMA and DMAR hotplug, so that
+flow can't be validated on hardware. Hot-removing such a unit is also
+unsafe, because tdx-host may hold a reference to it and the TDX module
+may own its trusted DMA resources. This also keeps the unit handle
+returned by dmar_tdxc_get_params() valid for the lifetime of the system.
+
+The symbols are exported only to the tdx-host module.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ drivers/iommu/intel/iommu.h |   3 +
+ include/linux/dmar.h        |  23 +++++
+ drivers/iommu/intel/dmar.c  | 185 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 211 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 5/9] iommu/vt-d: Block GCMD and ECMD while acquired by the TDX module
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Once tdx-host acquires an IOMMU for TDH.IOMMU.SETUP, the TDX module
+owns its Secure TDX Mode state. The VT-d driver must not change the
+global state of the IOMMU behind the TDX module's back, nor issue
+enhanced commands, until the IOMMU is released after TDH.IOMMU.CLEAR.
+
+Use the tdxc_acquired flag of struct intel_iommu, which is protected
+by register_lock, to block both. dmar_tdxc_acquire() now fails with
+-EBUSY if an enhanced command is still in progress when it sets the
+flag. All GCMD writers hold register_lock and wait for completion before
+dropping it, so setting the flag under the same lock guarantees no GCMD
+operation is in flight once acquire() returns. While the flag is set,
+ecmd_submit_sync() fails with -EBUSY rather than waiting, as it may be
+called from atomic context.
+
+Write buffer flushing is the only GCMD write reachable on the runtime
+map path. Rather than adding a check there, refuse to acquire IOMMUs
+that require it (rwbf_quirk or CAP.RWBF). Move rwbf_quirk and
+rwbf_required() to iommu.h so dmar.c can use them.
+
+The remaining GCMD writers (root table, translation enable/disable,
+queued invalidation and interrupt remapping) are only used at init,
+hotplug and suspend/resume. Acquired units are never hot-removed,
+hibernation is unavailable with TDX, and the following patch refuses
+system suspend while an IOMMU is acquired. Guard them with
+WARN_ON_ONCE() ahead of their companion register writes (RTADDR,
+IQT/IQA, IRTA).
+
+intel_iommu_shutdown() is the exception. It is only called from
+native_machine_shutdown() via machine_shutdown(). On restart, halt,
+power-off and kexec, syscore_shutdown() runs first and tdx_shutdown()
+issues TDH.SYS.DISABLE, which takes every IOMMU out of Secure TDX Mode.
+The crash kexec path doesn't call it. Clear tdxc_acquired there so
+translation is still turned off.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ drivers/iommu/intel/iommu.h         |  8 ++++-
+ drivers/iommu/intel/dmar.c          | 50 ++++++++++++++++++++++++-----
+ drivers/iommu/intel/iommu.c         | 33 +++++++++++++++++--
+ drivers/iommu/intel/irq_remapping.c | 10 ++++++
+ 4 files changed, 89 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 3/9] x86/virt/tdx: Export Dynamic PAMT helpers to tdx-host
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+With Dynamic PAMT, any page handed to the TDX module needs PAMT backing
+first, via tdx_pamt_get(), and must drop it with tdx_pamt_put() once the
+TDX module gives the page back. Besides KVM, the tdx-host driver now
+hands pages to the TDX module: the IOMMU_MT pages for TDH.IOMMU.SETUP.
+
+Export the two helpers to tdx-host as well. A symbol can only be
+exported once, so replace EXPORT_SYMBOL_FOR_KVM() with an explicit list.
+Only kvm-intel calls these helpers in KVM.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ arch/x86/virt/vmx/tdx/tdx.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/9] x86/virt/tdx: Read global metadata for trusted IOMMU
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Add support for reading the global metadata of the trusted IOMMU.
+
+The trusted IOMMU feature is optionally enumerated via TDX_FEATURES0.
+Check this feature bit before reading the metadata to avoid causing
+the entire TDX initialization to fail on platforms that do not support
+it.
+
+The read value represents the number of pages required for the IOMMU
+metadata. The host will allocate this count of pages and provide them to
+the TDX module when it configures the IOMMU to operate in Secure TDX mode
+via the TDH.IOMMU.SETUP SEAMCALL.
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ arch/x86/include/asm/tdx.h                  |  1 +
+ arch/x86/include/asm/tdx_global_metadata.h  |  5 +++++
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c | 20 ++++++++++++++++++++
+ 3 files changed, 26 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/9] x86/virt/tdx: Add SEAMCALL wrappers for IOMMU setup/clear
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Intel VT-d hardware gains a second set of DMA translation structures,
+managed by the TDX module and used only for devices assigned to TDs.
+Each IOMMU has a trusted root-table address register and a trusted
+invalidation queue, both accessible only from SEAM. The existing
+untrusted DMA translation path of the IOMMU stays under host control.
+
+Before trusted DMA can be used through an IOMMU, the TDX module must
+initialize these resources. TDH.IOMMU.SETUP does this: it puts the
+IOMMU into Secure TDX Mode, programs the trusted root table and the
+trusted invalidation queue, and protects the related I/O resources
+from further untrusted host access. The host provides the memory for
+this through a parameter page that lists the invalidation queue
+buffers and the metadata pages the TDX module needs for the IOMMU.
+
+TDH.IOMMU.CLEAR does the reverse. It tears down the Secure TDX Mode
+state of the IOMMU, after which the host can reclaim the memory.
+
+Add wrappers for both SEAMCALLs and export them to the tdx-host driver,
+which allocates the memory and issues them.
+
+TDH.IOMMU.SETUP and TDH.IOMMU.CLEAR are defined in the Intel TDX
+Connect ABI Specification [1].
+
+[1] https://cdrdv2.intel.com/v1/dl/getContent/858625
+
+Signed-off-by: Lu Baolu <baolu.lu@linux.intel.com>
+---
+ arch/x86/include/asm/tdx.h  | 14 ++++++++++
+ arch/x86/virt/vmx/tdx/tdx.h |  2 ++
+ arch/x86/virt/vmx/tdx/tdx.c | 53 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 69 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/9] coco/tdx-host: Introduce trusted DMA initialization support
+Author: Lu Baolu <baolu.lu@linux.intel.com>
+
+Hi,
+
+This series adds trusted DMA initialization support to the tdx-host and
+intel-iommu drivers, as groundwork for TEE I/O trusted DMA support.
+
+As in v2, the host/TDX-module interactions live in the tdx-host (TSM)
+driver, and the VT-d driver only provides the iommu-side pieces. v3
+moves trusted DMA setup from driver probe to the TSM connect path. It is
+posted to collect review feedback from TDX, TSM and IOMMU stakeholders;
+it is not yet intended for merging.
+
+This is part of the effort to implement the TDX PCIe Link Encryption
+feature, which includes the following components:
+
+[ ] TDX module extensions initialization, posted in [3]
+[X] Introduce trusted DMA initialization support
+[ ] SEAMCALL helpers for TDX PCIe Link Encryption
+[ ] PCIe Link Encryption Establishment via TDX platform services
+
+The series is based on the latest tip/x86/tdx branch, with these
+dependent series applied:
+
+ - TDX module extensions initialization
+
+The full stack is available at:
+
+  https://github.com/LuBaolu/intel-iommu/commits/iommu/tdxc/enablement-v3
+
+Background:
+
+Intel VT-d hardware gains a second set of DMA translation structures,
+managed by the TDX module and used only for devices assigned to
+confidential guests. Per the TDX Connect architecture specification [2],
+VT-d is enhanced with:
+
+  1) Trusted DMA translation root table
+     - A second root-table address register, restricted to SEAM SAI.
+     - Programmed by the TDX module with the root of TDX-managed DMA
+       translation tables for TD-assigned devices.
+
+  2) Trusted invalidation queue
+     - A second invalidation-queue address register plus dedicated
+       head/tail registers, also restricted to SEAM SAI.
+
+  3) IOTLB / DID isolation
+     - While an IOMMU is in Secure TDX Mode, the TDX module owns the
+       half of the domain ID space with the MSB set; the VMM must
+       confine itself to the lower half.
+
+This posting covers IOMMU initialization only. The current Link TSM
+connect callback obtains and immediately drops a trusted-DMA reference,
+so it exercises TDH.IOMMU.SETUP and TDH.IOMMU.CLEAR, then returns -ENXIO;
+it does not establish a TSM connection. Once TDISP connect is
+implemented, the intended lifetime is for the first connected device
+behind a trusted DMA-capable IOMMU to trigger TDH.IOMMU.SETUP and the
+last disconnect to trigger TDH.IOMMU.CLEAR. The untrusted DMA path is
+unchanged, except that while an IOMMU is in Secure TDX Mode the host is
+confined to the lower half of its domain ID space and must not touch its
+global command (GCMD) or enhanced command (ECMD) interfaces. The TDX
+guest and device flows come in a later series.
+
+Breakdown:
+
+- Patch 1: Adds the TDH.IOMMU.SETUP and TDH.IOMMU.CLEAR SEAMCALL
+  wrappers, exported only to the tdx-host module, together with a
+  structure that mirrors the IOMMU_MT parameter page layout.
+
+- Patch 2: Reads the IOMMU_MT_PAGES_COUNT global metadata field when
+  TDX_FEATURES0 advertises TDX Connect. It tells the host how many
+  metadata pages the TDX module needs per IOMMU.
+
+- Patch 3: Exports the Dynamic PAMT helpers to tdx-host, which needs
+  PAMT backing for the pages it hands to the TDX module.
+
+- Patch 4: Adds a per-device interface to the VT-d driver:
+  dmar_tdxc_get_params(), dmar_tdxc_acquire() and dmar_tdxc_release().
+  acquire() checks the preconditions TDH.IOMMU.SETUP requires and
+  confines the host to the lower half of the DID space; release()
+  undoes it. Trusted DMA-capable units are excluded from DMAR hotplug.
+
+- Patch 5: Blocks GCMD and ECMD on an IOMMU while it is acquired.
+  IOMMUs that need write buffer flushing are refused, and the remaining
+  GCMD writers are guarded. intel_iommu_shutdown() is exempt because
+  TDH.SYS.DISABLE has already run by then.
+
+- Patch 6: Refuses system suspend while any IOMMU is acquired by the TDX
+  module, avoiding suspend/resume callbacks that would change its state.
+
+- Patch 7: Adds the tdx-host Link TSM skeleton that the TSM connect and
+  disconnect callbacks hang off. It is carried here as a dependency.
+
+- Patch 8: Renames tdx-host.c to main.c in preparation for adding more
+  source files. No functional change.
+
+- Patch 9: Adds per-IOMMU reference-counted trusted DMA setup and teardown
+  and invokes it from the TSM connect callback. The setup path allocates
+  the trusted invalidation-queue buffers and metadata pages on the
+  IOMMU's NUMA node, takes Dynamic PAMT backing for them, and builds the
+  IOMMU_MT parameter page. If TDH.IOMMU.CLEAR fails, the pages are
+  intentionally leaked and the IOMMU is not reused.
+
+Change log:
+
+v3:
+- Replaced the callback-based "initialize all IOMMUs at probe time" API
+  with a per-device interface. Trusted DMA is now set up on TSM device
+  connect and torn down on disconnect, refcounted per IOMMU.
+- Blocked both the GCMD and ECMD interfaces while an IOMMU is in Secure
+  TDX Mode, and refused IOMMUs that need write buffer flushing.
+- Add a patch to refuse system suspend while an IOMMU has been acquired
+  by the TDX module to avoid global state change in
+  iommu_suspend/resume().
+- Added Dynamic PAMT backing for the IOMMU_MT pages.
+- Replaced the untyped parameter page with a dedicated structure that
+  mirrors the IOMMU_MT parameter layout in the ABI spec.
+- Split the tdx-host.c to main.c rename into its own patch, and renamed
+  the new file from iommu.c to viommu.c.
+- Reworked commit messages per review feedback.
+
+v2:
+- Moved the TDX module interactions (page allocation, IOMMU_MT
+  construction, SEAMCALLs) from the VT-d driver to the tdx-host driver.
+  The VT-d driver now only does the DRHD walk, precondition checks and
+  DID reservation, and exposes them via a callback-based API.
+- Renamed tdx-host.c to main.c and added iommu.c.
+- https://lore.kernel.org/r/20261015010705.1973284-1-baolu.lu@linux.intel.com
+
+v1:
+- https://lore.kernel.org/r/20260915074235.1219183-1-baolu.lu@linux.intel.com
+
+ABI History:
+
+TDH.IOMMU.CLEAR previously required the host to provide, as input, the
+parameter page used for TDH.IOMMU.SETUP. The ABI has changed to take
+only the TDX IOMMU ID. This change is not yet reflected in the public
+ABI specification [1], so the two may differ.
+
+The TDX Connect ABI specification should include a dedicated section
+listing all IOMMU registers whose use must be coordinated between legacy,
+host-managed operation and trusted, TDX-module-managed operation. This
+would let host IOMMU drivers avoid accesses that interfere with the TDX
+module while an IOMMU is in Secure TDX Mode. GCMD and ECMD are confirmed
+to be in scope; additional registers may be identified as the
+specification is clarified.
+
+Reference:
+
+Implementation details follow the interfaces and behavior defined in the
+Intel TDX Connect ABI Specification [1] and the Intel TDX Connect
+Architecture Specification [2].
+
+A full preview of these dependencies and follow-up changes is available
+at [4].
+
+Link: https://cdrdv2.intel.com/v1/dl/getContent/858625 # [1]
+Link: https://www.intel.com/content/www/us/en/content-details/862706/intel-tdx-connect-architecture-specification.html # [2]
+Link: https://lore.kernel.org/r/20261013-tdx-module-ext-v4-0-de5ffac65470@linux.intel.com # [3]
+Link: https://github.com/intel-staging/tdx/tree/tdisp_phase1 # [4]
+
+Please review. Any feedback is highly appreciated.
+
+Thanks,
+Baolu
+
+Lu Baolu (9):
+  x86/virt/tdx: Add SEAMCALL wrappers for IOMMU setup/clear
+  x86/virt/tdx: Read global metadata for trusted IOMMU
+  x86/virt/tdx: Export Dynamic PAMT helpers to tdx-host
+  iommu/vt-d: Add interface for tdx-host when enabling trusted DMA
+  iommu/vt-d: Block GCMD and ECMD while acquired by the TDX module
+  iommu/vt-d: Refuse system suspend while acquired by the TDX module
+  coco/tdx-host: Add skeleton to support PCI link encryption
+  coco/tdx-host: Rename tdx-host.c to main.c
+  coco/tdx-host: Enable trusted DMA on IOMMUs on device connect
+
+ drivers/virt/coco/tdx-host/Kconfig            |   7 +
+ drivers/virt/coco/tdx-host/Makefile           |   3 +
+ arch/x86/include/asm/tdx.h                    |  23 +
+ arch/x86/include/asm/tdx_global_metadata.h    |   5 +
+ arch/x86/virt/vmx/tdx/tdx.h                   |   2 +
+ drivers/iommu/intel/iommu.h                   |  10 +
+ drivers/virt/coco/tdx-host/private.h          |  21 +
+ include/linux/dmar.h                          |  25 ++
+ arch/x86/virt/vmx/tdx/tdx.c                   |  57 ++-
+ arch/x86/virt/vmx/tdx/tdx_global_metadata.c   |  20 +
+ drivers/iommu/intel/dmar.c                    | 278 +++++++++++-
+ drivers/iommu/intel/iommu.c                   |  34 +-
+ drivers/iommu/intel/irq_remapping.c           |  10 +
+ .../virt/coco/tdx-host/{tdx-host.c => main.c} | 129 +++++-
+ drivers/virt/coco/tdx-host/viommu.c           | 401 ++++++++++++++++++
+ 15 files changed, 1016 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From ccb00c5d6 to 41a9b2d86
+KVM mailing list update from ccb00c5d6 to 41a9b2d86
+
+Top 15 contributor Email domains (Based on Email Body)
+
+      2 amazon.co.uk
+      1 linux.dev
+      1 google.com
+
+Top 15 contributors (Based on Email Body)
+
+      2  David Woodhouse <dwmw@amazon.co.uk>
+      1  Vincent Donnefort <vdonnefort@google.com>
+      1  Fuad Tabba <fuad.tabba@linux.dev>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH 17/16] Documentation: kvm: Renumber KVM_CREATE_PLANE and restore the kvm_run label
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+The KVM_CREATE_PLANE section was inserted between the .. _kvm_run:
+label and "5. The kvm_run structure", so the :ref:`kvm_run` in the
+KVM_CAP_SYNC_REGS text now links to KVM_CREATE_PLANE. It also took the
+number 4.145, which KVM_PPC_GET_COMPAT_CAPS already has, leaving 4.147
+unused.
+
+Move the label back above section 5 and number the section 4.147.
+
+Found by a local Sashiko review.
+
+Fixes the section placement in "Documentation: kvm: introduce "VM
+plane" concept".
+
+Fixes: https://lore.kernel.org/all/20260608144252.351443-9-joro@8bytes.org/
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ Documentation/virt/kvm/api.rst | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 18/16] KVM: SVM: Bound the SNP plane count by the architectural VMPL limit
+Author: David Woodhouse <dwmw2@infradead.org>
+
+
+sev_snp_max_planes() reports the VMPL count straight from CPUID
+0x8000001f EBX[15:12], a 4-bit field the host provides. A value above
+four lets userspace create SNP planes that no VMPL switch can ever
+reach, because the switch already refuses a VMPL at or above
+SVM_SEV_VMPL_MAX.
+
+Clamp the count to between one and SVM_SEV_VMPL_MAX, so that a
+VM's plane count never exceeds what the architecture defines.
+
+Fixes the plane count in "kvm: svm: Implement max_planes x86
+operation".
+
+Fixes: https://lore.kernel.org/all/20260608144252.351443-60-joro@8bytes.org/
+Signed-off-by: David Woodhouse <dwmw@amazon.co.uk>
+---
+ arch/x86/kvm/svm/sev.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: arm64: Fast fail transparent_hugepage_adjust() for
+Author: Vincent Donnefort <vdonnefort@google.com>
+
+transparent_hugepage_adjust() must walk the userspace stage-1 to detect
+if a PMD-level mapping is installed and whether a stage-2 block mapping
+can be used. Even though this stage-1 walk is most likely cache hot
+(in most cases, the mapping has just been installed), walking a
+page-table is still costly.
+
+While we can't be sure by solely looking at the folio if the stage-1 is
+a block mapping as userspace has multiple ways to split it, we can infer
+from its size if the stage-1 mapping is smaller than PMD_SIZE. Anonymous
+memory or memfd faults allocate a big enough folio, as do khugepaged or
+MADV_COLLAPSE.
+
+Add a fast fail based on the folio size: whenever a struct page is
+present and its folio is not PMD-mappable, bail out early and do not
+walk stage-1. This helps when THPs are disabled or under memory
+pressure, while adding a folio check on the PMD-hit path.
+
+To measure this walk on 100% PMD misses, function_graph traced
+user_mem_abort() and get_user_mapping_size() with THP disabled while a
+guest faulted PAGE_SIZE anonymous pages:
+
+  Platform            Setup                get_user_mapping_size()
+  ------------------  -------------------  -----------------------
+  Apple M2 (big CPU)  nested L1->L2, perf  mean  5.25%, med  2.70%
+  Ampere Altra        non-NV, VHE          mean 13.69%, med 12.28%
+
+On non-NV VHE Ampere Altra, get_user_mapping_size() takes 0.26 us mean
+(0.24 us median) out of 2.32 us in user_mem_abort(). On nested L1->L2
+Apple M2, longer L1 user_mem_abort() handling shrinks the relative
+share.
+
+Signed-off-by: Vincent Donnefort <vdonnefort@google.com>
+---
+
+Notes:
+    v2:
+      - Reword commit message as a fast fail, describe the function_graph
+        setup, and include both nested Apple M2 and non-NV Ampere Altra
+        numbers (Marc)
+    
+    v1: https://lore.kernel.org/all/20261102211900.504192-1-vdonnefort@google.com/
+
+ arch/arm64/kvm/mmu.c | 42 ++++++++++++++++++++++++------------------
+ 1 file changed, 24 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: arm64: Sync a pVM's control state before CPU_ON reads its endianness
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+pKVM handles a protected guest's PSCI CPU_ON at EL2 before the guest's
+EL1 sysregs are saved, so kvm_vcpu_is_be() reads a stale SCTLR_EL1. A
+guest that changes SCTLR_EL1.EE and calls CPU_ON before its next exit
+to the host starts the target vCPU with the old endianness.
+
+Have CPU_ON sync the caller's PC, PSTATE, VBAR_EL1 and SCTLR_EL1 before
+reading its endianness, through a helper factored out of
+inject_sync64(), so that both handlers sync the same state.
+
+Fixes: 9d4ec80be2eb4 ("KVM: arm64: Handle PSCI calls for protected VMs at EL2")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+
+Notes:
+    Changes in v2:
+    - Factor inject_sync64()'s sync into a helper and call it from CPU_ON,
+      as Marc suggested. Named pkvm_sync_vcpu_ctrl_state() rather than
+      ..._before_exception(), since CPU_ON injects no exception.
+    - Subject and message reworded to match.
+    
+    v1: https://lore.kernel.org/r/20261111082746.1064567-1-fuad.tabba@linux.dev
+
+ arch/arm64/kvm/hyp/include/nvhe/pkvm.h |  1 +
+ arch/arm64/kvm/hyp/nvhe/pkvm.c         |  2 ++
+ arch/arm64/kvm/hyp/nvhe/sys_regs.c     | 16 ++++++++++------
+ 3 files changed, 13 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
