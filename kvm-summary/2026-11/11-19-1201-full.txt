@@ -1,0 +1,3562 @@
+
+On /root/mail/repo:
+From c8fd66962d to 76a770cb1e
+KVM mailing list update from c8fd66962d to 76a770cb1e
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     24 arm.com
+     16 google.com
+     14 huawei.com
+      4 valinux.co.jp
+      3 linux.alibaba.com
+      2 163.com
+      1 tum.de
+      1 shazbot.org
+      1 redhat.com
+      1 linux.ibm.com
+      1 linux.dev
+      1 gmail.com
+      1 broadcom.com
+      1 amicon.ru
+
+Top 15 contributors (Based on Email Body)
+
+     24  Sascha Bischoff <sascha.bischoff@arm.com>
+     14  Chengwen Feng <fengchengwen@huawei.com>
+      9  David Matlack <dmatlack@google.com>
+      4  Koichiro Den <den@valinux.co.jp>
+      3  Colton Lewis <coltonlewis@google.com>
+      2  Sean Christopherson <seanjc@google.com>
+      2  Lai Jiangshan <laijs@linux.alibaba.com>
+      2  Haoxiang Li <haoxiang_li2024@163.com>
+      1  Zack Rusin <zack.rusin@broadcom.com>
+      1  weichenchen <weichen.chen@linux.alibaba.com>
+      1  Qiliang Yuan <qiliang.yuan@linux.dev>
+      1  Paolo Bonzini <pbonzini@redhat.com>
+      1  Mark Street <streetster@gmail.com>
+      1  Manuel Andreas <manuel.andreas@tum.de>
+      1  Josh Hilke <jrhilke@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH] KVM: x86: Fix stalled descriptor table accesses to MMIO
+Author: weichenchen <weichen.chen@linux.alibaba.com>
+
+Use the emulated memory accessors for the explicit operands of LGDT,
+LIDT, SGDT and SIDT.  When the operand has no backing memslot, the
+standard accessors return X86EMUL_IO_NEEDED without queuing an MMIO
+fragment.  LIDT can repeat the generic operand read at the same RIP,
+and SIDT can re-enter emulation without sending a write to userspace.
+
+Check the segment bounds of both fields before reading the limit or
+base.  If the operand crosses a page boundary, pass the whole operand
+to the emulated read so a fault on the second page is reported before
+an MMIO exit to userspace.  Keep the separate limit and base reads on
+a single page.  Use the emulator's read cache to resume after MMIO and
+set NoAccess to skip the redundant generic source read.
+
+Use the destination operand for common writeback of SGDT and SIDT.  This
+keeps the entire descriptor available until userspace completes a
+ten-byte MMIO write.
+
+Fixes: c3cd7ffaf57a ("KVM: x86 emulator: x86_emulate_insn() return -1 only in case of emulation failure")
+Fixes: 129a72a0d3c8 ("KVM: x86: Introduce segmented_write_std")
+Signed-off-by: weichenchen <weichen.chen@linux.alibaba.com>
+---
+On Intel VMX/EPT, LIDT and SIDT both reached the following HLT with the
+expected IDTR data for RAM and MMIO operands. LIDT completed a 2-byte
+and an 8-byte MMIO read. SIDT completed an 8-byte and a 2-byte write.
+
+With only the limit field in range in 32-bit compatibility mode, LIDT
+delivered #GP(0) at the expected RIP before any userspace MMIO exit.
+The same selftest passed with forced emulation. A local extension to
+set_memory_region_test also covered all four descriptor-table
+instructions and a split RAM/MMIO LIDT.
+
+A standalone test of the emulator and its MMIO fragment handling used
+mock page translation to check a userspace MMIO page followed by a
+non-present page. All 36 cross-page load cases returned a page fault
+without preparing a userspace MMIO exit or updating GDTR or IDTR.
+
+Six KVM selftests passed. Eight kvm-unit-tests suites at a2891d9528ef
+reported 445 passes, five skips and no failures. Both vendor modules
+built with KVM_WERROR. Runtime testing used Intel.
+
+Codex assisted with the emulator changes and regression testing.
+
+ arch/x86/kvm/emulate.c | 57 ++++++++++++++++++++++--------------------
+ 1 file changed, 30 insertions(+), 27 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 8/8] vfio: selftests: Add test for device power state transitions
+Author: David Matlack <dmatlack@google.com>
+
+Add vfio_pci_power_state_test to exercise VFIO's handling of device
+power state changes initiated by userspace through the PM capability in
+config space.
+
+The test covers:
+
+ - Closing a device in D3hot and then reopening it, which must leave
+   the device in D0.
+ - Enabling SR-IOV while the PF is in D3hot, which must return the PF to
+   D0 and prevent it from leaving D0 while VFs are enabled.
+ - Racing a close of the device while it is in D3hot against enabling
+   SR-IOV, both of which transition the device back to D0.
+
+The SR-IOV tests are skipped if the device does not support SR-IOV,
+already has VFs enabled, or SR-IOV cannot be configured on it (e.g.
+vfio-pci with vfio_pci.enable_sriov=N). If an SR-IOV test case fails,
+any VFs it left enabled are disabled so they don't affect later test
+cases.
+
+Fail the test if /sys/kernel/warn_count changes between fixture setup
+and teardown, since bugs such as the close vs. SR-IOV enable race show
+up only as kernel warnings. When that happens, print the warnings
+logged to /dev/kmsg during the test so that the failure can be debugged
+from the test log.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../vfio/vfio_pci_power_state_test.c          | 256 ++++++++++++++++++
+ 2 files changed, 257 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 7/8] vfio: selftests: Add helpers to print kernel warnings
+Author: David Matlack <dmatlack@google.com>
+
+Add kmsg_open() and kmsg_print_warnings() to the library. kmsg_open()
+opens /dev/kmsg positioned after the last message in the kernel log, and
+kmsg_print_warnings() prints any kernel messages at KERN_WARNING or
+higher priority that have been logged since.
+
+Bound how much kmsg_print_warnings() reads and prints, since other
+processes (e.g. tests running in parallel) may log a large number of
+messages, and note in the output when messages were lost because the
+kernel log wrapped. If /dev/kmsg cannot be opened, kmsg_open() prints a
+message saying that kernel warnings will not be printed, so that callers
+do not each need to.
+
+This will be used in a subsequent commit to print kernel warnings to
+the test log when a test triggers one, so the failure can be debugged
+from the test log.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ .../selftests/vfio/lib/include/libvfio.h      |   1 +
+ .../selftests/vfio/lib/include/libvfio/kmsg.h |   8 ++
+ tools/testing/selftests/vfio/lib/kmsg.c       | 134 ++++++++++++++++++
+ tools/testing/selftests/vfio/lib/libvfio.mk   |   1 +
+ 4 files changed, 144 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 6/8] vfio: selftests: Add sysfs_kernel_warn_count_get()
+Author: David Matlack <dmatlack@google.com>
+
+Add a helper to read /sys/kernel/warn_count, which counts the number of
+warnings the kernel has encountered since boot. Return a negative value
+if the file does not exist, e.g. on kernels that predate it.
+
+Factor the code to read an integer from a sysfs file out of
+sysfs_val_get_int() so that it can be shared by both helpers.
+
+This will be used in a subsequent commit to detect kernel warnings
+triggered by tests.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ .../vfio/lib/include/libvfio/sysfs.h          |  1 +
+ tools/testing/selftests/vfio/lib/sysfs.c      | 28 ++++++++++++++++---
+ 2 files changed, 25 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/8] vfio/pci: Hold memory_lock for all calls to vfio_pci_set_power_state()
+Author: David Matlack <dmatlack@google.com>
+
+Hold vdev->memory_lock for write when calling vfio_pci_set_power_state()
+from vfio_pci_core_disable() and vfio_pci_core_register_device(), and
+assert that the lock is held for all power state transitions, not just
+transitions out of D0.
+
+vfio_pci_core_disable() calls vfio_pci_set_power_state(vdev, PCI_D0)
+without holding memory_lock, which allows it to race with
+vfio_pci_core_sriov_configure() when userspace writes to sriov_numvfs
+while the device is being closed. If the user left the device in D3hot
+via a config space write, both threads can transition the device from
+D3hot to D0 concurrently. Since a config space write does not change
+the runtime PM status, the device stays RPM_ACTIVE, pm_runtime_resume()
+in the close path is a no-op, and vfio_pci_set_power_state() performs
+the D3hot->D0 transition.
+
+For devices with vdev->needs_pm_restore set (NoSoftRst-), this can
+result in:
+
+ - vfio_pci_core_disable() restoring the PF's BARs after
+   vfio_pci_core_sriov_configure() has enabled VFs, since the D3hot->D0
+   transition sleeps before restoring device state. This reproduces
+   reliably with vfio_pci_power_state_test and triggers the following
+   warning:
+
+     vfio-pci 0000:01:00.0: can't update enabled VF BAR0 [mem 0xe0200000000-0xe020001ffff 64bit pref]
+     WARNING: drivers/pci/iov.c:1062 at pci_iov_update_resource+0x170/0x3b0
+     Call Trace:
+      pci_update_resource+0x1a3/0x5b0
+      __pci_set_power_state+0x597/0xb90
+      vfio_pci_core_disable+0x13b/0x1180
+      vfio_pci_core_close_device+0x144/0x260
+      vfio_df_close+0xf2/0x210
+      vfio_df_unbind_iommufd+0x89/0x140
+      vfio_device_fops_release+0x85/0xf0
+      __fput+0x2d6/0x720
+      fput_close_sync+0xe8/0x180
+      __x64_sys_close+0x7f/0xc0
+      do_syscall_64+0xbc/0x320
+      entry_SYSCALL_64_after_hwframe+0x76/0x7e
+
+ - Both threads observing pdev->current_state >= PCI_D3hot and calling
+   pci_load_and_free_saved_state(pdev, &vdev->pm_save) concurrently,
+   resulting in a double-free of vdev->pm_save.
+
+vfio_pci_core_register_device() cannot race with other callers since
+the device is not yet registered and device_lock is held across probe,
+but take the lock there as well so that the lockdep assertion can be
+made unconditional and catch any future unlocked callers.
+
+Taking memory_lock in these paths does not introduce any new lock
+dependencies. vfio_pci_core_disable() already acquires memory_lock
+under dev_set->lock via vfio_pci_runtime_pm_exit(), and
+vfio_pci_core_register_device(), like vfio_pci_core_sriov_configure(),
+runs under device_lock, which is already taken before memory_lock.
+
+Fixes: f4162eb1e2fc ("vfio/pci: Change the PF power state to D0 before enabling VFs")
+Cc: stable@vger.kernel.org
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 14 +++++++++-----
+ 1 file changed, 9 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 5/8] vfio: selftests: Add vfio_pci_find_capability()
+Author: David Matlack <dmatlack@google.com>
+
+Add vfio_pci_find_capability(), which walks a device's standard
+capability list like the kernel's pci_find_capability().
+
+This will be used in a subsequent commit to locate the PM capability.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ .../lib/include/libvfio/vfio_pci_device.h     |  2 ++
+ .../selftests/vfio/lib/vfio_pci_device.c      | 36 +++++++++++++++++++
+ 2 files changed, 38 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 4/8] vfio: selftests: Skip vfio_pci_sriov_uapi_test if
+Author: David Matlack <dmatlack@google.com>
+
+Skip vfio_pci_sriov_uapi_test if writing to the PF's sriov_numvfs file
+fails with -ENOENT, which means SR-IOV cannot be configured on the PF.
+
+vfio-pci returns -ENOENT unless its enable_sriov module parameter is
+set, which it is not by default, so the test currently fails during
+setup instead of skipping.
+
+Fixes: a6e4e726600d ("vfio: selftests: Add tests to validate SR-IOV UAPI")
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ tools/testing/selftests/vfio/vfio_pci_sriov_uapi_test.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 3/8] vfio: selftests: Add __sysfs_sriov_numvfs_set()
+Author: David Matlack <dmatlack@google.com>
+
+Add __sysfs_sriov_numvfs_set(), which returns the error from writing to
+a PF's sriov_numvfs file instead of asserting that the write succeeds,
+and implement sysfs_sriov_numvfs_set() on top of it.
+
+This will be used in subsequent commits to skip SR-IOV tests when the
+kernel returns -ENOENT, which means SR-IOV cannot be configured on the
+PF, e.g. because vfio-pci's enable_sriov module parameter is not set.
+
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ .../vfio/lib/include/libvfio/sysfs.h          |  1 +
+ tools/testing/selftests/vfio/lib/sysfs.c      | 38 +++++++++++++++----
+ 2 files changed, 31 insertions(+), 8 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/8] vfio/pci: Annotate lockless accesses to vdev->sriov_active
+Author: David Matlack <dmatlack@google.com>
+
+Use READ_ONCE() and WRITE_ONCE() to annotate the read of
+vdev->sriov_active in vfio_pci_set_power_state() and the lockless write
+that clears it in vfio_pci_core_sriov_configure().
+
+vfio_pci_core_sriov_configure() intentionally clears sriov_active
+without holding memory_lock, so the write can race with the read in
+vfio_pci_set_power_state() (which runs under memory_lock). The race is
+benign: at worst it causes a spurious -EBUSY while the device stays in
+D0. Mark the accesses anyway to document the intentional data race and
+avoid KCSAN reports.
+
+The write that sets sriov_active is done under memory_lock and is
+serialized against the lockless write by device_lock, so it does not
+need to be annotated.
+
+Fixes: 40ef3edf151e ("vfio/pci: Use a private flag to prevent power state change with VFs")
+Signed-off-by: David Matlack <dmatlack@google.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/8] vfio/pci: Fix power state race with SR-IOV enablement
+Author: David Matlack <dmatlack@google.com>
+
+This series can be found on GitHub:
+
+  https://github.com/dmatlack/linux/tree/vfio/set_power_state/v2
+
+This series fixes a race between closing a vfio-pci device and enabling
+SR-IOV on it, both of which can transition the device from D3hot to D0
+without being serialized. On devices with NoSoftRst-, this can restore
+the PF's BARs after VFs have been enabled (triggering a WARN in
+pci_iov_update_resource()), or double-free vdev->pm_save.
+
+This series also adds a selftest that exercises VFIO's handling of
+power state transitions requested by userspace through the PM
+capability, including a test case that reproduces the race.
+
+This series applies on top of vfio/next (vfio-v7.4-rc1).
+
+Series Overview
+---------------
+
+This series implements the following:
+
+  1. Hold memory_lock for all calls to vfio_pci_set_power_state() and
+     assert that it is held, which fixes the race (patch 1).
+
+  2. Annotate the intentional lockless accesses to vdev->sriov_active
+     with READ_ONCE() and WRITE_ONCE() (patch 2).
+
+  3. Skip vfio_pci_sriov_uapi_test instead of failing when SR-IOV
+     cannot be configured on the PF, e.g. because vfio-pci's
+     enable_sriov module parameter is not set (patches 3-4).
+
+  4. Add library helpers to find a PCI capability, read
+     /sys/kernel/warn_count, and print kernel warnings from /dev/kmsg
+     (patches 5-7).
+
+  5. Add vfio_pci_power_state_test, which covers closing a device in
+     D3hot and reopening it, enabling SR-IOV while the PF is in D3hot,
+     and racing a close in D3hot against enabling SR-IOV. The test fails
+     if /sys/kernel/warn_count changes during a test case, and prints
+     the warnings logged to /dev/kmsg to help debug the failure
+     (patch 8).
+
+Testing
+-------
+
+All patches were build-tested individually. The series was tested on
+x86_64 in a QEMU VM with an emulated Intel 82576 NIC (igb), which has
+NoSoftRst- and supports SR-IOV, bound to vfio-pci:
+
+  - Without patch 1 (KASAN kernel), close_in_d3hot_races_sriov_enable
+    fails, hitting the pci_iov_update_resource() WARN on 9 or 10 of the
+    test's 10 iterations.
+
+  - With the full series (KASAN and lockdep kernels), all VFIO
+    selftests pass with no warnings, KASAN reports, or lockdep splats.
+
+To run the new test (the SR-IOV test cases are skipped unless
+vfio_pci.enable_sriov=1):
+
+  # tools/testing/selftests/vfio/scripts/setup.sh 0000:01:00.0
+  # tools/testing/selftests/vfio/scripts/run.sh \
+      tools/testing/selftests/vfio/vfio_pci_power_state_test
+
+Changelog
+---------
+
+v2:
+ - Rename close_in_d3hot to reopen_after_close_in_d3hot and clarify that
+   it does not verify the D0 transition during close, since that is not
+   reliably observable from userspace (Alex)
+ - Print the kernel warnings logged to /dev/kmsg when the warn_count
+   check fails, so the failure can be debugged from the test log (Alex)
+ - Drop the claim that memory_lock protects the sriov_active check from
+   the comment in vfio_pci_set_power_state(), since it is cleared
+   without memory_lock
+ - Skip the SR-IOV tests, including the existing
+   vfio_pci_sriov_uapi_test, when SR-IOV cannot be configured on the PF
+   (e.g. vfio_pci.enable_sriov=N) instead of failing
+ - Use kernel-doc for the new library helpers
+ - Clean up commit messages, comments, and the cover letter
+
+v1: https://lore.kernel.org/kvm/20261029203324.1637772-1-dmatlack@google.com/
+
+David Matlack (8):
+  vfio/pci: Hold memory_lock for all calls to vfio_pci_set_power_state()
+  vfio/pci: Annotate lockless accesses to vdev->sriov_active
+  vfio: selftests: Add __sysfs_sriov_numvfs_set()
+  vfio: selftests: Skip vfio_pci_sriov_uapi_test if SR-IOV can't be
+    enabled
+  vfio: selftests: Add vfio_pci_find_capability()
+  vfio: selftests: Add sysfs_kernel_warn_count_get()
+  vfio: selftests: Add helpers to print kernel warnings from /dev/kmsg
+  vfio: selftests: Add test for device power state transitions
+
+ drivers/vfio/pci/vfio_pci_core.c              |  16 +-
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../selftests/vfio/lib/include/libvfio.h      |   1 +
+ .../selftests/vfio/lib/include/libvfio/kmsg.h |   8 +
+ .../vfio/lib/include/libvfio/sysfs.h          |   2 +
+ .../lib/include/libvfio/vfio_pci_device.h     |   2 +
+ tools/testing/selftests/vfio/lib/kmsg.c       | 134 +++++++++
+ tools/testing/selftests/vfio/lib/libvfio.mk   |   1 +
+ tools/testing/selftests/vfio/lib/sysfs.c      |  66 ++++-
+ .../selftests/vfio/lib/vfio_pci_device.c      |  36 +++
+ .../vfio/vfio_pci_power_state_test.c          | 256 ++++++++++++++++++
+ .../selftests/vfio/vfio_pci_sriov_uapi_test.c |   8 +-
+ 12 files changed, 512 insertions(+), 19 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] vfio: Allow untainted use of driver_override
+Author: Alex Williamson <alex@shazbot.org>
+
+Driver overrides are the standard mechanism for binding vfio drivers
+to devices.  With the introduction of the support_driver_override flag
+in the core driver struct, it's now required for drivers to declare
+themselves as driver_override compatible, otherwise driver_override
+bindings will be denied or generate a kernel taint.
+
+Set the support_driver_override flag on the driver struct across all
+vfio drivers.
+
+Cc: Yishai Hadas <yishaih@nvidia.com>
+Cc: Longfang Liu <liulongfang@huawei.com>
+Cc: Ankit Agrawal <ankita@nvidia.com>
+Cc: Brett Creeley <brett.creeley@amd.com>
+Cc: Giovanni Cabiddu <giovanni.cabiddu@intel.com>
+Cc: Michał Winiarski <michal.winiarski@intel.com>
+Cc: Julian Ruess <julianr@linux.ibm.com>
+Cc: Nipun Gupta <nipun.gupta@amd.com>
+Cc: Nikhil Agarwal <nikhil.agarwal@amd.com>
+Cc: Eric Auger <eric.auger@redhat.com>
+Cc: Mostafa Saleh <smostafa@google.com>
+Cc: Pranjal Shrivastava <praan@google.com>
+Cc: Ioana Ciornei <ioana.ciornei@nxp.com>
+Cc: qat-linux@intel.com
+Cc: virtualization@lists.linux.dev
+Cc: intel-xe@lists.freedesktop.org
+Cc: kvm@vger.kernel.org
+Signed-off-by: Alex Williamson <alex@shazbot.org>
+---
+
+Uwe, this should cover all the vfio drivers that expect to use
+driver_override.  Thanks,
+
+Alex
+
+ drivers/vfio/cdx/main.c                        | 1 +
+ drivers/vfio/fsl-mc/vfio_fsl_mc.c              | 1 +
+ drivers/vfio/pci/hisilicon/hisi_acc_vfio_pci.c | 3 ++-
+ drivers/vfio/pci/ism/main.c                    | 3 ++-
+ drivers/vfio/pci/mlx5/main.c                   | 3 ++-
+ drivers/vfio/pci/nvgrace-gpu/main.c            | 3 ++-
+ drivers/vfio/pci/pds/pci_drv.c                 | 3 ++-
+ drivers/vfio/pci/qat/main.c                    | 3 ++-
+ drivers/vfio/pci/vfio_pci.c                    | 3 ++-
+ drivers/vfio/pci/virtio/main.c                 | 3 ++-
+ drivers/vfio/pci/xe/main.c                     | 3 ++-
+ drivers/vfio/platform/vfio_amba.c              | 1 +
+ drivers/vfio/platform/vfio_platform.c          | 1 +
+ 13 files changed, 22 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: SVM: Set V_IGN_TPR when enabling a dummy V_IRQ for an
+Author: Jim Mattson <jmattson@google.com>
+
+Per the APM, the processor takes a virtual INTR interrupt only if
+V_INTR_PRIO is *strictly* greater than V_TPR, unless V_IGN_TPR is set to
+bypass the priority comparison.
+
+In svm_set_vintr(), KVM injects a dummy V_IRQ with V_INTR_PRIO=0xf to
+trigger #VMEXIT(VINTR) as soon as an interrupt window opens, but it does
+not set V_IGN_TPR.  If V_TPR is 0xf when the window opens--e.g. when
+CR8=0xf (in L1, or in L2 with V_INTR_MASKING=0) while a TPR-independent
+ExtINT or userspace IRQ-window request is pending, or in L2 with
+V_INTR_MASKING=1, INTERCEPT_INTR=0, and vmcb12.int_ctl.V_TPR=0xf--the
+priority comparison (0xf > 0xf) fails, and hardware masks the dummy
+V_IRQ indefinitely (also stranding any VM-wide AVIC IRQ-window inhibit).
+
+Set V_IRQ_INJECTION_BITS_MASK (which includes V_IRQ_MASK,
+V_INTR_PRIO_MASK, and V_IGN_TPR_MASK) in svm_set_vintr().  Note that
+svm_clear_vintr() already clears and restores V_IRQ_INJECTION_BITS_MASK.
+
+Fixes: 649d68643ebf ("KVM: SVM: sync TPR value to V_TPR field in the VMCB")
+Signed-off-by: Jim Mattson <jmattson@google.com>
+---
+ arch/x86/kvm/svm/svm.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 2/2] KVM: arm64: selftests: Verify HCR_EL2.NV1 is RES0 when
+Author: Colton Lewis <coltonlewis@google.com>
+
+In a VHE-only EL2 guest (KVM_ARM_VCPU_HAS_EL2 without
+KVM_ARM_VCPU_HAS_EL2_E2H0), KVM advertises ID_AA64MMFR4_EL1.E2H0 as
+NI_NV1, making HCR_EL2.E2H RES1 and HCR_EL2.NV1 RES0.
+
+Extend hello_el2 to attempt clearing HCR_EL2.E2H and setting HCR_EL2.NV1
+from userspace via KVM_SET_ONE_REG, verifying that HCR_EL2.E2H remains
+RES1 and HCR_EL2.NV1 is masked to RES0. Add a comment explaining why the
+check is performed from userspace rather than inside the guest.
+
+Signed-off-by: Colton Lewis <coltonlewis@google.com>
+---
+ tools/testing/selftests/kvm/arm64/hello_el2.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/2] KVM: arm64: Force HCR_EL2.NV1 to RES0 unconditionally
+Author: Colton Lewis <coltonlewis@google.com>
+
+ID_AA64MMFR4_EL1.E2H0 is a signed 4-bit field where:
+  - 0b0000 (IMP, 0): FEAT_E2H0 is implemented.
+  - 0b1111 (NI, -1): FEAT_E2H0 is not implemented, except HCR_EL2.NV1
+    is implemented.
+  - 0b1110 (NI_NV1, -2): Neither HCR_EL2.E2H == 0 nor HCR_EL2.NV1 is
+    implemented, and HCR_EL2.NV1 is RES0.
+
+When commit b2a324ff01fe ("KVM: arm64: Use HCR_EL2 feature map to drive
+fixed-value bits") converted HCR_EL2 to hcr_feat_map[], feat_nv2_e2h0_ni()
+was written as !kvm_has_feat(kvm, FEAT_E2H0), where FEAT_E2H0 checks
+E2H0 >= IMP (0). This inverted the condition: feat_nv2_e2h0_ni() evaluates
+to true when E2H0 < 0 (including NI_NV1), leaving HCR_EL2.NV1 writable
+instead of RES0 for VHE-only nested guests where KVM advertises
+ID_AA64MMFR4_EL1.E2H0 = NI_NV1.
+
+In practice, KVM cannot handle HCR_EL2.NV1 being non-RES0 in any
+configuration: limit_nv_id_reg() exposes either VHE-only EL2 with
+ID_AA64MMFR4_EL1.E2H0 = NI_NV1 (and E2H0 is not userspace-writable), or
+FEAT_E2H0 without FEAT_VHE or FEAT_NV. Checking E2H0 in a feature helper
+is therefore unnecessary.
+
+Drop feat_nv2_e2h0_ni() and mark HCR_EL2_NV1 as an unconditional RES0 bit
+using NEEDS_FEAT_FLAG(HCR_EL2_NV1, FORCE_RESx) in hcr_feat_map[] (shared
+by HCR_EL2 and NVHCR_EL2). Because HCR_EL2_NV1 is not part of the
+architectural HCR_EL2_RES0 mask, check_feat_map() accounts for it as an
+implementation-defined FORCE_RESx bit.
+
+Fixes: b2a324ff01fe ("KVM: arm64: Use HCR_EL2 feature map to drive fixed-value bits")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Colton Lewis <coltonlewis@google.com>
+---
+ arch/arm64/kvm/config.c | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/2] KVM: arm64: Force HCR_EL2.NV1 to RES0 unconditionally
+Author: Colton Lewis <coltonlewis@google.com>
+
+When commit b2a324ff01fe ("KVM: arm64: Use HCR_EL2 feature map to drive
+fixed-value bits") migrated HCR_EL2 fixed-bit masking to hcr_feat_map[],
+feat_nv2_e2h0_ni() was written as !kvm_has_feat(kvm, FEAT_E2H0). Because
+ID_AA64MMFR4_EL1.E2H0 is a signed 4-bit field where IMP is 0, NI is -1,
+and NI_NV1 is -2, !kvm_has_feat(kvm, FEAT_E2H0) evaluates to true when
+E2H0 < 0 (including NI_NV1), leaving HCR_EL2.NV1 writable instead of
+RES0 for VHE-only nested guests where KVM advertises E2H0 = NI_NV1.
+
+KVM never supports a configuration where HCR_EL2.NV1 is non-RES0
+(limit_nv_id_reg() exposes either VHE-only EL2 with E2H0 = NI_NV1 where
+E2H0 is not userspace-writable, or FEAT_E2H0 without FEAT_VHE or
+FEAT_NV).
+
+Patch 1 drops feat_nv2_e2h0_ni() and marks HCR_EL2.NV1 unconditionally
+RES0 using NEEDS_FEAT_FLAG(HCR_EL2_NV1, FORCE_RESx).
+Patch 2 extends the arm64 hello_el2 selftest to verify via
+KVM_SET_ONE_REG and KVM_GET_ONE_REG that HCR_EL2.E2H remains RES1 and
+HCR_EL2.NV1 remains RES0 when E2H0 is NI_NV1.
+
+Changes in v3:
+- Drop feat_nv2_nv1_not_res0() and force HCR_EL2.NV1 to RES0
+  unconditionally via NEEDS_FEAT_FLAG(HCR_EL2_NV1, FORCE_RESx) (Marc).
+- Add Suggested-by: Marc Zyngier <maz@kernel.org> on patch 1.
+- Add a comment in hello_el2.c explaining why RESx enforcement is
+  checked from userspace rather than inside the guest (Oliver).
+- Link to v2: https://lore.kernel.org/r/20261117204535.4036191-1-coltonlewis@google.com
+
+Tested under QEMU 11.1.2 TCG (arm64, kvm-arm.mode=nested): hello_el2
+fails with "HCR_EL2.NV1 should be RES0" on unpatched v7.4-rc3 and passes
+with this series applied, with no check_feature_map() warnings at boot.
+
+Changes in v2:
+- Rename feat_nv2_e2h0_ni() to feat_nv2_nv1_not_res0() (Leonardo).
+- Drop the guest EL2 MSR/MRS HCR_EL2 check in hello_el2 (Marc).
+- Link to v1: https://lore.kernel.org/r/20261116200418.3535619-1-coltonlewis@google.com
+
+Colton Lewis (2):
+  KVM: arm64: Force HCR_EL2.NV1 to RES0 unconditionally
+  KVM: arm64: selftests: Verify HCR_EL2.NV1 is RES0 when E2H0 is NI_NV1
+
+ arch/arm64/kvm/config.c                       |  7 +------
+ tools/testing/selftests/kvm/arm64/hello_el2.c | 15 +++++++++++++++
+ 2 files changed, 16 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86/mmu: Defer TDP MMU RCU callback barrier
+Author: Mark Street <streetster@gmail.com>
+
+TDP MMU pages are freed from RCU callbacks, which return their headers to MMU slab caches. Waiting for an rcu_barrier() during every VM teardown makes each VM wait for all pending RCU callbacks, including callbacks queued by unrelated VMs.
+
+Move the barrier to kvm_mmu_vendor_module_exit(), immediately before the MMU caches are destroyed. Set the owner of KVM stats and per-VM debugfs files to the vendor module so open files pin the module and prevent its exit while those files are active.
+
+This keeps the caches alive until queued callbacks finish while removing the callback drain from individual VM teardown.
+
+Signed-off-by: Mark Street <streetster@gmail.com>
+---
+ arch/x86/kvm/debugfs.c     |  7 ++++++-
+ arch/x86/kvm/mmu/mmu.c     |  2 ++
+ arch/x86/kvm/mmu/tdp_mmu.c |  7 -------
+ include/linux/kvm_host.h   |  1 +
+ virt/kvm/kvm_main.c        | 16 ++++++++++++----
+ 5 files changed, 21 insertions(+), 12 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v5] ring-buffer: Do not check si_mem_available() before deferred init completes
+Author: Amit Machhiwal <amachhiw@linux.ibm.com>
+
+With CONFIG_DEFERRED_STRUCT_PAGE_INIT=y, only about one memory section
+per node is initialized early in boot (16 MiB on powerpc).  The rest is
+initialized on demand by deferred_grow_zone() when an allocation would
+otherwise fail, or later by page_alloc_init_late().
+
+Until then NR_FREE_PAGES can be close to zero, because early allocations
+(SLUB, vmalloc, ftrace records) use up the first section.
+si_mem_available() is derived from NR_FREE_PAGES, so it under-reports.
+
+__rb_allocate_pages() returns -ENOMEM when si_mem_available() is below
+the requested size.  This check wrongly fails the buffers allocated for
+the boot CPU in early_trace_init() and for secondary CPUs in smp_init(),
+both of which run before page_alloc_init_late().  The resulting boot log
+shows:
+
+  ERROR: Failed to allocate trace buffer
+  ERROR: tracer: failed to allocate ring buffer!
+
+Skip the check until SYSTEM_FREEING_INITMEM on
+CONFIG_DEFERRED_STRUCT_PAGE_INIT kernels.  The allocation itself still
+fails if memory really is short.
+
+This is the second half of the fix for the early boot crash reported on
+ppc64le KVM guests.  Commit b3b974008388 ("tracing: Do not initialize
+tracefs work if tracing is disabled") stopped the NULL pointer
+dereference in __find_event_file() that followed the failed allocation.
+This patch fixes the allocation failure itself.
+
+Fixes: 2a872fa4e9c8 ("ring-buffer: Check if memory is available before allocation")
+Cc: stable@vger.kernel.org
+Reported-by: Michal Suchánek <msuchanek@suse.de>
+Closes: https://lore.kernel.org/all/arYskzbiaNzBR9MD@kunlun.suse.cz/
+Reviewed-by: Vincent Donnefort <vdonnefort@google.com>
+Signed-off-by: Amit Machhiwal <amachhiw@linux.ibm.com>
+---
+Changes since v4:
+ - v4: https://lore.kernel.org/all/20261023145459.47516-1-amachhiw@linux.ibm.com/
+ - Rewrote commit message for clarity and conciseness (Vincent, Steven).
+ - Structure the deferred init check using if/else with unlikely() (Steven).
+ - Added Vincent's R-b.
+
+Changes since v3:
+ - v3: https://lore.kernel.org/all/20261022181817.49717-1-amachhiw@linux.ibm.com
+ - Replace #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT / #else / #endif with
+   IS_ENABLED() + i = LONG_MAX to avoid duplicating the threshold check.
+   (Vincent Donnefort)
+ - Trim the in-code comment to one sentence. (Vincent Donnefort)
+
+Changes since v2:
+ - v2: https://lore.kernel.org/all/20261016134247.70722-1-amachhiw@linux.ibm.com
+ - Rebase on top of upstream ring_buffer.c changes from Vincent Donnefort;
+   update threshold to i < (nr_pages << subbuf_order). (Michal Suchánek)
+
+Changes since v1:
+ - v1: https://lore.kernel.org/all/20261009163557.88467-1-amachhiw@linux.ibm.com
+ - Extend the guard to cover SYSTEM_SCHEDULING as well: smp_init() calls
+   trace_rb_cpu_prepare() -> __rb_allocate_pages() before page_alloc_init_late()
+   completes, so the false negative window spans both SYSTEM_BOOTING and
+   SYSTEM_SCHEDULING. Use system_state >= SYSTEM_FREEING_INITMEM as the correct
+   boundary. (Sashiko, Vincent Donnefort)
+ - Wrap in #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT to preserve the original
+   check unchanged on non-deferred kernels. (Vincent Donnefort)
+ - Drop Tested-by: guard condition changed, requesting fresh test.
+
+ kernel/trace/ring_buffer.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 23/23] arm64: Expose the GICv5 ITS irqchip option
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow --irqchip=gicv5-its now that the ITS DT nodes and PCI MSI
+requester mapping are in place. Start automatic irqchip selection at
+GICv5 ITS so it is preferred ahead of base GICv5 and older models.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                         | 4 +++-
+ arm64/include/kvm/kvm-config-arch.h | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 22/23] arm64: Map PCI MSI requester IDs to the GICv5 ITS
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+The GICv5 ITS MSI controller requires one MSI cell carrying the
+DeviceID. Describe an identity mapping from the 16-bit PCI requester
+ID to the ITS DeviceID with msi-map. Keep the existing msi-parent
+property for GICv2m and GICv3 ITS.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/pci.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 21/23] arm64: Describe the GICv5 ITS in the DT
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Add an ITS node below the GICv5 IRS node with the CONFIG frame as its
+register region. Add an MSI controller child node for the TRANSLATE
+frame, with a phandle and one MSI cell carrying the DeviceID.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 20/23] arm64: Add GICv5 ITS device support
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow the GICv5 ITS irqchip to create a separate KVM ITS device and
+place its CONFIG and TRANSLATE frames immediately below the IRS.
+Reuse the ITS creation helper for GICv3 and GICv5, selecting the
+device and address types for each model.
+
+At this stage, --irqchip=gicv5-its is not yet exposed, and automatic
+irqchip selection starts with GICv5.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                  | 24 ++++++++++++++++++------
+ arm64/include/kvm/gic.h      |  1 +
+ arm64/include/kvm/kvm-arch.h |  8 ++++++++
+ 3 files changed, 27 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 19/23] arm64: Add proposed GICv5 ITS UAPI definitions
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Mirror the GICv5 ITS device type, address type and size from the posted
+KVM GICv5 ITS series. These definitions are not part of the v7.4-rc1
+UAPI header sync.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/include/asm/kvm.h | 2 ++
+ include/linux/kvm.h     | 2 ++
+ 2 files changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 18/23] arm64: Expose the GICv5 irqchip option
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow --irqchip=gicv5 and prefer GICv5 for automatic irqchip selection
+when the kernel supports it. The IRS and guest DT support are now in
+place.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                         | 4 +++-
+ arm64/include/kvm/kvm-config-arch.h | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 17/23] arm64: Generate GICv5 PCI INTx specifiers
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+PCI interrupt-map entries currently use the GICv2/v3 SPI type and an
+IRQ number with the SPI base subtracted. GICv5 uses a different SPI
+type (matching the hardware) and zero-based SPI numbers. Use the GICv5
+encoding for its INTx entries while retaining the existing encoding
+for other GICs.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/pci.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 16/23] arm64: Generate GICv5 SPI specifiers for platform devices
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Use the GICv5 interrupt type and absolute SPI number for platform
+devices. Preserve the legacy GICv2/v3 DT encoding for other VMs.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/fdt.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 15/23] arm64: Describe the GICv5 IRS in the DT
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Describe the IRS CONFIG and SETLPI frames and associate each CPU
+phandle with its IAFFID. This lets the guest discover and configure
+the IRS for shared interrupts.
+
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 14/23] arm64: Describe the GICv5 CPU interface in the DT
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Emit an interrupt-controller node for the GICv5 CPU interface. This
+provides the interrupt parent and allows guests to use PPIs.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 13/23] arm64: Assign CPU DT phandles
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Assign stable phandles to all arm64 CPU nodes. The GICv5 IRS DT node
+uses them to map IAFFIDs to CPUs; they remain unreferenced for earlier
+GIC models.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/fdt.c                  | 1 +
+ arm64/include/kvm/fdt-arch.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 12/23] arm64: Describe timer PPIs for GICv5
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+GICv5 DT specifiers use absolute PPI numbers due to having separate
+namespaces for the different interrupt types. Keep the existing
+GICv2/v3 specifiers by subtracting the legacy PPI base for those
+irqchips.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/timer.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 11/23] arm64: Describe the PMU interrupt for GICv5
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Use the GICv5 PPI specifier in the DT. KVM also expects the PMU IRQ
+attribute to contain the GICv5 interrupt type in the upper bits, so
+encode it before setting KVM_ARM_VCPU_PMU_V3_IRQ.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/pmu.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 10/23] arm64: Define GICv5 interrupt types
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Define the PPI and SPI type values used by GICv5 interrupt specifiers,
+and the type-field shift used to construct a full GICv5 INTID for
+KVM's PMU IRQ attribute. Give the FDT type values distinct names while
+retaining the same numeric values.
+
+Suggested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c             | 42 +++++++++++++++++++++++++++++++++++++----
+ arm64/include/kvm/gic.h |  9 +++++++++
+ 2 files changed, 47 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 09/23] arm64: Configure the GICv5 IRS
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Place the IRS CONFIG and SETLPI frames in two 64 KiB regions below the
+guest AXI area, and pass the IRS base to KVM through
+KVM_VGIC_V5_ADDR_TYPE_IRS.
+
+The GICv5 NR_IRQS attribute counts SPIs without the 32 SGI/PPI lines
+included for earlier GICs. Use that count for GICv5 while retaining
+the existing count for GICv2/v3. Allow zero-based GICv5 IRQ numbers
+when setting the level through KVM_IRQ_LINE.
+
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                  | 30 ++++++++++++++++++++++++++++--
+ arm64/include/kvm/kvm-arch.h |  8 ++++++++
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 08/23] arm64: Start GICv5 SPI line allocation at zero
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+GICv5 SPIs start at zero, while earlier GICs use an offset of 32.
+Select the zero offset before allocating any interrupt lines.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 06/23] arm64: Configure GIC interrupt bases
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Record the SPI and PPI bases for the selected irqchip and expose getters
+to code that does not receive the irqchip type. Configure the bases
+after the GIC device and MSI frame have been created.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c             | 48 +++++++++++++++++++++++++++++++++++++++++
+ arm64/include/kvm/gic.h |  4 ++++
+ 2 files changed, 52 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 07/23] irq: Allow the initial interrupt line number to be set
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow callers to select the initial IRQ line number before allocating
+any lines. Track the selected offset when reporting the number of
+allocated lines.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ include/kvm/irq.h |  1 +
+ irq.c             | 15 ++++++++++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 05/23] arm64: Add GICv5 irqchip device support
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Add IRQCHIP_GICV5 and create KVM_DEV_TYPE_ARM_VGIC_V5 for it. GICv5
+has no distributor or redistributor MMIO frame, so omit those address
+attributes.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c             | 5 +++++
+ arm64/include/kvm/gic.h | 1 +
+ 2 files changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 04/23] Sync kernel UAPI headers with v7.4-rc1
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Synchronise the headers to pull in the support for the GICv5 IRS that
+was added in v7.4-rc1. These changes do not include the GICv5 ITS
+changes which are still under review at the time of writing.
+
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/include/asm/kvm.h        | 16 ++++++++++++++++
+ include/linux/kvm.h            | 21 +++++++++++++++++++++
+ include/linux/virtio_console.h |  2 +-
+ include/linux/virtio_ids.h     |  1 +
+ powerpc/include/asm/kvm.h      | 18 ++++++++++++++++++
+ riscv/include/asm/kvm.h        | 17 +++++++++++++++++
+ x86/include/asm/kvm.h          |  4 ++--
+ 7 files changed, 76 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 03/23] arm64: Split GIC device setup
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Separate the CPU interface, redistributor and distributor address setup
+from GIC device creation. Keep the per-GIC address handling in small
+helpers.
+
+Have the existing MSI frame helper use the global MSI base instead of
+passing it as an argument.
+
+Use the irqchip enum order to omit the GICv2 PPI CPU mask for GICv3
+and later generations.
+
+Suggested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 94 +++++++++++++++++++++++++++++++++++------------------
+ 1 file changed, 62 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 02/23] arm64: Close the ITS descriptor when setup fails
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+gic__create_its_frame() closes the device fd if the address attribute
+is unavailable, but returns without closing it if setting the address
+or initialising the ITS fails. Route all errors after device creation
+through the same close path.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 19 ++++++++++++-------
+ 1 file changed, 12 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 01/23] arm64: Propagate IRQ routing initialisation errors
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+irq__routing_init() can fail while allocating entries for the default
+routing table. gic__init_gic() currently ignores that error and
+continues with a partially populated table. Return the error before
+the VGIC is marked as initialised.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 00/23] arm64: Support GICv5-based guests
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+This series adds support for GICv5-based VMs to kvmtool. These are
+exposed as --irqchip=gicv5 and --irqchip=gicv5-its, where the former
+creates a vGICv5 device and the latter adds a GICv5 ITS. The GICv5
+specification can be found at [1].
+
+The GICv5 support in KVM needed by --irqchip=gicv5 is available as of
+Linux v7.4-rc1. The GICv5 ITS support is described in [2]; using
+--irqchip=gicv5-its requires a KVM build with those changes.
+
+The series teaches kvmtool to create the GICv5 irqchip and ITS KVM
+devices. It describes the GICv5 CPU interface, IRS and ITS in the
+guest DT, updates the timer and PMU interrupt descriptions, and
+generates GICv5 interrupt specifiers for platform devices and PCI. It
+also maps PCI MSI requester IDs to the ITS. The IRS support is built
+and exposed before the ITS support, so the GICv5 irqchip support can
+be merged separately from the ITS changes.
+
+Compared with v4 [3]:
+
+* Added Vladimir's Reviewed-by and Tested-by trailers where provided,
+  and described the MSI helper's use of the global base in patch 3's
+  commit message.
+
+* Updated to check GICv5 SPI indices passed to KVM_IRQ_LINE against
+  the 0-255 range that fits kvmtool's 8-bit IRQ storage, while
+  retaining the 32-255 range for GICv2/v3.
+
+* Restored blank lines inadvertently removed in patches 9 and 12.
+
+* Made GICv5 ITS setup fall through to the common GICv5 IRS setup.
+
+* Replaced PCI MSI property selection with a switch statement.
+
+The v7.4-rc1 header sync includes GICv5 IRS UAPI, but not GICv5 ITS
+UAPI. Patch 19 mirrors the ITS definitions from [2]. Once that UAPI
+lands upstream, the headers should be resynced against the latest
+Linux headers before merging the ITS support.
+
+Thanks,
+Sascha
+
+[1] https://developer.arm.com/documentation/aes0070/latest
+[2] https://lore.kernel.org/all/20261102194454.4086911-1-sascha.bischoff@arm.com/
+[3] https://lore.kernel.org/all/20261102213413.4136118-1-sascha.bischoff@arm.com/
+
+Sascha Bischoff (23):
+  arm64: Propagate IRQ routing initialisation errors
+  arm64: Close the ITS descriptor when setup fails
+  arm64: Split GIC device setup
+  Sync kernel UAPI headers with v7.4-rc1
+  arm64: Add GICv5 irqchip device support
+  arm64: Configure GIC interrupt bases
+  irq: Allow the initial interrupt line number to be set
+  arm64: Start GICv5 SPI line allocation at zero
+  arm64: Configure the GICv5 IRS
+  arm64: Define GICv5 interrupt types
+  arm64: Describe the PMU interrupt for GICv5
+  arm64: Describe timer PPIs for GICv5
+  arm64: Assign CPU DT phandles
+  arm64: Describe the GICv5 CPU interface in the DT
+  arm64: Describe the GICv5 IRS in the DT
+  arm64: Generate GICv5 SPI specifiers for platform devices
+  arm64: Generate GICv5 PCI INTx specifiers
+  arm64: Expose the GICv5 irqchip option
+  arm64: Add proposed GICv5 ITS UAPI definitions
+  arm64: Add GICv5 ITS device support
+  arm64: Describe the GICv5 ITS in the DT
+  arm64: Map PCI MSI requester IDs to the GICv5 ITS
+  arm64: Expose the GICv5 ITS irqchip option
+
+ arm64/fdt.c                         |  13 +-
+ arm64/gic.c                         | 361 ++++++++++++++++++++++++----
+ arm64/include/asm/kvm.h             |  18 ++
+ arm64/include/kvm/fdt-arch.h        |   1 +
+ arm64/include/kvm/gic.h             |  15 ++
+ arm64/include/kvm/kvm-arch.h        |  16 ++
+ arm64/include/kvm/kvm-config-arch.h |   2 +-
+ arm64/pci.c                         |  24 +-
+ arm64/pmu.c                         |  13 +-
+ arm64/timer.c                       |   8 +-
+ include/kvm/irq.h                   |   1 +
+ include/linux/kvm.h                 |  23 ++
+ include/linux/virtio_console.h      |   2 +-
+ include/linux/virtio_ids.h          |   1 +
+ irq.c                               |  15 +-
+ powerpc/include/asm/kvm.h           |  18 ++
+ riscv/include/asm/kvm.h             |  17 ++
+ x86/include/asm/kvm.h               |   4 +-
+ 18 files changed, 483 insertions(+), 69 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: x86/mmu: Wait for freed TDP MMU pages only before
+Author: Qiliang Yuan <qiliang.yuan@linux.dev>
+
+The TDP MMU frees page table pages from RCU callbacks, so that lockless
+walkers never see a freed table. kvm_mmu_uninit_tdp_mmu() ends with
+rcu_barrier(), which commit 7cca2d0b7e7d ("KVM: x86/mmu: Protect TDP MMU
+page table memory with RCU") added so that these callbacks run before
+the VM is torn down.
+
+The callbacks only free the page table page and return its kvm_mmu_page
+to mmu_page_header_cache; they do not touch the VM. Still, destroying
+any VM waits for the RCU callbacks pending on every CPU, which accounts
+for most of the time it takes to destroy a small VM and limits how fast
+sandboxes that run one short-lived VM per task can be recycled.
+
+Move the barrier to mmu_destroy_caches(), the only place that needs the
+callbacks to have run, before mmu_page_header_cache is destroyed.
+
+Each thread creates VMs with a 1 MiB memslot and one vCPU that touches
+eight guest pages, and destroys them by closing the vCPU and VM fds; 400
+VMs per run in a 32 vCPU guest with nested KVM on AMD, median of five
+runs:
+
+             destroy time per VM             VMs per second
+  threads   before (ms)  after (ms)  change   before    after   change
+        1         11.9        0.76     -94%       61      509    +734%
+        4         15.5        0.61     -96%      197     1105    +461%
+       16         23.6        2.87     -88%      429      968    +126%
+
+Signed-off-by: Qiliang Yuan <qiliang.yuan@linux.dev>
+---
+ arch/x86/kvm/mmu/mmu.c     | 5 +++++
+ arch/x86/kvm/mmu/tdp_mmu.c | 7 -------
+ 2 files changed, 5 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: nSVM: Reject EVENTINJ of #BR/#OF into a 64-bit L2
+Author: Manuel Andreas <manuel.andreas@tum.de>
+
+nested_svm_event_inj_valid_exept() treats BR_VECTOR and OF_VECTOR as
+unconditionally valid for TYPE=3 (exception) injection.  However, the APM
+(Vol 2, 15.20) states that injecting an event that is impossible for the
+guest mode, e.g. #BR into a guest in 64-bit mode, makes VMRUN fail with
+VMEXIT_INVALID.  BOUND and INTO are both invalid in 64-bit mode.
+
+Because the check depends on both the control area (EVENTINJ) and the save
+area (EFER/CR0/CS), add it to nested_svm_check_cached_vmcb12(), which covers
+both nested VMRUN and RSM, rather than to nested_vmcb_check_controls().
+
+Fixes: 7e79f71bca5c ("KVM: nSVM: Add missing consistency check for EVENTINJ")
+Signed-off-by: Manuel Andreas <manuel.andreas@tum.de>
+---
+ arch/x86/kvm/svm/nested.c | 32 ++++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 0/5] KVM: x86: Backport shadow MMU GFN and role fixes
+Author: Artem Novikov <naa@amicon.ru>
+
+Backport the shadow MMU fixes for CVE-2026-46113 and CVE-2026-53359
+to linux-5.10.y at 3a323bc22b88 (Linux 5.10.274). A linked child is
+reusable only when its GFN and complete role match the current walk.
+
+Patch 1 makes shadow-page sync flush remote TLBs when it drops a
+mapping. Patch 2 syncs cached descendants before linking a child.
+Patch 3 checks for an obsolete legacy root after reclaim and handles
+synthetic roots, addressing the root lifetime issue reported for the
+earlier 5.10 backport. Patches 4 and 5 check GFN and role, respectively,
+at the three legacy child lookup sites.
+
+The backport keeps the 5.10 page allocator's role calculation, including
+the non-PAE quadrant calculation. It uses the existing zap and flush
+helpers for replacement after the page is ready, preserving the existing
+root-count check. The parent-derived role and its setup refactors have no
+dependency in this implementation.
+
+Regression discussion:
+https://lore.kernel.org/kvm/20260630223723.83727-1-zcgao@amazon.com/
+
+Lai Jiangshan (2):
+  KVM: X86: Fix missed remote tlb flush in rmap_write_protect()
+  KVM: X86: Synchronize the shadow pagetable before link it
+
+Paolo Bonzini (1):
+  KVM: x86: Fix shadow paging use-after-free due to unexpected role
+
+Sean Christopherson (2):
+  KVM: x86/mmu: Retry faults on obsolete shadow roots
+  KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+
+ arch/x86/kvm/mmu/mmu.c         | 97 +++++++++++++++++++++-------------
+ arch/x86/kvm/mmu/paging_tmpl.h | 57 +++++++-------------
+ 2 files changed, 80 insertions(+), 74 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 1/5] KVM: X86: Fix missed remote tlb flush in rmap_write_protect()
+Author: Artem Novikov <naa@amicon.ru>
+
+
+commit f81602958c115fc7c87b985f71574042a20ff858 upstream.
+
+A leaf mapping removed by sync_page() can still be writable in a remote
+vCPU's TLB. Request an immediate remote flush when synchronization
+drops a mapping, so subsequent write protection can rely on the rmap.
+
+Fixes: a4ee1ca4a36e ("KVM: MMU: delay flush all tlbs on sync_page path")
+Link: https://lore.kernel.org/r/20210918005636.3675-2-jiangshanlai@gmail.com
+Signed-off-by: Lai Jiangshan <laijs@linux.alibaba.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+Signed-off-by: Artem Novikov <naa@amicon.ru>
+---
+ arch/x86/kvm/mmu/paging_tmpl.h | 23 ++---------------------
+ 1 file changed, 2 insertions(+), 21 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 5/5] KVM: x86: Fix shadow paging use-after-free due to unexpected role
+Author: Artem Novikov <naa@amicon.ru>
+
+
+commit 81ccda30b4e83d8f5cc4fd50503c44e3a33abfeb upstream.
+
+A linked page with the expected GFN can have a different role.
+Direct and indirect shadow pages use different reverse-map GFN
+accounting. Reusing a child whose role has changed can leave a stale
+reverse map after the child is freed.
+
+Require the linked child to match both the GFN and the whole role.
+Compare against the same role used for cache lookup. The role includes
+the access bits, so the shared replacement path also handles access
+changes on a direct child.
+
+Fixes: 2032a93d66fa ("KVM: MMU: Don't allocate gfns page for direct mmu pages")
+Reported-by: Hyunwoo Kim <imv4bel@gmail.com>
+Link: https://www.cve.org/CVERecord?id=CVE-2026-53359
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[Apply the comparison where the 5.10 page allocator builds its role.
+ Keep the original role calculation and root lookup.]
+Signed-off-by: Artem Novikov <naa@amicon.ru>
+---
+Backport fix for CVE-2026-53359
+
+ arch/x86/kvm/mmu/mmu.c         | 43 +++++++++-------------------------
+ arch/x86/kvm/mmu/paging_tmpl.h |  2 --
+ 2 files changed, 11 insertions(+), 34 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 4/5] KVM: x86: Fix shadow paging use-after-free due to unexpected GFN
+Author: Artem Novikov <naa@amicon.ru>
+
+
+commit 0cb2af2ea66ad8ff195c156ea690f11216285bdf upstream.
+
+A linked shadow page can have a different GFN from the one expected by
+the current walk. Reusing it can leave reverse mappings under a GFN
+that the shadow page cannot recover when removing those mappings.
+
+Check the GFN in all three legacy child lookup paths. When a replacement
+is ready, zap the old parent SPTE and flush remote TLBs before linking
+the replacement. Use the existing zap helper, which also preserves
+shadow pages still pinned as roots.
+
+Fixes: 2032a93d66fa ("KVM: MMU: Don't allocate gfns page for direct mmu pages")
+Fixes: 6aa8b732ca01 ("kvm: userspace interface")
+Reported-by: Alexander Bulekov <bkov@amazon.com>
+Reported-by: Fred Griffoul <fgriffo@amazon.co.uk>
+Link: https://lore.kernel.org/r/20260503201029.106481-1-pbonzini@redhat.com
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[Keep the 5.10 shadow walk and large-SPTE handling. Use the legacy GFN
+ and role inputs when looking up a replacement.]
+Signed-off-by: Artem Novikov <naa@amicon.ru>
+---
+ arch/x86/kvm/mmu/mmu.c         | 39 +++++++++++++++++++++++++++++-----
+ arch/x86/kvm/mmu/paging_tmpl.h | 21 +++++++-----------
+ 2 files changed, 42 insertions(+), 18 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 2/5] KVM: X86: Synchronize the shadow pagetable before link it
+Author: Artem Novikov <naa@amicon.ru>
+
+
+commit 65855ed8b03437e79e42f2a89a993206981ac6cb upstream.
+
+Synchronize descendants before linking a cached indirect shadow page.
+A guest can make a nonpresent GPTE present without flushing its TLB.
+Retry the fault if synchronization needs to yield the MMU lock.
+
+Fixes: 4731d4c7a077 ("KVM: MMU: out of sync shadow core")
+Link: https://lore.kernel.org/r/20210918005636.3675-3-jiangshanlai@gmail.com
+Signed-off-by: Lai Jiangshan <laijs@linux.alibaba.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[Adapt mmu_sync_children() to the 5.10 spinlock and PAE root path.]
+Signed-off-by: Artem Novikov <naa@amicon.ru>
+---
+ arch/x86/kvm/mmu/mmu.c         | 17 ++++++++++-------
+ arch/x86/kvm/mmu/paging_tmpl.h | 12 ++++++++++--
+ 2 files changed, 20 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 5.10 3/5] KVM: x86/mmu: Retry faults on obsolete shadow roots
+Author: Artem Novikov <naa@amicon.ru>
+
+
+commit a955cad84cdaffa282b3cf8f5ce69e9e5655e585 upstream.
+
+Retry before walking a shadow root that was invalidated during fault
+handling. Check under mmu_lock after reclaim has finished and fall
+back to the MMU reload request for synthetic roots.
+
+Carry the follow-ups 18c841e1f411 ("KVM: x86: Retry page fault if MMU
+reload is pending and root has no sp") and 2abd5287f083 ("KVM: x86:
+Check for invalid/obsolete root *after* making MMU pages available").
+
+Signed-off-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Paolo Bonzini <pbonzini@redhat.com>
+[Check at the legacy walk entry points. The separate 5.10 TDP MMU
+ uses its own root validity handling.]
+Signed-off-by: Artem Novikov <naa@amicon.ru>
+---
+ arch/x86/kvm/mmu/mmu.c         | 14 +++++++++++++-
+ arch/x86/kvm/mmu/paging_tmpl.h |  3 ++-
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2] KVM: PPC: Book3S HV: Clean up on uvmem initialization failure
+Author: Haoxiang Li <haoxiang_li2024@163.com>
+
+When kvmppc_uvmem_init() fails, kvmppc_book3s_init_hv() returns
+directly, bypassing the existing error path. Jump to the existing
+error path to clean up before returning the error.
+
+Fixes: 175be7e5800e ("KVM: PPC: Book3S HV: Free allocated memory if module init fails")
+Signed-off-by: Haoxiang Li <haoxiang_li2024@163.com>
+---
+Changes in v2:
+ - Change the Fixes tag.
+ - Modify the patch title.
+---
+ arch/powerpc/kvm/book3s_hv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: PPC: Book3S HV: Free nestedv2 state on vCPU creation failure
+Author: Haoxiang Li <haoxiang_li2024@163.com>
+
+When nestedv2 is enabled, kvmppc_core_vcpu_create_hv() allocates guest
+state buffers and messages through kvmhv_nestedv2_vcpu_create(). If
+the subsequent vcore lookup or allocation fails, it returns without
+releasing those resources.
+
+The caller's error path only calls kvmppc_subarch_vcpu_uninit(), which
+does not free the nestedv2 state. Call kvmhv_nestedv2_vcpu_free() before
+returning from the vcore error path when nestedv2 is enabled.
+
+Fixes: 19d31c5f1157 ("KVM: PPC: Add support for nestedv2 guests")
+Signed-off-by: Haoxiang Li <haoxiang_li2024@163.com>
+---
+ arch/powerpc/kvm/book3s_hv.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 11/13] vfio/pci: Add DS-ST TPH policy and TPH_RESOLVE capability
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Extend the VFIO TPH policy model beyond NO-ST and IV-ST, add DS-ST
+policy and introduce VFIO_DEVICE_FEATURE_TPH_RESOLVE for steering tag (ST)
+lookup.
+
+- Add VFIO_PCI_TPH_POLICY_DS_ST, extend module parameter valid range
+  * DS-ST: expose TPH_RESOLVE for CPU source steering tag lookup;
+           ST programming supports NONE and CPU sources
+  Note: In this 'DS-ST mode', device-specific ST tables are not preserved
+        across PCI resets, userspace must re-establish ST state after
+        reset. The kernel cannot validate these ST entries, so this mode
+        is not recommended for general virtualization usecases
+- Relax TPH control register write check to allow NS/IV/DS mode selection
+- Implement TPH_RESOLVE:
+  * Support CPU volatile / persistent memory source steering tag resolution
+  * Return resolved steering tag (ST) when capability is advertised
+- Advertise TPH_RESOLVE capability only when hardware reports DS-ST support
+- Update module parameter description to document DS-ST caveat
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci.c        | 11 ++++--
+ drivers/vfio/pci/vfio_pci_config.c |  2 +-
+ drivers/vfio/pci/vfio_pci_core.c   | 58 ++++++++++++++++++++++++++++--
+ drivers/vfio/pci/vfio_pci_priv.h   |  1 +
+ include/uapi/linux/vfio.h          | 37 +++++++++++++++++++
+ 5 files changed, 103 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 12/13] vfio/pci: Reset PCIe TPH state on device open and close
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Hardware resets clear PCI TPH registers, but PCI core software TPH state
+may remain stale across VFIO device open/close cycles.
+
+Invoke pcie_disable_tph() at enable and disable boundaries:
+- In vfio_pci_core_enable(): reset TPH state before saving PCI state
+  for a fresh user session
+- In vfio_pci_core_disable(): reset TPH state when releasing the device,
+  to clear stale software TPH tracking state
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v21 08/13] PCI/TPH: Add pci_tph_dsm_supported() helper to detect device TPH ST _DSM
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add new helper pci_tph_dsm_supported() to check whether the root port
+of a given PCI device exposes the TPH ST ACPI _DSM method.
+
+Wrap all ACPI logic under CONFIG_ACPI guard, return false directly
+when ACPI is disabled.
+
+This helper is prepared for follow-up VFIO TPH virtualization patches
+to uniformly judge platform CPU TPH resolving support.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 28 ++++++++++++++++++++++++++++
+ include/linux/pci-tph.h |  3 +++
+ 2 files changed, 31 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v21 09/13] vfio/pci: Add basic NO-ST TPH VFIO device feature support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Implement basic PCIe TPH support restricted to NO-ST mode:
+
+- Add a tph_policy module parameter, currently locked to NO-ST.
+  The parameter range is reserved for future TPH policies.
+- Virtualize the TPH extended capability register: mask IV/DS
+  modes, ST location and ST size fields, only NO-ST capability
+  is visible to userspace.
+- Gate all TPH control register writes behind tph_opt_in.
+  Opt-in is one-shot (0 -> 1 only), no reset path.
+- Validate TPH control register writes: only NO-ST mode and
+  supported requester enable values are accepted; invalid writes
+  are dropped. CTRL reads always fetch hardware state directly.
+- Add VFIO_DEVICE_FEATURE_TPH ioctl for opt-in (SET) and VFIO
+  usable capability query (GET). GET fails with -EINVAL if the
+  device has not been opted in.
+- ST table accesses beyond the base TPH capability return zero
+  on read and writes are discarded.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci.c        |  16 +++
+ drivers/vfio/pci/vfio_pci_config.c | 167 ++++++++++++++++++++++++++---
+ drivers/vfio/pci/vfio_pci_core.c   |  46 ++++++++
+ drivers/vfio/pci/vfio_pci_priv.h   |   4 +
+ include/linux/vfio_pci_core.h      |   3 +
+ include/uapi/linux/vfio.h          |  22 ++++
+ 6 files changed, 241 insertions(+), 17 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 13/13] vfio/pci: Expose per-device TPH state via debugfs
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add read-only debugfs file "tph" to report per-device TPH runtime state:
+- effective tph_policy mode
+- virtual TPH capability value
+- tph_opt-in user enable state
+
+Align debugfs comments to include tph_policy and new tph debug entry.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci_core.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 07/13] PCI/TPH: Add pcie_tph_set_st_entries() batch ST entry programming helper
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add batch variant pcie_tph_set_st_entries() to write a contiguous range
+of ST table entries, returning the number of successfully written entries
+or negative errno.
+- Keep original pcie_tph_set_st_entry() as a wrapper for backward
+  compatibility
+- Disable/enable TPH once per batch instead of per entry for better
+  performance
+- Add header declaration and fallback static inline version
+- Add error logging for failed ST entry writes
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 77 +++++++++++++++++++++++++----------------
+ include/linux/pci-tph.h |  6 ++++
+ 2 files changed, 54 insertions(+), 29 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 10/13] vfio/pci: Add IV-ST TPH policy and TPH_PROGRAM batch programming support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Extend the NO-ST baseline with an IV-ST policy and introduce
+VFIO_DEVICE_FEATURE_TPH_PROGRAM for batch programming of architected ST
+entries.
+
+- Add VFIO_PCI_TPH_POLICY_IV_ST and extend the tph_policy module
+  parameter:
+  * IV-ST: expose IV mode and architected ST table access, hide DS
+- Restrict TPH control register writes to NO-ST and IV-ST only;
+  block device-specific TPH mode
+- VFIO TPH GET reports PROG_ST_NONE and PROG_ST_CPU capabilities after
+  opt-in
+- Add VFIO_DEVICE_FEATURE_TPH_PROGRAM (SET-only) to batch program
+  architected ST entries for NONE and CPU (volatile/persistent) sources
+- All ST programming is gated behind tph_opt_in and policy checks
+- Register a per-device cpuhp offline callback: automatically clear ST
+  entries bound to an offlined CPU and set those ST values to zero
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/vfio/pci/vfio_pci.c        |   5 +-
+ drivers/vfio/pci/vfio_pci_config.c |  10 +-
+ drivers/vfio/pci/vfio_pci_core.c   | 287 ++++++++++++++++++++++++++++-
+ drivers/vfio/pci/vfio_pci_priv.h   |   1 +
+ include/linux/vfio_pci_core.h      |   3 +
+ include/uapi/linux/vfio.h          |  74 +++++++-
+ 6 files changed, 371 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 06/13] PCI/TPH: Add macros to check standard and extended TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Add two helper macros for TPH capability checking:
+- pcie_std_tph_supported(): check basic standard TPH support
+- pcie_ext_tph_supported(): check extended TPH requester support
+
+They rely on the cached tph_max_type value validated during probe,
+and provide consistent capability queries for subsequent VFIO TPH
+virtualization code. Stub definitions are added for !CONFIG_PCIE_TPH.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ include/linux/pci-tph.h | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v21 05/13] PCI/TPH: Refactor pcie_tph_get_cpu_st & add requester variant
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Refactor pcie_tph_get_cpu_st() and add pcie_tph_get_cpu_st_ext() extended
+variant with explicit requester type parameter.
+
+- Preserve original pcie_tph_get_cpu_st() as a compatibility wrapper,
+  using the default negotiated tph_max_type automatically, so existing
+  callers require no modification.
+- Add exported pcie_tph_get_cpu_st_ext() to accept an explicit requester
+  type argument for ST namespace selection, used by upcoming VFIO TPH
+  support.
+- Add requester type validation to reject invalid values and enforce the
+  hardware negotiated tph_max_type capability limit.
+
+Update pci-tph.h header and CONFIG_PCIE_TPH stub inline definitions
+to match the new function signatures.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 45 ++++++++++++++++++++++++++++++++---------
+ include/linux/pci-tph.h | 10 +++++++--
+ 2 files changed, 44 insertions(+), 11 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 03/13] PCI/TPH: Cache negotiated max requester type at probe time
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+pcie_enable_tph() recalculates the TPH requester capability and queries
+root port completer type on every invocation, causing redundant config
+space reads.
+
+Calculate the negotiated maximum requester type once during pci_tph_init()
+and cache it in a new pdev->tph_max_type bitfield. Simplify the enable path
+by reusing the cached value to eliminate repeated hardware access.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c   | 45 ++++++++++++++++++++++++---------------------
+ include/linux/pci.h |  4 +++-
+ 2 files changed, 27 insertions(+), 22 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 01/13] PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+pcie_tph_get_st_table_loc() incorrectly uses FIELD_GET(), which shifts the
+field value to bit 0. But the function is designed to return raw
+PCI_TPH_LOC_* values as defined in the function comment.
+
+This causes incorrect ST table location detection. Fix it by using bitwise
+AND with PCI_TPH_CAP_LOC_MASK to return the unshifted field value matching
+the function specification.
+
+This doesn't make a difference to mlx5_st_create(), the lone external
+caller, because it only checks for PCI_TPH_LOC_NONE (0), but will be needed
+for callers that check for PCI_TPH_LOC_CAP or PCI_TPH_LOC_MSIX.
+
+Also add tph_cap validation for pcie_tph_get_st_table_loc() to prevent
+invalid PCI configuration space access when TPH is not supported. Add stub
+functions for pcie_tph_get_st_table_size() and pcie_tph_get_st_table_loc()
+when !CONFIG_PCIE_TPH.
+
+Fixes: d2e8a34876ce ("PCI/TPH: Add Steering Tag support")
+Cc: stable@vger.kernel.org
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Reviewed-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/tph.c       | 12 +++++-------
+ include/linux/pci-tph.h |  4 ++++
+ 2 files changed, 9 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 00/13] vfio/pci: Add PCIe TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+This patchset enables userspace-configurable PCIe TPH support for VFIO in
+the **device-to-host (D2H)** scenario, bringing performance benefits for
+userspace workloads such as DPDK and SPDK.
+
+The patchset is split into two logical parts:
+1. The first eight patches fix and refactor core PCI/TPH kernel code to
+   export the required helper interfaces.
+2. The second five patches implement the corresponding VFIO TPH
+   virtualization and uAPI step by step.
+
+
+Since TLP TPH ST values are not validated by the IOMMU like TLP address
+fields, there exists risk of cross-tenant cache interference if untrusted
+VM can program arbitrary ST tags. We introduce two-level security
+gating:
+
+The first is the VFIO-PCI module parameter tph_policy, defined as:
+   Global TPH policy level (0 = default No-ST):
+   0 = No-ST mode: ST programming unavailable
+   1 = Add IV-ST mode: ST programming supports NONE / CPU sources
+   2 = Add DS-ST mode: RESOLVE returns ST for CPU sources;
+                       ST programming supports NONE / CPU sources
+       Note: In this 'Add DS-ST mode', device-specific ST tables are not
+             preserved across PCI resets, userspace must re-establish ST
+             state after reset. The kernel cannot validate these ST
+             entries, so this mode is not recommended for general
+             virtualization usecases.
+
+Note: IV-ST mode is considered safe for VM use because the ST table is
+programmed exclusively via the kernel VFIO uAPI. VM cannot directly
+write the architected ST table in MSI-X or config space. The hypervisor
+(e.g. QEMU) will verify ST, and also when a target CPU transitions from
+online to offline, the kernel automatically (add in this patchset) clears
+all ST table entries mapped to that CPU, setting those ST values to zero.
+
+The second gate is per-device opt-in. TPH programming is only permitted
+after userspace successfully opt-in via the VFIO TPH feature.
+
+
+Three VFIO device features are introduced in this series:
+1. VFIO_DEVICE_FEATURE_TPH: control and query VFIO TPH feature
+   capabilities.
+2. VFIO_DEVICE_FEATURE_TPH_PROGRAM: batch program architected steering tag
+   table entries.
+3. VFIO_DEVICE_FEATURE_TPH_RESOLVE: resolve TPH attributes for a given CPU
+   source.
+
+The intended userspace programming model is:
+1. Read the virtualized PCI TPH capability via VFIO config space access to
+   discover underlying hardware TPH support.
+2. Invoke VFIO_DEVICE_FEATURE_TPH SET to opt-in and obtain TPH permission.
+3. Invoke VFIO_DEVICE_FEATURE_TPH GET to retrieve available TPH
+   capabilities; GET returns an error if opt-in has not been performed.
+4. Write the TPH control register through VFIO config space to activate
+   hardware TPH.
+5. Program architected ST table entries via
+   VFIO_DEVICE_FEATURE_TPH_PROGRAM if the device exposes architected ST
+   table.
+6. Query the ST value for a given CPU ID via
+   VFIO_DEVICE_FEATURE_TPH_RESOLVE for DS-ST capable devices, userspace
+   may then configure the ST through device MMIO or firmware interfaces.
+
+
+Key implementation details for capability virtualization:
+1. The TPH capability register is virtualized according to the active
+   tph_policy:
+   a. No-ST policy: IV/DS mode bits, ST location and ST size fields are
+      masked. Only NO-ST capability is visible to userspace.
+   b. IV-ST policy: DS mode bits are masked. Userspace sees NO-ST and
+      IV-ST capabilities (if hardware supports IV-ST).
+   c. DS-ST policy: capability register is passed through unmodified.
+2. Capability bits returned by VFIO_DEVICE_FEATURE_TPH GET follow these
+   rules:
+   a. If virtualized TPH exposes architected ST table:
+      VFIO_DEVICE_TPH_CAP_PROG_ST_NONE and VFIO_DEVICE_TPH_CAP_PROG_ST_CPU
+      are reported. These indicate userspace may use TPH_PROGRAM to update
+      ST.
+   b. If virtualized TPH supports DS mode:
+      VFIO_DEVICE_TPH_CAP_RESOLVE_CPU_ST is reported. This indicates
+      userspace can resolve CPU-ID associated ST values via TPH_RESOLVE.
+
+
+Future P2P / DMABUF extension
+------------------------------
+The uAPI is designed to easy extend to support device-to-device (P2P) and
+DMABUF-backed scenarios on top of Zhiping's P2P TPH patchset:
+1. Return VFIO_DEVICE_TPH_CAP_RESOLVE_DMABUF_PH in all tph_policy in
+   VFIO_DEVICE_FEATURE_TPH GET, so that userspace could resolve DMABUF's
+   TPH PH info
+2. Return VFIO_DEVICE_TPH_CAP_PROG_ST_DMABUF if virtualized TPH has the
+   architect ST, so that userspace could program ST entries which
+   associated to DMABUFs' fd
+3. Return VFIO_DEVICE_TPH_CAP_RESOLVE_DMABUF_ST if virtualized TPH
+   supports DS mode, so that userspace could retrieve ST value which
+   associated to DMABUF's fd
+   
+---
+v21:
+- Focus only device-to-host (D2H) scenario
+- Refactor the implementation
+v20:
+- Address almost all comments from Alex about v19, not within Alex's
+  scope:
+  - Drop LITERAL policy support
+  - uAPI changes: cap have been split into fine-grained
+  - TPH config access: still based on perm mechanism, but restrict the
+    readable and writable length
+  - Debugfs add more fields
+v19:
+- Address all comments from Alex
+  - Drop CPU-to-ST translation of PCI/TPH
+  - Re-implement vfio part, please refer:
+    https://lore.kernel.org/linux-pci/20260626092232.53ed3a7c@shazbot.org/
+- Add expose tph_policy via debugfs
+
+Chengwen Feng (13):
+  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+  PCI/TPH: Fix tph_enabled concurrent update race by bitfield packing
+  PCI/TPH: Cache negotiated max requester type at probe time
+  PCI/TPH: Refactor pcie_enable_tph and add requester variant
+  PCI/TPH: Refactor pcie_tph_get_cpu_st & add requester variant
+  PCI/TPH: Add macros to check standard and extended TPH support
+  PCI/TPH: Add pcie_tph_set_st_entries() batch ST entry programming
+    helper
+  PCI/TPH: Add pci_tph_dsm_supported() helper to detect device TPH ST
+    _DSM
+  vfio/pci: Add basic NO-ST TPH VFIO device feature support
+  vfio/pci: Add IV-ST TPH policy and TPH_PROGRAM batch programming
+    support
+  vfio/pci: Add DS-ST TPH policy and TPH_RESOLVE capability
+  vfio/pci: Reset PCIe TPH state on device open and close
+  vfio/pci: Expose per-device TPH state via debugfs
+
+ drivers/pci/tph.c                  | 240 +++++++++++------
+ drivers/vfio/pci/vfio_pci.c        |  24 ++
+ drivers/vfio/pci/vfio_pci_config.c | 175 +++++++++++--
+ drivers/vfio/pci/vfio_pci_core.c   | 402 ++++++++++++++++++++++++++++-
+ drivers/vfio/pci/vfio_pci_priv.h   |   6 +
+ include/linux/pci-tph.h            |  47 +++-
+ include/linux/pci.h                |   6 +-
+ include/linux/vfio_pci_core.h      |   6 +
+ include/uapi/linux/vfio.h          | 129 +++++++++
+ 9 files changed, 935 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 04/13] PCI/TPH: Refactor pcie_enable_tph and add requester variant
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Refactor the core TPH enable logic by renaming the original function to
+pcie_enable_tph_ext(), which accepts an explicit requester type argument.
+
+- Keep the original pcie_enable_tph() as a compatibility wrapper; it uses
+  the pre-cached tph_max_type negotiated capability automatically, so
+  existing drivers calling pcie_enable_tph() require no modification.
+- Export new pcie_enable_tph_ext() to support explicit requester type
+  selection, intended for use by the upcoming VFIO TPH series.
+- Add requester type validation to reject values out of hardware negotiated
+  range or invalid reserved types.
+
+Update pci-tph.h header and CONFIG_PCIE_TPH stub inline definitions
+to match the new function signatures.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ drivers/pci/tph.c       | 41 ++++++++++++++++++++++++++++++-----------
+ include/linux/pci-tph.h |  8 ++++++--
+ 2 files changed, 36 insertions(+), 13 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v21 02/13] PCI/TPH: Fix tph_enabled concurrent update race by bitfield packing
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+Split tph_enabled from shared pci_dev bitfield into spare bit of tph_cap's
+u16: tph_cap is immutable post-enumeration (15 bits for offset), remaining
+1 bit stores tph_enabled. Removes cross-bitfield concurrent write hazards
+highlighted by Sashiko after VFIO TPH exposure. No functional changes.
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+---
+ include/linux/pci.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v8] vfio: selftests: Find devices that have VFIO selftest drivers
+Author: Josh Hilke <jrhilke@google.com>
+
+Add list_supported_devices.sh to print the PCI addresses and names of
+devices on the host that have a VFIO selftest driver. Group the output
+into supported and unusable sections based on whether vfio-pci is loaded
+and whether the vfio-pci denylist blocks the device.
+
+Add -q to print only the PCI addresses of usable devices so the output
+can go straight to setup.sh. Add -a for use with -q to include unusable
+devices as well.
+
+When vfio-pci is loaded with disable_denylist=Y, the script lists the
+denylisted devices under "Supported (on denylist, but denylist
+disabled):" and includes them in the -q output. When vfio-pci is not
+loaded, the script lists all devices as unusable and omits them from -q
+unless -a is also passed.
+
+Example on a host with Intel IOAT and Intel DSA devices when vfio-pci is
+loaded with disable_denylist=N:
+
+$ ./list_supported_devices.sh
+Supported:
+  0000:00:04.0 - Intel IOAT SKX [8086:2021]
+  ...
+Unusable (available, but denylisted by the kernel):
+  0000:6a:01.0 - Intel DSA SPR [8086:0b25]
+  ...
+
+  To use denylisted devices, load vfio-pci with disable_denylist=1
+  (or boot the kernel with vfio_pci.disable_denylist=1).
+
+$ ./list_supported_devices.sh -q
+0000:00:04.0
+...
+
+$ ./list_supported_devices.sh -q -a
+0000:00:04.0
+...
+0000:6a:01.0
+...
+
+Suggested-by: Sean Christopherson <seanjc@google.com>
+Signed-off-by: Josh Hilke <jrhilke@google.com>
+---
+Changelog
+
+v7 -> v8
+- Group devices under Supported and Unusable headers instead of
+  repeating denylist state on every line, and shorten the denylist hint
+  at the end of the denylisted section. Suggested by Sean.
+- Check /sys/bus/pci/drivers/vfio-pci to verify that vfio-pci is loaded,
+  mark devices as unusable when it is not loaded, and omit them from -q
+  unless -a is passed. Suggested by Sean.
+- Add -a for use with -q to include unusable devices in the SBDF output.
+  Suggested by Sean.
+
+v7: https://lore.kernel.org/kvm/20261106051726.3964374-1-jrhilke@google.com/
+v6: https://lore.kernel.org/kvm/20260602222941.3133236-1-jrhilke@google.com/
+v5: https://lore.kernel.org/kvm/20260602185615.3025904-1-jrhilke@google.com/
+
+ tools/testing/selftests/vfio/Makefile         |   1 +
+ .../vfio/scripts/list_supported_devices.sh    | 199 ++++++++++++++++++
+ 2 files changed, 200 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 3/3] x86/cpufeatures: Remove unused VMware hypercall feature bits
+Author: Zack Rusin <zack.rusin@broadcom.com>
+
+The static-call conversion removed the alternative instruction templates
+that used X86_FEATURE_VMCALL and X86_FEATURE_VMW_VMMCALL. Their remaining
+users only force the bits during VMware setup; no code tests either bit.
+
+Remove the forced capabilities and mark both positions free in the kernel
+header. Neither feature has a cpuinfo name, so this changes no
+userspace-visible flag.
+
+Signed-off-by: Zack Rusin <zack.rusin@broadcom.com>
+---
+ arch/x86/include/asm/cpufeatures.h | 4 ++--
+ arch/x86/kernel/cpu/vmware.c       | 4 ----
+ 2 files changed, 2 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/2] RISC-V: KVM: Skip steal-time updates when run_delay is unchanged
+Author: Koichiro Den <den@valinux.co.jp>
+
+Check run_delay against last_steal and skip the update if they match.
+This avoids accessing the SBI STA shared structure and marking its page
+dirty on vCPU loads with no new steal time to report.
+
+Signed-off-by: Koichiro Den <den@valinux.co.jp>
+---
+ arch/riscv/kvm/vcpu_sbi_sta.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 0/2] RISC-V: KVM: Lessen steal time update overhead
+Author: Koichiro Den <den@valinux.co.jp>
+
+Hi,
+
+For guests that register an SBI STA shared-memory area, this small patch
+set reduces update overhead by batching user accesses and also skipping
+updates when run_delay is unchanged.
+
+Tested on SpacemiT K3:
+The benchmark uses KVM selftest helpers. The guest registers its STA
+shared memory and calls GUEST_UCALL_NONE() in a loop. The vCPU thread is
+pinned to one host CPU and re-enters KVM_RUN after each exit.
+
+The table shows the median vCPU thread CPU time per round trip (from
+host userspace to the guest and back), measured with
+CLOCK_THREAD_CPUTIME_ID. Each case has five runs of 1,000,000
+iterations, preceded by 10,000 warm-up iterations per run.
+Below, "contended" adds a busy loop on that CPU.
+
+                Before      After
+  ------------  ----------  -------------------
+  uncontended   2966.51 ns  2703.26 ns (-8.87%)
+  contended     2973.46 ns  2717.72 ns (-8.60%)
+
+Based off of riscv_kvm_next, commit e9bf49bbc422 ("RISC-V: KVM: Fix
+G-stage page table memory leak on VM destroy")
+
+Best regards,
+Koichiro Den
+
+
+Koichiro Den (2):
+  RISC-V: KVM: Batch user accesses when updating steal time
+  RISC-V: KVM: Skip steal-time updates when run_delay is unchanged
+
+ arch/riscv/kvm/vcpu_sbi_sta.c | 61 +++++++++++++++++++++--------------
+ 1 file changed, 37 insertions(+), 24 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 1/2] RISC-V: KVM: Batch user accesses when updating steal time
+Author: Koichiro Den <den@valinux.co.jp>
+
+Updating the SBI STA shared structure performs 2x get_user() + 3x
+put_user() calls, each of which toggles sstatus.SUM.
+
+Keep SUM enabled across all five accesses to the shared structure.
+
+Note that write barriers are added to order the odd sequence store
+before the steal-time update and the even sequence store after it.
+
+Signed-off-by: Koichiro Den <den@valinux.co.jp>
+---
+To reviewers: please let me know if you'd prefer
+scoped_user_rw_access() here.
+
+ arch/riscv/kvm/vcpu_sbi_sta.c | 59 ++++++++++++++++++++---------------
+ 1 file changed, 34 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] RISC-V: KVM: Run vCPU timer callbacks in hardirq context on RT
+Author: Koichiro Den <den@valinux.co.jp>
+
+On hosts with Sstc, kvm_arch_vcpu_load() cancels the vCPU wakeup hrtimer
+with preemption disabled, including when called from sched-in preemption
+notifier. The vCPU reset path also cancels the timer under get_cpu(),
+with or without Sstc.
+
+On PREEMPT_RT, these callbacks run in softirq thread context, so
+hrtimer_cancel() may sleep waiting for a running callback, which is
+invalid with preemption disabled.
+
+Let the callbacks run in hardirq context on -RT. They only rearm the
+timer, update interrupt state under a raw spinlock, and kick the vCPU.
+Similar to commit 9090825fa997 ("KVM: arm/arm64: Let the timer expire in
+hardirq context on RT").
+
+Cc: stable@vger.kernel.org
+Fixes: 3e1d86569c21 ("RISC-V: KVM: Add SBI HSM extension in KVM")
+Fixes: 8f5cb44b1bae ("RISC-V: KVM: Support sstc extension")
+Signed-off-by: Koichiro Den <den@valinux.co.jp>
+---
+Tested on SpacemiT K3 (which has Sstc) with an -RT host kernel.
+- Without this patch, with the vCPU thread running at say SCHED_FIFO/50,
+  just booting a Linux guest triggered "scheduling while atomic" splats.
+- With this patch, the issue disappeared.
+---
+ arch/riscv/kvm/vcpu_timer.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From 111dce600 to 94a10d9b3
+KVM mailing list update from 111dce600 to 94a10d9b3
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     24 arm.com
+      9 google.com
+      8 pereq.eu
+      8 linux.dev
+      1 siemens.com
+      1 gmail.com
+
+Top 15 contributors (Based on Email Body)
+
+     24  Sascha Bischoff <sascha.bischoff@arm.com>
+      8  Fuad Tabba <fuad.tabba@linux.dev>
+      8  Dan Carpenter <dan@pereq.eu>
+      3  Sebastian Ene <sebastianene@google.com>
+      3  Colton Lewis <coltonlewis@google.com>
+      2  Bartłomiej Grzesik <bgrzesik@google.com>
+      1  Mostafa Saleh <smostafa@google.com>
+      1  Haseeb Ashraf <haseeb.ashraf@siemens.com>
+      1  Haseeb Ashraf <haseebashraf091@gmail.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+[PATCH v3 2/2] KVM: arm64: selftests: Verify HCR_EL2.NV1 is RES0 when
+Author: Colton Lewis <coltonlewis@google.com>
+
+In a VHE-only EL2 guest (KVM_ARM_VCPU_HAS_EL2 without
+KVM_ARM_VCPU_HAS_EL2_E2H0), KVM advertises ID_AA64MMFR4_EL1.E2H0 as
+NI_NV1, making HCR_EL2.E2H RES1 and HCR_EL2.NV1 RES0.
+
+Extend hello_el2 to attempt clearing HCR_EL2.E2H and setting HCR_EL2.NV1
+from userspace via KVM_SET_ONE_REG, verifying that HCR_EL2.E2H remains
+RES1 and HCR_EL2.NV1 is masked to RES0. Add a comment explaining why the
+check is performed from userspace rather than inside the guest.
+
+Signed-off-by: Colton Lewis <coltonlewis@google.com>
+---
+ tools/testing/selftests/kvm/arm64/hello_el2.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v3 1/2] KVM: arm64: Force HCR_EL2.NV1 to RES0 unconditionally
+Author: Colton Lewis <coltonlewis@google.com>
+
+ID_AA64MMFR4_EL1.E2H0 is a signed 4-bit field where:
+  - 0b0000 (IMP, 0): FEAT_E2H0 is implemented.
+  - 0b1111 (NI, -1): FEAT_E2H0 is not implemented, except HCR_EL2.NV1
+    is implemented.
+  - 0b1110 (NI_NV1, -2): Neither HCR_EL2.E2H == 0 nor HCR_EL2.NV1 is
+    implemented, and HCR_EL2.NV1 is RES0.
+
+When commit b2a324ff01fe ("KVM: arm64: Use HCR_EL2 feature map to drive
+fixed-value bits") converted HCR_EL2 to hcr_feat_map[], feat_nv2_e2h0_ni()
+was written as !kvm_has_feat(kvm, FEAT_E2H0), where FEAT_E2H0 checks
+E2H0 >= IMP (0). This inverted the condition: feat_nv2_e2h0_ni() evaluates
+to true when E2H0 < 0 (including NI_NV1), leaving HCR_EL2.NV1 writable
+instead of RES0 for VHE-only nested guests where KVM advertises
+ID_AA64MMFR4_EL1.E2H0 = NI_NV1.
+
+In practice, KVM cannot handle HCR_EL2.NV1 being non-RES0 in any
+configuration: limit_nv_id_reg() exposes either VHE-only EL2 with
+ID_AA64MMFR4_EL1.E2H0 = NI_NV1 (and E2H0 is not userspace-writable), or
+FEAT_E2H0 without FEAT_VHE or FEAT_NV. Checking E2H0 in a feature helper
+is therefore unnecessary.
+
+Drop feat_nv2_e2h0_ni() and mark HCR_EL2_NV1 as an unconditional RES0 bit
+using NEEDS_FEAT_FLAG(HCR_EL2_NV1, FORCE_RESx) in hcr_feat_map[] (shared
+by HCR_EL2 and NVHCR_EL2). Because HCR_EL2_NV1 is not part of the
+architectural HCR_EL2_RES0 mask, check_feat_map() accounts for it as an
+implementation-defined FORCE_RESx bit.
+
+Fixes: b2a324ff01fe ("KVM: arm64: Use HCR_EL2 feature map to drive fixed-value bits")
+Suggested-by: Marc Zyngier <maz@kernel.org>
+Signed-off-by: Colton Lewis <coltonlewis@google.com>
+---
+ arch/arm64/kvm/config.c | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v3 0/2] KVM: arm64: Force HCR_EL2.NV1 to RES0 unconditionally
+Author: Colton Lewis <coltonlewis@google.com>
+
+When commit b2a324ff01fe ("KVM: arm64: Use HCR_EL2 feature map to drive
+fixed-value bits") migrated HCR_EL2 fixed-bit masking to hcr_feat_map[],
+feat_nv2_e2h0_ni() was written as !kvm_has_feat(kvm, FEAT_E2H0). Because
+ID_AA64MMFR4_EL1.E2H0 is a signed 4-bit field where IMP is 0, NI is -1,
+and NI_NV1 is -2, !kvm_has_feat(kvm, FEAT_E2H0) evaluates to true when
+E2H0 < 0 (including NI_NV1), leaving HCR_EL2.NV1 writable instead of
+RES0 for VHE-only nested guests where KVM advertises E2H0 = NI_NV1.
+
+KVM never supports a configuration where HCR_EL2.NV1 is non-RES0
+(limit_nv_id_reg() exposes either VHE-only EL2 with E2H0 = NI_NV1 where
+E2H0 is not userspace-writable, or FEAT_E2H0 without FEAT_VHE or
+FEAT_NV).
+
+Patch 1 drops feat_nv2_e2h0_ni() and marks HCR_EL2.NV1 unconditionally
+RES0 using NEEDS_FEAT_FLAG(HCR_EL2_NV1, FORCE_RESx).
+Patch 2 extends the arm64 hello_el2 selftest to verify via
+KVM_SET_ONE_REG and KVM_GET_ONE_REG that HCR_EL2.E2H remains RES1 and
+HCR_EL2.NV1 remains RES0 when E2H0 is NI_NV1.
+
+Changes in v3:
+- Drop feat_nv2_nv1_not_res0() and force HCR_EL2.NV1 to RES0
+  unconditionally via NEEDS_FEAT_FLAG(HCR_EL2_NV1, FORCE_RESx) (Marc).
+- Add Suggested-by: Marc Zyngier <maz@kernel.org> on patch 1.
+- Add a comment in hello_el2.c explaining why RESx enforcement is
+  checked from userspace rather than inside the guest (Oliver).
+- Link to v2: https://lore.kernel.org/r/20261117204535.4036191-1-coltonlewis@google.com
+
+Tested under QEMU 11.1.2 TCG (arm64, kvm-arm.mode=nested): hello_el2
+fails with "HCR_EL2.NV1 should be RES0" on unpatched v7.4-rc3 and passes
+with this series applied, with no check_feature_map() warnings at boot.
+
+Changes in v2:
+- Rename feat_nv2_e2h0_ni() to feat_nv2_nv1_not_res0() (Leonardo).
+- Drop the guest EL2 MSR/MRS HCR_EL2 check in hello_el2 (Marc).
+- Link to v1: https://lore.kernel.org/r/20261116200418.3535619-1-coltonlewis@google.com
+
+Colton Lewis (2):
+  KVM: arm64: Force HCR_EL2.NV1 to RES0 unconditionally
+  KVM: arm64: selftests: Verify HCR_EL2.NV1 is RES0 when E2H0 is NI_NV1
+
+ arch/arm64/kvm/config.c                       |  7 +------
+ tools/testing/selftests/kvm/arm64/hello_el2.c | 15 +++++++++++++++
+ 2 files changed, 16 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 23/23] arm64: Expose the GICv5 ITS irqchip option
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow --irqchip=gicv5-its now that the ITS DT nodes and PCI MSI
+requester mapping are in place. Start automatic irqchip selection at
+GICv5 ITS so it is preferred ahead of base GICv5 and older models.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                         | 4 +++-
+ arm64/include/kvm/kvm-config-arch.h | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 22/23] arm64: Map PCI MSI requester IDs to the GICv5 ITS
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+The GICv5 ITS MSI controller requires one MSI cell carrying the
+DeviceID. Describe an identity mapping from the 16-bit PCI requester
+ID to the ITS DeviceID with msi-map. Keep the existing msi-parent
+property for GICv2m and GICv3 ITS.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/pci.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 21/23] arm64: Describe the GICv5 ITS in the DT
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Add an ITS node below the GICv5 IRS node with the CONFIG frame as its
+register region. Add an MSI controller child node for the TRANSLATE
+frame, with a phandle and one MSI cell carrying the DeviceID.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 41 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 41 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 20/23] arm64: Add GICv5 ITS device support
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow the GICv5 ITS irqchip to create a separate KVM ITS device and
+place its CONFIG and TRANSLATE frames immediately below the IRS.
+Reuse the ITS creation helper for GICv3 and GICv5, selecting the
+device and address types for each model.
+
+At this stage, --irqchip=gicv5-its is not yet exposed, and automatic
+irqchip selection starts with GICv5.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                  | 24 ++++++++++++++++++------
+ arm64/include/kvm/gic.h      |  1 +
+ arm64/include/kvm/kvm-arch.h |  8 ++++++++
+ 3 files changed, 27 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 19/23] arm64: Add proposed GICv5 ITS UAPI definitions
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Mirror the GICv5 ITS device type, address type and size from the posted
+KVM GICv5 ITS series. These definitions are not part of the v7.4-rc1
+UAPI header sync.
+
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/include/asm/kvm.h | 2 ++
+ include/linux/kvm.h     | 2 ++
+ 2 files changed, 4 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 18/23] arm64: Expose the GICv5 irqchip option
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow --irqchip=gicv5 and prefer GICv5 for automatic irqchip selection
+when the kernel supports it. The IRS and guest DT support are now in
+place.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                         | 4 +++-
+ arm64/include/kvm/kvm-config-arch.h | 2 +-
+ 2 files changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 17/23] arm64: Generate GICv5 PCI INTx specifiers
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+PCI interrupt-map entries currently use the GICv2/v3 SPI type and an
+IRQ number with the SPI base subtracted. GICv5 uses a different SPI
+type (matching the hardware) and zero-based SPI numbers. Use the GICv5
+encoding for its INTx entries while retaining the existing encoding
+for other GICs.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/pci.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 16/23] arm64: Generate GICv5 SPI specifiers for platform devices
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Use the GICv5 interrupt type and absolute SPI number for platform
+devices. Preserve the legacy GICv2/v3 DT encoding for other VMs.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/fdt.c | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 15/23] arm64: Describe the GICv5 IRS in the DT
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Describe the IRS CONFIG and SETLPI frames and associate each CPU
+phandle with its IAFFID. This lets the guest discover and configure
+the IRS for shared interrupts.
+
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 14/23] arm64: Describe the GICv5 CPU interface in the DT
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Emit an interrupt-controller node for the GICv5 CPU interface. This
+provides the interrupt parent and allows guests to use PPIs.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 13/23] arm64: Assign CPU DT phandles
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Assign stable phandles to all arm64 CPU nodes. The GICv5 IRS DT node
+uses them to map IAFFIDs to CPUs; they remain unreferenced for earlier
+GIC models.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/fdt.c                  | 1 +
+ arm64/include/kvm/fdt-arch.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 12/23] arm64: Describe timer PPIs for GICv5
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+GICv5 DT specifiers use absolute PPI numbers due to having separate
+namespaces for the different interrupt types. Keep the existing
+GICv2/v3 specifiers by subtracting the legacy PPI base for those
+irqchips.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/timer.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 11/23] arm64: Describe the PMU interrupt for GICv5
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Use the GICv5 PPI specifier in the DT. KVM also expects the PMU IRQ
+attribute to contain the GICv5 interrupt type in the upper bits, so
+encode it before setting KVM_ARM_VCPU_PMU_V3_IRQ.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/pmu.c | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 10/23] arm64: Define GICv5 interrupt types
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Define the PPI and SPI type values used by GICv5 interrupt specifiers,
+and the type-field shift used to construct a full GICv5 INTID for
+KVM's PMU IRQ attribute. Give the FDT type values distinct names while
+retaining the same numeric values.
+
+Suggested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c             | 42 +++++++++++++++++++++++++++++++++++++----
+ arm64/include/kvm/gic.h |  9 +++++++++
+ 2 files changed, 47 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 09/23] arm64: Configure the GICv5 IRS
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Place the IRS CONFIG and SETLPI frames in two 64 KiB regions below the
+guest AXI area, and pass the IRS base to KVM through
+KVM_VGIC_V5_ADDR_TYPE_IRS.
+
+The GICv5 NR_IRQS attribute counts SPIs without the 32 SGI/PPI lines
+included for earlier GICs. Use that count for GICv5 while retaining
+the existing count for GICv2/v3. Allow zero-based GICv5 IRQ numbers
+when setting the level through KVM_IRQ_LINE.
+
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c                  | 30 ++++++++++++++++++++++++++++--
+ arm64/include/kvm/kvm-arch.h |  8 ++++++++
+ 2 files changed, 36 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 08/23] arm64: Start GICv5 SPI line allocation at zero
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+GICv5 SPIs start at zero, while earlier GICs use an offset of 32.
+Select the zero offset before allocating any interrupt lines.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 07/23] irq: Allow the initial interrupt line number to be set
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Allow callers to select the initial IRQ line number before allocating
+any lines. Track the selected offset when reporting the number of
+allocated lines.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ include/kvm/irq.h |  1 +
+ irq.c             | 15 ++++++++++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 06/23] arm64: Configure GIC interrupt bases
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Record the SPI and PPI bases for the selected irqchip and expose getters
+to code that does not receive the irqchip type. Configure the bases
+after the GIC device and MSI frame have been created.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c             | 48 +++++++++++++++++++++++++++++++++++++++++
+ arm64/include/kvm/gic.h |  4 ++++
+ 2 files changed, 52 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 05/23] arm64: Add GICv5 irqchip device support
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Add IRQCHIP_GICV5 and create KVM_DEV_TYPE_ARM_VGIC_V5 for it. GICv5
+has no distributor or redistributor MMIO frame, so omit those address
+attributes.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c             | 5 +++++
+ arm64/include/kvm/gic.h | 1 +
+ 2 files changed, 6 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 04/23] Sync kernel UAPI headers with v7.4-rc1
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Synchronise the headers to pull in the support for the GICv5 IRS that
+was added in v7.4-rc1. These changes do not include the GICv5 ITS
+changes which are still under review at the time of writing.
+
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/include/asm/kvm.h        | 16 ++++++++++++++++
+ include/linux/kvm.h            | 21 +++++++++++++++++++++
+ include/linux/virtio_console.h |  2 +-
+ include/linux/virtio_ids.h     |  1 +
+ powerpc/include/asm/kvm.h      | 18 ++++++++++++++++++
+ riscv/include/asm/kvm.h        | 17 +++++++++++++++++
+ x86/include/asm/kvm.h          |  4 ++--
+ 7 files changed, 76 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 03/23] arm64: Split GIC device setup
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+Separate the CPU interface, redistributor and distributor address setup
+from GIC device creation. Keep the per-GIC address handling in small
+helpers.
+
+Have the existing MSI frame helper use the global MSI base instead of
+passing it as an argument.
+
+Use the irqchip enum order to omit the GICv2 PPI CPU mask for GICv3
+and later generations.
+
+Suggested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 94 +++++++++++++++++++++++++++++++++++------------------
+ 1 file changed, 62 insertions(+), 32 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 02/23] arm64: Close the ITS descriptor when setup fails
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+gic__create_its_frame() closes the device fd if the address attribute
+is unavailable, but returns without closing it if setting the address
+or initialising the ITS fails. Route all errors after device creation
+through the same close path.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 19 ++++++++++++-------
+ 1 file changed, 12 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 01/23] arm64: Propagate IRQ routing initialisation errors
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+irq__routing_init() can fail while allocating entries for the default
+routing table. gic__init_gic() currently ignores that error and
+continues with a partially populated table. Return the error before
+the VGIC is marked as initialised.
+
+Reviewed-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Tested-by: Vladimir Murzin <vladimir.murzin@arm.com>
+Signed-off-by: Sascha Bischoff <sascha.bischoff@arm.com>
+---
+ arm64/gic.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+----------------------------------------------------------------------
+
+[PATCH kvmtool v5 00/23] arm64: Support GICv5-based guests
+Author: Sascha Bischoff <sascha.bischoff@arm.com>
+
+This series adds support for GICv5-based VMs to kvmtool. These are
+exposed as --irqchip=gicv5 and --irqchip=gicv5-its, where the former
+creates a vGICv5 device and the latter adds a GICv5 ITS. The GICv5
+specification can be found at [1].
+
+The GICv5 support in KVM needed by --irqchip=gicv5 is available as of
+Linux v7.4-rc1. The GICv5 ITS support is described in [2]; using
+--irqchip=gicv5-its requires a KVM build with those changes.
+
+The series teaches kvmtool to create the GICv5 irqchip and ITS KVM
+devices. It describes the GICv5 CPU interface, IRS and ITS in the
+guest DT, updates the timer and PMU interrupt descriptions, and
+generates GICv5 interrupt specifiers for platform devices and PCI. It
+also maps PCI MSI requester IDs to the ITS. The IRS support is built
+and exposed before the ITS support, so the GICv5 irqchip support can
+be merged separately from the ITS changes.
+
+Compared with v4 [3]:
+
+* Added Vladimir's Reviewed-by and Tested-by trailers where provided,
+  and described the MSI helper's use of the global base in patch 3's
+  commit message.
+
+* Updated to check GICv5 SPI indices passed to KVM_IRQ_LINE against
+  the 0-255 range that fits kvmtool's 8-bit IRQ storage, while
+  retaining the 32-255 range for GICv2/v3.
+
+* Restored blank lines inadvertently removed in patches 9 and 12.
+
+* Made GICv5 ITS setup fall through to the common GICv5 IRS setup.
+
+* Replaced PCI MSI property selection with a switch statement.
+
+The v7.4-rc1 header sync includes GICv5 IRS UAPI, but not GICv5 ITS
+UAPI. Patch 19 mirrors the ITS definitions from [2]. Once that UAPI
+lands upstream, the headers should be resynced against the latest
+Linux headers before merging the ITS support.
+
+Thanks,
+Sascha
+
+[1] https://developer.arm.com/documentation/aes0070/latest
+[2] https://lore.kernel.org/all/20261102194454.4086911-1-sascha.bischoff@arm.com/
+[3] https://lore.kernel.org/all/20261102213413.4136118-1-sascha.bischoff@arm.com/
+
+Sascha Bischoff (23):
+  arm64: Propagate IRQ routing initialisation errors
+  arm64: Close the ITS descriptor when setup fails
+  arm64: Split GIC device setup
+  Sync kernel UAPI headers with v7.4-rc1
+  arm64: Add GICv5 irqchip device support
+  arm64: Configure GIC interrupt bases
+  irq: Allow the initial interrupt line number to be set
+  arm64: Start GICv5 SPI line allocation at zero
+  arm64: Configure the GICv5 IRS
+  arm64: Define GICv5 interrupt types
+  arm64: Describe the PMU interrupt for GICv5
+  arm64: Describe timer PPIs for GICv5
+  arm64: Assign CPU DT phandles
+  arm64: Describe the GICv5 CPU interface in the DT
+  arm64: Describe the GICv5 IRS in the DT
+  arm64: Generate GICv5 SPI specifiers for platform devices
+  arm64: Generate GICv5 PCI INTx specifiers
+  arm64: Expose the GICv5 irqchip option
+  arm64: Add proposed GICv5 ITS UAPI definitions
+  arm64: Add GICv5 ITS device support
+  arm64: Describe the GICv5 ITS in the DT
+  arm64: Map PCI MSI requester IDs to the GICv5 ITS
+  arm64: Expose the GICv5 ITS irqchip option
+
+ arm64/fdt.c                         |  13 +-
+ arm64/gic.c                         | 361 ++++++++++++++++++++++++----
+ arm64/include/asm/kvm.h             |  18 ++
+ arm64/include/kvm/fdt-arch.h        |   1 +
+ arm64/include/kvm/gic.h             |  15 ++
+ arm64/include/kvm/kvm-arch.h        |  16 ++
+ arm64/include/kvm/kvm-config-arch.h |   2 +-
+ arm64/pci.c                         |  24 +-
+ arm64/pmu.c                         |  13 +-
+ arm64/timer.c                       |   8 +-
+ include/kvm/irq.h                   |   1 +
+ include/linux/kvm.h                 |  23 ++
+ include/linux/virtio_console.h      |   2 +-
+ include/linux/virtio_ids.h          |   1 +
+ irq.c                               |  15 +-
+ powerpc/include/asm/kvm.h           |  18 ++
+ riscv/include/asm/kvm.h             |  17 ++
+ x86/include/asm/kvm.h               |   4 +-
+ 18 files changed, 483 insertions(+), 69 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH] KVM: arm64: nv: Ignore TLBI IPAS2E1 above the IPA limit
+Author: Dan Carpenter <dan@pereq.eu>
+
+In theory, an L1 hypervisor could issue a TLBI IPAS2E1 for an IPA
+above the host's IPA limit.  The s2_mmu_unmap_ipa() function would
+pass it to kvm_stage2_unmap_range(), the page table walk would fail
+with -ERANGE, and that would trigger the WARN_ON() in
+kvm_vm_stage2_unmap_range():
+
+	WARN_ON(stage2_apply_range(mmu, start, start + size, fn, may_block));
+
+The TLBI's IPA field goes up to 48 bits, so this needs a host whose IPA
+limit (its PARange) is below 48 bits, and it would also need to support
+nested virtualization.  There are very few CPUs which meet both these
+requirements.
+
+The fix for this is to return early.  Since there is nothing mapped above
+the limit, there is nothing to do.  This matches how handle_ripas2e1is()
+also ignores TLBIs that start outside the PA_bits range.
+
+Fixes: 70109bcd701e ("KVM: arm64: nv: Handle TLBI IPAS2E1{,IS} operations")
+Signed-off-by: Dan Carpenter <dan@pereq.eu>
+---
+This bug was identified as part of our formal analysis work at Pereq.  I
+have not been able to reproduce it on real hardware.  The only CPU Claude
+can think of where you might be able to trigger it is possibly the Apple
+M2?  Not 100% sure about that.
+
+ arch/arm64/kvm/sys_regs.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 3/3] KVM: arm64: nv: Report EL2 registers with no trap
+Author: Dan Carpenter <dan@pereq.eu>
+
+One of the recurring issues we run into is that people add a trap to
+KVM but they forget to add a matching trap for nested virtualization.
+Add a boot time warning to print a warning for missing traps.
+
+Signed-off-by: Dan Carpenter <dan@pereq.eu>
+---
+ arch/arm64/include/asm/kvm_host.h |  2 +-
+ arch/arm64/kvm/emulate-nested.c   |  5 ++++-
+ arch/arm64/kvm/sys_regs.c         | 23 +++++++++++++++++++++--
+ 3 files changed, 26 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH 2/3] KVM: arm64: nv: Forward CNTP_TVAL_EL02 and
+Author: Dan Carpenter <dan@pereq.eu>
+
+There are a couple timer related entries messing in the nested
+virtualization traps.
+
+With nested virtualization you can run a hypervisor in L1 and then you
+can run another hypervisor under that one in L2 and a guest under that
+in L3.  Without these then if L2 tries to read or write L3's timers it
+instead reads and writes to its own timers.
+
+Fixes: c271269e3570 ("KVM: arm64: nv: Add trap routing for CNTHCTL_EL2.EL1{NVPCT,NVVCT,TVT,TVCT}")
+Cc: stable@vger.kernel.org
+Signed-off-by: Dan Carpenter <dan@pereq.eu>
+---
+ arch/arm64/kvm/emulate-nested.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 1/3] KVM: arm64: nv: Forward PIR_EL2, PIRE0_EL2 and POR_EL2
+Author: Dan Carpenter <dan@pereq.eu>
+
+These registers were added to KVM, but not to the encoding_to_cgt[]
+table which decides when a trap is forwarded to a nested hypervisor.
+
+The result is that if an L1 hypervisor runs its L2 with HCR_EL2.NV set
+(meaning the L2 is itself a hypervisor), and the L2 accesses these
+registers, KVM handles the access itself and it goes to the L1's own
+registers instead of being emulated on L1.  This is quite a serious bug
+because it lets the L2 change the permissions of the L1's own stage 1
+translations.  It could mark everything as no-access and cause a crash
+in L1 or mark everything as read-write-execute which weakens the
+protections in L1.
+
+Add the three registers with CGT_HCR_NV, MAIR_EL2 and AMAIR_EL2.
+
+Fixes: 874ae1d48e60 ("KVM: arm64: Handle PIR{,E0}_EL2 traps")
+Fixes: 5970e9903f03 ("KVM: arm64: Add basic support for POR_EL2")
+Cc: stable@vger.kernel.org
+Signed-off-by: Dan Carpenter <dan@pereq.eu>
+---
+ arch/arm64/kvm/emulate-nested.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH 0/3] KVM: arm64: nv: trap forwarding bugs
+Author: Dan Carpenter <dan@pereq.eu>
+
+This was detected as part of our Formal Analysis work at Pereq.
+
+Regular KVM and nested virt traps have been getting out of sync.  Fix a
+couple bugs and add a boot time check to prevent future bugs.
+
+Dan Carpenter (3):
+  KVM: arm64: nv: Forward PIR_EL2, PIRE0_EL2 and POR_EL2 traps
+  KVM: arm64: nv: Forward CNTP_TVAL_EL02 and CNTV_TVAL_EL02 traps
+  KVM: arm64: nv: Report EL2 registers with no trap forwarding
+
+ arch/arm64/include/asm/kvm_host.h |  2 +-
+ arch/arm64/kvm/emulate-nested.c   | 10 +++++++++-
+ arch/arm64/kvm/sys_regs.c         | 23 +++++++++++++++++++++--
+ 3 files changed, 31 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 13/13] Documentation: KVM: arm64: Describe the ITS hardening
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Describe in pkvm.rst why the hypervisor emulates the host's ITS, and how
+protected mode differs from non-protected mode as a result.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ Documentation/virt/kvm/arm/pkvm.rst | 34 +++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 12/13] KVM: arm64: Reject ITS commands whose IDs are out of range
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+The ITS can't be relied on to reject a command with an out-of-range ID.
+IHI 0069H.b 5.3.2 makes the response to a command error CONSTRAINED
+UNPREDICTABLE, and one permitted outcome is "The data that generated the
+error or errors is treated as having a legal value, and the command is
+processed accordingly". With an out-of-range DeviceID, EventID or ICID,
+the ITS then accesses memory past the device table, the ITT or the
+collection table.
+
+Bound each ID before forwarding the command. The DeviceID is bounded by
+GITS_TYPER.Devbits and the device table, the EventID by the size its
+device was mapped with, and the ICID by the ICID width and the number of
+collections. A device that isn't mapped, a retired one included, has no
+EventID in range. The driver never allocates an out-of-range DeviceID or
+EventID, and never sends a command for a device it has unmapped. Its
+ICIDs are CPU numbers, and a CPU's number is out of range only where the
+ITS itself treats the MAPC for that CPU's collection as a command error.
+Once the hypervisor has the ITS, a command with such an ICID gives the
+host a data abort instead.
+
+MAPTI's pINTID, which the ITS only stores in the ITE, and the RDbase of
+MAPC, MOVALL and SYNC are left to the redistributor series that will
+follow this one.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/its_emulate.c | 48 +++++++++++++++++++++++++--
+ include/linux/irqchip/arm-gic-v3.h    |  3 ++
+ 2 files changed, 48 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 11/13] KVM: arm64: Take the ITT of every device the host maps
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+On a translation, the ITS indexes the collection and vPE tables with
+whatever ICID and vPEID the ITE holds. As "The format of the ITT entries
+is IMPLEMENTATION DEFINED" (IHI 0069H.b 5.3.10), the hypervisor can't
+check an ITT the host can write.
+
+On a MAPD with V == 1, the hypervisor takes the ITT's pages and zeroes
+them before forwarding the command, and rejects the MAPD if the DeviceID
+is already mapped, the ITT isn't page-aligned or Size exceeds
+GITS_TYPER.ID_bits. It sizes the ITT from the MAPD's Size and
+GITS_TYPER.ITT_entry_size, except on QDF2400 rev 1, whose ITS writes
+16-byte entries whatever ITT_entry_size holds (erratum 0065). The ITTs
+of the devices mapped before the takeover, which the driver lists, are
+taken without being zeroed.
+
+A MAPD is UNPREDICTABLE when "There is an existing mapping for the
+DeviceID and the mapped ITT contains valid EventID mappings" (5.3.10),
+whether V is 0 or 1. If the host unmaps a device without discarding its
+events first, the ITS may go on using the ITT. The hypervisor doesn't
+track which events a device has mapped, so it never gives an ITT back.
+On a MAPD with V == 0 it marks the device retired, and a later MAPD for
+that DeviceID reuses the ITT, zeroed, if the command gives the same
+address and the ITT is large enough. If the command gives another
+address, the hypervisor takes the new ITT and keeps the old one too. The
+driver keeps a freed device's ITT as well, for the next device with its
+DeviceID, so in protected mode ITT memory doesn't go back to the kernel.
+
+A GITS_CBASER write resets the queue, so it now aborts until the ITS has
+consumed every forwarded command, as a dropped MAPD would leave a device
+tracked that the ITS never mapped. The hypervisor counts the consumed
+commands from GITS_CREADR, which it reads when the host does and before
+a GITS_CWRITER or GITS_CTLR write. The driver writes GITS_CBASER only on
+resume, after its waits, so a resume aborts only if a wait timed out
+before suspend.
+
+The hypervisor tracks a fixed number of DeviceIDs per ITS, about 1300 on
+a 4K host, and returns that number from the setup call. Retired ones are
+included, so that's a limit on the DeviceIDs mapped since boot.
+its_create_device() fails beyond that number rather than queue a MAPD
+the hypervisor would reject.
+
+Co-developed-by: Sebastian Ene <sebastianene@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Co-developed-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Signed-off-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/its_emulate.c | 172 +++++++++++++++++++++++++-
+ arch/arm64/kvm/pkvm.c                 |   2 +-
+ drivers/irqchip/irq-gic-v3-its.c      |  66 +++++++++-
+ include/linux/irqchip/arm-gic-v3.h    |   5 +-
+ 4 files changed, 231 insertions(+), 14 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 10/13] KVM: arm64: Take the ITS tables and restrict GITS_BASER<n>
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+The ITS writes device and collection entries into the tables
+GITS_BASER<n> points to. At setup the hypervisor takes every such table
+and every level-2 page an indirect device table already points to. That
+includes the vPE table, which the driver allocates whether or not GICv4
+is in use. With GICv4 off for the host, only the device table gains
+level-2 pages after setup.
+
+From the takeover on, the driver writes new level-1 entries into a copy
+of the device table, which the hypervisor pins. On the first MAPD that
+needs a new entry, the hypervisor publishes the copy's entry if the
+entry holds only Valid and the address of an aligned level-2 page, and
+takes and zeroes that page. A MAPD whose entry stays invalid is
+rejected, and so is a MAPD past the end of a flat device table.
+
+A GITS_BASER<n> write is now accepted only with the ITS disabled and
+quiescent, and only for a register that pointed to a table at setup. The
+hypervisor then writes the value it read at setup in place of the
+host's, and an enable aborts unless every such register still holds it.
+
+Co-developed-by: Sebastian Ene <sebastianene@google.com>
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/hyp/nvhe/its_emulate.c | 252 +++++++++++++++++++++++++-
+ drivers/irqchip/irq-gic-v3-its.c      |  30 ++-
+ include/linux/irqchip/arm-gic-v3.h    |   7 +-
+ 3 files changed, 280 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 09/13] KVM: arm64: Emulate the ITS command queue
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+The ITS writes to the memory its commands point to, so a host that
+queues commands freely can aim those writes at the hypervisor or a
+protected guest.
+
+Register each ITS's control frame with the hypervisor, so that every
+host access to it traps once the host is deprivileged. Each ITS takes
+one of the hypervisor's eight MMIO region slots, so on a host with more
+than eight ITSes KVM doesn't initialise in protected mode. Inside the
+stop_machine() callback that deprivileges the host, the hypervisor reads
+GITS_CBASER, GITS_CWRITER and GITS_CREADR itself, takes the queue and
+pins the driver's copy. If that fails, no CPU is deprivileged and
+KVM_CREATE_VM fails with -ENODEV.
+
+On a GITS_CWRITER write, the hypervisor reads each new command once from
+the driver's copy of the queue, checks it and copies it into the
+hardware queue. For a rejected command, the host's GITS_CWRITER write
+takes a data abort, after the commands before it have been forwarded.
+For now that's a vLPI command or an unknown encoding, neither of which
+the driver queues.
+
+An access aborts if its syndrome isn't valid, or if it is narrower than
+four bytes or misaligned. Reads go to the hardware for the registers the
+driver reads, each at the size the driver uses, and other reads abort.
+GITS_CREADR, which the driver reads at 32 bits, can be read at 64 bits
+too.
+
+Writes abort, except to GITS_CWRITER, GITS_BASER<n>, GITS_CTLR and
+GITS_CBASER. The next patch restricts GITS_BASER<n>, and the driver
+writes GITS_CTLR and GITS_CBASER on suspend and resume. A GITS_CBASER
+write is accepted only with the ITS disabled and quiescent, and the
+hypervisor writes the value it read at setup in place of the host's. A
+write that enables the ITS aborts unless GITS_CBASER holds that value.
+While the ITS isn't quiescent, the hypervisor drops such a write rather
+than abort it, which leaves the ITS disabled. The driver re-enables the
+ITS from a syscore callback when a quiesce times out, and an abort
+there would take the host down.
+
+Add to arm-gic-v3.h the GITS_CBASER, GITS_CWRITER and GITS_CREADR
+fields that the hypervisor decodes.
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Co-developed-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Signed-off-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Co-developed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_asm.h              |   2 +
+ arch/arm64/include/asm/kvm_hcall.h            |   2 +
+ arch/arm64/include/asm/kvm_pkvm.h             |   4 +
+ arch/arm64/kvm/arm.c                          |   4 +
+ arch/arm64/kvm/hyp/include/nvhe/its_emulate.h |  16 +
+ arch/arm64/kvm/hyp/nvhe/Makefile              |   3 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |   8 +
+ arch/arm64/kvm/hyp/nvhe/its_emulate.c         | 323 ++++++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         |  65 ++++
+ arch/arm64/kvm/pkvm.c                         |  98 +++++-
+ include/linux/irqchip/arm-gic-v3.h            |   5 +
+ 11 files changed, 527 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 08/13] irqchip/gic-v3-its: Add the pKVM takeover entry points
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+In a subsequent patch the pKVM hypervisor takes the ITS command queue
+from the host. From then on, the driver writes its commands into a copy
+that the hypervisor checks before the ITS sees them.
+
+Add the driver's side of the takeover, which KVM runs in three steps
+when it deprivileges the host. its_pkvm_setup_prepare() allocates the
+copy and the pages the hypervisor keeps its state in, and lists the
+devices already mapped, with their ITTs, as the ITS's own record of them
+is IMPLEMENTATION DEFINED. It holds every ITS's dev_alloc_lock until
+its_pkvm_setup_finish(), so the list stays exact.
+
+its_pkvm_setup_commit() runs with every CPU stopped, and switches the
+driver to its copies only once the hypervisor has taken every ITS, so a
+failure leaves the driver on the hardware queues. If the commit fails,
+no CPU is deprivileged, and its_pkvm_setup_finish() frees everything
+prepare allocated, including the pages the hypervisor had taken.
+
+its_pkvm_iter_its() gives KVM each ITS's base, so that KVM can register
+the control frames before the hypervisor initialises. These functions
+don't have a caller yet.
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Co-developed-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Signed-off-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Co-developed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ drivers/irqchip/irq-gic-v3-its.c   | 183 +++++++++++++++++++++++++++++
+ include/linux/irqchip/arm-gic-v3.h |  27 +++++
+ 2 files changed, 210 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 07/13] KVM: arm64: Deprivilege the host under stop_machine()
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+pkvm_drop_host_privileges() installs the host stage 2 with
+on_each_cpu(), and each CPU goes back to running the host as soon as its
+own __pkvm_prot_finalize() returns. That doesn't work for the ITS
+takeover that a subsequent patch adds here. The other CPUs must not post
+ITS commands while the driver switches to its copy of the command queue,
+and a takeover that fails has to leave every CPU privileged.
+
+Finalise from a stop_machine() callback instead, so that the takeover
+can run with the other CPUs stopped and before any CPU is finalised. An
+error from any CPU is still returned to finalize_pkvm().
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/pkvm.c | 13 ++++---------
+ 1 file changed, 4 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 06/13] KVM: arm64: Share the ITS command field accessors with the hypervisor
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+The vgic's ITS emulation reads command fields with its_cmd_mask_field()
+and the its_cmd_get_*() accessors. struct its_cmd_block, the block they
+decode, is private to the ITS driver, but in a subsequent patch the
+hypervisor parses the host's commands too.
+
+Move the command block and the accessors to arm-gic-v3.h, which already
+holds the GITS_CMD_* encodings, so there is one copy of each. Only KVM
+reads commands, but the accessors decode the block the driver writes, so
+they sit with it rather than in a KVM header.
+
+No functional change intended.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/kvm/vgic/vgic-its.c     | 15 ---------------
+ drivers/irqchip/irq-gic-v3-its.c   | 10 ----------
+ include/linux/irqchip/arm-gic-v3.h | 22 ++++++++++++++++++++++
+ 3 files changed, 22 insertions(+), 25 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 05/13] irqchip/gic-v3-its: Compute the wait target under the ITS lock
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+its_wait_for_range_completion() converts the posted command pointer into
+a queue offset against its->cmd_base, after the caller has dropped
+its->lock. That's fine while cmd_base never changes, but the pKVM
+takeover in a subsequent patch switches cmd_base to a copy of the queue
+while the other CPUs are stopped, and a CPU stopped in the wait before
+it has converted the pointer would compute its target against the wrong
+base.
+
+Compute the offset in its_post_commands(), under the lock, and pass it
+to the wait instead of the pointer.
+
+No functional change intended.
+
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ drivers/irqchip/irq-gic-v3-its.c | 17 ++++++++---------
+ 1 file changed, 8 insertions(+), 9 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 04/13] irqchip/gic-v3-its: Page-align ITT allocations in pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+In a subsequent patch the host donates the pages of each device's ITT
+to the hypervisor. A page the hypervisor already owns can't be donated
+again, so the MAPD of a device whose ITT shares a page with another
+device's would be rejected.
+
+Round each ITT up to whole pages in protected mode. This costs up to a
+page per MSI device, where several 256-byte ITTs would have shared one.
+That's tens of pages on a phone and thousands on a server with thousands
+of VFs.
+
+Signed-off-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ drivers/irqchip/irq-gic-v3-its.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 03/13] irqchip/gic-v3: Disable GICv4 features in pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+In subsequent patches the hypervisor takes the ITS from the host and
+checks each command the host queues. Those patches don't emulate the
+vLPI commands, as VMAPP's VPT_base, for one, is a host-chosen address
+the ITS and the redistributors write to.
+
+Clear has_vlpis and has_rvpeid at redistributor probe in protected mode,
+so the host never issues a vLPI command, and print that GICv4 is off.
+The host loses GICv4 direct injection for its non-protected guests, a
+feature that's off unless kvm-arm.vgic_v4_enable is set. A guest
+migrated from a host with GICD_TYPER2.nASSGIcap set can't be restored
+either, as KVM rejects that GICD_TYPER2 value without GICv4.1. Document
+the loss of direct injection in kernel-parameters.txt.
+
+Add gic_is_protected_kvm() to irq-gic-common.h to test for protected
+mode, as the ITS driver uses it too from the next patch on. It calls
+kvm_get_mode(), so the header now includes linux/kvm_host.h.
+
+Signed-off-by: Bartłomiej Grzesik <bgrzesik@google.com>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ Documentation/admin-guide/kernel-parameters.txt |  8 +++++---
+ drivers/irqchip/irq-gic-common.h                | 13 +++++++++++++
+ drivers/irqchip/irq-gic-v3.c                    |  8 ++++++++
+ 3 files changed, 26 insertions(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 02/13] KVM: arm64: Take host-registered MMIO regions at pKVM finalisation
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+To emulate a device for the host, the hypervisor has to own the device's
+registers, so that a host access to them takes a stage-2 abort rather
+than reaching the device.
+
+Allow the host to register MMIO regions before the hypervisor
+initialises, and have __pkvm_init_finalise() donate each one and record
+where it's mapped in the hypervisor's private range. The donation runs
+before pkvm_check_host_ownership(), which then covers those mappings
+too. A failed donation fails the hypervisor's initialisation before the
+host stage 2 is installed, so the hypervisor doesn't have to give
+anything back.
+
+The host doesn't register a region yet.
+
+Signed-off-by: Sebastian Ene <sebastianene@google.com>
+Co-developed-by: Fuad Tabba <fuad.tabba@linux.dev>
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pkvm.h     | 12 ++++++++++++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c |  3 +++
+ arch/arm64/kvm/hyp/nvhe/setup.c       | 22 ++++++++++++++++++++++
+ 3 files changed, 37 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v4 01/13] KVM: arm64: Donate MMIO to the hypervisor
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+
+Add __pkvm_host_donate_hyp_mmio() so IOMMU drivers in the hypervisor can
+take ownership of the IOMMU MMIO. The range is mapped in the hypervisor
+private range and annotated as owned by the hypervisor in the host
+stage-2, so host accesses fault and further donations of the same range
+are refused. MMIO has no struct hyp_page, so the annotation is the only
+state, and a dedicated function is simpler than teaching the memory
+donation path about MMIO. Donation is only allowed before the host is
+de-privileged, which is when the hypervisor IOMMU drivers initialise.
+
+Make kvm_pgtable_stage2_unmap() leave invalid counted PTEs (annotations)
+in place. host_stage2_unmap_dev_all() unmaps all non-memory ranges to
+recycle page-table pages under memory pressure, and would otherwise drop
+the annotation and let the host fault the MMIO back in. No caller depends
+on the old behaviour: host_stage2_unmap_dev_all() only covers non-memory
+ranges, where no annotation existed until now, and the guest unmap paths
+check that the PTE is valid first. Returning an error for counted PTEs
+instead is not an option, as a non-zero visitor return stops the walk,
+which would abort recycling at the first hypervisor-owned MMIO page and
+inject an abort into the host for an unrelated address.
+
+Link: https://lore.kernel.org/r/20261015200903.2735565-2-smostafa@google.com
+Signed-off-by: Mostafa Saleh <smostafa@google.com>
+[fuad: pass kvm_pgtable_get_leaf() the walk flags ee26443f3dd70 added;
+ drop __pkvm_hyp_donate_host_mmio(), which this series doesn't call]
+Signed-off-by: Fuad Tabba <fuad.tabba@linux.dev>
+---
+ arch/arm64/include/asm/kvm_pgtable.h          |  2 +
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |  5 ++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 62 ++++++++++++++++++-
+ arch/arm64/kvm/hyp/pgtable.c                  |  8 +--
+ 4 files changed, 70 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 00/13] KVM: ITS hardening for pKVM
+Author: Fuad Tabba <fuad.tabba@linux.dev>
+
+Hi folks,
+
+Changes since v3 [1]:
+  - The hypervisor never gives an ITT back to the host (patch 11).
+  - The limit on devices per ITS now counts every DeviceID mapped since
+    boot (patch 11).
+  - A host read of an ITS register now aborts, unless the driver reads
+    that register (patch 9).
+  - Rebased on 7.4-rc3.
+  - Various cleanups and wording fixes.
+
+The ITS writes to the memory that its command queue and tables point
+to, and the host programs both, so a host that controls the ITS can
+write to hypervisor and protected-VM memory. With this series the
+hypervisor owns the command queue, the tables and the ITTs, traps every
+host access to the ITS control frame, and checks each command before
+forwarding it to the ITS. The cover letter for v3 [1] describes the
+design in more detail.
+
+This series covers the ITS. The redistributors will follow in a series
+of their own.
+
+Jinjie's series [2] lets the collection table have two levels, which
+this series doesn't handle. Once it's merged, I'll send patches that
+make the hypervisor handle that table the way it handles the device
+table.
+
+Tested on QEMU with a program that writes forged commands, table
+entries and register values to the ITS through /dev/mem from the host's
+userspace. Also tested on FVP, where the ITS uses physical redistributor
+addresses (GITS_TYPER.PTA). There, every secondary CPU was hotplugged
+after the takeover, so that the driver maps each returning CPU's
+collection through the hypervisor with a MAPC that carries a physical
+address.
+
+The series is structured as follows:
+
+  01:     MMIO donation.
+  02:     Taking host-registered MMIO regions at finalisation.
+  03-06:  Driver preparation: GICv4 off, page-aligned ITTs, computing
+          the wait target under the ITS lock, the shared command
+          accessors.
+  07:     Deprivileging the host under stop_machine().
+  08-09:  The takeover: the driver's entry points, then the hypervisor
+          trapping the control frame, taking the command queue and
+          emulating GITS_CTLR and GITS_CBASER.
+  10-11:  The tables and GITS_BASER<n>, then the ITTs.
+  12:     Rejecting commands whose IDs are out of range.
+  13:     Documentation.
+
+Based on Linux 7.4-rc3 (aebb727447640).
+
+Cheers,
+/fuad
+
+[1] https://lore.kernel.org/all/20261102130133.3684226-1-fuad.tabba@linux.dev/
+[2] https://lore.kernel.org/all/20261117123116.591621-1-ruanjinjie@huawei.com/
+
+Bartłomiej Grzesik (2):
+  irqchip/gic-v3: Disable GICv4 features in pKVM
+  irqchip/gic-v3-its: Page-align ITT allocations in pKVM
+
+Fuad Tabba (7):
+  irqchip/gic-v3-its: Compute the wait target under the ITS lock
+  KVM: arm64: Share the ITS command field accessors with the hypervisor
+  KVM: arm64: Deprivilege the host under stop_machine()
+  KVM: arm64: Take the ITS tables and restrict GITS_BASER<n>
+  KVM: arm64: Take the ITT of every device the host maps
+  KVM: arm64: Reject ITS commands whose IDs are out of range
+  Documentation: KVM: arm64: Describe the ITS hardening
+
+Mostafa Saleh (1):
+  KVM: arm64: Donate MMIO to the hypervisor
+
+Sebastian Ene (3):
+  KVM: arm64: Take host-registered MMIO regions at pKVM finalisation
+  irqchip/gic-v3-its: Add the pKVM takeover entry points
+  KVM: arm64: Emulate the ITS command queue
+
+ .../admin-guide/kernel-parameters.txt         |   8 +-
+ Documentation/virt/kvm/arm/pkvm.rst           |  34 +
+ arch/arm64/include/asm/kvm_asm.h              |   2 +
+ arch/arm64/include/asm/kvm_hcall.h            |   2 +
+ arch/arm64/include/asm/kvm_pgtable.h          |   2 +
+ arch/arm64/include/asm/kvm_pkvm.h             |  16 +
+ arch/arm64/kvm/arm.c                          |   4 +
+ arch/arm64/kvm/hyp/include/nvhe/its_emulate.h |  16 +
+ arch/arm64/kvm/hyp/include/nvhe/mem_protect.h |   5 +
+ arch/arm64/kvm/hyp/nvhe/Makefile              |   3 +-
+ arch/arm64/kvm/hyp/nvhe/hyp-main.c            |   8 +
+ arch/arm64/kvm/hyp/nvhe/its_emulate.c         | 765 ++++++++++++++++++
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c         | 130 ++-
+ arch/arm64/kvm/hyp/nvhe/setup.c               |  22 +
+ arch/arm64/kvm/hyp/pgtable.c                  |   8 +-
+ arch/arm64/kvm/pkvm.c                         | 105 ++-
+ arch/arm64/kvm/vgic/vgic-its.c                |  15 -
+ drivers/irqchip/irq-gic-common.h              |  13 +
+ drivers/irqchip/irq-gic-v3-its.c              | 301 ++++++-
+ drivers/irqchip/irq-gic-v3.c                  |   8 +
+ include/linux/irqchip/arm-gic-v3.h            |  65 ++
+ 21 files changed, 1475 insertions(+), 57 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 2/2] KVM: arm64: nv: Fix NULL dereference in
+Author: Dan Carpenter <dan@pereq.eu>
+
+With the KVM_ARM_VCPU_PMU_V3_STRICT feature, kvm->arch.arm_pmu stays
+NULL until userspace selects a PMU with the KVM_ARM_VCPU_PMU_V3_SET_PMU
+attribute.  The KVM_SET_VCPU_EVENTS ioctl can inject an SError or
+external abort before that which leads to a NULL pointer dereference.
+
+Unable to handle kernel NULL pointer dereference at virtual address 00000000000001e8
+  kvm_pmu_create_perf_event (arch/arm64/kvm/pmu-emul.c:710) (P)
+  kvm_pmu_nested_transition (arch/arm64/kvm/pmu-emul.c:1357)
+  kvm_inject_nested (arch/arm64/kvm/emulate-nested.c:2927)
+  kvm_inject_nested_serror (arch/arm64/kvm/emulate-nested.c:2979)
+  kvm_inject_serror_esr (arch/arm64/kvm/inject_fault.c:365)
+  __kvm_arm_vcpu_set_events (arch/arm64/kvm/guest.c:827)
+  kvm_arch_vcpu_ioctl (arch/arm64/kvm/arm.c:2161)
+  kvm_vcpu_ioctl (arch/arm64/kvm/../../../virt/kvm/kvm_main.c:4772)
+
+Return early if the PMU hasn't been initialized to fix this.  After all,
+we can't transition a PMU that doesn't exist.
+
+Reported-by: Sashiko <sashiko-bot@kernel.org>
+Closes: https://lore.kernel.org/all/sashiko-outbox-217134@kernel.org/
+Fixes: ad220e275c39 ("KVM: arm64: Add KVM_ARM_VCPU_PMU_V3_STRICT vCPU feature")
+Cc: stable@vger.kernel.org
+Signed-off-by: Dan Carpenter <dan@pereq.eu>
+---
+v2: This is a new patch.
+
+ arch/arm64/kvm/pmu-emul.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+----------------------------------------------------------------------
+
+[PATCH v2 1/2] KVM: arm64: Load the vcpu in KVM_SET_VCPU_EVENTS
+Author: Dan Carpenter <dan@pereq.eu>
+
+Nested virtualization can trigger a NULL pointer dereference of
+vcpu->arch.hw_mmu in kvm_inject_nested():
+
+Unable to handle kernel NULL pointer dereference at virtual address 0000000000000084
+  kvm_vcpu_put_hw_mmu (arch/arm64/kvm/nested.c:1046) (P)
+  vhe_vcpu_put (arch/arm64/kvm/arm.c:827)
+  kvm_arch_vcpu_put (arch/arm64/kvm/arm.c:860)
+  kvm_inject_nested (arch/arm64/kvm/emulate-nested.c:2903)
+  kvm_inject_nested_serror (arch/arm64/kvm/emulate-nested.c:2976)
+  kvm_inject_serror_esr (arch/arm64/kvm/inject_fault.c:365)
+  __kvm_arm_vcpu_set_events (arch/arm64/kvm/guest.c:827)
+  kvm_arch_vcpu_ioctl (arch/arm64/kvm/arm.c:2017 arch/arm64/kvm/arm.c:2157)
+  kvm_vcpu_ioctl (arch/arm64/kvm/../../../virt/kvm/kvm_main.c:4772)
+
+The KVM_SET_VCPU_EVENTS ioctl does not load the vcpu, it just injects a
+pending SError or external abort straight away.  If the vcpu is in L2
+context and L1 has asked for the exception, kvm_inject_nested() puts and
+loads a vcpu that is not loaded which leads to a NULL pointer dereference.
+
+Load the vcpu in kvm_arm_vcpu_set_events() so that kvm_inject_nested()
+always finds a loaded vcpu.
+
+Fixes: 9aba641b9ec2 ("KVM: arm64: nv: Respect exception routing rules for SEAs")
+Fixes: 77ee70a07357 ("KVM: arm64: nv: Honor SError exception routing / masking")
+Cc: stable@vger.kernel.org
+Signed-off-by: Dan Carpenter <dan@pereq.eu>
+---
+In v1, I added checks for if the vcpu was loaded.  This version calls
+vcpu_load() in the caller instead.  That's more like what x86 does.
+
+Also Sashiko found an additional bug in v1 and I have added a fix for
+that as patch 2/2.
+
+ arch/arm64/kvm/arm.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v2 0/2] KVM: arm64: nv: Fix a couple NULL dereferences in
+Author: Dan Carpenter <dan@pereq.eu>
+
+This is part of our formal verification work at Pereq.  It's a couple
+of NULL dereference bugs that affect nested virt.
+
+The first version added checks for if the vcpu was loaded but the
+new version loads it unconditionally instead.  Also add a fix for
+the related bug that Sashiko found.
+
+Dan Carpenter (2):
+  KVM: arm64: Load the vcpu in KVM_SET_VCPU_EVENTS
+  KVM: arm64: nv: Fix NULL dereference in kvm_pmu_nested_transition()
+
+ arch/arm64/kvm/arm.c      | 8 ++++++--
+ arch/arm64/kvm/pmu-emul.c | 3 +++
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4] KVM: arm64: Resume stage-2 range walks where they stopped
+Author: Haseeb Ashraf <haseebashraf091@gmail.com>
+
+
+stage2_apply_range() walks a range one block-sized chunk at a time.
+The walker steps over an invalid entry in one go, but the next walk
+starts at the following chunk, so an invalid entry larger than a chunk
+is visited once for every chunk it covers. Unmapping the whole IPA
+space of a shadow stage-2, as emulating TLBI VMALLS12E1IS and TLBI
+ALLE1IS does, takes 2^18 walks with 4K pages and a 48-bit IPA space,
+however little it maps. Each walk also ends with a range TLBI when
+FEAT_TLBIRANGE and FWB are available.
+
+On an AmpereOne A192-32X (192 CPUs, Xen on KVM, 4K pages, 48-bit IPA),
+a full-range unmap of one shadow stage-2 took 0.84-0.94 s (mean 0.91 s
+over 226 unmaps) on 6.18.29. With v3 of this change and the mainline
+commits it builds on backported, it took 2.1-45 ms (mean 4.1 ms over 672
+unmaps), with 512 to 1023 walks instead of 262144. The slowest TLBI
+VMALLS12E1IS trap took 0.94 s before and 46 ms after.
+
+Have the walk report the address it reached, and have
+stage2_apply_range() resume from there. Unmap, write-protect and flush
+all go through it, so all three get this. kvm_pgtable_stage2_unmap(),
+kvm_pgtable_stage2_wrprotect() and kvm_pgtable_stage2_flush() now
+return the address, or a negative error code, and so do their pKVM
+counterparts, which do not walk page tables and return the end of the
+range. The other callers, in nested.c and at EL2, only looked for an
+error: they now check for a negative value, and those that pass the
+result on turn it back into 0. The walk handles every entry it steps
+over, including invalid entries that carry state, so nothing has to be
+looked up beforehand.
+
+The unmap of a shadow stage-2 also drops the guest stage-2 records of
+the whole span the walk covered: nothing is mapped in the part it
+stepped over, so any record there is stale. Each walk that remains
+ends with the same deferred TLB invalidation as before. The spans that
+were skipped have no valid entry, so there is nothing to invalidate.
+
+Suggested-by: Oliver Upton <oupton@kernel.org>
+Signed-off-by: Haseeb Ashraf <haseeb.ashraf@siemens.com>
+---
+ arch/arm64/include/asm/kvm_pgtable.h  | 25 ++++++++----
+ arch/arm64/include/asm/kvm_pkvm.h     |  6 +--
+ arch/arm64/kvm/hyp/nvhe/mem_protect.c | 22 +++++++----
+ arch/arm64/kvm/hyp/pgtable.c          | 55 +++++++++++++++++----------
+ arch/arm64/kvm/mmu.c                  | 32 ++++++++++------
+ arch/arm64/kvm/nested.c               |  2 +-
+ arch/arm64/kvm/pkvm.c                 | 14 +++----
+ 7 files changed, 97 insertions(+), 59 deletions(-)
+
+----------------------------------------------------------------------
+
+[PATCH v4 0/1] KVM: arm64: Resume stage-2 range walks where they stopped
+Author: Haseeb Ashraf <haseebashraf091@gmail.com>
+
+
+----------------------------------------------------------------------
+
