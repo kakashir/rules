@@ -1,0 +1,1048 @@
+
+On /root/mail/repo:
+From 360deb5ccb to da4c693469
+KVM mailing list update from 360deb5ccb to da4c693469
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     14 huawei.com
+      1 pm.me
+      1 linux.alibaba.com
+      1 gmail.com
+      1 cs.unc.edu
+
+Top 15 contributors (Based on Email Body)
+
+     14  Chengwen Feng <fengchengwen@huawei.com>
+      1  YanXin Li <fadouse@pm.me>
+      1  Qi Wu <shijing.wuqi@linux.alibaba.com>
+      1  Javid Rzayev <javid.rzyv@gmail.com>
+      1  Hengyu Liang <hengyul@cs.unc.edu>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+[PATCH v22 01/13] PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+pcie_tph_get_st_table_loc() incorrectly uses FIELD_GET(), which shifts the
+field value to bit 0. But the function is designed to return raw
+PCI_TPH_LOC_* values as defined in the function comment.
+
+This causes incorrect ST table location detection. Fix it by using bitwise
+AND with PCI_TPH_CAP_LOC_MASK to return the unshifted field value matching
+the function specification.
+
+This doesn't make a difference to mlx5_st_create(), the lone external
+caller, because it only checks for PCI_TPH_LOC_NONE (0), but will be needed
+for callers that check for PCI_TPH_LOC_CAP or PCI_TPH_LOC_MSIX.
+
+Also add tph_cap validation for pcie_tph_get_st_table_loc() to prevent
+invalid PCI configuration space access when TPH is not supported. Add stub
+functions for pcie_tph_get_st_table_size() and pcie_tph_get_st_table_loc()
+when !CONFIG_PCIE_TPH.
+
+Fixes: 0a61ec9cc51b ("PCI/TPH: Expose pcie_tph_get_st_table_size()")
+Fixes: 7b8a8ec20cfc ("PCI/TPH: Expose pcie_tph_get_st_table_loc()")
+Cc: stable@vger.kernel.org
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Reviewed-by: Alex Williamson <alex.williamson@nvidia.com>
+Reviewed-by: Bjorn Helgaas <bhelgaas@google.com>
+---
+ drivers/pci/tph.c       | 12 +++++-------
+ include/linux/pci-tph.h |  6 ++++++
+ 2 files changed, 11 insertions(+), 7 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vfio/pci: Add PCIe TPH support
+[PATCH v22 00/13] vfio/pci: Add PCIe TPH support
+Author: Chengwen Feng <fengchengwen@huawei.com>
+
+This patchset enables userspace-configurable PCIe TPH support for VFIO in
+the **device-to-host (D2H)** scenario, bringing performance benefits for
+userspace workloads such as DPDK and SPDK.
+
+The patchset is split into two logical parts:
+1. The first eight patches fix and refactor core PCI/TPH kernel code to
+   export the required helper interfaces.
+2. The second five patches implement the corresponding VFIO TPH
+   virtualization and uAPI step by step.
+
+
+Since TLP TPH ST values are not validated by the IOMMU like TLP address
+fields, there exists risk of cross-tenant cache interference if untrusted
+VM can program arbitrary ST tags. We introduce two-level security
+gating:
+
+The first is the VFIO-PCI module parameter tph_policy, defined as:
+   Global TPH policy level (0 = default No-ST):
+   0 = No-ST mode: ST programming unavailable
+   1 = Add IV-ST mode: ST programming supports NONE / CPU sources
+   2 = Add DS-ST mode: RESOLVE returns ST for CPU sources;
+                       ST programming supports NONE / CPU sources
+       Note: In this 'Add DS-ST mode', device-specific ST tables are not
+             preserved across PCI resets, userspace must re-establish ST
+             state after reset. The kernel cannot validate these ST
+             entries, so this mode is not recommended for general
+             virtualization usecases.
+
+Note: IV-ST mode is considered safe for VM use because the ST table is
+programmed exclusively via the kernel VFIO uAPI. VM cannot directly
+write the architected ST table in MSI-X or config space. The hypervisor
+(e.g. QEMU) will verify ST, and also when a target CPU transitions from
+online to offline, the kernel automatically (add in this patchset) clears
+all ST table entries mapped to that CPU, setting those ST values to zero.
+
+The second gate is per-device opt-in. TPH programming is only permitted
+after userspace successfully opt-in via the VFIO TPH feature.
+
+
+Three VFIO device features are introduced in this series:
+1. VFIO_DEVICE_FEATURE_TPH: control and query VFIO TPH feature
+   capabilities.
+2. VFIO_DEVICE_FEATURE_TPH_PROGRAM: batch program architected steering tag
+   table entries.
+3. VFIO_DEVICE_FEATURE_TPH_RESOLVE: resolve TPH attributes for a given CPU
+   source.
+
+The intended userspace programming model is:
+1. Read the virtualized PCI TPH capability via VFIO config space access to
+   discover underlying hardware TPH support.
+2. Invoke VFIO_DEVICE_FEATURE_TPH SET to opt-in and obtain TPH permission.
+3. Invoke VFIO_DEVICE_FEATURE_TPH GET to retrieve available TPH
+   capabilities; GET returns an error if opt-in has not been performed.
+4. Write the TPH control register through VFIO config space to activate
+   hardware TPH.
+5. Program architected ST table entries via
+   VFIO_DEVICE_FEATURE_TPH_PROGRAM if the device exposes architected ST
+   table.
+6. Query the ST value for a given CPU ID via
+   VFIO_DEVICE_FEATURE_TPH_RESOLVE for DS-ST capable devices, userspace
+   may then configure the ST through device MMIO or firmware interfaces.
+
+
+Key implementation details for capability virtualization:
+1. The TPH capability register is virtualized according to the active
+   tph_policy:
+   a. No-ST policy: IV/DS mode bits, ST location and ST size fields are
+      masked. Only NO-ST capability is visible to userspace.
+   b. IV-ST policy: DS mode bits are masked. Userspace sees NO-ST and
+      IV-ST capabilities (if hardware supports IV-ST).
+   c. DS-ST policy: capability register is passed through unmodified.
+2. Capability bits returned by VFIO_DEVICE_FEATURE_TPH GET follow these
+   rules:
+   a. If virtualized TPH exposes architected ST table:
+      VFIO_DEVICE_TPH_CAP_PROG_ST_NONE and VFIO_DEVICE_TPH_CAP_PROG_ST_CPU
+      are reported. These indicate userspace may use TPH_PROGRAM to update
+      ST.
+   b. If virtualized TPH supports DS mode:
+      VFIO_DEVICE_TPH_CAP_RESOLVE_CPU_ST is reported. This indicates
+      userspace can resolve CPU-ID associated ST values via TPH_RESOLVE.
+
+
+Future P2P / DMABUF extension:
+The uAPI is designed to easy extend to support device-to-device (P2P) and
+DMABUF-backed scenarios on top of Zhiping's P2P TPH patchset:
+1. Return VFIO_DEVICE_TPH_CAP_RESOLVE_DMABUF_PH in all tph_policy in
+   VFIO_DEVICE_FEATURE_TPH GET, so that userspace could resolve DMABUF's
+   TPH PH info
+2. Return VFIO_DEVICE_TPH_CAP_PROG_ST_DMABUF if virtualized TPH has the
+   architect ST, so that userspace could program ST entries which
+   associated to DMABUFs' fd
+3. Return VFIO_DEVICE_TPH_CAP_RESOLVE_DMABUF_ST if virtualized TPH
+   supports DS mode, so that userspace could retrieve ST value which
+   associated to DMABUF's fd
+   
+---
+v22:
+- Rebase latest linux-next to resolve uAPI conflict
+- Reorder patch sequence: move core tph disable fixes ahead of vfio patches
+- Fix Sashiko comments:
+  - Fix TPH config write path: disable existing TPH before re-enable to
+    keep state coherent
+  - Fix cpuhp race/UAF: reorder TPH teardown before cpuhp removal
+  - Add cpu_online() check in ST resolve routine
+  - Gate IV/DS capability exposure on TPH _DSM presence; hide IV/DS when
+    DSM unavailable
+  - Fix kernel-doc and redundant check in pcie_tph_dsm_supported() helper
+v21:
+- Focus only device-to-host (D2H) scenario
+- Implement steering-tag to cpuid map to tracking cpu offline
+- Refactor the implementation
+v20:
+- Address almost all comments from Alex about v19, not within Alex's
+  scope:
+  - Drop LITERAL policy support
+  - uAPI changes: cap have been split into fine-grained
+  - TPH config access: still based on perm mechanism, but restrict the
+    readable and writable length
+  - Debugfs add more fields
+v19:
+- Address all comments from Alex
+  - Drop CPU-to-ST translation of PCI/TPH
+  - Re-implement vfio part, please refer:
+    https://lore.kernel.org/linux-pci/20260626092232.53ed3a7c@shazbot.org/
+- Add expose tph_policy via debugfs
+
+Chengwen Feng (13):
+  PCI/TPH: Fix pcie_tph_get_st_table_loc() field extraction
+  PCI/TPH: Fix tph_enabled concurrent update race by bitfield packing
+  PCI/TPH: Cache negotiated max requester type at probe time
+  PCI/TPH: Refactor pcie_enable_tph and add requester variant
+  PCI/TPH: Refactor pcie_tph_get_cpu_st & add requester variant
+  PCI/TPH: Add helpers to check standard and extended TPH support
+  PCI/TPH: Add pcie_tph_set_st_entries() batch ST entry programming
+    helper
+  PCI/TPH: Add pcie_tph_dsm_supported() helper to detect device TPH ST
+    _DSM
+  vfio/pci: Reset PCIe TPH state on device open and close
+  vfio/pci: Add basic NO-ST TPH VFIO device feature support
+  vfio/pci: Add IV-ST TPH policy and TPH_PROGRAM batch programming
+    support
+  vfio/pci: Add DS-ST TPH policy and TPH_RESOLVE capability
+  vfio/pci: Expose per-device TPH state via debugfs
+
+ drivers/pci/tph.c                  | 240 ++++++++++++-----
+ drivers/vfio/pci/vfio_pci.c        |  24 ++
+ drivers/vfio/pci/vfio_pci_config.c | 188 +++++++++++--
+ drivers/vfio/pci/vfio_pci_core.c   | 412 ++++++++++++++++++++++++++++-
+ drivers/vfio/pci/vfio_pci_priv.h   |   6 +
+ include/linux/pci-tph.h            |  55 +++-
+ include/linux/pci.h                |   6 +-
+ include/linux/vfio_pci_core.h      |   7 +
+ include/uapi/linux/vfio.h          | 129 +++++++++
+ 9 files changed, 967 insertions(+), 100 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  KVM: selftests: Use __vmread() for the optional HOST_IA32_PERF_GLOBAL_CTRL field
+[PATCH] KVM: selftests: Use __vmread() for the optional HOST_IA32_PERF_GLOBAL_CTRL field
+Author: Javid Rzayev <javid.rzyv@gmail.com>
+
+The HOST_IA32_PERF_GLOBAL_CTRL VMCS field exists only if the CPU supports
+the "load IA32_PERF_GLOBAL_CTRL" VM-exit control, which is not always the
+case.  E.g. when running on an Intel VM in Google Cloud with nested
+virtualization enabled and no vPMU, VMREAD of this field fails.
+
+init_vmcs_guest_state() copies the field into GUEST_IA32_PERF_GLOBAL_CTRL.
+The write already uses __vmwrite() because the field is optional, but the
+read uses vmread(), which asserts on failure since commit 4e824a04d4fa
+("KVM: selftests: Always assert that vmreadz() succeeds").  As a result,
+nested VMX tests (e.g. state_test, smm_test, nested_close_kvm_test) fail
+with:
+
+  vmread[0x2c04] hit VM-Fail
+
+Read the field with __vmread() and copy it only if the read succeeds.
+
+Fixes: 4e824a04d4fa ("KVM: selftests: Always assert that vmreadz() succeeds")
+Signed-off-by: Javid Rzayev <javid.rzyv@gmail.com>
+---
+Tested on a Google Cloud n2-standard-128 VM (Intel, nested
+virtualization enabled, no vPMU) running next-20261120:
+
+  before: 15 nested VMX tests fail with "vmread[0x2c04] hit VM-Fail"
+  after:  all of them pass
+
+mmu_stress_test hits the 120s kselftest timeout both before and after
+the patch; that is unrelated (the test scales with the host size).
+
+ tools/testing/selftests/kvm/lib/x86/vmx.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost: mask the in-order used-ring log cursor
+[PATCH] vhost: mask the in-order used-ring log cursor
+Author: YanXin Li via B4 Relay <devnull+fadouse.pm.me@kernel.org>
+
+
+vhost_add_used_n_in_order() plays the batch of used-ring writes back a
+second time for dirty logging.  Commit e244725e86be ("vhost: fix used
+ring index wrap in vhost_add_used_n_in_order") masked the index in the
+descriptor-publishing loop.  The dirty-logging loop introduced by
+bfcde6b64769 still uses the single-subtraction form
+
+    next = start + nheads[i];
+    if (next >= vq->num)
+        next -= vq->num;
+
+If the guest refills the available ring while get_rx_bufs() collects
+one mergeable-RX packet, that packet can consume more heads than
+vq->num.  get_rx_bufs() permits up to UIO_MAXIOV = 1024 descriptor
+chains in one call, so a single subtraction is not enough.  For
+vq->num = 32, last_used_idx = 0 and nheads[0] = 64, next becomes
+64 - 32 = 32, which is still equal to vq->num and out of bounds.  The
+next iteration then logs
+
+    used = vq->used->ring + 32;
+    log_used(vq, 4 + 32 * 8, 8);
+
+which starts past the end of the 260-byte ring body (4 + 32 * 8).
+For a used ring placed inside page 7 at guest address 0x7ef8 (so the
+entire 262-byte ring occupies [0x7ef8, 0x7ffe) and
+vq_log_used_access_ok() validates only log_base[0]), log_used()
+marks [0x7ffc, 0x8004) as dirty.  log_write() then sets a bit in
+log_base[1] for page 8, past the single validated byte.  On a
+vhost-net RX queue configured with VIRTIO_F_IN_ORDER,
+VIRTIO_NET_F_MRG_RXBUF,
+VHOST_F_LOG_ALL, VHOST_VRING_F_LOG, vq->num = 32, and
+log_guest_addr = 0x7ef8, delivering one 8 KiB frame consuming 64
+mergeable buffers followed by one 1-buffer frame in the same
+count = 2 flush writes
+
+    log_base[1] = 0x01
+
+where log_base[0] = 0x80 is the only byte the kernel was entitled to
+touch.  A guest attached to a vhost-net backend with dirty-page
+logging enabled (for example during live migration) and a small RX
+ring can therefore corrupt dirty-log bitmap memory that the VMM owns
+outside the region registered for this ring.
+
+Wrap the logging loop index the same way the first loop does:
+
+    next = (start + nheads[i]) & (vq->num - 1);
+
+vhost_vring_set_num() already enforces that vq->num is a nonzero
+power of two, so this is well defined for every accepted ring size.
+The coalescing invariant is preserved: if a run is not flushed,
+next == start + 1.  When start == vq->num - 1, start + 1 == vq->num,
+whereas the masked next is always less than vq->num.  The run is
+therefore flushed before the cursor wraps.
+With this change the same vhost-net configuration publishes
+used->idx = 65 and confines the dirty log to log_base[0] = 0x80,
+leaving log_base[1] = 0x00.  The mask keeps next in [0, vq->num) for
+every accepted power-of-two ring size.  As a bounded cross-check of
+the index arithmetic, a Z3 model over ring sizes {1, 2, 4, 8, 16, 32}
+and buffer counts in [1, 64] finds an out-of-range result for the old
+subtraction (vq->num = 16, start = 15, nheads = 17) and none for the
+mask within those bounds.
+
+Runtime verification and fix validation were performed in an x86-64
+QEMU/KVM guest running mainline after v7.4-rc3, with Generic KASAN,
+UBSAN, lockdep, and DEBUG_OBJECTS.
+
+Fixes: bfcde6b64769 ("vhost: fix dirty logging for in-order used ring entries")
+Cc: stable@vger.kernel.org
+Signed-off-by: YanXin Li <fadouse@pm.me>
+---
+ drivers/vhost/vhost.c | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  vhost/net: bound the count of VHOST_SET_FEATURES_ARRAY
+[PATCH] vhost/net: bound the count of VHOST_SET_FEATURES_ARRAY
+Author: Hengyu Liang <hengyul@cs.unc.edu>
+
+Commit 333c515d1896 ("vhost-net: allow configuring extended features")
+added VHOST_SET_FEATURES_ARRAY. The ioctl reads the number of feature
+words from user space and checks that every word above the supported
+ones is zero, one word at a time in a loop.
+
+However, the loop has no upper bound and no scheduling point. As of now,
+a caller can pass a count of U64_MAX and a pointer into a large
+zero-filled mapping. The ioctl then stays in the kernel for as long as
+the mapping is readable, and a fatal signal is not handled until it
+ends. On a v6.18 debug kernel booted with preempt=none, two such calls
+from a non-root user, each on a 4 GiB mapping, froze a 2-CPU VM for
+56 s with soft lockup reports.
+
+Interfaces that take an extensible structure from user space limit it
+to one page (openat2, clone3, sched_setattr).
+
+On a KASAN kernel with a 1 GiB mapping: before commit 333c515d1896
+("vhost-net: allow configuring extended features"), the ioctl does not
+exist and the call fails with EPERM at once. After that commit, it
+fails with EFAULT after 26.0 s. With this patch, it fails with E2BIG at
+once. A reproducer is available on request.
+
+This patch will reject counts above one page of words (512 on a 4 KiB
+page, or 32768 feature bits; 128 are defined today) before the walk
+starts.
+
+Fixes: 333c515d1896 ("vhost-net: allow configuring extended features")
+Cc: stable@vger.kernel.org # v6.17+
+Signed-off-by: Hengyu Liang <hengyul@cs.unc.edu>
+---
+I found this while comparing the behavior of different kernel versions.
+I used an LLM to analyze the problem and to draft the patch and this
+message, and I analyzed the result myself.
+
+Tested on the vhost tree at 44293796526f with KASAN and lockdep: counts
+of 0, 2, 3 and 512 words still succeed, a nonzero word above the
+supported ones still gives EOPNOTSUPP, and VHOST_GET_FEATURES_ARRAY is
+unchanged.
+ drivers/vhost/net.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+----------------------------------------------------------------------
+
+New:  KVM: irqfd: Publish the resampler after adding its first member
+[PATCH] KVM: irqfd: Publish the resampler after adding its first member
+Author: Qi Wu <shijing.wuqi@linux.alibaba.com>
+
+kvm_irqfd_assign() publishes a new resampler before adding its first
+member and then calls synchronize_srcu_expedited() to drain readers that
+may have seen an empty member list.  This per-new-resampler grace period
+runs under resampler_lock and adds to VM creation / snapshot restore
+latency.
+
+Add the first member while the resampler is private, then publish it to
+both global entries.  RCU list insertion guarantees any reader that finds
+the resampler also sees its first member, so the empty-list state is never
+visible and the first member needs no grace period; later members still
+synchronize.  This also prevents kvm_notify_irqfd_resampler() from finding
+an empty resampler and dropping a pending interrupt on IOAPIC unmask.
+
+synchronize_srcu() calls per path (regression check; only the first row
+changes):
+
+  path                              before  after
+  new resampler, first member         1       0
+  existing resampler, next member     1       1
+  non-resample irqfd assign           0       0
+  irqfd_shutdown (UAF fix)            1       1
+  deassign, non-last member           1       1
+  deassign, last member               1       1
+
+Build-tested with gcc/clang and KASAN+PROVE_RCU+PROVE_LOCKING / KCSAN
+(KVM subsystem and selftests compile); checkpatch --strict clean.
+
+This patch was prepared with AI assistance; the author reviewed and owns
+the change.
+
+Signed-off-by: Qi Wu <shijing.wuqi@linux.alibaba.com>
+---
+ virt/kvm/eventfd.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+----------------------------------------------------------------------
+
+On /root/mail/repo_armkvm:
+From fa97e2420 to ebc2bd7bd
+KVM mailing list update from fa97e2420 to ebc2bd7bd
+
+Top 15 contributor Email domains (Based on Email Body)
+
+     12 google.com
+
+Top 15 contributors (Based on Email Body)
+
+     12  Ian Rogers <irogers@google.com>
+
+===== Patch list in this time period =====
+
+
+===== Patch Commit Messages ====
+
+New:  unwind: Add Minimal DWARF CFI bytecode
+[RFC PATCH v1 01/11] unwind: Add Minimal DWARF CFI bytecode
+Author: Ian Rogers <irogers@google.com>
+
+Add a strictly bounded DWARF Call Frame Information (.eh_frame /
+.eh_frame_hdr) interpreter (CONFIG_UNWIND_DWARF_CFI) matching SFrame's
+stack-unwinding state model and security properties, without requiring
+new toolchain sections or duplicating user-space unwind metadata.
+
+Instead of implementing a general DWARF expression virtual machine or
+tracking arbitrary architectural register arrays, struct dwarf_cfi_row
+tracks only:
+ - CFA = (SP | FP | prologue scratch reg) + cfa_off, or fixed-pattern
+   indirect CFA *(FP + off) (DRAP stack realignment) / *(SP + off)
+   (signal trampolines)
+ - Frame pointer save rule (SAME, *(CFA + off), *(FP + off), *(SP + off))
+ - Return address save rule (SAME in link register, *(CFA + off),
+   *(SP + off), or UNDEFINED for bottom-of-stack termination), plus
+   AArch64 PAC-RET signing state (DW_CFA_AARCH64_negate_ra_state)
+
+Callee-saved general-purpose register spill/restore opcodes are decoded
+and ignored in O(1) space. General DW_OP_* expressions, DW_CFA_set_loc
+backward PC jumps, DW_CFA_register rules on {SP, FP, RA}, and
+DW_EH_PE_indirect pointer encodings are unconditionally rejected with
+-EINVAL. CIEs (<= 128 B), FDEs (<= 4096 B), LEB128 operands (<= 5 B),
+and DW_CFA_remember_state nesting (<= 4 entries) execute in a single
+forward pass with zero dynamic memory allocations, zero locks, and
+Spectre v1 / v1.1 nospec hardening (array_index_nospec() and
+barrier_nospec()) across all windowed user stream, expression-buffer,
+and state-stack accesses.
+
+Also provide shared RCU-safe loadable-module .eh_frame indexing helpers
+(dwarf_cfi_mod_alloc(), dwarf_cfi_mod_free_rcu(), dwarf_cfi_mod_eval())
+and a built-in KUnit test suite (CONFIG_UNWIND_DWARF_CFI_KUNIT_TEST)
+covering SP/FP frames, ignored GPR spills, shrink-wrapped state stacks,
+DRAP and sigreturn frames, ARM64 PAC-RET and RISC-V leaf frames,
+security rejections, and live kernel stack walks.
+
+Signed-off-by: Ian Rogers <irogers@google.com>
+---
+ arch/Kconfig                     |   16 +
+ arch/arm64/Kconfig               |    3 -
+ include/linux/unwind_dwarf_cfi.h |  174 +++
+ kernel/unwind/Makefile           |   13 +-
+ kernel/unwind/dwarf_cfi.c        | 1842 ++++++++++++++++++++++++++++++
+ kernel/unwind/dwarf_cfi_kunit.c  |  625 ++++++++++
+ 6 files changed, 2669 insertions(+), 4 deletions(-)
+
+----------------------------------------------------------------------
+
+New:  unwind: Minimal DWARF CFI stack unwinding for
+[RFC PATCH v1 00/11] unwind: Minimal DWARF CFI stack unwinding for
+Author: Ian Rogers <irogers@google.com>
+
+Overview
+========
+
+This RFC series introduces Minimal DWARF Call Frame Information (CFI)
+stack unwinding in the Linux kernel for both user-space deferred
+callchains (unwind_user / PERF_RECORD_CALLCHAIN_DEFERRED) and
+kernel-space stack traces (stacktrace.h / HAVE_RELIABLE_STACKTRACE)
+across x86-64, ARM64, and RISC-V, paired with an optional standalone C
+build-time .eh_frame minifier (scripts/min_eh_frame.c).
+
+It enables reliable stack unwinding across kernel and user-space
+binaries compiled with or without frame pointers (-fomit-frame-pointer),
+without introducing duplicate .sframe sections in user-space ELF files
+or requiring new compiler, assembler, or dynamic-loader formats.
+
+
+Motivation
+==========
+
+1. Limitations of Frame-Pointer-Only Unwinding
+----------------------------------------------
+ - Ecosystem defaults: Many Linux distributions (e.g., Debian, RHEL,
+   Alpine), language toolchains, and prebuilt third-party shared
+   libraries compile with -fomit-frame-pointer by default. A single
+   frameless shared library in a call path breaks frame-pointer walks.
+ - Completeness and reliability: Even with -fno-omit-frame-pointer,
+   frame-pointer chains miss callers inside leaf functions, function
+   prologues/epilogues, and hand-written assembly routines (such as
+   libc string/math/crypto primitives), and cannot guarantee reliable
+   kernel stack traces across asynchronous boundaries without external
+   validation such as objtool.
+
+2. Drawbacks of SFrame (PT_GNU_SFRAME)
+--------------------------------------
+SFrame was proposed as a simplified out-of-band unwind format to avoid
+placing a full DWARF .eh_frame virtual machine in the kernel. In
+practice, introducing a second unwind format carries substantial costs:
+
+ - ~2x user-space unwind metadata bloat: User-space ELF executables and
+   shared libraries must already ship .eh_frame and .eh_frame_hdr
+   (PT_GNU_EH_FRAME) for C++ exceptions, Rust panics, pthread_cancel
+   forced unwinding, and _Unwind_Backtrace(). Because SFrame omits
+   callee-saved register locations, personality routines, and LSDA
+   pointers, it cannot replace .eh_frame. On binaries built with GNU
+   Binutils 2.47 (SFRAME_VERSION_3), .sframe is nearly the same size as
+   .eh_frame + .eh_frame_hdr combined (e.g., +123.9 KB atop 124.1 KB in
+   /bin/bash, and +164.5 KB atop 163.5 KB in aarch64-linux-gnu-gcc-15),
+   roughly doubling unwind table footprint on disk.
+ - Toolchain and architecture gaps: SFrame has gone through incompatible
+   binary format revisions (v1 -> v2 -> v3), lacks upstream Clang/LLVM
+   support, lacks RISC-V -mrelax linker-relaxation support in standard
+   binutils, and requires new build flags (-Wa,--gsframe) across the
+   entire user-space ecosystem before profiling benefits materialize.
+ - Expressiveness gaps and dropped FDEs: SFrame cannot represent
+   dynamically realigned DRAP stack frames (CFA = *(fp + off), e.g.,
+   64-byte aligned locals in mm/vmscan.c:shrink_lruvec()), and GNU as
+   --gsframe silently omits .sframe FDEs when hand-written assembly uses
+   non-standard CFI patterns (for example, warning "no SFrame FDE
+   emitted; FP without RA on stack" on ARM64's return_to_handler).
+
+3. Core Insight of Minimal DWARF CFI
+------------------------------------
+Historically, in-kernel DWARF .eh_frame unwinding was rejected for two
+reasons:
+
+ 1. Execution context (predating deferred stack traces): Earlier
+    proposals predated deferred user-space stack tracing for perf and
+    BPF (unwind_deferred / PERF_RECORD_CALLCHAIN_DEFERRED). When user
+    callchains could only be captured synchronously inside NMI/atomic
+    context under pagefault_disable(), the kernel could neither take
+    mmap_lock to locate PT_GNU_EH_FRAME VMAs nor fault in cold
+    .eh_frame pages (forcing perf --call-graph dwarf to copy 8-64 KB of
+    raw user stack per sample). Upstream's deferred task_work unwind
+    infrastructure now solves that faultability barrier for any
+    table-based user unwinder.
+ 2. Unrestricted DWARF state-machine complexity: Full DWARF permits
+    Turing-complete DW_OP_* expressions, arbitrary N-register tracking
+    arrays, DW_CFA_set_loc backward PC jumps, and DW_EH_PE_indirect
+    pointer dereferences.
+
+With deferred unwinding solving (1) for user space (while kernel
+.eh_frame tables remain pinned in RAM for NMI/atomic walks), (2) is
+solved if an in-kernel .eh_frame_hdr / .eh_frame interpreter restricts
+its state machine to the exact state model of SFrame -- tracking only
+CFA, Frame Pointer (FP), and Return Address (RA), plus link-register
+leaf state, ARM64 PAC-RET signing (0x2d), a 4-entry remember_state
+stack, and a fixed 3-byte pattern match for DRAP/sigreturn frames while
+decoding and discarding general callee-saved GPR spill opcodes:
+
+ - O(1) stack memory, zero heap allocations, zero locks in the core
+   interpreter, and strictly bounded single-pass execution;
+ - Smaller unwind metadata than SFrame by construction: SFrame stores
+   materialized table rows (re-emitting full CFA/FP/RA offsets on every
+   FRE, plus an explicit PC+0 entry FRE per function because there is no
+   shared CIE), whereas DWARF encodes delta-compressed bytecodes (6-bit
+   packed PC advances, alignment-scaled LEB128 deltas for only the rule
+   that changed, 1-byte remember/restore_state, and a single 20-24 B CIE
+   shared across ~70,000 FDEs). Once unneeded GPR spill ops are stripped,
+   minified DWARF is naturally smaller than SFrame;
+ - Immediate compatibility with existing unmodified Linux binaries and
+   libc.so.6 across x86 (64/32-bit), ARM64 (AArch64/AArch32), and
+   RISC-V (RV64/RV32) built with either GCC or Clang/LLVM;
+ - 100.00% FDE coverage across x86_64, arm64, and riscv vmlinux builds
+   (195,019 / 195,019 functions).
+
+(ARM64 already has in-tree precedent in arch/arm64/kernel/pi/patch-scs.c,
+which parses .eh_frame CIEs/FDEs in ~180 lines with zero allocations;
+this series preserves __pi___eh_frame_* so Dynamic Shadow Call Stack
+boot-time patching continues to work unchanged.)
+
+
+Benefits vs. Drawbacks and Trade-offs
+=====================================
+
+Benefits
+--------
+ 1. Zero duplicate user-space metadata: Reuses existing PT_GNU_EH_FRAME
+    tables already present in standard ELF binaries (~50% smaller total
+    unwind metadata than shipping both .eh_frame* and .sframe).
+ 2. Toolchain and ecosystem readiness: Works out of the box with GCC and
+    Clang/LLVM, C and Rust kernel code, RISC-V -mrelax linker
+    relaxation, x86 IA32 and ARM32/RV32 compat user binaries, and
+    existing distro root filesystems.
+ 3. Smaller kernel unwind tables: With build-time .eh_frame minification
+    (scripts/min_eh_frame.c), kernel .eh_frame tables are 18%-28%
+    smaller than SFrame v3 (.sframe) in .o objects and 26.5% smaller
+    than x86-64 ORC (~3.16 MB for .eh_frame + .eh_frame_hdr vs. ~4.30 MB
+    for .orc_unwind* on x86-64 vmlinux). On ARM64 vmlinux, even combined
+    minified .eh_frame + .eh_frame_hdr (2.72 MB) is smaller than linked
+    .sframe alone (2.80 MB).
+ 4. Full frame-shape coverage: Unwinds SP-based frames, VLA/alloca FP
+    frames, 64-byte DRAP stack-realigned frames, shrink-wrapped
+    prologues/epilogues, ARM64 PAC-RET frames, signal trampolines
+    (including SA_ONSTACK and interrupted leaf functions), and mixed
+    CFI + JIT frame-pointer stacks.
+
+Drawbacks and Limitations
+-------------------------
+ 1. Higher per-frame CPU cost than FP, ORC, or SFrame: Interpreting
+    linear FDE CFA bytecodes from function entry to target PC takes
+    ~47-51 ns/frame (~185-202 cycles) in the hardened C interpreter,
+    compared to ~1 ns/frame for frame pointers and ~19 ns/frame for
+    fixed-record SFrame/ORC lookups. This is negligible for crash/oops
+    dumps, /proc/<tid>/stack, livepatch transitions, and amortized
+    task_work user walks, though slightly costlier than ORC if kernel
+    callchains are sampled at very high PMU NMI frequencies.
+ 2. User-space CFI requires deferred task_work context (not NMI): Just
+    like user-space SFrame, user .eh_frame* sections live in cold,
+    demand-paged user VMAs that cannot be faulted in or VMA-resolved
+    under NMI/IRQ (pagefault_disable() / mmap_lock). Synchronous
+    perf_callchain_user() in NMI remains FP-only; user CFI runs via
+    PERF_RECORD_CALLCHAIN_DEFERRED on return to user space. If an NMI
+    fires mid-syscall before execve(), munmap()/dlclose(), or pending
+    signal delivery, exit-time user state can differ slightly from
+    NMI-time state. (Note: the kernel also must not auto-enable
+    defer_callchain behind unaware perf_event_open() callers, as doing
+    so alters the PERF_RECORD_SAMPLE ips[] ABI; defaulting belongs in
+    user-space tools/perf after probing kernel support.)
+ 3. Build-time minifier host pass and stripped GPR rules: Achieving
+    smaller-than-SFrame kernel .eh_frame sizes uses a fast host C pass
+    (scripts/min_eh_frame.c) on .o files until compilers offer an
+    optional -funwind-tables=minimal flag under -fno-exceptions. When
+    minification is enabled on vmlinux, PC/SP/FP backtraces in gdb/crash
+    work normally, but inspecting spilled callee-saved GPRs in outer
+    frames requires .debug_frame (or leaving CONFIG_UNWINDER_DWARF_CFI_MINIFY
+    disabled on debug builds).
+ 4. Reliance on compiler and assembly .cfi_* annotations: Unlike x86
+    objtool (which validates machine instructions directly), .eh_frame
+    (like .sframe) trusts compiler -fasynchronous-unwind-tables output
+    and manual .cfi_* annotations in hand-written .S routines. For this
+    reason, arch_stack_walk_reliable() on ARM64 and RISC-V continues to
+    conservatively reject stacks containing in-kernel asynchronous
+    exception pt_regs boundaries until asynchronous epilogue/.S CFI
+    auditing is established.
+ 5. Hard interpreter bounds: Pathological FDEs with > 4,096 bytes of
+    bytecode or DW_CFA_remember_state depth > 4 are rejected with
+    -EINVAL (falling back to FP in user space). Across all 195,019
+    vmlinux FDEs on x86-64, ARM64, and RISC-V, 0 FDEs hit the size bound
+    and the maximum observed remember_state depth is 1.
+
+
+Execution Contexts and Fallback Mechanics
+=========================================
+
+1. When Kernel-Space vs. User-Space CFI Can Run
+-----------------------------------------------
+  Context                        Kernel CFI   User CFI     Notes
+  -----------------------------  -----------  -----------  -------------------
+  PMU NMI (in_nmi())             Yes (direct) No (defer)   Pinned vmlinux/RCU
+                                                           mod tables vs. cold
+                                                           user VMAs
+  Hardirq / Softirq / BPF        Yes (direct) No (defer)   bpf_get_stack[id];
+                                                           user sync = FP-only
+  Return-to-user task_work       Yes          Yes (faults) mmap_read_lock then
+                                                           copy_from_user()
+  Cross-task /proc/<tid>/stack   Yes          No           current->mm only
+  Livepatch reliable walk        Yes (all 3)  N/A          Kernel-only API
+  Kernel threads / x86 VM86      Yes (kthd)   No           mm == NULL / 16-bit
+
+Whenever user-space CFI cannot run synchronously (for example,
+non-deferred perf_callchain_user() or atomic bpf_get_stack() /
+bpf_get_stackid() with BPF_F_USER_STACK in NMI, IRQ, or preempt-disabled
+context), the kernel falls back to the existing synchronous
+frame-pointer user stack walk (arch_stack_walk_user()) just as it does
+today. When deferred user unwinding is requested in NMI,
+unwind_deferred_request() takes ~10-20 ns and emits
+[PERF_CONTEXT_USER_DEFERRED, cookie]; even if dozens of PMU NMIs fire
+during a slow syscall, unwind_user_faultable() walks the user stack at
+most once on return to user space.
+
+2. Per-Frame User-Space Fallback (CFI -> FP -> CFI)
+---------------------------------------------------
+unwind_user_next() (kernel/unwind/user.c) evaluates each frame
+independently rather than locking an entire walk to one unwinder:
+
+ 1. Architectural signal trampoline hook (unwind_user_sigreturn()):
+    Checked first (bounded to UNWIND_USER_MAX_SIGNALS = 4 per walk so
+    SA_ONSTACK switches cannot loop). On ARM64 (__kernel_rt_sigreturn)
+    and RISC-V (__vdso_rt_sigreturn), where vDSO trampolines omit
+    .eh_frame register rules for libgcc compatibility, recovers pc, sp,
+    fp, and lr/ra (with ra_valid = true) from rt_sigframe. On x86-64,
+    .cfi_signal_frame ('S' augmentation) is handled directly by CFI.
+ 2. Minimal DWARF CFI (highest priority):
+    Resolves PT_GNU_EH_FRAME via a 4-slot per-walk VMA cache (or under
+    mmap_read_lock_killable(), dropped before copy_from_user()):
+     - Explicit bottom of stack (DW_CFA_undefined on RA, or RA == 0):
+       sets state->done = true and stops cleanly without FP fallback.
+     - Missing PT_GNU_EH_FRAME / FDE (-ENOENT, e.g. anonymous RX JIT
+       code) or unsupported bytecode (-EINVAL/-EFAULT): caches a
+       negative VMA entry when no PT_GNU_EH_FRAME exists, leaves
+       state->done = false, and falls through to FP for this frame.
+ 3. Frame pointer fallback: Steps out of the JIT/non-CFI frame via FP.
+ 4. Automatic return to CFI: On the next frame, unwind_user_next() tries
+    Minimal DWARF CFI first again, unwinding mixed stacks seamlessly as
+    CFI -> FP -> CFI -> FP -> CFI.
+
+
+Compatibility with Kernel Livepatching (HAVE_RELIABLE_STACKTRACE)
+=================================================================
+
+All three architectures support arch_stack_walk_reliable() for kernel
+livepatching under CONFIG_UNWINDER_DWARF_CFI, even when compiled with
+-fomit-frame-pointer:
+
+ - x86-64 (arch/x86/kernel/unwind_dwarf.c): Unwinds vmlinux and RCU
+   module .eh_frame tables, traverses %rsp-verified ENCODE_FRAME_POINTER
+   pt_regs frames across task/IRQ/exception stacks, recovers CFA-keyed
+   ftrace_graph and rethook return addresses, and sets state->error on
+   any missing or invalid FDE so arch_stack_walk_reliable() returns
+   -EINVAL rather than guessing.
+ - ARM64 (arch/arm64/kernel/stacktrace.c): Preserves ARM64's existing
+   HAVE_RELIABLE_STACKTRACE and HAVE_LIVEPATCH guarantees without frame
+   pointers. Normal sleeping tasks unwind via kunwind_next_cfi() down to
+   the SP-verified FRAME_META_TYPE_FINAL entry boundary. Every non-CFI
+   fallback (live x30 guess or AArch64 frame-record fallback for JITed
+   eBPF code) sets state->unreliable = true, and in-kernel exception
+   boundaries set KUNWIND_SOURCE_REGS_PC -- both of which are rejected
+   with -EINVAL by arch_reliable_kunwind_consume_entry().
+   Compared to out-of-tree ARM64 SFrame proposals, Minimal DWARF CFI
+   works with both Clang/LLVM and GCC today and achieves 100.00% FDE
+   coverage (including entry-ftrace.S's return_to_handler where GNU as
+   omits .sframe). Moreover, kunwind_next_cfi() already distinguishes
+   live LR (DWARF_CFI_RULE_SAME) vs. stack-saved LR
+   (DWARF_CFI_RULE_OFFSET) at regs->pc, so if asynchronous epilogue/.S
+   CFI is audited across ARM64 in the future, reliable traversal across
+   KUNWIND_SOURCE_REGS_PC requires no format changes.
+ - RISC-V (arch/riscv/kernel/stacktrace.c): Selects
+   HAVE_RELIABLE_STACKTRACE under CONFIG_UNWINDER_DWARF_CFI.
+   walk_stackframe_cfi(..., require_reliable = true) verifies every step
+   via .eh_frame CFI and SP-keyed ftrace_graph/rethook recovery while
+   rejecting handle_exception pt_regs frames and non-CFI fallbacks with
+   -EINVAL.
+
+
+Compatibility with User Space and Kernel Subsystems
+===================================================
+
+ - C++ exceptions, Rust panics, and pthread_cancel: 100% unchanged. The
+   kernel only reads PT_GNU_EH_FRAME in user ELF mappings, skipping
+   'zPLR' personality ('P') and LSDA ('L') augmentations and ignoring
+   callee-saved GPR opcodes. ARM64 and RISC-V vDSO sigreturn trampolines
+   are untouched so libgcc's instruction-matching fallback is preserved.
+ - Debugging (gdb, lldb, kdump/crash): User debugging is untouched.
+   Kernel backtraces (bt), .debug_line, and .debug_info work normally.
+ - Hardware security, sanitizers, and eBPF: Supports ARM64 PAC-RET + BTI
+   (-mbranch-protection=standard), ARM64 Dynamic Shadow Call Stack
+   (patch-scs.c), x86 Kernel IBT (objtool skips .eh_frame* relocations),
+   SW-tag KASAN (__hwasan_tag_mismatch .cfi_* annotations), Spectre v1 /
+   v1.1 nospec bounds clamping, and JITed eBPF programs (bpf_get_stack,
+   bpf_get_stackid).
+
+
+Worked Examples
+===============
+
+Example 1: Single-Function Encoding (Raw vs. Minified .eh_frame vs. SFrame)
+---------------------------------------------------------------------------
+For a 64-byte C function compiled with gcc -O2 -fomit-frame-pointer
+-fasynchronous-unwind-tables -Wa,--gsframe (3 GPR spills: r15, r14, rbx):
+
+  Raw .eh_frame (30 B FDE + 8 B .eh_frame_hdr entry = 38 B; 1 shared CIE):
+    42 0e 10 [8f 02]  # +2:  CFA=rsp+16, [r15 at cfa-16 -> ignored]
+    45 0e 18 [8e 03]  # +5:  CFA=rsp+24, [r14 at cfa-24 -> ignored]
+    44 0e 20 [83 04]  # +4:  CFA=rsp+32, [rbx at cfa-32 -> ignored]
+    47 0e 30          # +7:  CFA=rsp+48
+    66 0e 20 | 41 0e 18 | 42 0e 10 | 42 0e 08   # epilogue pops
+
+  Minified .eh_frame (24 B FDE + 8 B .eh_frame_hdr entry = 32 B):
+    42 0e 10 | 45 0e 18 | 44 0e 20 | 47 0e 30
+    66 0e 20 | 41 0e 18 | 42 0e 10 | 42 0e 08
+
+  SFrame v3 .sframe (27 B FREs + 5 B FRE hdr + 16 B FDE index = 48 B):
+    00 03 08 | 02 03 10 | 07 03 18 | 0b 03 20 | 12 03 30
+    38 03 20 | 39 03 18 | 3b 03 10 | 3d 03 08   # no shared CIE -> +PC=0 FRE
+
+Example 2: Kernel-Space Walk (eBPF + DRAP Module + kretprobe on ARM64)
+----------------------------------------------------------------------
+  [Context: JITed eBPF raw_tracepoint("sched_switch") calls bpf_get_stack()]
+
+  Frame 0: bpf_prog_<tag> (JITed eBPF text, no .eh_frame)
+    -> .eh_frame lookup: -ENOENT -> falls back to FP record [x29, x29+16]
+       (sets state->unreliable = true; allowed for non-reliable bpf walk)
+    -> Recovers caller PC in tracepoint hook, resumes CFI on Frame 1
+
+  Frame 1: __schedule (vmlinux .text, built with -fomit-frame-pointer)
+    -> Binary search __start_eh_frame_hdr at lookup_pc = pc - 4
+    -> Evaluates FDE (skips x19..x28 spills, toggles ra_signed on 0x2d):
+       row = { cfa = SP + 144, fp = *(CFA - 144), ra = *(CFA - 136), pac = 1 }
+    -> Reads saved x30, strips PAC via ptrauth_strip_kernel_insn_pac()
+
+  Frame 2: mod_unwind_drap [test_unwind_mod] (64B stack-realigned DRAP)
+    -> RCU lookup in mod->arch.dwarf_cfi_index matches 3-byte expression
+       [DW_OP_breg(fp), -40, DW_OP_deref] -> CFA = *(fp - 40)
+
+  Frame 3: mod_krp_inner [test_unwind_mod] (hijacked by kretprobe)
+    -> Stack RA == &__kretprobe_trampoline -> kunwind_recover_return_address()
+       matches entry SP == CFA on kretprobe shadow list -> restores real PC
+
+  Frame N: el0t_64_sync_handler (EL0 -> EL1 syscall boundary)
+    -> .eh_frame: -ENOENT -> SP-verified FRAME_META_TYPE_FINAL -> clean stop
+
+Example 3: User-Space Deferred Walk (Signal + SA_ONSTACK + Leaf + JIT)
+----------------------------------------------------------------------
+  [Step A -- In PMU NMI]:
+    unwind_deferred_request() emits [PERF_CONTEXT_USER_DEFERRED, cookie]
+    and queues TWA_NMI_CURRENT task_work (~15 ns).
+
+  [Step B -- Return to User Space (unwind_user_faultable())]:
+    Frame 0: nanosleep() in libc.so.6 (frameless leaf, topmost = true)
+      -> Caches libc PT_GNU_EH_FRAME (slot 0), drops mmap_read_lock
+      -> FDE at exact ip: CFA = SP + 0, RA = SAME -> consumes live LR
+         -> sigusr1_handler + 0x24; clears state->ra_valid = false
+
+    Frame 1: sigusr1_handler (on SA_ONSTACK sigaltstack)
+      -> Caches binary PT_GNU_EH_FRAME (slot 1); reads RA = vDSO sigreturn
+
+    Frame 2: [vdso] rt_sigreturn trampoline
+      -> unwind_user_sigreturn() reads uc_mcontext from rt_sigframe,
+         pivots SP back to main stack, restores ip = dso_leaf_tgkill + 8
+         and live LR (ra_valid = true, signal = true, nr_signals = 1)
+
+    Frame 3: dso_leaf_tgkill in libcleanup.so (interrupted frameless leaf)
+      -> signal == true -> exact ip lookup; RA = SAME consumes restored LR
+
+    Frame 4: c_dso_trigger in libcleanup.so ('zPLR' C++ CIE, frameless)
+      -> Skips personality/LSDA augmentation -> unwinds to jit_bridge
+
+    Frame 5: Anonymous PROT_READ|PROT_EXEC JIT stub (no ELF header, has FP)
+      -> Negative VMA cache hit (slot 3) -> CFI returns -ENOENT -> FP step
+
+    Frames 6..9: 64B DRAP -> alloca() VLA -> main -> _start
+      -> CFI resumes automatically after JIT frame; _start hits
+         DW_CFA_undefined on RA -> state->done = true (clean stop).
+
+
+Empirical Size and Latency Comparisons
+======================================
+
+1. Kernel Unwind Table Sizes (x86_64, arm64, riscv)
+---------------------------------------------------
+  Target               .text     ORC       .sframe   Min .eh    Min .eh+_hdr
+  -------------------  --------  --------  --------  ---------  ------------
+  x86_64 mm/vmscan.o    40.6 KB  14,240 B   7,840 B*   6,432 B       --
+  x86_64 ext4/inode.o   60.3 KB  12,980 B   7,486 B    5,840 B       --
+  x86_64 vmlinux       20.09 MB  ~4.30 MB     --      2.62 MB      3.16 MB
+  arm64 kernel/fork.o   18.5 KB     --      2,617 B    2,040 B     2,548 B
+  arm64 mm/vmscan.o     28.4 KB     --      2,423 B    1,744 B     2,136 B
+  arm64 vmlinux        17.64 MB     --      2.80 MB    2.19 MB      2.72 MB
+  riscv kernel/fork.o   19.8 KB     --        --       2,860 B     3,496 B
+  riscv mm/vmscan.o     35.3 KB     --        --       5,916 B     7,168 B
+  riscv vmlinux        11.49 MB     --        --       1.93 MB      2.35 MB
+  (* SFrame omits DRAP FDEs in x86_64 mm/vmscan.o and ARM64 entry-ftrace.S;
+     Minimal DWARF covers 100.00%: 69,958 x86 + 69,765 arm64 + 55,296 riscv.)
+
+2. User-Space ELF Unwind Metadata Sizes (GCC 15.2 / Binutils 2.47)
+------------------------------------------------------------------
+  Binary                    .text    Raw .eh*  Min .eh*  .sframe  .eh*+.sframe
+  ------------------------  -------  --------  --------  -------  ------------
+  4,038-fn benchmark (x86)   302 KB  162.4 KB  151.4 KB  137.4 K     299.8 KB
+  /bin/bash (Debian x86)     887 KB  124.1 KB  116.5 KB  123.9 K     248.0 KB
+  aarch64-linux-gnu-gcc-15   911 KB  163.5 KB     --     164.5 K     328.0 KB
+  libc.so.6 (x86-64)        1.47 MB  181.7 KB  171.3 KB    --          --
+  /usr/bin/python3 (x86-64) 3.39 MB  548.7 KB  512.5 KB    --          --
+
+3. Unwind Speed (17-Frame Mixed SP/VLA/Shrink-Wrap Walk, 4,038-FDE Binary)
+--------------------------------------------------------------------------
+  Unwinder Implementation                    17-Frame Walk  ns/Frame  Cyc/Frm
+  -----------------------------------------  -------------  --------  -------
+  Frame Pointer (-fno-omit-frame-pointer)          16.3 ns   0.96 ns    2.1 c
+  SFrame v3 (.sframe)                             321.3 ns  18.90 ns   74.7 c
+  Hardened kernel dwarf_cfi.c (Min .eh)           795.9 ns  46.82 ns  185.4 c
+  Hardened kernel dwarf_cfi.c (Raw .eh)           860.5 ns  50.62 ns  201.8 c
+  Full DWARF (libgcc _Unwind_Backtrace)         1,476.2 ns  86.83 ns  342.2 c
+
+
+Testing and Verification
+========================
+
+ - Static & style checks: 0 errors/warnings from scripts/checkpatch.pl,
+   scripts/kernel-doc -Werror -none, and scripts/spdxcheck.py across all
+   11 patches.
+ - Differential equivalence & fuzzing: 100.00% match across 905,231+
+   ASan+UBSan PC probes against reference DWARF evaluation across x86-64,
+   ARM64 (PAC-RET), and RISC-V (-mrelax), plus 500,000 ASan+UBSan fuzzer
+   iterations on kernel/unwind/dwarf_cfi.c and 5,000 mutated ELF .o
+   fuzzer iterations on scripts/min_eh_frame.c with 0 findings.
+ - Live multi-architecture QEMU testing (qemu-system-x86_64,
+   qemu-system-aarch64 -M virt -cpu max with PAC-RET + BTI, and
+   qemu-system-riscv64 -M virt -cpu rv64 with RVC):
+   Passed 7/7 KUnit tests, backtracetest, 10x module load/unload cycles
+   with DRAP + nested kretprobes/rethook + arch_stack_walk_reliable(),
+   50x cross-task /proc/<tid>/stack walks, JITed eBPF bpf_get_stack() +
+   bpf_get_stackid(), unwind_user_cfi kselftest (clobbered FP, VLA, DRAP,
+   shrink-wrap, anonymous RX JIT CFI->FP->CFI fallback), -m32 IA32 compat,
+   'zPLR' DSO + SA_ONSTACK SIGUSR1 rt_sigreturn across interrupted leaf
+   functions, and 4-thread hostile ELF VMA fault injection with 0 failures
+   and clean dmesg across all three architectures.
+
+
+Tool-Assistance Disclosure
+==========================
+
+Per Documentation/process/generated-content.rst and
+Documentation/process/coding-assistants.rst:
+
+ - Tool used: Gemini (AI coding assistant), used interactively across an
+   extended engineering session.
+ - Scope of assistance: Prototyping and refining the bounded DWARF CFA
+   interpreter, user-space PT_GNU_EH_FRAME VMA unwinder, build-time
+   scripts/min_eh_frame.c minifier, x86-64/ARM64/RISC-V kernel and
+   user-space unwinder integrations, KUnit/kselftest suites, differential
+   fuzzers, QEMU multi-arch test harnesses, and series documentation.
+
+Ian Rogers (11):
+  unwind: Add Minimal DWARF CFI bytecode interpreter and KUnit tests
+  unwind_user: Support Minimal DWARF CFI user-space unwinding
+  scripts, unwind: Add build-time .eh_frame minifier
+  objtool/ibt: Ignore .eh_frame relocations during ENDBR validation
+  x86/unwind: Add Minimal DWARF CFI kernel unwinder
+  arm64: unwind_user: Support Minimal DWARF CFI and FP user unwinding
+  arm64/unwind: Add Minimal DWARF CFI kernel unwinder
+  riscv: unwind_user: Support Minimal DWARF CFI and FP user unwinding
+  riscv/unwind: Add Minimal DWARF CFI kernel unwinder
+  selftests/perf_events: Add Minimal DWARF CFI deferred user unwind test
+  scripts: Add eh_frame_min.py .eh_frame coverage and size analyzer
+
+ arch/Kconfig                                  |   31 +
+ arch/arm64/Kconfig                            |    7 +-
+ arch/arm64/Kconfig.debug                      |   32 +
+ arch/arm64/Makefile                           |    5 +
+ arch/arm64/include/asm/ftrace.h               |   10 +-
+ arch/arm64/include/asm/module.h               |   16 +
+ arch/arm64/include/asm/module.lds.h           |    2 +-
+ arch/arm64/include/asm/perf_event.h           |   15 +
+ arch/arm64/include/asm/unwind_user.h          |  126 ++
+ arch/arm64/kernel/Makefile                    |    2 +
+ arch/arm64/kernel/efi-rt-wrapper.S            |   22 +
+ arch/arm64/kernel/entry-ftrace.S              |   35 +-
+ arch/arm64/kernel/entry.S                     |   22 +
+ arch/arm64/kernel/ftrace.c                    |   12 +-
+ arch/arm64/kernel/module.c                    |   17 +-
+ arch/arm64/kernel/probes/kprobes.c            |   14 +-
+ arch/arm64/kernel/signal.c                    |   54 +
+ arch/arm64/kernel/stacktrace.c                |  537 ++++-
+ arch/arm64/kernel/vmlinux.lds.S               |   21 +-
+ arch/arm64/kvm/hyp/nvhe/Makefile              |    1 +
+ arch/arm64/lib/kasan_sw_tags.S                |   16 +
+ arch/arm64/net/bpf_jit_comp.c                 |    9 +-
+ arch/arm64/net/bpf_timed_may_goto.S           |   19 +
+ arch/riscv/Kconfig                            |    7 +-
+ arch/riscv/Kconfig.debug                      |   16 +
+ arch/riscv/Makefile                           |   15 +-
+ arch/riscv/include/asm/module.h               |   22 +
+ arch/riscv/include/asm/perf_event.h           |   15 +
+ arch/riscv/include/asm/signal32.h             |    8 +
+ arch/riscv/include/asm/stacktrace.h           |   11 +
+ arch/riscv/include/asm/unwind_user.h          |   81 +
+ arch/riscv/kernel/Makefile                    |    4 +
+ arch/riscv/kernel/compat_signal.c             |   44 +
+ arch/riscv/kernel/entry.S                     |    2 +
+ arch/riscv/kernel/mcount-dyn.S                |    6 +-
+ arch/riscv/kernel/mcount.S                    |   34 +-
+ arch/riscv/kernel/module.c                    |    9 +
+ arch/riscv/kernel/probes/rethook.c            |   13 +-
+ arch/riscv/kernel/probes/rethook_trampoline.S |   30 +
+ arch/riscv/kernel/signal.c                    |   62 +
+ arch/riscv/kernel/stacktrace.c                |  732 ++++++-
+ arch/riscv/kernel/vmlinux.lds.S               |   13 +
+ arch/riscv/purgatory/Makefile                 |    3 +-
+ arch/x86/Kconfig                              |    3 +-
+ arch/x86/Kconfig.debug                        |   13 +
+ arch/x86/Makefile                             |    7 +
+ arch/x86/boot/startup/Makefile                |    1 +
+ arch/x86/entry/calling.h                      |   17 +
+ arch/x86/include/asm/dwarf2.h                 |    6 +-
+ arch/x86/include/asm/frame.h                  |   42 +-
+ arch/x86/include/asm/module.h                 |    5 +
+ arch/x86/include/asm/unwind.h                 |   15 +-
+ arch/x86/include/asm/unwind_user.h            |   47 +
+ arch/x86/kernel/Makefile                      |    4 +
+ arch/x86/kernel/ftrace_64.S                   |   44 +-
+ arch/x86/kernel/module.c                      |   11 +-
+ arch/x86/kernel/rethook.c                     |   92 +-
+ arch/x86/kernel/unwind_dwarf.c                |  663 ++++++
+ arch/x86/kernel/vmlinux.lds.S                 |   16 +
+ arch/x86/net/bpf_jit_comp.c                   |   12 +-
+ arch/x86/purgatory/Makefile                   |    1 +
+ drivers/firmware/efi/libstub/Makefile         |    7 +-
+ include/asm-generic/vmlinux.lds.h             |    5 +
+ include/linux/unwind_dwarf_cfi.h              |  174 ++
+ include/linux/unwind_user.h                   |   78 +
+ include/linux/unwind_user_types.h             |   92 +-
+ kernel/unwind/Makefile                        |   14 +-
+ kernel/unwind/dwarf_cfi.c                     | 1842 +++++++++++++++++
+ kernel/unwind/dwarf_cfi_kunit.c               |  625 ++++++
+ kernel/unwind/user.c                          |  155 +-
+ kernel/unwind/user_cfi.c                      |  378 ++++
+ rust/Makefile                                 |    4 +-
+ scripts/Makefile                              |    1 +
+ scripts/Makefile.build                        |   12 +-
+ scripts/Makefile.lib                          |   13 +-
+ scripts/Makefile.vmlinux_o                    |    8 +-
+ scripts/eh_frame_min.py                       |  938 +++++++++
+ scripts/min_eh_frame.c                        | 1719 +++++++++++++++
+ tools/objtool/check.c                         |    1 +
+ .../testing/selftests/perf_events/.gitignore  |    1 +
+ tools/testing/selftests/perf_events/Makefile  |    4 +-
+ .../selftests/perf_events/unwind_user_cfi.c   |  447 ++++
+ 82 files changed, 9551 insertions(+), 118 deletions(-)
+
+----------------------------------------------------------------------
+
